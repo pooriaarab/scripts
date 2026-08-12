@@ -1,0 +1,19 @@
+# secrets, tokens, credentials — never commit
+.env
+.env.*
+*.key
+*.pem
+auth.json
+*.token
+*token*
+*secret*
+*credential*
+.secrets/
+# machine-specific / caches
+.DS_Store
+node_modules/
+*.log
+.cache/
+__pycache__/
+# skill-manager lock (machine state)
+.skill-lock.json
