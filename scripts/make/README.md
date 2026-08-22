@@ -56,9 +56,15 @@ Top-level keys map 1:1 to Make components:
   (converger), 11 = responder, 12 = universal (returner).
 - Section set: `PUT .../modules/{name}/{api|expect|interface|samples|...}` with the raw
   section JSON. `api` ← communication, `expect` ← mappable parameters.
-- **Rate limit** shows up as HTTP `403` with body code **`1010`**. The script paces
-  (default 1.5s) and backs off 30s on `1010`. Note: failed calls still count against
-  the bucket, so don't hammer it — raise `--pause` if you keep hitting 1010.
+- **Quota (not a per-second rate limit)** shows up as HTTP `403` body code **`1010`**.
+  This tripped me up for an hour, so: it's a **windowed bucket**. Isolated calls and
+  short bursts (I fired 20 rapid POSTs, all `200`) succeed fine, but big **back-to-back
+  runs** (100s of calls) drain it, and then it needs a **long cooldown — ~30-60 min of
+  no calls** — to refill. Lowering `--pause` or looping retries does **not** help; a
+  retry-storm keeps hammering the empty bucket and holds it empty. The script aborts on
+  a persistent `1010` with guidance rather than storming — just wait and re-run (it's
+  idempotent, so it resumes where it left off). Every failed call still counts against
+  the window, so don't test against a live app more than you need to.
 - **attach/detach** reference connection params as `{{account.paramName}}` (not
   `{{connection.*}}`) and do **not** inherit base, so the script writes them with an
   absolute URL + explicit `Bearer {{account.apiKey}}` header.
