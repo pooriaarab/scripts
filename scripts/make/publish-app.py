@@ -40,8 +40,14 @@ API facts baked in (learned the hard way, 2026-08)
       9=search, 10=instant-trigger(converger), 11=responder, 12=universal(returner).
   - Section set: PUT .../modules/{name}/{api|expect|interface|samples|parameters|scope}
       body = the raw section JSON. api<-communication, expect<-mappable parameters.
-  - RATE LIMIT: exceeding it returns HTTP 403 with body code 1010. Pace requests
-      (default 1.5s) and back off on 1010. Failed calls still count against the bucket.
+  - QUOTA (not a per-second rate limit): HTTP 403 body code `1010` = the SDK write
+      quota is drained. It's a WINDOWED bucket — isolated calls and short bursts (20+
+      rapid) succeed, but big back-to-back runs (100s of calls) exhaust it, and then
+      it needs a LONG cooldown (~30-60 min of NO calls) to refill. Lowering --pause or
+      retrying in a loop does NOT help — a retry-storm keeps hammering the empty bucket
+      and holds it empty. This script aborts on a persistent 1010 with guidance; just
+      wait and re-run (it's idempotent and resumes where it left off). Every failed
+      call still counts, so don't test against a live app more than you have to.
   - Connection/webhook auth quirk: attach/detach reference connection params as
       {{account.paramName}} (NOT {{connection.*}}), and do NOT inherit base — so this
       tool writes attach/detach with an ABSOLUTE url + explicit account Bearer header.
@@ -90,17 +96,29 @@ def main():
             return 0, str(e)
 
     def call(method, url, body=None):
+        # `1010` is Make's SDK QUOTA error, not a per-second rate limit. Isolated
+        # calls succeed; it's a windowed bucket that big back-to-back runs drain. A
+        # retry-STORM makes it worse — it keeps hammering an empty bucket, which
+        # holds it empty. So: one short backoff+retry for a transient blip, then
+        # ABORT with guidance. The script is idempotent, so re-running after the
+        # window resets (~30-60 min of NO calls) picks up exactly where it left off.
         if a.dry_run and method != "GET":
             print(f"      DRY {method} {url.split('/api/')[-1]}")
             return 200, {}
         time.sleep(a.pause)
-        for attempt in range(5):
+        st, r = _once(method, url, body)
+        if st == 403 and isinstance(r, str) and "1010" in r:
+            print("      (1010 quota hit — one 20s backoff, then retry)")
+            time.sleep(20)
             st, r = _once(method, url, body)
             if st == 403 and isinstance(r, str) and "1010" in r:
-                print(f"      (rate-limited, backoff 30s, attempt {attempt+1})")
-                time.sleep(30)
-                continue
-            return st, r
+                print(
+                    "\nABORTING: Make SDK quota (1010) is drained.\n"
+                    "This is a windowed quota, not a pacing problem — do NOT lower --pause\n"
+                    "or retry in a loop (that keeps it empty). Stop all calls, wait ~30-60\n"
+                    "min for the window to reset, then re-run this exact command. It skips\n"
+                    "whatever already exists and continues from there.", flush=True)
+                sys.exit(2)
         return st, r
 
     def names(url, key):
