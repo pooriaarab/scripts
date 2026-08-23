@@ -40,14 +40,13 @@ API facts baked in (learned the hard way, 2026-08)
       9=search, 10=instant-trigger(converger), 11=responder, 12=universal(returner).
   - Section set: PUT .../modules/{name}/{api|expect|interface|samples|parameters|scope}
       body = the raw section JSON. api<-communication, expect<-mappable parameters.
-  - QUOTA (not a per-second rate limit): HTTP 403 body code `1010` = the SDK write
-      quota is drained. It's a WINDOWED bucket — isolated calls and short bursts (20+
-      rapid) succeed, but big back-to-back runs (100s of calls) exhaust it, and then
-      it needs a LONG cooldown (~30-60 min of NO calls) to refill. Lowering --pause or
-      retrying in a loop does NOT help — a retry-storm keeps hammering the empty bucket
-      and holds it empty. This script aborts on a persistent 1010 with guidance; just
-      wait and re-run (it's idempotent and resumes where it left off). Every failed
-      call still counts, so don't test against a live app more than you have to.
+  - The `1010` trap (this cost me hours — it is NOT a quota): a request with the
+      default Python-urllib User-Agent gets blocked by Cloudflare bot-management, and
+      Make returns HTTP 403 body `error code: 1010`. curl works, urllib does not — same
+      token, same instant. The general rate limit (`x-ratelimit-limit: 10000`) is
+      irrelevant. FIX: send a normal `User-Agent` header (this script sends `curl/8.4.0`).
+      With that header the whole app publishes in one clean run. If you ever see 1010,
+      it's the User-Agent, not a rate/quota problem.
   - Connection/webhook auth quirk: attach/detach reference connection params as
       {{account.paramName}} (NOT {{connection.*}}), and do NOT inherit base — so this
       tool writes attach/detach with an ABSOLUTE url + explicit account Bearer header.
@@ -87,6 +86,10 @@ def main():
         req = urllib.request.Request(url, data=data, method=method)
         req.add_header("Authorization", f"Token {a.token}")
         req.add_header("Content-Type", "application/json")
+        # Cloudflare bot-management blocks the default Python-urllib User-Agent and
+        # Make returns HTTP 403 body "error code: 1010" for it. Send a normal UA so the
+        # request isn't fingerprinted as a bot. (This — NOT any quota — is what 1010 was.)
+        req.add_header("User-Agent", "curl/8.4.0")
         try:
             with urllib.request.urlopen(req, timeout=30) as r:
                 return r.status, json.loads(r.read() or "{}")
@@ -96,29 +99,16 @@ def main():
             return 0, str(e)
 
     def call(method, url, body=None):
-        # `1010` is Make's SDK QUOTA error, not a per-second rate limit. Isolated
-        # calls succeed; it's a windowed bucket that big back-to-back runs drain. A
-        # retry-STORM makes it worse — it keeps hammering an empty bucket, which
-        # holds it empty. So: one short backoff+retry for a transient blip, then
-        # ABORT with guidance. The script is idempotent, so re-running after the
-        # window resets (~30-60 min of NO calls) picks up exactly where it left off.
         if a.dry_run and method != "GET":
             print(f"      DRY {method} {url.split('/api/')[-1]}")
             return 200, {}
         time.sleep(a.pause)
         st, r = _once(method, url, body)
+        # A 1010 here means the User-Agent header was dropped (see _once). It is NOT a
+        # rate limit — flag it loudly so nobody chases a phantom quota again.
         if st == 403 and isinstance(r, str) and "1010" in r:
-            print("      (1010 quota hit — one 20s backoff, then retry)")
-            time.sleep(20)
-            st, r = _once(method, url, body)
-            if st == 403 and isinstance(r, str) and "1010" in r:
-                print(
-                    "\nABORTING: Make SDK quota (1010) is drained.\n"
-                    "This is a windowed quota, not a pacing problem — do NOT lower --pause\n"
-                    "or retry in a loop (that keeps it empty). Stop all calls, wait ~30-60\n"
-                    "min for the window to reset, then re-run this exact command. It skips\n"
-                    "whatever already exists and continues from there.", flush=True)
-                sys.exit(2)
+            print("      1010 = Cloudflare blocked the User-Agent, not a quota. "
+                  "Check the UA header in _once().")
         return st, r
 
     def names(url, key):
