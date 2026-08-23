@@ -100,10 +100,22 @@ Steps (in the Make app editor):
      confirmations.
 4. **Request review.**
 
-**Not automatable:** the SDK Apps API builds components, but Make's review wants real
-scenarios with real successful runs and valid data — the Scenarios API can create empty
-scenarios but can't make them meaningfully pass, and many modules have side effects. So
-budget real manual QA time for the ~N scenarios; don't rush it right after Publish.
+**Scenario shells CAN be created via the API** — `create-review-scenarios.py` (next to
+this file) makes one scenario per module and prints the URLs to paste into the review
+form's per-module fields. It's a real time-saver, but the shells still need a connection
+attached + a successful run each (the Scenarios API can't do that part — see that
+script's header for the exact blueprint format and the connection caveat). Read modules
+run with just a connection; write modules need valid data and have side effects.
+
+**The post-"Request review" follow-up form (easy to miss):** after you Request review,
+Make emails a **Tally form** ("Externally developed apps on Make") and *the review does
+not proceed until it's submitted*. It asks: your relationship to the API vendor (for a
+first-party app: "We are the direct vendor of that software (ISV)"), the ISV company
+name, the software homepage URL, an optional logo (square PNG), a **partnership contact**
+(email + name + **phone** — the phone field is a masked tel input, so type a leading `1`
+for +1 numbers or it won't format), a **support contact** (email + name), the app
+**category + subcategory** (e.g. Marketing → Social Media), and two required attestations
+(trademark ownership, external-service T&C). Fill and submit it or the review stalls.
 
 **The code requirements this script already satisfies** (so the review won't bounce on
 them): a Universal module, `limit` + pagination on list modules, typed dates, sanitized
