@@ -19,6 +19,7 @@ async function shareCurrentDesign(apiKey: string, apiBase: string) {
     const form = new FormData();
     form.append("file", blob, "design.png");
     const media = await postToApi(apiBase, "/media", apiKey, form);
+    if (!media?.id) throw new Error("media upload missing id");
 
     await postToApi(apiBase, "/posts", apiKey, {
       content: "Shared from Adobe Express",

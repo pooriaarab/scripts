@@ -11,12 +11,17 @@ async function shareCurrentDesign(apiKey: string, apiBase: string) {
   if (response.status !== "completed") return; // user cancelled the export dialog
 
   for (const b of response.exportBlobs) {
-    const blob = await (await fetch(b.url)).blob(); // Canva returns a URL, not an in-memory Blob
+    // Canva returns a URL, not an in-memory Blob; an expired/revoked export URL
+    // resolves with a non-2xx status, not a network error, so check it explicitly.
+    const blobRes = await fetch(b.url);
+    if (!blobRes.ok) throw new Error(`export blob fetch -> ${blobRes.status}`);
+    const blob = await blobRes.blob();
 
     // External origin MUST be allow-listed in the Developer Portal or this fails silently.
     const form = new FormData();
     form.append("file", blob, "design.png");
     const media = await postToApi(apiBase, "/media", apiKey, form);
+    if (!media?.id) throw new Error("media upload missing id");
 
     await postToApi(apiBase, "/posts", apiKey, {
       content: "Shared from Canva",

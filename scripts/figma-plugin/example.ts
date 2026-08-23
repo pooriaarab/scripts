@@ -26,6 +26,7 @@ async function exportSelectionAndPost(apiKey: string) {
   fileBody.set(tail, head.length + png.length);
 
   const media = await postToApi(apiKey, "/media", fileBody, `multipart/form-data; boundary=${boundary}`);
+  if (!media?.id) throw new Error("media upload missing id");
   await postToApi(
     apiKey,
     "/posts",

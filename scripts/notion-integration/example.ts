@@ -58,7 +58,27 @@ export async function syncOnce(token: string, databaseId: string, apiBase: strin
 
   for (const page of pages) {
     const p = (page as { properties: Record<string, any> }).properties;
-    if (plain(p["Post ID"]?.rich_text)) continue; // already synced — re-runs are safe
+    if (plain(p["Post ID"]?.rich_text)) {
+      // The post itself already exists — a prior run's Status write must have failed
+      // (e.g. transient 429) since this row still matched the "Ready" filter. Retry
+      // only the Status write; never re-post.
+      try {
+        await notion.pages.update({
+          page_id: page.id,
+          properties: {
+            Status: kind === "status" ? { status: { name: "Done" } } : { select: { name: "Done" } },
+          } as never,
+        });
+      } catch (err) {
+        await notion.pages.update({
+          page_id: page.id,
+          properties: {
+            Error: { rich_text: [{ type: "text", text: { content: String(err).slice(0, 1900) } }] },
+          } as never,
+        });
+      }
+      continue;
+    }
     const row = {
       title: plain(p.Name?.title),
       body: plain(p.Body?.rich_text),
