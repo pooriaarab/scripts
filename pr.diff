@@ -1,0 +1,1057 @@
+diff --git a/scripts/canva-app/README.md b/scripts/canva-app/README.md
+new file mode 100644
+index 0000000..3603622
+--- /dev/null
++++ b/scripts/canva-app/README.md
+@@ -0,0 +1,36 @@
++# canva-app — build, run, and submit a Canva app
++
++A Canva app is a React app on the **Canva Apps SDK** running in a sandboxed iframe
++inside the Canva editor. Unlike Make/Zapier there is no push CLI for submission — you
++upload a built bundle in the Developer Portal. This is the playbook: the command
++sequence from `integrations/<app>/` to submitted-for-review, plus the traps that each
++cost a round-trip. The concept-level skill is `canva-app` in `pooriaarab/skills`.
++
++## Flow
++
++```bash
++cd integrations/<app>            # canva app source (src/, manifest/config, assets/)
++npm install
++npx @canva/cli apps start        # local preview; open it inside Canva via the portal's "Preview"
++# ... develop against @canva/app-ui-kit + @canva/design + @canva/intents ...
++npm run build                    # produces the bundle to upload
++```
++
++Then in `developer.canva.com`:
++1. Create the app → copy its **App ID** into the app config.
++2. Configuration → allow-list every external origin the app fetches (incl. `localhost` for dev) — **un-allow-listed origins fail silently**.
++3. Declare capabilities (design read, asset upload) — match them to the SDK calls exactly.
++4. Upload the built bundle; fill the listing (name, description, **512×512** icon, screenshots).
++5. **Submit for review** (marketplace) — or keep it private/team for internal use.
++
++## Traps (each = one round-trip)
++
++- **Iframe blocks un-allow-listed fetch** — the #1 "my API hangs" cause. Allow-list the origin in the portal.
++- **Design export is async** — `addOnUISdk.app.document.createRenditions(...)` returns a Promise of blobs; handle multi-page/element output. No synchronous getter.
++- **App ID is portal-owned** — a placeholder ID previews fine but fails on submit.
++- **Icon must be exactly 512×512**; a fresh reviewer must be able to authenticate from a clean state (self-service auth in-app).
++
++## Files
++
++`example.ts` (next to this README) — the smallest real wiring: export the current design,
++upload the rendition, create the downstream action. Copy it as a starting point.
+diff --git a/scripts/canva-app/example.ts b/scripts/canva-app/example.ts
+new file mode 100644
+index 0000000..0020b05
+--- /dev/null
++++ b/scripts/canva-app/example.ts
+@@ -0,0 +1,40 @@
++// Smallest real Canva-app wiring: export the current design, then hand the blob to
++// your API. Runs inside the Canva iframe (import { addOnUISdk } from "@canva/app-sdk").
++// Swap `postToApi` for your product's SDK or REST call.
++
++import { addOnUISdk } from "@canva/app-ui-kit"; // or the current @canva SDK entrypoint
++
++async function shareCurrentDesign(apiKey: string, apiBase: string) {
++  // Design export is ASYNC and can return multiple renditions (multi-page designs).
++  const { renditions } = await addOnUISdk.app.document.createRenditions({
++    range: "currentPage",
++    format: "png",
++  });
++
++  for (const r of renditions) {
++    const blob = await (await fetch(r.blobUrl)).blob(); // r.blobUrl is same-origin, allowed
++
++    // External origin MUST be allow-listed in the Developer Portal or this fails silently.
++    const form = new FormData();
++    form.append("file", blob, "design.png");
++    const media = await postToApi(apiBase, "/media", apiKey, form);
++
++    await postToApi(apiBase, "/posts", apiKey, {
++      content: "Shared from Canva",
++      mediaIds: [media.id],
++    });
++  }
++}
++
++async function postToApi(base: string, path: string, key: string, body: unknown) {
++  const isForm = body instanceof FormData;
++  const res = await fetch(base + path, {
++    method: "POST",
++    headers: { Authorization: `Bearer ${key}`, ...(isForm ? {} : { "Content-Type": "application/json" }) },
++    body: isForm ? (body as FormData) : JSON.stringify(body),
++  });
++  if (!res.ok) throw new Error(`${path} -> ${res.status}`); // surface, don't swallow
++  return res.json();
++}
++
++export { shareCurrentDesign };
+diff --git a/scripts/figma-plugin/README.md b/scripts/figma-plugin/README.md
+new file mode 100644
+index 0000000..db9be40
+--- /dev/null
++++ b/scripts/figma-plugin/README.md
+@@ -0,0 +1,60 @@
++# figma-plugin — build, run, and publish a Figma plugin
++
++A Figma plugin is two programs over `postMessage`: `code.js` in the plugin sandbox
++(no DOM, but no CORS) and `ui.html` in an iframe (full DOM, but CORS applies),
++declared in `manifest.json` alongside `networkAccess.allowedDomains`. There is no
++publish CLI — submission happens in the Figma desktop app / Community site. This is
++the playbook: the command sequence from `integrations/<plugin>/` to published, plus
++the traps that each cost a round-trip. The concept-level skill is `figma-plugin` in
++`pooriaarab/skills`.
++
++## Flow
++
++```bash
++cd integrations/<plugin>         # plugin source (src/, manifest.json, assets/)
++npm install
++npm run build                    # esbuild: src/code.ts -> code.js; src/ui.ts bundled + inlined into ui.html
++npm run watch                    # rebuild on change
++npm run typecheck
++```
++
++Then in the Figma desktop app:
++1. **Plugins → Development → Import plugin from manifest…** → select `manifest.json`.
++2. Run it: **Plugins → Development → \<plugin name\>**.
++3. Store the API key through the plugin's own settings UI — it lands in
++   `figma.clientStorage`, sandbox-side, and never enters the iframe.
++
++## Publish
++
++1. `npm run build` and smoke-test: select frame → export → API round trip.
++2. **Plugins → Development → Manage plugins → Publish**
++   (or `figma.com/community` → **Publish plugin**).
++3. First publish assigns a plugin ID — add `"id": "<assigned-id>"` to
++   `manifest.json` so every later publish updates the same listing.
++4. Fill the listing: name, **128×128** icon, **1920×1080** cover, description
++   (state that an API key is required + where to get one), tags, support URL.
++5. **Publish** → Figma review before it appears in Community search
++   (SLA: TBD — confirm at first submission).
++
++## Traps (each = one round-trip)
++
++- **Fetch in the wrong context** — the #1 "request fails" cause. The sandbox has no
++  CORS; the iframe has full CORS. If your API sends no CORS headers, the fetch
++  belongs in `code.js`, never in the UI.
++- **`networkAccess.allowedDomains`** — every external origin (API, upload CDN,
++  image/thumbnail hosts) listed exactly, with scheme; `reasoning` is required.
++  Missing = runtime failure, not build failure.
++- **No `FormData`/`Blob` in the sandbox** — hand-roll multipart bodies with
++  `TextEncoder` + `Uint8Array` (see `example.ts`).
++- **UI = one self-contained HTML file** — the build inlines the JS bundle into
++  `ui.html` via a placeholder; no external scripts unless allow-listed.
++- **Export is async** — `await node.exportAsync(...)` returns a `Uint8Array`.
++- **Plugin ID after first publish** — copy it into `manifest.json` or the next
++  publish forks the listing.
++- **`editorType`** — declare only the editors the plugin supports; reviewers check.
++
++## Files
++
++`example.ts` (next to this README) — the smallest real wiring: sandbox-side frame
++export → hand-rolled multipart upload → API call, driven by a `postMessage` intent
++from the UI. Copy it as a starting point.
+diff --git a/scripts/figma-plugin/example.ts b/scripts/figma-plugin/example.ts
+new file mode 100644
+index 0000000..20b5fa5
+--- /dev/null
++++ b/scripts/figma-plugin/example.ts
+@@ -0,0 +1,62 @@
++// Smallest real Figma-plugin wiring (sandbox side, code.ts): export the selected frame,
++// hand-roll the multipart body (no FormData in the sandbox), and call your API.
++// Swap API_BASE/paths for your product's SDK or REST call; list every origin in manifest.json networkAccess.allowedDomains.
++
++const API_BASE = "https://api.example.com/v1";
++
++figma.showUI(__html__, { width: 420, height: 600, themeColors: true });
++
++async function exportSelectionAndPost(apiKey: string) {
++  const node = figma.currentPage.selection[0];
++  if (!node) throw new Error("Select a frame or layer first.");
++
++  // Export is async and returns raw bytes (Uint8Array), not a Blob.
++  const png = await node.exportAsync({ format: "PNG", constraint: { type: "SCALE", value: 2 } });
++
++  // The sandbox has no DOM: build multipart/form-data manually.
++  const boundary = `figma${Date.now().toString(36)}`;
++  const enc = new TextEncoder();
++  const head = enc.encode(
++    `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="frame.png"\r\nContent-Type: image/png\r\n\r\n`,
++  );
++  const tail = enc.encode(`\r\n--${boundary}--\r\n`);
++  const fileBody = new Uint8Array(head.length + png.length + tail.length);
++  fileBody.set(head, 0);
++  fileBody.set(png, head.length);
++  fileBody.set(tail, head.length + png.length);
++
++  const media = await postToApi(apiKey, "/media", fileBody, `multipart/form-data; boundary=${boundary}`);
++  await postToApi(
++    apiKey,
++    "/posts",
++    JSON.stringify({ content: "Shared from Figma", mediaIds: [media.id] }),
++    "application/json",
++  );
++}
++
++async function postToApi(apiKey: string, path: string, body: BodyInit, contentType: string) {
++  const res = await fetch(`${API_BASE}${path}`, {
++    method: "POST",
++    headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": contentType },
++    body,
++  });
++  if (!res.ok) throw new Error(`${path} -> ${res.status}`); // surface, don't swallow
++  return res.json();
++}
++
++// The UI iframe only sends intents: parent.postMessage({ pluginMessage: { type: "share" } }, "*").
++// The sandbox owns the API key (figma.clientStorage) and every fetch.
++figma.ui.onmessage = async (msg) => {
++  if (msg.type === "share") {
++    const apiKey = await figma.clientStorage.getAsync("apiKey");
++    try {
++      if (typeof apiKey !== "string" || !apiKey) throw new Error("Add your API key in Settings first.");
++      await exportSelectionAndPost(apiKey);
++      figma.ui.postMessage({ type: "share-result", ok: true });
++      figma.notify("Shared");
++    } catch (e) {
++      figma.ui.postMessage({ type: "share-result", ok: false, error: e instanceof Error ? e.message : String(e) });
++    }
++  }
++  if (msg.type === "close") figma.closePlugin();
++};
+diff --git a/scripts/framer-plugin/README.md b/scripts/framer-plugin/README.md
+new file mode 100644
+index 0000000..6292001
+--- /dev/null
++++ b/scripts/framer-plugin/README.md
+@@ -0,0 +1,52 @@
++# framer-plugin — build, run, and publish a Framer plugin
++
++A Framer plugin is a React app on the **`framer-plugin` npm package** (`@framer/plugin`)
++running in an iframe inside the Framer desktop app. Unlike Canva there is no portal
++bundle upload or review queue — you zip the build and post it to the Framer Community,
++and it publishes near-instantly. This is the playbook: the command sequence from
++`integrations/<app>/` to published, plus the traps that each cost a round-trip. The
++concept-level skill is `framer-plugin` in the skills repo.
++
++## Flow
++
++```bash
++cd integrations/<app>            # framer plugin source (src/, framer.json, public/)
++npm install
++npm run dev                      # vite + mkcert; prints https://localhost:5173
++# ONE TIME: open that https URL in a browser and accept the local certificate,
++# or Framer shows a blank panel (Framer refuses plain http://localhost).
++# In the Framer desktop app: Plugins menu → enable Developer Tools → open the
++# development plugin for that URL.
++# ... develop against @framer/plugin (framer.showUI, getImage, setPluginData) ...
++npm run build                    # tsc + vite → dist/ (vite-plugin-framer copies framer.json in)
++npm run pack                     # zips the CONTENTS of dist/ → <app>-framer-plugin.zip
++```
++
++Then publish:
++1. Post the zip in the Framer Community (`framer.com/communities/`, Plugins category).
++   Published essentially immediately — no lengthy review. This is the platform's big
++   selling point; the build traps above are the real work.
++2. Framer Marketplace listing is a separate curated step — TBD, confirm the submission
++   URL and requirements at first submission.
++
++## Traps (each = one round-trip)
++
++- **Dev server must be local HTTPS** — `vite-plugin-mkcert` + one manual cert-accept in
++  a browser. The #1 "my plugin is a white box" cause.
++- **`framer.showUI({...})` before `createRoot().render()`** — with explicit
++  `width`/`height`, or the panel never sizes. `import "@framer/plugin/framer.css"` too.
++- **Selection via the SDK, not the DOM** — `framer.getImage()` /
++  `framer.subscribeToImage(cb)` (canvas mode); bytes via `asset.getData()`. Subscribe,
++  don't read once — a stale selection ships the wrong image.
++- **Zip the CONTENTS of `dist/`** (`zip -r out.zip .` from inside `dist/`) so
++  `framer.json` sits at the archive root. Zipping the folder itself fails to load.
++- **Plugin data is per project** — `framer.getPluginData`/`setPluginData` are async and
++  stored in the Framer project file. Always read on load; gate the UI when no key.
++- **No fetch allow-list** — the iframe can call your API directly (team API key as
++  Bearer token). Keep business logic server-side; the plugin is a thin client.
++
++## Files
++
++`example.ts` (next to this README) — the smallest real wiring: open the plugin window,
++read the current selection image, upload its bytes to your API, create the downstream
++action. Copy it as a starting point.
+diff --git a/scripts/framer-plugin/example.ts b/scripts/framer-plugin/example.ts
+new file mode 100644
+index 0000000..b0d1b38
+--- /dev/null
++++ b/scripts/framer-plugin/example.ts
+@@ -0,0 +1,43 @@
++// Smallest real Framer-plugin wiring: open the plugin window, read the current canvas
++// selection image, upload its bytes to your API, create the downstream action.
++// Swap `postToApi` for your product's SDK or public REST call.
++
++import { framer, type ImageAsset } from "@framer/plugin";
++
++// 1. Size the window BEFORE rendering anything, or you get a blank panel.
++void framer.showUI({ position: "top right", width: 340, height: 480, resizable: true });
++
++async function shareCurrentSelection(apiKey: string, apiBase: string) {
++  // 2. The selection is SDK-read, never DOM-read. This is async; null when nothing
++  //    usable is selected. Use framer.subscribeToImage(cb) to track re-selection.
++  const asset: ImageAsset | null = await framer.getImage();
++  if (!asset) throw new Error("Select an image on the canvas first");
++
++  const { bytes, mimeType } = await asset.getData(); // also async
++  const form = new FormData();
++  form.append("file", new Blob([bytes as BlobPart], { type: mimeType }), "framer-selection.png");
++  const media = await postToApi(apiBase, "/media", apiKey, form);
++
++  await postToApi(apiBase, "/posts", apiKey, {
++    content: "Shared from Framer",
++    mediaIds: [media.id],
++  });
++}
++
++// 3. The API key persists per PROJECT (not globally) — read on load, gate the UI.
++async function loadStoredKey(): Promise<string | null> {
++  return framer.getPluginData("apiKey"); // async; framer.setPluginData("apiKey", key) to save
++}
++
++async function postToApi(base: string, path: string, key: string, body: unknown) {
++  const isForm = body instanceof FormData;
++  const res = await fetch(base + path, {
++    method: "POST",
++    headers: { Authorization: `Bearer ${key}`, ...(isForm ? {} : { "Content-Type": "application/json" }) },
++    body: isForm ? (body as FormData) : JSON.stringify(body),
++  });
++  if (!res.ok) throw new Error(`${path} -> ${res.status}`); // surface, don't swallow
++  return res.json();
++}
++
++export { shareCurrentSelection, loadStoredKey };
+diff --git a/scripts/google-workspace-addon/README.md b/scripts/google-workspace-addon/README.md
+new file mode 100644
+index 0000000..225bfe0
+--- /dev/null
++++ b/scripts/google-workspace-addon/README.md
+@@ -0,0 +1,63 @@
++# google-workspace-addon — build, deploy, and publish a Workspace add-on
++
++A Google Workspace add-on is server-side **Apps Script + CardService** running in the
++Docs/Sheets sidebar — no push-CLI submission either; you point the Marketplace SDK at a
++versioned deployment ID in the Google Cloud console. This is the playbook: the command
++sequence from `integrations/<addon>/` to published, plus the traps that each cost a
++round-trip. The concept-level skill is `google-workspace-addon` in `pooriaarab/skills`.
++
++## Flow
++
++```bash
++npm install -g @google/clasp
++clasp login
++cd integrations/<addon>                 # .gs sources + appsscript.json
++clasp create --type standalone --title "<App name>"
++# or bind an existing script: .clasp.json with {"scriptId": "...", "rootDir": "."}
++clasp push                              # uploads appsscript.json + all .gs files
++clasp open                              # opens the Apps Script editor
++```
++
++Test it in the Apps Script editor:
++1. **Deploy → Test deployments** → Google Workspace Add-on → pick Docs/Sheets → **Install**.
++2. Open a Doc or Sheet — the add-on icon appears in the right sidebar.
++
++Prepare the production deployment:
++3. **Project Settings → Google Cloud Platform (GCP) Project → Change project** — switch
++   from the default (hidden) project to a standard GCP project you own.
++4. **Deploy → New deployment → Add-on** → copy the **deployment ID**.
++
++Then in `console.cloud.google.com` (the standard project):
++1. **OAuth consent screen** (External) — add the exact scopes from `appsscript.json`.
++2. **Enable the Google Workspace Marketplace SDK.**
++3. **App Configuration tab:** check Google Workspace Add-on + hosts, paste the deployment
++   ID, fill developer name/website/support email, visibility **Public**.
++4. **Store Listing tab:** name, descriptions, 128×128 icon, 220×140 tile card, 1280×800
++   (or 640×400) screenshots, category, pricing, ToS + privacy-policy URLs.
++5. **OAuth verification** (public + sensitive scopes): submit from the consent-screen page
++   with a demo video of the add-on flow — the heavy gate, days to weeks.
++6. **Publish.** Review takes days. Visibility **Private** skips verification + review.
++
++## Traps (each = one round-trip)
++
++- **No `fetch`** — `UrlFetchApp.fetch` only, synchronous, no async/await. Needs the
++  `script.external_request` scope, your origin in `urlFetchWhitelist`, and
++  `muteHttpExceptions: true` (or non-2xx throws and you lose the error body).
++- **oauthScopes must match** manifest ↔ OAuth consent screen ↔ code. Prefer
++  `.currentonly` host scopes; full `documents`/`drive` scopes trigger restricted-scope
++  verification.
++- **Triggers return Cards, handlers return ActionResponses** — `homepageTrigger` →
++  `newCardBuilder()…build()`; button handlers → `newActionResponseBuilder()…build()`.
++  The wrong type fails the sidebar silently.
++- **Keys in `PropertiesService.getUserProperties()`** (per-user) — never script
++  properties, which are shared across all users.
++- **The Marketplace points at a versioned deployment ID** — `clasp push` alone doesn't
++  reach users; create a new deployment version.
++- **The default GCP project can't be fully configured** — switch to a standard project
++  before touching the consent screen or Marketplace SDK.
++
++## Files
++
++`example.gs` (next to this README) — the smallest real wiring: a homepage card with an
++API-key settings form, and a save handler that validates the key against your API with
++`UrlFetchApp` and stores it in user properties. Copy it as a starting point.
+diff --git a/scripts/google-workspace-addon/example.gs b/scripts/google-workspace-addon/example.gs
+new file mode 100644
+index 0000000..43c4c30
+--- /dev/null
++++ b/scripts/google-workspace-addon/example.gs
+@@ -0,0 +1,65 @@
++// Smallest real Workspace add-on wiring: homepage card -> save API key -> validate it
++// against your API with UrlFetchApp. Swap API_BASE + the validate path for your API.
++
++var API_BASE = 'https://api.example.com/v1'; // must be in urlFetchWhitelist
++var PROP_API_KEY_ = 'MY_API_KEY';
++
++/** Homepage trigger (appsscript.json -> addOns.common.homepageTrigger.runFunction). */
++function onHomepage() {
++  return CardService.newCardBuilder()
++    .setHeader(CardService.newCardHeader().setTitle('Connect your account'))
++    .addSection(
++      CardService.newCardSection()
++        .addWidget(
++          CardService.newTextParagraph().setText(
++            'Paste your <b>API key</b>. It is stored in your user properties only.'
++          )
++        )
++        .addWidget(
++          CardService.newTextInput()
++            .setFieldName('apiKey')
++            .setTitle('API key')
++            .setHint('Paste key here')
++        )
++        .addWidget(
++          CardService.newTextButton()
++            .setText('Save')
++            .setTextButtonStyle(CardService.TextButtonStyle.FILLED)
++            .setOnClickAction(CardService.newAction().setFunctionName('onSaveApiKey'))
++        )
++    )
++    .build();
++}
++
++/** Action handler: must return an ActionResponse (not a Card). */
++function onSaveApiKey(e) {
++  var key = (e.formInput.apiKey || '').trim();
++  if (!key) return notify_('Enter an API key first.');
++
++  var result = apiFetch_('/me', key); // any lightweight authenticated GET
++  if (!result.ok) return notify_('Key rejected: HTTP ' + result.status);
++
++  PropertiesService.getUserProperties().setProperty(PROP_API_KEY_, key);
++  return notify_('API key saved.');
++}
++
++/**
++ * Thin REST client. Needs the script.external_request scope + origin in
++ * urlFetchWhitelist; muteHttpExceptions:true or non-2xx throws and hides the body.
++ */
++function apiFetch_(path, key) {
++  var res = UrlFetchApp.fetch(API_BASE + path, {
++    method: 'get',
++    contentType: 'application/json',
++    headers: { Authorization: 'Bearer ' + key },
++    muteHttpExceptions: true,
++  });
++  var status = res.getResponseCode();
++  return { ok: status >= 200 && status < 300, status: status, text: res.getContentText() };
++}
++
++function notify_(text) {
++  return CardService.newActionResponseBuilder()
++    .setNotification(CardService.newNotification().setText(text))
++    .build();
++}
+diff --git a/scripts/notion-integration/README.md b/scripts/notion-integration/README.md
+new file mode 100644
+index 0000000..33d893f
+--- /dev/null
++++ b/scripts/notion-integration/README.md
+@@ -0,0 +1,43 @@
++# notion-integration — build, run, and submit a Notion integration
++
++A Notion integration is a service on the **Notion API** (`@notionhq/client`)
++that moves content between a workspace and your product's SDK / public REST
++API. Distribution requires a **public** integration (OAuth) — internal tokens
++are one-workspace only, can never be listed, and can't be converted. This is
++the playbook: the path from `integrations/<app>/` to the gallery, plus the
++traps that each cost a round-trip. The concept-level skill is
++`notion-integration` in `pooriaarab/skills`.
++
++## Flow
++
++```bash
++cd integrations/<app>          # integration source (src/, assets/, .env)
++cp .env.example .env           # NOTION_CLIENT_ID / NOTION_CLIENT_SECRET / NOTION_REDIRECT_URI
++npm install
++npm run dev                    # serves OAuth + sync loop on localhost
++# open the landing page: connect Notion (OAuth), paste your API key + database id
++```
++
++Notion side, at `https://www.notion.so/my-integrations`:
++1. Create a **public** integration → copy the client id/secret into `.env`.
++2. Register the redirect URI exactly as `NOTION_REDIRECT_URI` (localhost for dev, HTTPS for prod).
++3. Set capabilities to only what the code calls (read/update/insert content).
++4. Grant content: pick the database on the OAuth consent screen (public), or share it via `…` → Connections (internal).
++5. When live: polish name/description/icon → **Distribution → Submit for review** → gallery at `https://www.notion.so/integrations`.
++
++## Traps (each = one round-trip)
++
++- **Internal ≠ public** — internal tokens can't be distributed, listed, or converted. Start public.
++- **Grant the content** — `object_not_found` / empty query means the integration can't see the database. Not a bad id.
++- **status vs select** — detect the property type via `databases.retrieve`; filter and write syntax differ.
++- **Status options must pre-exist** — create them in Notion first; the API auto-creates select options only.
++- **Typed envelopes** — join `plain_text` from `title[]`/`rich_text[]`; truncate rich text under 2000 chars; paginate with `start_cursor`.
++- **Redirect URI exact match** — byte-for-byte against the registered value, at both authorize and token exchange.
++- **No refresh token** — store the access token; a 401 means the workspace uninstalled → re-auth. Back off on 429.
++
++## Files
++
++`example.ts` (next to this README) — the smallest real wiring: OAuth exchange,
++query a database for rows at a status (with status/select detection), hand
++each row to your API, write the result back onto the row. Copy it as a
++starting point.
+diff --git a/scripts/notion-integration/example.ts b/scripts/notion-integration/example.ts
+new file mode 100644
+index 0000000..d9e924e
+--- /dev/null
++++ b/scripts/notion-integration/example.ts
+@@ -0,0 +1,101 @@
++// Smallest real Notion-integration wiring: OAuth exchange, query a database for
++// rows at a status, hand each row to your API, write the result back onto the row.
++
++import { Client } from "@notionhq/client";
++
++// --- OAuth: one access token per workspace install (no refresh token — store it) ---
++export async function exchangeCode(
++  clientId: string,
++  clientSecret: string,
++  redirectUri: string,
++  code: string,
++) {
++  return new Client().oauth.token({
++    client_id: clientId,
++    client_secret: clientSecret,
++    grant_type: "authorization_code",
++    code,
++    redirect_uri: redirectUri, // must byte-match a URI registered on the integration
++  });
++}
++
++const plain = (parts?: Array<{ plain_text: string }>) =>
++  (parts ?? []).map((p) => p.plain_text).join("").trim();
++
++// --- status vs select: detect once; filter AND write-back syntax depend on it ---
++async function statusType(notion: Client, databaseId: string, prop: string) {
++  const db = await notion.databases.retrieve({ database_id: databaseId });
++  const type = (db.properties as Record<string, { type: string }>)[prop]?.type;
++  if (!type) throw new Error(`No "${prop}" property — or the database is not granted to the integration.`);
++  if (type !== "status" && type !== "select") {
++    throw new Error(`"${prop}" must be a Status or Select property (found: ${type}).`);
++  }
++  return type;
++}
++
++export async function syncOnce(token: string, databaseId: string, apiBase: string, apiKey: string) {
++  const notion = new Client({ auth: token });
++  const kind = await statusType(notion, databaseId, "Status");
++
++  const filter =
++    kind === "status"
++      ? { property: "Status", status: { equals: "Ready" } }
++      : { property: "Status", select: { equals: "Ready" } };
++  const res = await notion.databases.query({ database_id: databaseId, filter, page_size: 100 });
++
++  for (const page of res.results) {
++    const p = (page as { properties: Record<string, any> }).properties;
++    if (plain(p["Post ID"]?.rich_text)) continue; // already synced — re-runs are safe
++    const row = {
++      title: plain(p.Name?.title),
++      body: plain(p.Body?.rich_text),
++      date: p.Date?.date?.start ?? null,
++      platforms: (p.Platforms?.multi_select ?? []).map((o: { name: string }) => o.name),
++    };
++
++    try {
++      const post = await postToApi(apiBase, "/posts", apiKey, {
++        title: row.title,
++        content: row.body || row.title,
++        scheduledAt: row.date,
++        platforms: row.platforms,
++      });
++      // Write the idempotency marker (Post ID) first and on its own: if the Status
++      // write below fails (e.g. the "Done" option doesn't exist yet), the row still
++      // shows a Post ID and the `continue` guard above stops the next run from
++      // re-posting and creating a duplicate.
++      await notion.pages.update({
++        page_id: page.id,
++        properties: {
++          "Post ID": { rich_text: [{ type: "text", text: { content: String(post.id) } }] },
++          "Post URL": { url: `${apiBase}/posts/${post.id}` },
++        } as never,
++      });
++      await notion.pages.update({
++        page_id: page.id,
++        properties: {
++          // status options must pre-exist in Notion; select options auto-create
++          Status: kind === "status" ? { status: { name: "Done" } } : { select: { name: "Done" } },
++        } as never,
++      });
++    } catch (err) {
++      // surface on the row (rich text caps at 2000 chars), don't swallow
++      await notion.pages.update({
++        page_id: page.id,
++        properties: {
++          Error: { rich_text: [{ type: "text", text: { content: String(err).slice(0, 1900) } }] },
++        } as never,
++      });
++    }
++  }
++}
++
++async function postToApi(base: string, path: string, key: string, body: unknown) {
++  const res = await fetch(base + path, {
++    method: "POST",
++    headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
++    body: JSON.stringify(body),
++  });
++  if (!res.ok) throw new Error(`${path} -> ${res.status}`); // surface, don't swallow
++  return res.json();
++}
+diff --git a/scripts/raycast-extension/README.md b/scripts/raycast-extension/README.md
+new file mode 100644
+index 0000000..9132e46
+--- /dev/null
++++ b/scripts/raycast-extension/README.md
+@@ -0,0 +1,63 @@
++# raycast-extension — build, run, and submit a Raycast extension
++
++A Raycast extension is TypeScript + React on **`@raycast/api`**; `package.json` is the
++manifest. Unlike browser/Canva stores there is no portal upload — **submission is a PR
++into the `raycast/extensions` monorepo**. This is the playbook: the command sequence from
++`integrations/raycast-extension/` to merged-PR, plus the traps that each cost a
++round-trip. The concept-level skill is `raycast-extension` in the sibling skills repo.
++
++## Flow
++
++```bash
++cd integrations/raycast-extension   # isolated package: src/, assets/, package.json (manifest)
++npm install
++npm run dev                         # ray develop — hot-reload inside Raycast
++# ... build commands: src/<command-name>.tsx default-exporting List/Form/Detail ...
++npm run build                       # ray build — type-check + bundle; must be clean
++npm run lint                        # ray lint (@raycast/eslint-config)
++```
++
++The manifest, in `package.json` (schema: `https://www.raycast.com/schemas/extension.json`):
++
++- `commands[]` — one entry per command; **`name` must equal the src/ filename**
++  (`"name": "new-post"` ↔ `src/new-post.tsx`). `mode`: `view` (React UI) | `no-view`
++  (headless async fn) | `menu-bar`.
++- `preferences[]` — user config. API key: `{ "name": "apiKey", "type": "password",
++  "required": true, ... }`; read it in code with `getPreferenceValues<Preferences>()`.
++- `author` — your **registered Raycast username** (lint/CI reject anything else).
++- `categories` — from the fixed allowed list only. `icon` — a 512×512 PNG in `assets/`.
++- `raycast-env.d.ts` is generated from this file — never hand-edit; rerun `ray develop`
++  to regenerate.
++
++## Submit to the Raycast Store
++
++1. Fork `github.com/raycast/extensions`; add the package as `extensions/<extension-name>/`.
++2. Confirm `author` is your registered Raycast username.
++3. `npm install && npm run build && npm run lint` inside the monorepo layout (CI reruns them).
++4. Ensure the extension dir has its own README telling a fresh reviewer how to get an API
++   key (self-serve signup or clear steps — they have no account of yours).
++5. Open the PR against `raycast/extensions`. Bot checks manifest hygiene; a human review
++   follows (days). Push fixes to the same PR. Updates later = new PRs against the same dir.
++6. `npx @raycast/api@latest publish` automates fork+PR from a local clone — still ends in
++   PR review. (Exact flags: TBD — confirm at first submission.)
++
++## Traps (each = one round-trip)
++
++- **Command `name` ≠ filename** — the command silently doesn't exist. The manifest, not
++  the file tree, defines what ships.
++- **`author` not a registered username** — lint/store CI reject; fix before opening the PR.
++- **Hardcoded API key** — leaks into a public monorepo and bounces review. Use a
++  `password` preference + `getPreferenceValues<Preferences>()`. Never commit `.env`/keys.
++- **Editing `raycast-env.d.ts`** — it's generated; stale `Preferences` types mean the
++  manifest changed and you didn't rerun `ray develop`.
++- **No progress UI** — long API calls need `showToast` Animated → Success/Failure with the
++  real error message; silent failures are review-bait.
++- **`npm publish`** — the store is not npm; keep the `prepublishOnly` guard that blocks it.
++- **Wrong `mode`** — `no-view` commands can't render; `view` commands must default-export
++  a component.
++
++## Files
++
++`example.ts` (next to this README) — the smallest real wiring: a Form command that reads
++the API key from preferences, calls your API, and reports via Toast. Copy it as a
++starting point; add a matching entry to `commands[]` in `package.json`.
+diff --git a/scripts/raycast-extension/example.ts b/scripts/raycast-extension/example.ts
+new file mode 100644
+index 0000000..3aebff8
+--- /dev/null
++++ b/scripts/raycast-extension/example.ts
+@@ -0,0 +1,58 @@
++// Smallest real Raycast-extension wiring: a Form command that reads your API key from
++// extension preferences and calls your API. Swap `callApi` for your product's SDK or
++// REST call. Lives at src/<name>.tsx — the filename MUST equal the command's `name` in
++// package.json's `commands[]`, and the key MUST be a `type: "password"` preference.
++
++import { Action, ActionPanel, Form, Icon, Toast, getPreferenceValues, showToast, useNavigation } from "@raycast/api";
++
++interface ExtensionPreferences {
++  apiKey: string; // declared in package.json preferences[] as type "password", required
++}
++
++export default function Command() {
++  const { pop } = useNavigation();
++
++  async function handleSubmit(values: Form.Values) {
++    const content = String(values.content ?? "").trim();
++    if (!content) {
++      await showToast({ style: Toast.Style.Failure, title: "Content is required" });
++      return;
++    }
++
++    // No implicit progress UI in Raycast — show one for any network call.
++    const toast = await showToast({ style: Toast.Style.Animated, title: "Sending…" });
++    try {
++      const { apiKey } = getPreferenceValues<ExtensionPreferences>();
++      await callApi(apiKey.trim(), { content });
++      toast.style = Toast.Style.Success;
++      toast.title = "Sent";
++      pop(); // return to root search
++    } catch (error) {
++      toast.style = Toast.Style.Failure;
++      toast.title = "Request failed";
++      toast.message = error instanceof Error ? error.message : String(error); // surface, don't swallow
++    }
++  }
++
++  return (
++    <Form
++      actions={
++        <ActionPanel>
++          <Action.SubmitForm icon={Icon.Upload} title="Send" onSubmit={handleSubmit} />
++        </ActionPanel>
++      }
++    >
++      <Form.TextArea id="content" title="Content" placeholder="What's happening?" />
++    </Form>
++  );
++}
++
++async function callApi(apiKey: string, body: unknown) {
++  const res = await fetch("https://api.example.com/v1/items", {
++    method: "POST",
++    headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
++    body: JSON.stringify(body),
++  });
++  if (!res.ok) throw new Error(`API -> ${res.status}`);
++  return res.json();
++}
+diff --git a/scripts/shopify-app/README.md b/scripts/shopify-app/README.md
+new file mode 100644
+index 0000000..f8f2baf
+--- /dev/null
++++ b/scripts/shopify-app/README.md
+@@ -0,0 +1,42 @@
++# shopify-app — build, run, and submit a Shopify app
++
++A Shopify app is a Remix embedded app (App Bridge + Polaris) on
++`@shopify/shopify-app-remix`, configured by `shopify.app.toml`. Submission is NOT
++CLI-only: the CLI deploys config, but review happens from the Partner Dashboard.
++This is the playbook: the command sequence from `integrations/shopify-app/` to
++submitted-for-review, plus the traps that each cost a round-trip. The
++concept-level skill is `shopify-app` in the skills repo.
++
++## Flow
++
++```bash
++cd integrations/shopify-app      # app source (app/, shopify.app.toml, .env)
++npm install
++cp .env.example .env             # SHOPIFY_API_KEY / SHOPIFY_API_SECRET / SHOPIFY_APP_URL / SCOPES
++npx shopify app config link      # binds the dir to the Partner app, writes client_id into the toml
++npm run dev                      # shopify app dev — tunnel, URL sync, installs on your dev store
++# ... develop: routes under app/routes/, Polaris UI in App Bridge, your product's API in .server.ts ...
++npm run typecheck && npm run build
++npx shopify app deploy           # push shopify.app.toml (webhooks, scopes, URLs) — REQUIRED after any toml edit
++```
++
++Then in the Partner Dashboard (`partners.shopify.com`):
++1. Apps → Create app (once) → copy Client ID/secret into `.env` + `client_id` in `shopify.app.toml`.
++2. Host the production build on a public HTTPS URL; set `SHOPIFY_APP_URL`, update `application_url` + `redirect_urls`, `shopify app deploy` again.
++3. App Store listing: name, tagline, description, **512×512 icon**, screenshots of the embedded UI, public **privacy-policy URL**.
++4. **Submit for review** — reviewers install on a test store with none of your state. After approval, flip distribution to the App Store.
++
++## Traps (each = one round-trip)
++
++- **Webhook route must 2xx after the HMAC check passes** — catch downstream errors; Shopify retries non-2xx into a webhook storm.
++- **GDPR webhooks are mandatory**: `customers/data_request`, `customers/redact`, `shop/redact`. No-ops are fine if you store no buyer data; `shop/redact` + `app/uninstalled` must wipe the shop's settings/sessions.
++- **toml edits are dead until `shopify app deploy`** — the #1 "webhook never fires" cause. New scopes force merchant re-auth.
++- **Embedded root route needs `boundary.error` + `boundary.headers` exports** (`@shopify/shopify-app-remix/server`) or OAuth redirects die in the iframe; pass the API key to `<AppProvider isEmbeddedApp apiKey>`.
++- **Session storage**: dev SQLite file → production needs DB-backed storage; lost sessions = OAuth loops on every click.
++- **Review runs with zero state**: every page needs a working "connect your account" state; privacy-policy URL is required for the listing.
++
++## Files
++
++`example.ts` (next to this README) — the smallest real wiring: `shopifyApp()`
++server config plus a webhook route that authenticates, calls your product's REST
++API best-effort, and always returns 200. Copy it as a starting point.
+diff --git a/scripts/shopify-app/example.ts b/scripts/shopify-app/example.ts
+new file mode 100644
+index 0000000..d7477b4
+--- /dev/null
++++ b/scripts/shopify-app/example.ts
+@@ -0,0 +1,45 @@
++// Smallest real Shopify-app wiring: shopifyApp() server config + one webhook route.
++// The webhook authenticates (HMAC), calls your product's REST API best-effort, and always 200s.
++
++// --- app/shopify.server.ts ---
++import "@shopify/shopify-app-remix/adapters/node";
++import {
++  ApiVersion,
++  AppDistribution,
++  shopifyApp,
++} from "@shopify/shopify-app-remix/server";
++import { SQLiteSessionStorage } from "@shopify/shopify-app-session-storage-sqlite"; // dev only; use a DB-backed store in prod
++
++const shopify = shopifyApp({
++  apiKey: process.env.SHOPIFY_API_KEY,
++  apiSecretKey: process.env.SHOPIFY_API_SECRET || "",
++  apiVersion: ApiVersion.January25,
++  scopes: process.env.SCOPES?.split(","),
++  appUrl: process.env.SHOPIFY_APP_URL || "",
++  authPathPrefix: "/auth", // redirect_urls in shopify.app.toml must cover these callbacks
++  sessionStorage: new SQLiteSessionStorage("shopify_sessions.sqlite"),
++  distribution: AppDistribution.AppStore,
++});
++
++export const authenticate = shopify.authenticate;
++
++// --- app/routes/webhooks.products.tsx ---
++import type { ActionFunctionArgs } from "@remix-run/node";
++
++export const action = async ({ request }: ActionFunctionArgs) => {
++  // HMAC verification happens here; a bad signature never reaches your code.
++  const { shop, topic, payload } = await authenticate.webhook(request);
++
++  try {
++    // Load this shop's saved settings (their API key for YOUR product), then call
++    // your product's SDK / public REST API. Swap this block for your real handler.
++    const product = payload as { title?: string };
++    console.log(`[${topic}] ${shop}: ${product?.title}`);
++    // await yourApi.draftSomething(apiKeyForShop(shop), { ... });
++  } catch (error) {
++    // Shopify retries non-2xx deliveries — your downstream outage must NOT propagate.
++    console.error("webhook handler failed; still returning 200:", error);
++  }
++
++  return new Response(); // always 200 once authenticated
++};
+diff --git a/scripts/wordpress-plugin/README.md b/scripts/wordpress-plugin/README.md
+new file mode 100644
+index 0000000..e59d44d
+--- /dev/null
++++ b/scripts/wordpress-plugin/README.md
+@@ -0,0 +1,77 @@
++# wordpress-plugin — build, test, and submit a WordPress plugin
++
++A WordPress plugin is plain PHP with a header-comment manifest — no build step,
++no push CLI. Submission is a manual zip upload; hosting is SVN (trunk + tags).
++This is the playbook: from `integrations/wordpress-plugin/` to listed in the
++WordPress.org directory, plus the traps that each cost a manual-review
++round-trip. The concept-level skill is `wordpress-plugin` in `pooriaarab/skills`.
++
++## Flow
++
++```bash
++cd integrations/wordpress-plugin   # plugin source (main .php, includes/, readme.txt)
++
++# Local dev — wp-env maps this folder as a plugin (needs .wp-env.json)
++npm install -g @wordpress/env
++npx wp-env start                   # open the printed URL → Plugins → Activate
++
++# Pre-flight the same greps the reviewers run
++composer global require wp-coding-standards/wpcs
++phpcs --standard=WordPress .
++
++# Build the zip reviewers see (respect .distignore; folder name = slug)
++rsync -a --exclude-from .distignore . /tmp/<slug>/
++cd /tmp && zip -r <slug>.1.0.0.zip <slug>
++```
++
++Submission (manual review — days–weeks; each bounce re-queues):
++
++```bash
++# 1. Upload the zip at wordpress.org/plugins/developers/add/ → request slug <slug>.
++#    Wait for the approval email. Do NOT touch SVN before approval.
++# 2. First import (trunk = the snapshot the directory serves for development):
++svn checkout https://plugins.svn.wordpress.org/<slug>/ <slug>-svn
++rsync -a --delete --exclude-from integrations/wordpress-plugin/.distignore \
++  integrations/wordpress-plugin/ <slug>-svn/trunk/
++cd <slug>-svn && svn add trunk --force && svn ci -m "Initial commit of 1.0.0"
++
++# 3. Tag it — required, or readme.txt "Stable tag: 1.0.0" resolves to nothing:
++svn cp trunk tags/1.0.0 && svn ci -m "Tagging 1.0.0"
++
++# 4. Plugin-page assets live in /assets (sibling of trunk/), NOT in trunk:
++#    assets/icon-128x128.png assets/icon-256x256.png
++#    assets/banner-772x250.png assets/banner-1544x500.png assets/screenshot-1.png
++svn add assets --force && svn ci -m "Plugin page assets"
++```
++
++Later releases: bump `Version` in the main file AND `Stable tag` in readme.txt,
++add a `== Changelog ==` entry, rsync → trunk, `svn ci`, `svn cp trunk tags/x.y.z`,
++`svn ci`. No re-review for routine updates.
++
++## Traps (each = one manual-review round-trip)
++
++- **Every `$_POST`/`$_GET` read needs nonce + capability + sanitize** — the #1
++  bounce. `wp_unslash()` BEFORE `sanitize_text_field()`; escape
++  (`esc_html`/`esc_attr`/`esc_url`) at the echo, not at assignment.
++- **`Stable tag` = header `Version` = an existing `tags/x.y.z`** — mismatch and
++  the directory serves the wrong code, or none.
++- **Assets in `/assets`, not trunk** — icons/banners committed to trunk never
++  render on the plugin page.
++- **Folder name, `Text Domain`, and prefixes must match the APPROVED slug** —
++  rename everywhere if your requested slug was taken.
++- **No remote-loaded JS/CSS, no bundled secrets, no telemetry without consent** —
++  calling your documented API with a user-supplied key is fine; CDN scripts,
++  `eval`, and minified-only JS are instant rejects.
++- **Prefix every function/class/option; `defined( 'ABSPATH' ) || exit;` in every
++  PHP file.** `uninstall.php` must delete the plugin's options and meta.
++- **`save_post` fires on autosave/revision** — guard with `wp_is_post_autosave()`
++  / `wp_is_post_revision()` before calling your API.
++- **readme.txt `Tested up to` ≤ current WP release** — a future version warns, a
++  stale one sinks search rank.
++
++## Files
++
++`example.php` (next to this README) — the smallest real wiring: header manifest,
++a sanitized Settings-API field for the team API key, `save_post` →
++`wp_remote_request` to your API, and a nonce-protected form handler. Copy it as
++a starting point and rename every `your_product` prefix to your slug.
+diff --git a/scripts/wordpress-plugin/example.php b/scripts/wordpress-plugin/example.php
+new file mode 100644
+index 0000000..8c1b68b
+--- /dev/null
++++ b/scripts/wordpress-plugin/example.php
+@@ -0,0 +1,111 @@
++<?php
++// Smallest real WordPress-plugin wiring: store a team API key (Settings API), then
++// push each published post to your API. Swap YOUR_PRODUCT_API_BASE + the payload
++// for your product's public REST API contract. Rename the `your_product` prefix
++// to your approved slug everywhere.
++
++/**
++ * Plugin Name:       Your Product
++ * Description:       Push published posts to your product via its public REST API.
++ * Version:           1.0.0
++ * Requires at least: 6.0
++ * Requires PHP:      7.4
++ * License:           GPL-2.0-or-later
++ * Text Domain:       your-product
++ */
++
++defined( 'ABSPATH' ) || exit; // required guard in every PHP file
++
++define( 'YOUR_PRODUCT_API_BASE', 'https://api.example.com/v1' );
++
++// --- Settings: one array option, sanitized on the way in ---
++add_action(
++	'admin_init',
++	function () {
++		register_setting(
++			'your_product',
++			'your_product_settings',
++			array(
++				'sanitize_callback' => function ( $input ) {
++					$input = is_array( $input ) ? $input : array();
++					return array(
++						'api_key' => isset( $input['api_key'] ) ? sanitize_text_field( wp_unslash( $input['api_key'] ) ) : '',
++					);
++				},
++			)
++		);
++	}
++);
++
++// --- save_post → POST to your API (guard autosave/revision first) ---
++add_action(
++	'save_post',
++	function ( $post_id, $post ) {
++		if ( wp_is_post_autosave( $post_id ) || wp_is_post_revision( $post_id ) ) {
++			return;
++		}
++		if ( 'publish' !== $post->post_status || ! current_user_can( 'edit_post', $post_id ) ) {
++			return;
++		}
++		// Only create once: without this, every later save of the same published post
++		// (e.g. fixing a typo) POSTs again and creates another remote resource.
++		if ( get_post_meta( $post_id, '_your_product_post_id', true ) ) {
++			return;
++		}
++
++		$options = get_option( 'your_product_settings', array() );
++		$key     = isset( $options['api_key'] ) ? $options['api_key'] : '';
++		if ( '' === $key ) {
++			return;
++		}
++
++		$res = wp_remote_request( // never raw curl / file_get_contents — WPCS flags both
++			YOUR_PRODUCT_API_BASE . '/posts',
++			array(
++				'method'  => 'POST',
++				'timeout' => 30,
++				'headers' => array(
++					'Authorization' => 'Bearer ' . $key,
++					'Content-Type'  => 'application/json; charset=utf-8',
++				),
++				'body'    => wp_json_encode(
++					array(
++						'title'     => get_the_title( $post ),
++						'permalink' => get_permalink( $post ),
++					)
++				),
++			)
++		);
++
++		if ( is_wp_error( $res ) || wp_remote_retrieve_response_code( $res ) >= 300 ) {
++			update_post_meta( $post_id, '_your_product_last_error', 'API call failed' ); // surface, don't swallow
++			return;
++		}
++
++		$body = json_decode( wp_remote_retrieve_body( $res ), true );
++		if ( ! empty( $body['id'] ) ) {
++			update_post_meta( $post_id, '_your_product_post_id', sanitize_text_field( $body['id'] ) );
++		}
++	},
++	20,
++	2
++);
++
++// --- The guard triplet reviewers grep for, on any $_POST handler ---
++add_action(
++	'admin_post_your_product_action',
++	function () {
++		if ( ! isset( $_POST['your_product_nonce'] ) ) {
++			wp_die( 'Missing nonce' );
++		}
++		if ( ! wp_verify_nonce( sanitize_text_field( wp_unslash( $_POST['your_product_nonce'] ) ), 'your_product_action' ) ) {
++			wp_die( 'Bad nonce' );
++		}
++		if ( ! current_user_can( 'manage_options' ) ) {
++			wp_die( 'Denied' );
++		}
++		// ... sanitize each field, then act. In the form: wp_nonce_field( 'your_product_action', 'your_product_nonce' );
++		wp_safe_redirect( admin_url( 'options-general.php?page=your-product&done=1' ) );
++		exit;
++	}
++);

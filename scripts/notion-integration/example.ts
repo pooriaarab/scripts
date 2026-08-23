@@ -41,9 +41,22 @@ export async function syncOnce(token: string, databaseId: string, apiBase: strin
     kind === "status"
       ? { property: "Status", status: { equals: "Ready" } }
       : { property: "Status", select: { equals: "Ready" } };
-  const res = await notion.databases.query({ database_id: databaseId, filter, page_size: 100 });
+  // Paginate: a single page tops out at 100 rows, so >100 "Ready" rows would
+  // otherwise leave every row past the first page unsynced.
+  const pages: Array<{ id: string; properties: Record<string, any> }> = [];
+  let cursor: string | undefined;
+  do {
+    const res = await notion.databases.query({
+      database_id: databaseId,
+      filter,
+      page_size: 100,
+      start_cursor: cursor,
+    });
+    pages.push(...(res.results as Array<{ id: string; properties: Record<string, any> }>));
+    cursor = res.has_more ? (res.next_cursor ?? undefined) : undefined;
+  } while (cursor);
 
-  for (const page of res.results) {
+  for (const page of pages) {
     const p = (page as { properties: Record<string, any> }).properties;
     if (plain(p["Post ID"]?.rich_text)) continue; // already synced — re-runs are safe
     const row = {

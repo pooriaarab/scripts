@@ -44,12 +44,18 @@ add_action(
 		if ( wp_is_post_autosave( $post_id ) || wp_is_post_revision( $post_id ) ) {
 			return;
 		}
+		// save_post fires for every post type (pages, attachments, custom types too);
+		// restrict to the type this plugin actually pushes.
+		if ( 'post' !== $post->post_type ) {
+			return;
+		}
 		if ( 'publish' !== $post->post_status || ! current_user_can( 'edit_post', $post_id ) ) {
 			return;
 		}
 		// Only create once: without this, every later save of the same published post
-		// (e.g. fixing a typo) POSTs again and creates another remote resource.
-		if ( get_post_meta( $post_id, '_your_product_post_id', true ) ) {
+		// (e.g. fixing a typo) POSTs again and creates another remote resource. This also
+		// guards a prior malformed/idless response so we don't silently retry-and-duplicate.
+		if ( get_post_meta( $post_id, '_your_product_post_id', true ) || get_post_meta( $post_id, '_your_product_needs_attention', true ) ) {
 			return;
 		}
 
@@ -83,9 +89,15 @@ add_action(
 		}
 
 		$body = json_decode( wp_remote_retrieve_body( $res ), true );
-		if ( ! empty( $body['id'] ) ) {
-			update_post_meta( $post_id, '_your_product_post_id', sanitize_text_field( $body['id'] ) );
+		if ( empty( $body['id'] ) ) {
+			// A 2xx with no usable id means we can't tell whether a remote resource was
+			// created. Flag it instead of leaving the guard unset, which would otherwise
+			// let every future save re-POST and create another duplicate.
+			update_post_meta( $post_id, '_your_product_needs_attention', '1' );
+			update_post_meta( $post_id, '_your_product_last_error', 'API response missing id' );
+			return;
 		}
+		update_post_meta( $post_id, '_your_product_post_id', sanitize_text_field( $body['id'] ) );
 	},
 	20,
 	2
