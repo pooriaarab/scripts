@@ -47,16 +47,22 @@ async function postToApi(apiKey: string, path: string, body: BodyInit, contentTy
 
 // The UI iframe only sends intents: parent.postMessage({ pluginMessage: { type: "share" } }, "*").
 // The sandbox owns the API key (figma.clientStorage) and every fetch.
+let sharing = false; // a fast double-click/second "share" message while one is in flight
+// would otherwise run two exports+posts concurrently and create a duplicate remote post.
 figma.ui.onmessage = async (msg) => {
   if (msg.type === "share") {
-    const apiKey = await figma.clientStorage.getAsync("apiKey");
+    if (sharing) return;
+    sharing = true;
     try {
+      const apiKey = await figma.clientStorage.getAsync("apiKey");
       if (typeof apiKey !== "string" || !apiKey) throw new Error("Add your API key in Settings first.");
       await exportSelectionAndPost(apiKey);
       figma.ui.postMessage({ type: "share-result", ok: true });
       figma.notify("Shared");
     } catch (e) {
       figma.ui.postMessage({ type: "share-result", ok: false, error: e instanceof Error ? e.message : String(e) });
+    } finally {
+      sharing = false;
     }
   }
   if (msg.type === "close") figma.closePlugin();

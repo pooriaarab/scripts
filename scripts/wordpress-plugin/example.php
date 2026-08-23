@@ -49,9 +49,13 @@ add_action(
 		if ( 'post' !== $post->post_type ) {
 			return;
 		}
-		if ( 'publish' !== $post->post_status || ! current_user_can( 'edit_post', $post_id ) ) {
+		if ( 'publish' !== $post->post_status ) {
 			return;
 		}
+		// No current_user_can() gate here: a scheduled post published by WP-Cron runs
+		// with no logged-in user, so any capability check here is always false and
+		// would silently skip the sync for every scheduled post. Publishing to
+		// `publish` status is already capability-gated upstream by WordPress core.
 		// Only create once: without this, every later save of the same published post
 		// (e.g. fixing a typo) POSTs again and creates another remote resource. This also
 		// guards a prior malformed/idless response so we don't silently retry-and-duplicate.
@@ -83,8 +87,18 @@ add_action(
 			)
 		);
 
-		if ( is_wp_error( $res ) || wp_remote_retrieve_response_code( $res ) >= 300 ) {
-			update_post_meta( $post_id, '_your_product_last_error', 'API call failed' ); // surface, don't swallow
+		if ( is_wp_error( $res ) ) {
+			// A transport failure (timeout/DNS/TLS) doesn't tell us whether the remote
+			// already received and processed the request, unlike a definite HTTP
+			// rejection below. Flag it like the missing-id case so a retried save
+			// can't silently create a duplicate remote resource.
+			update_post_meta( $post_id, '_your_product_needs_attention', '1' );
+			update_post_meta( $post_id, '_your_product_last_error', 'API call failed: ' . $res->get_error_message() );
+			return;
+		}
+
+		if ( wp_remote_retrieve_response_code( $res ) >= 300 ) {
+			update_post_meta( $post_id, '_your_product_last_error', 'API call failed: HTTP ' . wp_remote_retrieve_response_code( $res ) ); // surface, don't swallow
 			return;
 		}
 

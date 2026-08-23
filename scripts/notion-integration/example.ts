@@ -121,17 +121,33 @@ export async function syncOnce(token: string, databaseId: string, apiBase: strin
     } catch (err) {
       // The remote post may already exist (creation succeeded, a write below failed,
       // e.g. transient 429/network) — persist its id so the continue guard above
-      // stops the next run from re-posting and creating a duplicate.
-      await notion.pages.update({
-        page_id: page.id,
-        properties: {
-          ...(post?.id
-            ? { "Post ID": { rich_text: [{ type: "text", text: { content: String(post.id) } }] } }
-            : {}),
-          // surface on the row (rich text caps at 2000 chars), don't swallow
-          Error: { rich_text: [{ type: "text", text: { content: String(err).slice(0, 1900) } }] },
-        } as never,
-      });
+      // stops the next run from re-posting and creating a duplicate. Write it in its
+      // own try first: if the Error write below also throws, an uncaught rejection
+      // here would abort the rest of this sync run AND, since it happens before the
+      // Post ID is saved, the next run would still re-post this row.
+      if (post?.id) {
+        try {
+          await notion.pages.update({
+            page_id: page.id,
+            properties: {
+              "Post ID": { rich_text: [{ type: "text", text: { content: String(post.id) } }] },
+            } as never,
+          });
+        } catch {
+          // best-effort; if this also fails the row will simply be retried next run
+        }
+      }
+      try {
+        // surface on the row (rich text caps at 2000 chars), don't swallow
+        await notion.pages.update({
+          page_id: page.id,
+          properties: {
+            Error: { rich_text: [{ type: "text", text: { content: String(err).slice(0, 1900) } }] },
+          } as never,
+        });
+      } catch {
+        // best-effort; don't let a failed Error write crash the rest of the sync run
+      }
     }
   }
 }
