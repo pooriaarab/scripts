@@ -75,3 +75,38 @@ Top-level keys map 1:1 to Make components:
 Re-running skips modules/RPCs that already exist (by name) and webhooks that already
 exist (by label). To re-push a component, delete it first
 (`DELETE /apps/{app}/{ver}/modules/{name}`).
+
+## Submitting the app for public review
+
+This script builds the app. Getting it into the public Make apps directory is a
+separate, **manual** step (Make's QA reviews it). The build satisfies the code
+requirements; the scenarios are on you.
+
+Steps (in the Make app editor):
+
+1. **Publish** the app — this is **permanent, there is no unpublish**. Only do it when
+   you actually want to submit.
+2. **Modules tab → set every module to "visible"** (the review checks visibility).
+3. **Review tab → fill the form:**
+   - **API documentation link** — a public docs URL for the service's API.
+   - **A test scenario per module** — one Make scenario URL per module
+     (`https://us1.make.com/{orgId}/scenarios/{id}/edit`), each showing a **successful
+     run** of that module. You build these by hand; the reviewer inspects the execution
+     logs. Watch out for modules with side effects (Create/Publish/Delete a Post act for
+     real) — use throwaway data.
+   - **One scenario that triggers an API error** — e.g. Get a Post with a bogus id, so
+     Make shows the service error is handled cleanly.
+   - Developer/support contact, categories, a **512×512 logo**, trademark + external-terms
+     confirmations.
+4. **Request review.**
+
+**Not automatable:** the SDK Apps API builds components, but Make's review wants real
+scenarios with real successful runs and valid data — the Scenarios API can create empty
+scenarios but can't make them meaningfully pass, and many modules have side effects. So
+budget real manual QA time for the ~N scenarios; don't rush it right after Publish.
+
+**The code requirements this script already satisfies** (so the review won't bounce on
+them): a Universal module, `limit` + pagination on list modules, typed dates, sanitized
+auth header on base + connection, real interfaces/labels/descriptions, and a connection
+test URL that errors on bad credentials. The only manual prep left is module visibility +
+the scenarios.
