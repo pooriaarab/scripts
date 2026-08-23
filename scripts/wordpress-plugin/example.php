@@ -29,7 +29,7 @@ add_action(
 				'sanitize_callback' => function ( $input ) {
 					$input = is_array( $input ) ? $input : array();
 					return array(
-						'api_key' => isset( $input['api_key'] ) ? sanitize_text_field( $input['api_key'] ) : '',
+						'api_key' => isset( $input['api_key'] ) ? sanitize_text_field( wp_unslash( $input['api_key'] ) ) : '',
 					);
 				},
 			)
@@ -45,6 +45,11 @@ add_action(
 			return;
 		}
 		if ( 'publish' !== $post->post_status || ! current_user_can( 'edit_post', $post_id ) ) {
+			return;
+		}
+		// Only create once: without this, every later save of the same published post
+		// (e.g. fixing a typo) POSTs again and creates another remote resource.
+		if ( get_post_meta( $post_id, '_your_product_post_id', true ) ) {
 			return;
 		}
 
@@ -74,6 +79,12 @@ add_action(
 
 		if ( is_wp_error( $res ) || wp_remote_retrieve_response_code( $res ) >= 300 ) {
 			update_post_meta( $post_id, '_your_product_last_error', 'API call failed' ); // surface, don't swallow
+			return;
+		}
+
+		$body = json_decode( wp_remote_retrieve_body( $res ), true );
+		if ( ! empty( $body['id'] ) ) {
+			update_post_meta( $post_id, '_your_product_post_id', sanitize_text_field( $body['id'] ) );
 		}
 	},
 	20,

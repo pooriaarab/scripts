@@ -27,7 +27,10 @@ async function statusType(notion: Client, databaseId: string, prop: string) {
   const db = await notion.databases.retrieve({ database_id: databaseId });
   const type = (db.properties as Record<string, { type: string }>)[prop]?.type;
   if (!type) throw new Error(`No "${prop}" property — or the database is not granted to the integration.`);
-  return type === "status" ? "status" : "select";
+  if (type !== "status" && type !== "select") {
+    throw new Error(`"${prop}" must be a Status or Select property (found: ${type}).`);
+  }
+  return type;
 }
 
 export async function syncOnce(token: string, databaseId: string, apiBase: string, apiKey: string) {
@@ -57,13 +60,22 @@ export async function syncOnce(token: string, databaseId: string, apiBase: strin
         scheduledAt: row.date,
         platforms: row.platforms,
       });
+      // Write the idempotency marker (Post ID) first and on its own: if the Status
+      // write below fails (e.g. the "Done" option doesn't exist yet), the row still
+      // shows a Post ID and the `continue` guard above stops the next run from
+      // re-posting and creating a duplicate.
+      await notion.pages.update({
+        page_id: page.id,
+        properties: {
+          "Post ID": { rich_text: [{ type: "text", text: { content: String(post.id) } }] },
+          "Post URL": { url: `${apiBase}/posts/${post.id}` },
+        } as never,
+      });
       await notion.pages.update({
         page_id: page.id,
         properties: {
           // status options must pre-exist in Notion; select options auto-create
           Status: kind === "status" ? { status: { name: "Done" } } : { select: { name: "Done" } },
-          "Post ID": { rich_text: [{ type: "text", text: { content: String(post.id) } }] },
-          "Post URL": { url: `${apiBase}/posts/${post.id}` },
         } as never,
       });
     } catch (err) {
