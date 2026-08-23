@@ -6,11 +6,11 @@
 # synthetic tests still pass. See the messaging-bot-onboarding-setup skill.
 #
 # Usage:
-#   set-messaging-webhook-secret.sh <ENV_VAR> <worker-1> [worker-2 ...]
+#   set-messaging-webhook-key.sh <ENV_VAR> <worker-1> [worker-2 ...]
 #
 # Examples:
-#   set-messaging-webhook-secret.sh SENDBLUE_WEBHOOK_SECRET content-rabbit-staging content-rabbit-production
-#   set-messaging-webhook-secret.sh WHATSAPP_VERIFY_TOKEN   content-rabbit-staging content-rabbit-production
+#   set-messaging-webhook-key.sh SENDBLUE_WEBHOOK_SECRET content-rabbit-staging content-rabbit-production
+#   set-messaging-webhook-key.sh WHATSAPP_VERIFY_TOKEN   content-rabbit-staging content-rabbit-production
 #
 # Notes:
 # - Prefix defaults by var name (sbwh_ / crwa_ / generic wh_); override with SECRET_PREFIX.
@@ -47,8 +47,13 @@ echo "    WhatsApp webhook Verify token / etc.) and SAVE."
 echo
 
 for w in "${WORKERS[@]}"; do
-  printf '%s' "$SECRET" | npx wrangler secret put "$VAR" --name "$w" 2>&1 \
-    | grep -iE "success|uploaded|error" | head -1 | sed "s/^/  [$w] /"
+  if out=$(printf '%s' "$SECRET" | npx wrangler secret put "$VAR" --name "$w" 2>&1); then
+    echo "  [$w] $(printf '%s\n' "$out" | grep -iE "success|uploaded" | head -1)"
+  else
+    echo "  [$w] FAILED — full wrangler output:" >&2
+    printf '%s\n' "$out" | sed "s/^/    /" >&2
+    exit 1
+  fi
 done
 
 echo
