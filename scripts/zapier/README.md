@@ -128,6 +128,24 @@ delivery" trigger needs an actual delivery to exist). Write-actions run for real
 point them at a throwaway tenant with no downstream connections so the side
 effects are harmless.
 
+**The unfakeable floor — S001 "at least 3 users with live Zaps."** Clearing every
+per-action task above still leaves this one, and editor tests by *your* account
+can never touch it: it needs **3 distinct Zapier accounts**, each with a
+**turned-on (live)** Zap using the app that has run. The CLI `promote` lists S001
+in its failures too, so it gates submission — **solo automation cannot reach a
+submittable state**, full stop. Plan for real users from the start:
+
+- **Controllable path:** 3 people (separate Zapier accounts) open the private-app
+  **invite link** (Platform UI → Sharing →
+  `zapier.com/developer/public-invite/<appId>/<token>/`), build one trivial Zap
+  (e.g. a New-record trigger → "Email by Zapier"), connect with a shared throwaway
+  API key, and **turn it on**. Three live Zaps = S001 cleared.
+- **Organic path:** the in-product Zapier **embed** onboards real early users.
+
+So the realistic sequence is: build the connector → clear the per-action tasks by
+testing → line up 3 real live Zaps for S001 → submit. Budget for the S001 step; it
+is not automatable.
+
 ## The other gate (Beta → public directory)
 
 Submitting + passing review lands the app in **Beta**. Exiting Beta into the
