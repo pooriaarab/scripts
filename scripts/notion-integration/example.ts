@@ -66,13 +66,19 @@ export async function syncOnce(token: string, databaseId: string, apiBase: strin
       platforms: (p.Platforms?.multi_select ?? []).map((o: { name: string }) => o.name),
     };
 
+    let post: { id?: unknown } | undefined;
     try {
-      const post = await postToApi(apiBase, "/posts", apiKey, {
+      post = await postToApi(apiBase, "/posts", apiKey, {
         title: row.title,
         content: row.body || row.title,
         scheduledAt: row.date,
         platforms: row.platforms,
       });
+      // A 2xx with no usable id means we can't tell whether a remote resource was
+      // created; don't persist "undefined" as the Post ID or the continue guard
+      // above would skip this row forever with no real remote link.
+      if (!post?.id) throw new Error("API response missing id");
+
       // Write the idempotency marker (Post ID) first and on its own: if the Status
       // write below fails (e.g. the "Done" option doesn't exist yet), the row still
       // shows a Post ID and the `continue` guard above stops the next run from
@@ -82,6 +88,7 @@ export async function syncOnce(token: string, databaseId: string, apiBase: strin
         properties: {
           "Post ID": { rich_text: [{ type: "text", text: { content: String(post.id) } }] },
           "Post URL": { url: `${apiBase}/posts/${post.id}` },
+          Error: { rich_text: [] }, // clear a stale error from a prior failed attempt
         } as never,
       });
       await notion.pages.update({
@@ -92,10 +99,16 @@ export async function syncOnce(token: string, databaseId: string, apiBase: strin
         } as never,
       });
     } catch (err) {
-      // surface on the row (rich text caps at 2000 chars), don't swallow
+      // The remote post may already exist (creation succeeded, a write below failed,
+      // e.g. transient 429/network) — persist its id so the continue guard above
+      // stops the next run from re-posting and creating a duplicate.
       await notion.pages.update({
         page_id: page.id,
         properties: {
+          ...(post?.id
+            ? { "Post ID": { rich_text: [{ type: "text", text: { content: String(post.id) } }] } }
+            : {}),
+          // surface on the row (rich text caps at 2000 chars), don't swallow
           Error: { rich_text: [{ type: "text", text: { content: String(err).slice(0, 1900) } }] },
         } as never,
       });

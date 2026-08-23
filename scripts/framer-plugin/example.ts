@@ -2,7 +2,7 @@
 // selection image, upload its bytes to your API, create the downstream action.
 // Swap `postToApi` for your product's SDK or public REST call.
 
-import { framer, type ImageAsset } from "@framer/plugin";
+import { framer, type ImageAsset } from "framer-plugin";
 
 // 1. Size the window BEFORE rendering anything, or you get a blank panel.
 void framer.showUI({ position: "top right", width: 340, height: 480, resizable: true });

@@ -26,7 +26,7 @@ Then in `developer.canva.com`:
 ## Traps (each = one round-trip)
 
 - **Iframe blocks un-allow-listed fetch** — the #1 "my API hangs" cause. Allow-list the origin in the portal.
-- **Design export is async** — `addOnUISdk.app.document.createRenditions(...)` returns a Promise of blobs; handle multi-page/element output. No synchronous getter.
+- **Design export is async and user-facing** — `requestExport(...)` from `@canva/design` opens Canva's own export UI and resolves to `{ status, exportBlobs }`; handle the `"aborted"` status (user cancelled) and fetch each blob's `url` for its bytes. No synchronous getter.
 - **App ID is portal-owned** — a placeholder ID previews fine but fails on submit.
 - **Icon must be exactly 512×512**; a fresh reviewer must be able to authenticate from a clean state (self-service auth in-app).
 

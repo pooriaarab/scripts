@@ -1,7 +1,7 @@
 # framer-plugin — build, run, and publish a Framer plugin
 
-A Framer plugin is a React app on the **`framer-plugin` npm package** (`@framer/plugin`)
-running in an iframe inside the Framer desktop app. Unlike Canva there is no portal
+A Framer plugin is a React app on the **`framer-plugin` npm package** running in an
+iframe inside the Framer desktop app. Unlike Canva there is no portal
 bundle upload or review queue — you zip the build and post it to the Framer Community,
 and it publishes near-instantly. This is the playbook: the command sequence from
 `integrations/<app>/` to published, plus the traps that each cost a round-trip. The
@@ -17,7 +17,7 @@ npm run dev                      # vite + mkcert; prints https://localhost:5173
 # or Framer shows a blank panel (Framer refuses plain http://localhost).
 # In the Framer desktop app: Plugins menu → enable Developer Tools → open the
 # development plugin for that URL.
-# ... develop against @framer/plugin (framer.showUI, getImage, setPluginData) ...
+# ... develop against framer-plugin (framer.showUI, getImage, setPluginData) ...
 npm run build                    # tsc + vite → dist/ (vite-plugin-framer copies framer.json in)
 npm run pack                     # zips the CONTENTS of dist/ → <app>-framer-plugin.zip
 ```
@@ -34,7 +34,7 @@ Then publish:
 - **Dev server must be local HTTPS** — `vite-plugin-mkcert` + one manual cert-accept in
   a browser. The #1 "my plugin is a white box" cause.
 - **`framer.showUI({...})` before `createRoot().render()`** — with explicit
-  `width`/`height`, or the panel never sizes. `import "@framer/plugin/framer.css"` too.
+  `width`/`height`, or the panel never sizes. `import "framer-plugin/framer.css"` too.
 - **Selection via the SDK, not the DOM** — `framer.getImage()` /
   `framer.subscribeToImage(cb)` (canvas mode); bytes via `asset.getData()`. Subscribe,
   don't read once — a stale selection ships the wrong image.
