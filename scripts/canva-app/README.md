@@ -16,12 +16,15 @@ npx @canva/cli apps start        # local preview; open it inside Canva via the p
 npm run build                    # produces the bundle to upload
 ```
 
-Then in `developer.canva.com`:
+Then in `developer.canva.com` (portal-review, free — no publish CLI; `@canva/cli` is preview only):
 1. Create the app → copy its **App ID** into the app config.
 2. Configuration → allow-list every external origin the app fetches (incl. `localhost` for dev) — **un-allow-listed origins fail silently**.
 3. Declare capabilities (design read, asset upload) — match them to the SDK calls exactly.
-4. Upload the built bundle; fill the listing (name, description, **512×512** icon, screenshots).
-5. **Submit for review** (marketplace) — or keep it private/team for internal use.
+4. Upload the built bundle; fill the listing. Assets: **512×512** PNG icon (1:1, full-bleed, no
+   transparency/rounded corners), a **2400×1800** (4:3) featured image (up to 2 in a carousel),
+   app support + privacy-policy URLs, and a **test-account login** if the app authenticates.
+5. **Submit for review** (marketplace) — or keep it private/team for internal use. Cap: 5
+   submissions per app per day.
 
 ## Traps (each = one round-trip)
 
