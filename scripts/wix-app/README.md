@@ -9,8 +9,16 @@ cd integrations/<app>
 npm install
 npm run build             # tsc --noEmit && vite build
 ```
-Register in the Wix Dev Center (OAuth, permissions, dashboard URL) → submit. AI pre-check
-(minutes) then human review (~business weeks).
+Submit at `dev.wix.com` (portal-review, free — no publish API; `@wix/cli` deploys
+code, not the listing):
+1. Configure extensions, OAuth scopes, redirect URLs; host over HTTPS (valid SSL).
+2. Fill the listing (name, teaser, description, keywords) + media: **5–6
+   screenshots, min 1200×900 px 4:3**; optional promo banner **540×360 px**; demo
+   video via YouTube URL. Privacy-policy + terms URLs if the app handles user data.
+3. Supply a **live demo account + credentials** and install notes for review.
+4. Clear all dashboard **blockers** → **Submit & Publish**. An AI review runs on
+   submit, then a Wix human review; SLA up to ~15 business days (locked meanwhile).
+5. On fail, new AI blockers appear — fixing alone doesn't clear them; **resubmit**.
 
 ## Traps
 - **`import.meta.env` untyped** → add `src/vite-env.d.ts` with `/// <reference types="vite/client" />`
