@@ -10,8 +10,17 @@ npm install
 npx whop-proxy            # dev proxy: loads the local app inside a real Whop
 npm run build             # bundle served at your hosted app URL
 ```
-Then in the Whop dashboard: create the app → set the hosted URL + OAuth redirects →
-test via the dev proxy → submit a versioned build for review → promote to the App Store.
+Submission (portal-review; no dev fee). `POST /apps` can create the app record
+(`name`, `company_id`, `base_url`, `route`, `icon`, `redirect_uris`), but the
+`marketplace_status` transition has no endpoint — you publish in the dashboard:
+1. `dev.whop.com` → create the app; set the HTTPS `base_url`/`route` + redirect URIs.
+2. Fill the listing: name, icon, description, **2–3 screenshots**, **10–20 s demo
+   video**. Preview at `whop.com/apps/<app_id>`.
+3. Set visibility **live** (needs name + icon + description) → **Publish to App
+   Store**. Review checks the billing/entitlement flow; on pass it goes live.
+
+Revenue: dev rev-share **10–30%**, or a one-time install fee, or a per-member sub.
+Whop's platform cut on top, icon px, and review SLA are not in the docs `(verify)`.
 
 ## Traps
 - **Whop OAuth ≠ your API's auth.** "Sign in with Whop" identifies the user; your own API

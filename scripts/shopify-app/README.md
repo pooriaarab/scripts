@@ -20,11 +20,13 @@ npm run typecheck && npm run build
 npx shopify app deploy           # push shopify.app.toml (webhooks, scopes, URLs) — REQUIRED after any toml edit
 ```
 
-Then in the Partner Dashboard (`partners.shopify.com`):
+Then in the Partner Dashboard (`partners.shopify.com`) — portal-review, free.
+`shopify app deploy` releases an app *version*, it does NOT submit for review:
 1. Apps → Create app (once) → copy Client ID/secret into `.env` + `client_id` in `shopify.app.toml`.
-2. Host the production build on a public HTTPS URL; set `SHOPIFY_APP_URL`, update `application_url` + `redirect_urls`, `shopify app deploy` again.
-3. App Store listing: name, tagline, description, **512×512 icon**, screenshots of the embedded UI, public **privacy-policy URL**.
-4. **Submit for review** — reviewers install on a test store with none of your state. After approval, flip distribution to the App Store.
+2. Host the production build on a public HTTPS URL (valid SSL); set `SHOPIFY_APP_URL`, update `application_url` + `redirect_urls`, `shopify app deploy` again.
+3. **Apps → [app] → Distribution → Shopify App Store**: set primary language, complete configuration (app URLs, GDPR webhooks, app icon, emergency contact); if you touch buyer data, complete the **protected customer data** request.
+4. Listing assets: **1200×1200 icon** (no text), **1600×900 feature image**, **3–6 screenshots at 1600×900**, a **demo screencast** (English/subtitled), public **privacy-policy URL**.
+5. Run the **automated checks** (+ optional AI self-review) → **Submit for review** — reviewers install on a test store with none of your state. Reviews run 2+ weeks. After approval, the App Store distribution goes live.
 
 ## Traps (each = one round-trip)
 
