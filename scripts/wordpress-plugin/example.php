@@ -1,0 +1,137 @@
+<?php
+// Smallest real WordPress-plugin wiring: store a team API key (Settings API), then
+// push each published post to your API. Swap YOUR_PRODUCT_API_BASE + the payload
+// for your product's public REST API contract. Rename the `your_product` prefix
+// to your approved slug everywhere.
+
+/**
+ * Plugin Name:       Your Product
+ * Description:       Push published posts to your product via its public REST API.
+ * Version:           1.0.0
+ * Requires at least: 6.0
+ * Requires PHP:      7.4
+ * License:           GPL-2.0-or-later
+ * Text Domain:       your-product
+ */
+
+defined( 'ABSPATH' ) || exit; // required guard in every PHP file
+
+define( 'YOUR_PRODUCT_API_BASE', 'https://api.example.com/v1' );
+
+// --- Settings: one array option, sanitized on the way in ---
+add_action(
+	'admin_init',
+	function () {
+		register_setting(
+			'your_product',
+			'your_product_settings',
+			array(
+				'sanitize_callback' => function ( $input ) {
+					$input = is_array( $input ) ? $input : array();
+					return array(
+						'api_key' => isset( $input['api_key'] ) ? sanitize_text_field( wp_unslash( $input['api_key'] ) ) : '',
+					);
+				},
+			)
+		);
+	}
+);
+
+// --- save_post → POST to your API (guard autosave/revision first) ---
+add_action(
+	'save_post',
+	function ( $post_id, $post ) {
+		if ( wp_is_post_autosave( $post_id ) || wp_is_post_revision( $post_id ) ) {
+			return;
+		}
+		// save_post fires for every post type (pages, attachments, custom types too);
+		// restrict to the type this plugin actually pushes.
+		if ( 'post' !== $post->post_type ) {
+			return;
+		}
+		if ( 'publish' !== $post->post_status ) {
+			return;
+		}
+		// No current_user_can() gate here: a scheduled post published by WP-Cron runs
+		// with no logged-in user, so any capability check here is always false and
+		// would silently skip the sync for every scheduled post. Publishing to
+		// `publish` status is already capability-gated upstream by WordPress core.
+		// Only create once: without this, every later save of the same published post
+		// (e.g. fixing a typo) POSTs again and creates another remote resource. This also
+		// guards a prior malformed/idless response so we don't silently retry-and-duplicate.
+		if ( get_post_meta( $post_id, '_your_product_post_id', true ) || get_post_meta( $post_id, '_your_product_needs_attention', true ) ) {
+			return;
+		}
+
+		$options = get_option( 'your_product_settings', array() );
+		$key     = isset( $options['api_key'] ) ? $options['api_key'] : '';
+		if ( '' === $key ) {
+			return;
+		}
+
+		$res = wp_remote_request( // never raw curl / file_get_contents — WPCS flags both
+			YOUR_PRODUCT_API_BASE . '/posts',
+			array(
+				'method'  => 'POST',
+				'timeout' => 30,
+				'headers' => array(
+					'Authorization' => 'Bearer ' . $key,
+					'Content-Type'  => 'application/json; charset=utf-8',
+				),
+				'body'    => wp_json_encode(
+					array(
+						'title'     => get_the_title( $post ),
+						'permalink' => get_permalink( $post ),
+					)
+				),
+			)
+		);
+
+		if ( is_wp_error( $res ) ) {
+			// A transport failure (timeout/DNS/TLS) doesn't tell us whether the remote
+			// already received and processed the request, unlike a definite HTTP
+			// rejection below. Flag it like the missing-id case so a retried save
+			// can't silently create a duplicate remote resource.
+			update_post_meta( $post_id, '_your_product_needs_attention', '1' );
+			update_post_meta( $post_id, '_your_product_last_error', 'API call failed: ' . $res->get_error_message() );
+			return;
+		}
+
+		if ( wp_remote_retrieve_response_code( $res ) >= 300 ) {
+			update_post_meta( $post_id, '_your_product_last_error', 'API call failed: HTTP ' . wp_remote_retrieve_response_code( $res ) ); // surface, don't swallow
+			return;
+		}
+
+		$body = json_decode( wp_remote_retrieve_body( $res ), true );
+		if ( empty( $body['id'] ) ) {
+			// A 2xx with no usable id means we can't tell whether a remote resource was
+			// created. Flag it instead of leaving the guard unset, which would otherwise
+			// let every future save re-POST and create another duplicate.
+			update_post_meta( $post_id, '_your_product_needs_attention', '1' );
+			update_post_meta( $post_id, '_your_product_last_error', 'API response missing id' );
+			return;
+		}
+		update_post_meta( $post_id, '_your_product_post_id', sanitize_text_field( $body['id'] ) );
+	},
+	20,
+	2
+);
+
+// --- The guard triplet reviewers grep for, on any $_POST handler ---
+add_action(
+	'admin_post_your_product_action',
+	function () {
+		if ( ! isset( $_POST['your_product_nonce'] ) ) {
+			wp_die( 'Missing nonce' );
+		}
+		if ( ! wp_verify_nonce( sanitize_text_field( wp_unslash( $_POST['your_product_nonce'] ) ), 'your_product_action' ) ) {
+			wp_die( 'Bad nonce' );
+		}
+		if ( ! current_user_can( 'manage_options' ) ) {
+			wp_die( 'Denied' );
+		}
+		// ... sanitize each field, then act. In the form: wp_nonce_field( 'your_product_action', 'your_product_nonce' );
+		wp_safe_redirect( admin_url( 'options-general.php?page=your-product&done=1' ) );
+		exit;
+	}
+);
