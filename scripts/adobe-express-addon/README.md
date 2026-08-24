@@ -1,8 +1,8 @@
 # adobe-express-addon — build, run, and submit an Adobe Express add-on
 
 An Express add-on is a React panel on the **Adobe Add-on SDK** running in a sandboxed
-iframe inside Adobe Express. Submission is a bundle upload in the Adobe Developer
-Console (no push CLI). This is the playbook: the command sequence from
+iframe inside Adobe Express. Submission is a package upload in the **Adobe Developer
+Distribution** portal (no push CLI). This is the playbook: the command sequence from
 `integrations/<app>/` to submitted, plus the traps that each cost a round-trip. The
 concept-level skill is `adobe-express-addon` in `pooriaarab/skills`.
 
@@ -16,11 +16,12 @@ npx @adobe/ccweb-add-on-scripts start # HTTPS local preview; load it inside Expr
 npm run build                         # produces the bundle to upload
 ```
 
-Then in the **Adobe Developer Console** (Express add-ons):
-1. Create the add-on listing.
-2. Upload the built bundle; fill name, description, icon, screenshots.
-3. Pick distribution: **public** (marketplace review) or **private/link**.
-4. Submit for review.
+Then in the **Adobe Developer Distribution** portal (portal-review, free):
+1. One-time: create a **Publisher Profile** (public name, site, description, **250×250 px** logo).
+2. Create the add-on listing; upload the packaged bundle.
+3. Pick distribution: **public** (in-app Marketplace, full assets) or **private/link** (one 36×36 icon, no listing).
+4. Public assets: icons **36×36 / 64×64 / 144×144 px**, **1–5 screenshots at 1360×800 px**, **privacy-policy URL** + EULA + support contact; test credentials (with credits) if the add-on gates features.
+5. **Submit for review** — human review, target 10 business days (often 2–3).
 
 ## Traps (each = one round-trip)
 

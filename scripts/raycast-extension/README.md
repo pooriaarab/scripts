@@ -38,8 +38,13 @@ The manifest, in `package.json` (schema: `https://www.raycast.com/schemas/extens
    key (self-serve signup or clear steps — they have no account of yours).
 5. Open the PR against `raycast/extensions`. Bot checks manifest hygiene; a human review
    follows (days). Push fixes to the same PR. Updates later = new PRs against the same dir.
-6. `npx @raycast/api@latest publish` automates fork+PR from a local clone — still ends in
-   PR review. (Exact flags: TBD — confirm at first submission.)
+6. Screenshots go in a `metadata/` folder in the extension dir — PNG, `2000×1250`, named
+   `screenshot-1.png` … (max 6, at least one required). Shoot them with Raycast's built-in
+   **Window Capture** so the dev-mode icon is stripped.
+7. `npx @raycast/api@latest publish` (run from the extension dir) authenticates with GitHub,
+   forks `raycast/extensions`, copies the extension in, and opens the PR — still ends in a
+   human PR review. Build + lint must be clean first; CI reruns them. Updates later = new PRs
+   against the same dir.
 
 ## Traps (each = one round-trip)
 

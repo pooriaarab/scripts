@@ -22,12 +22,14 @@ npm run build                    # tsc + vite → dist/ (vite-plugin-framer copi
 npm run pack                     # zips the CONTENTS of dist/ → <app>-framer-plugin.zip
 ```
 
-Then publish:
-1. Post the zip in the Framer Community (`framer.com/communities/`, Plugins category).
-   Published essentially immediately — no lengthy review. This is the platform's big
-   selling point; the build traps above are the real work.
-2. Framer Marketplace listing is a separate curated step — TBD, confirm the submission
-   URL and requirements at first submission.
+Then publish (portal-review, free — no publish CLI):
+1. Marketplace (reviewed): `framer.com/marketplace/dashboard/plugins/` → New Plugin →
+   upload `plugin.zip` → fill the form (name, description, icon, screenshots, pricing) →
+   submit. Manual review in two phases — initial check ~7 days, design review ~14 days
+   (verify) — status tracks in the dashboard; outcome by email. Rejects: unclear function,
+   poor performance, confusing UI, no light/dark mode.
+2. Community (optional, near-instant): post the zip at `framer.com/community`, Plugins
+   category, for early distribution while the Marketplace review runs.
 
 ## Traps (each = one round-trip)
 

@@ -31,10 +31,12 @@ Then in the Figma desktop app:
    (or `figma.com/community` → **Publish plugin**).
 3. First publish assigns a plugin ID — add `"id": "<assigned-id>"` to
    `manifest.json` so every later publish updates the same listing.
-4. Fill the listing: name, **128×128** icon, **1920×1080** cover, description
-   (state that an API key is required + where to get one), tags, support URL.
-5. **Publish** → Figma review before it appears in Community search
-   (SLA: TBD — confirm at first submission).
+4. Fill the listing: name, **128×128** icon, **1920×1080** cover (keep content inside the
+   `1800×1080` safe area), description (state that an API key is required + where to get one),
+   tags, support URL.
+5. **Publish** → Figma review before it appears in Community search. No published SLA; real
+   waits run days to a few weeks (verify). Decision arrives by email to your Figma account.
+   (portal-review, free — no publish CLI.)
 
 ## Traps (each = one round-trip)
 
