@@ -1,0 +1,291 @@
+diff --git a/scripts/agent-devbox/README.md b/scripts/agent-devbox/README.md
+new file mode 100644
+index 0000000..270dfe8
+--- /dev/null
++++ b/scripts/agent-devbox/README.md
+@@ -0,0 +1,159 @@
++# Remote agent dev box
++
++One always-on Linux box that holds the repos, the worktrees and the agent CLIs,
++driven from the laptop (or a phone) through Superset and T3 Code. The laptop
++becomes a thin client.
++
++## Why
++
++Measured on the laptop, 2026-08-26:
++
++| | |
++|---|---|
++| One Content Rabbit checkout | 9.7 GB (6.9 GB `node_modules`, 1.7 GB build caches, 640 MB `.git`) |
++| 48 live worktrees of that one repo | **86 GB** |
++| Laptop disk free | **89 GB of 926 GB** |
++
++One repo's worktrees already fill the disk, and there are 114 repos. A remote box
++with a real disk removes the ceiling and keeps sessions alive when the laptop
++sleeps.
++
++This is also why a serverless sandbox does not work here. Cloudflare Containers
++cap at 4 vCPU / 12 GiB / **20 GB disk**, and the disk is wiped on every wake — it
++cannot hold two worktrees, let alone forty-eight.
++
++## Sizing
++
++Next/OpenNext builds run with `--max-old-space-size=8192`, so budget ~12 GB
++resident per concurrent build.
++
++- **RAM:** 64 GB (three parallel builds plus a handful of agent CLIs)
++- **Disk:** 500 GB+ NVMe (86 GB is one repo)
++- **CPU:** 8+ cores; `bun install`, turbo and `tsc` all fan out
++
++A Hetzner **AX41-NVMe** (Ryzen 5 3600, 64 GB, 2×512 GB NVMe, ~€49/mo, less on the
++[auction](https://www.hetzner.com/sb/)) fits. Hetzner's cloud line got 107–204%
++more expensive for x86 in 2026, so a dedicated root server is now better value
++than CCX. If you would rather stay on cloud, ARM was barely touched — CAX41
++(16 vCPU, 32 GB, 320 GB) is ~€32/mo, but verify arm64 builds exist for kimi,
++muse and pi before committing.
++
++## Phase 1 — provision
++
++Ubuntu 24.04, your SSH key, no password login. Note the IP.
++
++## Phase 2 — bootstrap
++
++```bash
++scp scripts/agent-devbox/bootstrap.sh box:
++ssh box 'bash bootstrap.sh'
++```
++
++Installs the base toolchain, Node, Bun, `gh`, a 16 GB swapfile, ufw, and the
++agent CLIs that publish Linux packages: Claude Code, Codex, Gemini CLI, Superset.
++
++### Phase 2b — the three that need hands
++
++`kimi`, `muse` and `pi` ship their own installers and I have not confirmed a
++Linux build for each. Install them by hand and re-run the script's verify block.
++The box is useful without them — Claude, Codex and Gemini cover the roster.
++
++## Phase 3 — log the agents in
++
++Every agent CLI uses an OAuth flow that redirects to `localhost` **on the box**,
++where there is no browser. Forward the callback ports to the laptop first, then
++open the printed URL in the laptop browser:
++
++```bash
++ssh -L 1455:localhost:1455 -L 1456:localhost:1456 -L 8976:localhost:8976 box
++# then, inside that session:
++gh auth login
++claude-personal          # /login
++CODEX_HOME=~/.codex-personal codex login
++GEMINI_CLI_HOME=~/.gemini-personal gemini
++```
++
++Keep one config dir per identity, exactly as on the laptop. `~/.agentrc` (written
++by the bootstrap) sets `CODEX_HOME` and `GEMINI_CLI_HOME` and defines
++`claude-personal` / `claude-personal-1`.
++
++**Only personal accounts on this box.** No work profile, no Mozilla source. The
++box is a third-party host and the work/personal split has to survive the move.
++
++**Do not bake credentials into an image.** If this ever becomes a template, mount
++the tokens at boot from a secret store. Baked tokens sit in an image layer that
++every clone of the box shares.
++
++## Phase 4 — Superset remote workspaces
++
++Superset has first-class remote hosts, so no VPN is needed. Its relay routes
++laptop → box.
++
++On the box (headless, so use an API key from Settings → API Keys — `superset auth
++login` wants a browser):
++
++```bash
++export SUPERSET_API_KEY=sk_live_...     # put it in ~/.agentrc to persist
++superset start --daemon --org <org-slug>
++superset status --org <org-slug>
++```
++
++On the Mac: same org → **Workspaces** → **Device** filter → pick the box under
++"Other devices".
++
++Known limitation: dev-server ports are not forwarded to the laptop yet, so
++`localhost:PORT` only resolves on the box. Tunnel per port when you need a
++browser on it:
++
++```bash
++ssh -L 1355:localhost:1355 box     # portless / bun run dev:worktree
++```
++
++Run `/superset:setup` once per repo you fan out on, so `.superset/config.json`
++boots each worktree green.
++
++## Phase 5 — T3 Code remote
++
++T3 needs a network path, so this is the part that wants Tailscale.
++
++```bash
++# both machines
++curl -fsSL https://tailscale.com/install.sh | sh && sudo tailscale up
++
++# on the box
++npx t3@latest serve --tailscale-serve
++sudo npx t3@latest service        # always-on; systemd, so this works here
++```
++
++`t3 service` refuses to install on macOS but is supported on Linux + systemd —
++moving to a Linux box is what makes always-on T3 possible.
++
++Then in the T3 client, add one Claude provider **per config dir** (set the
++`CLAUDE_CONFIG_DIR path` field, not `HOME`, not launch args):
++
++| Provider name | CLAUDE_CONFIG_DIR |
++|---|---|
++| Claude Personal | `~/.claude-personal` |
++| Claude Personal 1 | `~/.claude-personal-1` |
++
++A thread is pinned to its config dir at start, so pick the subscription with
++headroom up front. Set **Auto-compact after** to ~300000 tokens.
++
++T3 worktrees have no setup hook, so a fresh thread will not install deps by
++itself — the thread's agent has to run the install. Repo-root `CLAUDE.md` /
++`AGENTS.md` and `.claude/skills` do load.
++
++## Phase 6 — disk hygiene
++
++The box has more disk, not infinite disk. 48 worktrees × 9.7 GB is 86 GB for one
++repo. Prune merged ones on a schedule:
++
++```bash
++git worktree list --porcelain | sed -n 's/^worktree //p' | while read -r w; do
++  b=$(git -C "$w" branch --show-current) || continue
++  [ -z "$b" ] && continue
++  git branch --merged origin/main | grep -qx "  $b" && echo "stale: $w ($b)"
++done
++```
++
++Review the list, then `git worktree remove` the ones you are done with.
+diff --git a/scripts/agent-devbox/bootstrap.sh b/scripts/agent-devbox/bootstrap.sh
+new file mode 100755
+index 0000000..6cd2581
+--- /dev/null
++++ b/scripts/agent-devbox/bootstrap.sh
+@@ -0,0 +1,120 @@
++#!/usr/bin/env bash
++# Bootstrap a remote agent dev box: base toolchain, agent CLIs, per-provider
++# config dirs. Idempotent -- safe to re-run after a partial failure.
++#
++# Usage (as a non-root sudoer, on a fresh Ubuntu 24.04 box):
++#   curl -fsSL <raw-url>/bootstrap.sh | bash
++#   # or: scp it over, then: bash bootstrap.sh
++#
++# Deliberately does NOT log any agent in. Logins are interactive and need a
++# browser callback -- see README.md "Phase 3".
++
++set -uo pipefail
++
++log()  { printf '\n\033[1;34m==>\033[0m %s\n' "$*"; }
++warn() { printf '\033[1;33m[warn]\033[0m %s\n' "$*"; }
++have() { command -v "$1" >/dev/null 2>&1; }
++
++[[ $EUID -eq 0 ]] && { echo "Run as a normal sudoer, not root."; exit 1; }
++
++NODE_MAJOR=25
++MISSING=()
++
++log "Base packages"
++sudo apt-get update -qq
++sudo apt-get install -y -qq \
++  build-essential git curl wget unzip zip jq ripgrep fd-find tmux htop \
++  ca-certificates gnupg python3 python3-pip pkg-config libssl-dev \
++  ufw fail2ban unattended-upgrades
++
++log "Swap (Next/OpenNext builds ask for an 8 GB heap)"
++if ! swapon --show | grep -q /swapfile; then
++  sudo fallocate -l 16G /swapfile
++  sudo chmod 600 /swapfile
++  sudo mkswap -q /swapfile
++  sudo swapon /swapfile
++  grep -q '^/swapfile' /etc/fstab || echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab >/dev/null
++fi
++
++log "Firewall + SSH hardening"
++sudo ufw --force default deny incoming
++sudo ufw --force default allow outgoing
++sudo ufw allow OpenSSH
++sudo ufw --force enable
++sudo sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config
++sudo systemctl reload ssh || sudo systemctl reload sshd
++
++log "GitHub CLI"
++if ! have gh; then
++  sudo mkdir -p -m 755 /etc/apt/keyrings
++  wget -qO- https://cli.github.com/packages/githubcli-archive-keyring.gpg \
++    | sudo tee /etc/apt/keyrings/githubcli-archive-keyring.gpg >/dev/null
++  sudo chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg
++  echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
++    | sudo tee /etc/apt/sources.list.d/github-cli.list >/dev/null
++  sudo apt-get update -qq && sudo apt-get install -y -qq gh
++fi
++
++log "Node ${NODE_MAJOR} via fnm"
++if ! have fnm; then
++  curl -fsSL https://fnm.vercel.app/install | bash -s -- --skip-shell
++fi
++export PATH="$HOME/.local/share/fnm:$PATH"
++eval "$(fnm env --shell bash)" 2>/dev/null || true
++fnm install "$NODE_MAJOR" >/dev/null 2>&1 || warn "fnm install $NODE_MAJOR failed"
++fnm default "$NODE_MAJOR" >/dev/null 2>&1 || true
++eval "$(fnm env --shell bash)" 2>/dev/null || true
++
++log "Bun"
++have bun || curl -fsSL https://bun.sh/install | bash
++export PATH="$HOME/.bun/bin:$PATH"
++
++log "Agent CLIs"
++npm_i() { npm install -g "$1" >/dev/null 2>&1 && echo "  ok   $1" || { echo "  FAIL $1"; MISSING+=("$1"); }; }
++npm_i @anthropic-ai/claude-code
++npm_i @google/gemini-cli
++npm_i @openai/codex
++
++# Superset host server -- Linux x64 + arm64 binaries exist.
++if ! have superset; then
++  curl -fsSL https://superset.sh/install.sh | bash \
++    && echo "  ok   superset" || { echo "  FAIL superset"; MISSING+=(superset); }
++fi
++
++# These three ship their own installers and I have NOT verified a Linux build
++# exists for each. Install by hand; the box is useful without them.
++for c in kimi muse pi; do
++  have "$c" || { echo "  todo $c (install manually, see README Phase 2b)"; MISSING+=("$c"); }
++done
++
++log "Per-provider config dirs (mirrors the laptop work/personal split)"
++mkdir -p ~/.claude-personal ~/.claude-personal-1 ~/.codex-personal ~/.gemini-personal
++cat > ~/.agentrc <<'RC'
++# Sourced by ~/.bashrc. One config dir per identity so provider credentials
++# never mix. Matches the laptop layout.
++export PATH="$HOME/.bun/bin:$HOME/.local/bin:$HOME/.superset/bin:$HOME/.kimi-code/bin:$PATH"
++export CODEX_HOME="$HOME/.codex-personal"
++export GEMINI_CLI_HOME="$HOME/.gemini-personal"
++
++claude-personal()   { CLAUDE_CONFIG_DIR="$HOME/.claude-personal"   command claude "$@"; }
++claude-personal-1() { CLAUDE_CONFIG_DIR="$HOME/.claude-personal-1" command claude "$@"; }
++RC
++grep -q 'agentrc' ~/.bashrc || cat >> ~/.bashrc <<'RC'
++
++eval "$(fnm env --shell bash)" 2>/dev/null || true
++[ -f "$HOME/.agentrc" ] && . "$HOME/.agentrc"
++RC
++
++log "Verify"
++# shellcheck disable=SC1090
++. ~/.agentrc
++for c in git gh node bun claude codex gemini superset kimi muse pi; do
++  printf '  %-10s %s\n' "$c" "$(command -v $c 2>/dev/null || echo MISSING)"
++done
++printf '  %-10s %s\n' "disk" "$(df -h --output=avail / | tail -1 | tr -d ' ') free"
++printf '  %-10s %s\n' "ram" "$(free -g | awk '/^Mem:/{print $2"Gi"}')"
++
++if ((${#MISSING[@]})); then
++  warn "not installed: ${MISSING[*]}"
++fi
++log "Done. Next: log each agent in (README Phase 3), then start Superset (Phase 4)."
