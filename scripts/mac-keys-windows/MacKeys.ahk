@@ -175,6 +175,25 @@ WheelUp:: Send "{WheelDown}"
 WheelDown:: Send "{WheelUp}"
 #HotIf
 
+; --------------------------------------------- trackpad gesture receiver ----
+; The Magic Trackpad stays on the Mac, and Deskflow forwards no multi-touch at
+; all - gestures are interpreted on the machine the trackpad is attached to.
+; So BetterTouchTool on the Mac converts each gesture into one of these
+; otherwise-unused chords, which Deskflow forwards like any ordinary key, and
+; they get turned back into the Windows equivalent here.
+;
+; Import MacKeys-Gestures.bttpreset on the Mac to set the sending half up.
+; Continuous gestures (pinch zoom, smooth swipe tracking) cannot work this way:
+; there is no gesture stream to interpolate, only a discrete keypress.
+;
+;   Mac gesture                chord              Windows action
+^!+1:: Only("#{Tab}")        ; 3-finger up      -> Mission Control / Task View
+^!+2:: CycleAppWindows()     ; 3-finger down    -> App Expose
+^!+3:: Only("#^{Right}")     ; 3-finger left    -> next Space
+^!+4:: Only("#^{Left}")      ; 3-finger right   -> previous Space
+^!+5:: Only("!{Space}")      ; 4-finger pinch   -> Launchpad / PowerToys Run
+^!+6:: Only("#d")            ; 4-finger spread  -> Show Desktop
+
 ; -------------------------------------------------------------- toggles -----
 ^!F12:: ToggleSuspend()
 #!e:: ToggleEmacs()
