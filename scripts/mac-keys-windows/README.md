@@ -6,19 +6,7 @@ remapped from Win. Ctrl and Alt are left alone, which keeps the local Dell
 keyboard behaving like normal Windows *and* frees Ctrl for macOS's emacs text
 navigation — exactly the division of labour a Mac has.
 
-## Install
-
-```powershell
-.\install.ps1
-```
-
-Idempotent. Installs AutoHotkey v2 and QuickLook via winget if missing, copies
-`MacKeys.ahk` to `%USERPROFILE%\MacKeys`, registers both at login, and starts
-them. Add `-FreeWinL` to also fix `Cmd+L` (see Known limits).
-
-If Command turns out to arrive as **Alt** rather than **Win** — a directly
-paired Apple keyboard with Boot Camp drivers does this — swap the `#` hotkey
-prefixes in `MacKeys.ahk` for `!`.
+Script: `C:\Users\poori\MacKeys\MacKeys.ahk` (AutoHotkey v2, starts at login)
 
 ## Escape hatches
 
@@ -37,6 +25,9 @@ The tray icon has the same options plus **Edit** and **Reload**.
 | `Cmd+C / X / V / A / Z / Shift+Z` | Copy, cut, paste, select all, undo, redo |
 | `Cmd+S / P / F / G / N / O / T / W / R` | Save, print, find, find-next, new, open, new tab, close, reload |
 | `Cmd+1`…`9`, `Cmd+0`, `Cmd+-`, `Cmd+=` | Tab switching and zoom |
+| `Cmd+click` | Add to a selection, or open a link in a background tab |
+| `Cmd+drag` | Same, held — press and release are mapped separately |
+| `Cmd+scroll` | Zoom |
 
 In a terminal, `Cmd+C` / `Cmd+V` become `Ctrl+Shift+C` / `Ctrl+Shift+V` so that
 `Ctrl+C` stays available as interrupt — the same trick Terminal.app plays.
@@ -87,11 +78,3 @@ The `Ctrl+…` set is skipped inside terminals, where those keys mean other thin
   already-inverted delta, so it is probably right — `Win+Alt+S` flips it if not.
 - No global menu bar, and no true app-level `Cmd+Q` quit semantics. Windows has
   no equivalent concept.
-
-## Trackpad gestures
-
-Deskflow forwards no multi-touch, so gestures need a relay: BetterTouchTool on
-the Mac converts each gesture to a `⌃⌥⇧<n>` chord that Deskflow forwards and
-`MacKeys.ahk` translates back. See [GESTURES.md](GESTURES.md) for the six
-mapped gestures, the paste-ready `MacKeys-Gestures.json`, and the trade-off
-that binding them globally costs you the native Mac gestures.

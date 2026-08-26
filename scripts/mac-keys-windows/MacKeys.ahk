@@ -1,6 +1,7 @@
 #Requires AutoHotkey v2.0
 #SingleInstance Force
 InstallKeybdHook
+InstallMouseHook
 Persistent
 SendMode "Input"
 SetTitleMatchMode 2
@@ -174,6 +175,29 @@ CmdDown() {
 WheelUp:: Send "{WheelDown}"
 WheelDown:: Send "{WheelUp}"
 #HotIf
+
+; ------------------------------------------------------------- Cmd+click ----
+; Mac adds a discrete item to a selection with Cmd+click, and opens links in a
+; background tab the same way; Windows uses Ctrl+click for both. Remapping the
+; keyboard alone never covers this, because the modifier is held while a MOUSE
+; button is pressed - no keyboard hotkey ever fires.
+;
+; Press and release are handled separately so Cmd+drag still works, and Shift
+; is left alone so Cmd+Shift+click arrives as Ctrl+Shift+click.
+*#LButton:: CmdClick("LButton")
+*#RButton:: CmdClick("RButton")
+
+CmdClick(btn) {
+    Send "{LWin up}{RWin up}{LCtrl down}"
+    Click (btn = "RButton" ? "Right Down" : "Down")
+    KeyWait btn
+    Click (btn = "RButton" ? "Right Up" : "Up")
+    Send "{LCtrl up}"
+}
+
+; Cmd+scroll zooms on a Mac; Windows zooms with Ctrl+scroll.
+*#WheelUp::   Send "{LWin up}{RWin up}^{WheelUp}"
+*#WheelDown:: Send "{LWin up}{RWin up}^{WheelDown}"
 
 ; --------------------------------------------- trackpad gesture receiver ----
 ; The Magic Trackpad stays on the Mac, and Deskflow forwards no multi-touch at
