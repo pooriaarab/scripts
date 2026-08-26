@@ -87,3 +87,11 @@ The `Ctrl+…` set is skipped inside terminals, where those keys mean other thin
   already-inverted delta, so it is probably right — `Win+Alt+S` flips it if not.
 - No global menu bar, and no true app-level `Cmd+Q` quit semantics. Windows has
   no equivalent concept.
+
+## Trackpad gestures
+
+Deskflow forwards no multi-touch, so gestures need a relay: BetterTouchTool on
+the Mac converts each gesture to a `⌃⌥⇧<n>` chord that Deskflow forwards and
+`MacKeys.ahk` translates back. See [GESTURES.md](GESTURES.md) for the six
+mapped gestures, the paste-ready `MacKeys-Gestures.json`, and the trade-off
+that binding them globally costs you the native Mac gestures.
