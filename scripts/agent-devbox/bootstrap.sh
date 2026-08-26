@@ -29,11 +29,15 @@ sudo apt-get install -y -qq \
 
 log "Swap (Next/OpenNext builds ask for an 8 GB heap)"
 if ! swapon --show | grep -q /swapfile; then
-  sudo fallocate -l 16G /swapfile
-  sudo chmod 600 /swapfile
-  sudo mkswap -q /swapfile
-  sudo swapon /swapfile
-  grep -q '^/swapfile' /etc/fstab || echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab >/dev/null
+  if sudo fallocate -l 16G /swapfile \
+    && sudo chmod 600 /swapfile \
+    && sudo mkswap -q /swapfile \
+    && sudo swapon /swapfile; then
+    grep -q '^/swapfile' /etc/fstab || echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab >/dev/null
+  else
+    warn "swap setup failed, leaving /etc/fstab untouched"
+    sudo rm -f /swapfile
+  fi
 fi
 
 log "Firewall + SSH hardening"
