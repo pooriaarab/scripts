@@ -42,23 +42,42 @@ copy/paste uses. `BTTPredefinedActionType: 264` is "send keyboard shortcut",
 and BTT accepts the human-readable `ctrl+option+shift+1` form on import, so
 there are no raw key codes to get wrong.
 
-## The trade-off you should decide on
+## The binding constraint: the Mac must not change
 
-These triggers bind **globally on the Mac**, so once BTT owns the three-finger
-swipes you lose native Mission Control and Spaces switching *on the Mac itself*.
-Three ways to handle that:
+The requirement is that **every gesture keeps doing exactly what it does today
+on the Mac**, and additionally works on Windows. A gesture manager that takes
+over a native macOS gesture and reimplements it does not meet that bar, even
+though it is the simplest thing to build.
 
-- **Rebind to four-finger swipes** in BTT (two clicks per trigger). macOS treats
-  three- and four-finger swipes as the same action by default, so moving the
-  relay to four fingers leaves the three-finger gestures native on the Mac. This
-  is the cleanest option if you use Mission Control on both machines.
-- **Use a Conditional Activation Group** in BTT so the triggers are only active
-  under a condition you choose.
-- **Accept it**, if the Mac is mostly a keyboard/trackpad host for the PC.
+So the Mac-side trigger has to either:
 
-Also: macOS may swallow the gestures before BTT sees them. If a swipe does
-nothing, turn off the corresponding gesture under
-**System Settings → Trackpad → More Gestures** so BTT gets it instead.
+1. **Pass through** — fire the chord while letting the native gesture still
+   happen (a per-trigger option in BetterTouchTool; explicit in a Hammerspoon
+   event tap, which returns the event unmodified while acting on it), or
+2. **Re-trigger** — fire the chord *and* explicitly invoke the native macOS
+   action, so the observable behaviour is identical.
+
+Pass-through is preferred. Whichever is used, "the Mac is unchanged" is the
+acceptance criterion, verified rather than assumed.
+
+`mac-side-prompt.md` in this folder is a self-contained brief for an agent
+running on the Mac, written to that constraint. The Mac is the Deskflow server
+and stays in control; nothing drives it from the Windows side.
+
+## The unknown that decides the design
+
+**Does Deskflow forward *synthetic* keystrokes?** Gesture tools emit keystrokes
+as synthetic `CGEvent`s, and Deskflow captures real hardware input — it may not
+pick up events posted programmatically by another app. If it does not, the whole
+keystroke-relay approach is dead and the transport has to become a direct
+network call from the Mac to a listener on the Windows box, bypassing Deskflow.
+
+Test it before building: put the Deskflow cursor on the Windows screen, post a
+synthetic keystroke from AppleScript, and see which machine receives it.
+
+Separately, macOS may swallow a gesture before the tool sees it. If a swipe does
+nothing, the corresponding entry under **System Settings → Trackpad → More
+Gestures** is the first place to look.
 
 ## What this cannot do
 
