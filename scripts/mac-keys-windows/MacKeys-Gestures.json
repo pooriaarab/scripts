@@ -1,0 +1,80 @@
+[
+  {
+    "BTTTriggerType": 112,
+    "BTTTriggerClass": "BTTTriggerTypeTouchpadAll",
+    "BTTTriggerName": "3-Finger Swipe Up -> Windows Mission Control",
+    "BTTEnabled": 1,
+    "BTTOrder": 0,
+    "BTTActionsToExecute": [
+      {
+        "BTTPredefinedActionType": 264,
+        "BTTShortcutToSend": "ctrl+option+shift+1"
+      }
+    ]
+  },
+  {
+    "BTTTriggerType": 113,
+    "BTTTriggerClass": "BTTTriggerTypeTouchpadAll",
+    "BTTTriggerName": "3-Finger Swipe Down -> Windows App Expose",
+    "BTTEnabled": 1,
+    "BTTOrder": 1,
+    "BTTActionsToExecute": [
+      {
+        "BTTPredefinedActionType": 264,
+        "BTTShortcutToSend": "ctrl+option+shift+2"
+      }
+    ]
+  },
+  {
+    "BTTTriggerType": 114,
+    "BTTTriggerClass": "BTTTriggerTypeTouchpadAll",
+    "BTTTriggerName": "3-Finger Swipe Left -> Windows next Space",
+    "BTTEnabled": 1,
+    "BTTOrder": 2,
+    "BTTActionsToExecute": [
+      {
+        "BTTPredefinedActionType": 264,
+        "BTTShortcutToSend": "ctrl+option+shift+3"
+      }
+    ]
+  },
+  {
+    "BTTTriggerType": 115,
+    "BTTTriggerClass": "BTTTriggerTypeTouchpadAll",
+    "BTTTriggerName": "3-Finger Swipe Right -> Windows previous Space",
+    "BTTEnabled": 1,
+    "BTTOrder": 3,
+    "BTTActionsToExecute": [
+      {
+        "BTTPredefinedActionType": 264,
+        "BTTShortcutToSend": "ctrl+option+shift+4"
+      }
+    ]
+  },
+  {
+    "BTTTriggerType": 194,
+    "BTTTriggerClass": "BTTTriggerTypeTouchpadAll",
+    "BTTTriggerName": "4-Finger Pinch In -> Windows Launchpad (PowerToys Run)",
+    "BTTEnabled": 1,
+    "BTTOrder": 4,
+    "BTTActionsToExecute": [
+      {
+        "BTTPredefinedActionType": 264,
+        "BTTShortcutToSend": "ctrl+option+shift+5"
+      }
+    ]
+  },
+  {
+    "BTTTriggerType": 195,
+    "BTTTriggerClass": "BTTTriggerTypeTouchpadAll",
+    "BTTTriggerName": "4-Finger Pinch Out -> Windows Show Desktop",
+    "BTTEnabled": 1,
+    "BTTOrder": 5,
+    "BTTActionsToExecute": [
+      {
+        "BTTPredefinedActionType": 264,
+        "BTTShortcutToSend": "ctrl+option+shift+6"
+      }
+    ]
+  }
+]
