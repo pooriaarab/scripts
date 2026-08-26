@@ -89,7 +89,10 @@ done
 
 log "Per-provider config dirs (mirrors the laptop work/personal split)"
 mkdir -p ~/.claude-personal ~/.claude-personal-1 ~/.codex-personal ~/.gemini-personal
-cat > ~/.agentrc <<'RC'
+if [[ -f ~/.agentrc ]]; then
+  warn "~/.agentrc already exists, leaving it as-is (it may hold SUPERSET_API_KEY or other local edits)"
+else
+  cat > ~/.agentrc <<'RC'
 # Sourced by ~/.bashrc. One config dir per identity so provider credentials
 # never mix. Matches the laptop layout.
 export PATH="$HOME/.bun/bin:$HOME/.local/bin:$HOME/.superset/bin:$HOME/.kimi-code/bin:$PATH"
@@ -99,6 +102,7 @@ export GEMINI_CLI_HOME="$HOME/.gemini-personal"
 claude-personal()   { CLAUDE_CONFIG_DIR="$HOME/.claude-personal"   command claude "$@"; }
 claude-personal-1() { CLAUDE_CONFIG_DIR="$HOME/.claude-personal-1" command claude "$@"; }
 RC
+fi
 grep -q 'agentrc' ~/.bashrc || cat >> ~/.bashrc <<'RC'
 
 eval "$(fnm env --shell bash)" 2>/dev/null || true
