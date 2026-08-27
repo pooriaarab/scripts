@@ -29,7 +29,13 @@ while (( $# )); do
       fi
       shift 2
       ;;
-    --limit=*) LIMIT="${1#--limit=}"; shift ;;
+    --limit=*)
+      LIMIT="${1#--limit=}"
+      if ! [[ "$LIMIT" =~ ^[0-9]+$ ]] || (( LIMIT == 0 )); then
+        echo "error: --limit must be a positive integer" >&2; exit 2
+      fi
+      shift
+      ;;
     -h|--help) usage; exit 0 ;;
     --) shift; break ;;
     --*) echo "error: unknown option: $1" >&2; usage >&2; exit 2 ;;
@@ -60,10 +66,18 @@ if ! command -v jq >/dev/null 2>&1; then
   echo "error: jq not found. Install jq." >&2
   exit 1
 fi
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "error: python3 not found. Install python3." >&2
+  exit 1
+fi
 
 # Cap per_page at 100 (GitHub API max)
 PER_PAGE=$LIMIT
-if (( PER_PAGE > 100 )); then PER_PAGE=100; fi
+if (( PER_PAGE > 100 )); then
+  echo "warning: --limit capped at 100 (GitHub API page limit)" >&2
+  PER_PAGE=100
+  LIMIT=100
+fi
 
 # Fetch recent completed runs
 runs_json=$(gh api "repos/$REPO/actions/runs?per_page=$PER_PAGE&status=completed" 2>&1 || true)
@@ -103,7 +117,8 @@ count_runs=0
 for rid in $run_ids; do
   count_runs=$((count_runs+1))
   # Fetch jobs for this run; sequential to avoid rate limit burst
-  jobs_json=$(gh api "repos/$REPO/actions/runs/$rid/jobs" 2>&1 || true)
+  # --paginate follows all pages so matrix runs with >30 jobs aren't truncated
+  jobs_json=$(gh api --paginate "repos/$REPO/actions/runs/$rid/jobs?per_page=100" 2>&1 || true)
   if ! echo "$jobs_json" | jq -e '.jobs' >/dev/null 2>&1; then
     # skip failed fetch, don't crash
     continue
@@ -126,7 +141,7 @@ fi
 
 # Aggregate with python: group by job name, compute durations, stats, runner label
 python3 - "$tmp_jobs" "$tmp_agg" "$JSON" <<'PY'
-import sys, json, statistics
+import sys, json
 from datetime import datetime, timezone
 from collections import defaultdict, Counter
 
@@ -227,7 +242,6 @@ else:
     # table output handled by bash; just ensure file exists
     pass
 PY
-python_exit=$?
 
 if (( JSON )); then
   # python already printed json
@@ -254,4 +268,3 @@ for r in rows:
     display_job = job if len(job) <= 28 else job[:25]+"..."
     print(f"{display_job:<28} {r['count']:>5} {r['median']:>8} {r['p95']:>8} {r['max']:>8} {r['runner']}")
 PY
-# Replace sys import missing; fix quickly

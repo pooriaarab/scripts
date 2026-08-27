@@ -56,7 +56,23 @@ for line in lines:
 if cur is not None: jobs.append((cur, "\n".join(blk)))
 for n,b in jobs:
     m=re.search(r'^\s+runs-on:\s*(.+?)\s*$', b, re.M)
-    runs=m.group(1).strip() if m else "(unknown)"
+    runs=m.group(1).strip() if m else ""
+    if not runs:
+        # block list form:
+        #   runs-on:
+        #     - self-hosted
+        #     - linux
+        lm=re.search(r'^\s+runs-on:\s*$', b, re.M)
+        items=[]
+        if lm:
+            for line in b[lm.end():].splitlines():
+                if not line.strip():
+                    continue
+                im=re.match(r'^\s+-\s*(.+?)\s*$', line)
+                if not im:
+                    break
+                items.append(im.group(1).strip())
+        runs=", ".join(items) if items else "(unknown)"
     runs=re.sub(r'\s+#.*$', '', runs).strip().strip('"').strip("'")
     has_s=1 if re.search(r'^\s+services:\s*$', b, re.M) else 0
     has_c=1 if 'actions/cache' in b else 0
