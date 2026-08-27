@@ -1,0 +1,192 @@
+#!/usr/bin/env bash
+# The metric CI optimisation is judged against.
+#
+# Reports two numbers per repo, because they move independently and confusing
+# them is how "we made CI 5x faster" claims get made about a queue:
+#
+#   LATENCY  wall clock from run created to last job finished. Includes queue
+#            wait. This is what a person waiting on a PR actually feels.
+#   MACHINE  sum of every job's own duration. This is what you pay for, and on
+#            metered runners it is the cost. Cutting fan-out cuts this without
+#            touching latency; adding runners cuts latency without touching this.
+#
+# Usage: ci-pr-latency owner/repo [--limit N] [--since YYYY-MM-DD] [--workflow NAME] [--json]
+set -euo pipefail
+
+usage() {
+  cat <<'USAGE'
+Usage: ci-pr-latency owner/repo [--limit N] [--since YYYY-MM-DD] [--workflow NAME] [--json]
+  owner/repo       repository to measure (e.g. pooriaarab/popcornteam)
+  --limit N        how many recent completed runs to read (default: 20, max 100)
+  --event NAME     run event to sample (default: pull_request; use push for main)
+  --since DATE     only runs created on/after this UTC date (baseline vs after)
+  --workflow NAME  restrict to one workflow name (default: all)
+  --json           machine-readable output
+  --help           show this help
+USAGE
+}
+
+REPO=""
+LIMIT=20
+SINCE=""
+WORKFLOW=""
+# Pull-request runs are the ones a person waits on, and they are the only ones
+# that queue behind other branches. Mixing push runs in understates latency,
+# because a push to the default branch competes with far less.
+EVENT="pull_request"
+JSON=0
+while (( $# )); do
+  case "$1" in
+    --json) JSON=1; shift ;;
+    --limit)
+      LIMIT="${2:-}"
+      [[ "$LIMIT" =~ ^[0-9]+$ ]] || { echo "error: --limit needs a positive integer" >&2; exit 2; }
+      LIMIT=$((10#$LIMIT))
+      (( LIMIT > 0 )) || { echo "error: --limit needs a positive integer" >&2; exit 2; }
+      if (( LIMIT > 100 )); then
+        echo "warning: --limit capped at 100 (GitHub API page limit)" >&2
+        LIMIT=100
+      fi
+      shift 2 ;;
+    --since) SINCE="${2:-}"; [[ "$SINCE" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || { echo "error: --since needs YYYY-MM-DD" >&2; exit 2; }; shift 2 ;;
+    --event) EVENT="${2:-}"; [[ -n "$EVENT" ]] || { echo "error: --event needs a name" >&2; exit 2; }; shift 2 ;;
+    --workflow) WORKFLOW="${2:-}"; [[ -n "$WORKFLOW" ]] || { echo "error: --workflow needs a name" >&2; exit 2; }; shift 2 ;;
+    --help|-h) usage; exit 0 ;;
+    -*) echo "error: unknown flag $1" >&2; usage >&2; exit 2 ;;
+    *) [[ -z "$REPO" ]] && REPO="$1" || { echo "error: unexpected argument $1" >&2; exit 2; }; shift ;;
+  esac
+done
+
+[[ -n "$REPO" ]] || { usage >&2; exit 2; }
+command -v gh >/dev/null 2>&1 || { echo "error: gh CLI not found" >&2; exit 3; }
+gh auth status >/dev/null 2>&1 || { echo "error: gh is not authenticated (run: gh auth login)" >&2; exit 3; }
+command -v python3 >/dev/null 2>&1 || { echo "error: python3 not found. Install python3." >&2; exit 3; }
+
+runs=$(gh api "repos/$REPO/actions/runs?status=completed&event=$EVENT&per_page=$LIMIT" \
+        --jq '.workflow_runs[] | [.id, .name, .created_at] | @tsv' 2>/dev/null </dev/null) || {
+  echo "error: cannot read runs for $REPO" >&2; exit 4; }
+if [[ -z "$runs" ]]; then
+  if [[ "$JSON" == "1" ]]; then
+    printf '{"repo":"%s","runs_sampled":0,"latency_p50_s":null,"latency_p95_s":null,"machine_p50_s":null,"machine_seconds_by_tier":{}}\n' "$REPO"
+  else
+    echo "no completed $EVENT runs for $REPO"
+  fi
+  exit 0
+fi
+
+# Collect each run's jobs. gh is called with stdin closed on purpose: it reads
+# stdin otherwise and eats the loop's input, which silently truncates the sweep.
+# Runs are read as TSV (not parsed out of JSON text with sed) so a workflow
+# name containing a literal `"` can't truncate the field and break --workflow.
+tmp=$(mktemp); trap 'rm -f "$tmp" "$tmp.runs"' EXIT
+printf '%s\n' "$runs" > "$tmp.runs"
+attempted=0
+failed=0
+while IFS=$'\t' read -r id wfname created <&3; do
+  [[ -z "$id" ]] && continue
+  [[ -n "$WORKFLOW" && "$wfname" != "$WORKFLOW" ]] && continue
+  [[ -n "$SINCE" && "${created%%T*}" < "$SINCE" ]] && continue
+  attempted=$((attempted + 1))
+  # RUNID must be exported for gh itself -- jq reads it via env.RUNID. Setting it
+  # on a later pipeline stage leaves the field empty and silently collapses every
+  # job into one pseudo-run, which looks like a working script reporting nonsense.
+  # --paginate follows all pages so matrix runs with >100 jobs aren't truncated.
+  if ! RUNID="$id" gh api --paginate "repos/$REPO/actions/runs/$id/jobs?per_page=100" \
+    --jq '.jobs[] | select(.started_at != null and .completed_at != null)
+          | [env.RUNID, .name, .started_at, .completed_at, (.labels|join("|"))] | @tsv' \
+    2>/dev/null </dev/null >> "$tmp"; then
+    failed=$((failed + 1))
+  fi
+done 3< "$tmp.runs"
+
+# A run that fails to fetch looks identical to one with no eligible jobs unless
+# we track it: without this, a mid-sweep auth/rate-limit failure silently
+# produces "no job data" (exit 0) instead of surfacing the real cause.
+if (( attempted > 0 && failed == attempted )); then
+  echo "error: failed to fetch jobs for all $attempted matched run(s) (check gh auth / rate limit)" >&2
+  exit 4
+elif (( failed > 0 )); then
+  echo "warning: failed to fetch jobs for $failed of $attempted matched run(s); results are partial" >&2
+fi
+
+REPO="$REPO" LIMIT="$LIMIT" JSON="$JSON" python3 - "$tmp" "$tmp.runs" <<'PY'
+import sys, os, json, datetime, collections
+
+jobs_file, runs_file = sys.argv[1], sys.argv[2]
+repo, as_json = os.environ["REPO"], os.environ["JSON"] == "1"
+
+def parse(t):
+    return datetime.datetime.fromisoformat(t.replace("Z", "+00:00"))
+
+def tier(labels):
+    l = labels.lower()
+    if "ubicloud" in l: return "cloud"
+    if "self-hosted" in l or "dell" in l: return "self-hosted"
+    return "hosted"
+
+runs = {}
+for line in open(runs_file):
+    line = line.rstrip("\n")
+    if not line: continue
+    parts = line.split("\t")
+    if len(parts) < 3: continue
+    rid, created = parts[0], parts[2]
+    if rid and created: runs[rid] = parse(created)
+
+per_run = collections.defaultdict(list)
+for line in open(jobs_file):
+    parts = line.rstrip("\n").split("\t")
+    if len(parts) < 5: continue
+    rid, name, s, e, labels = parts[0], parts[1], parts[2], parts[3], parts[4]
+    per_run[rid].append((name, parse(s), parse(e), tier(labels)))
+
+if not per_run:
+    # A consumer piping --json must still get JSON with the same keys as the
+    # success shape below, not a subset -- otherwise a fixed-schema consumer
+    # breaks whenever a sample happens to come back empty.
+    if as_json:
+        print(json.dumps({
+            "repo": repo, "runs_sampled": 0,
+            "latency_p50_s": None, "latency_p95_s": None, "machine_p50_s": None,
+            "machine_seconds_by_tier": {},
+        }, indent=2))
+    else:
+        print(f"{repo}: no job data in the sampled runs")
+    sys.exit(0)
+
+latencies, machines, by_tier = [], [], collections.Counter()
+for rid, js in per_run.items():
+    created = runs.get(rid) or min(j[1] for j in js)
+    latencies.append((max(j[2] for j in js) - created).total_seconds())
+    m = 0
+    for _, s, e, t in js:
+        d = (e - s).total_seconds(); m += d; by_tier[t] += d
+    machines.append(m)
+
+def pct(v, p):
+    """Nearest-rank percentile.
+
+    The previous form was `int(len(v) * p / 100)`, which indexes one position
+    too high: with four samples it returned the 3rd for p50 rather than the
+    2nd, biasing every median upward. Nearest rank is ceil(p/100 * n) - 1.
+    """
+    v = sorted(v)
+    import math
+    return v[max(0, min(len(v) - 1, math.ceil(p / 100 * len(v)) - 1))]
+
+out = {
+    "repo": repo, "runs_sampled": len(per_run),
+    "latency_p50_s": round(pct(latencies, 50)), "latency_p95_s": round(pct(latencies, 95)),
+    "machine_p50_s": round(pct(machines, 50)),
+    "machine_seconds_by_tier": {k: round(v) for k, v in by_tier.most_common()},
+}
+if as_json:
+    print(json.dumps(out, indent=2)); sys.exit(0)
+
+print(f"{repo}  ({out['runs_sampled']} runs sampled)")
+print(f"  LATENCY  p50 {out['latency_p50_s']:>5}s   p95 {out['latency_p95_s']:>5}s   (wall clock incl. queue — what you wait for)")
+print(f"  MACHINE  p50 {out['machine_p50_s']:>5}s                    (sum of job time — what you pay for)")
+if by_tier:
+    share = "  ".join(f"{k}={round(v)}s" for k, v in by_tier.most_common())
+    print(f"  BY TIER  {share}")
+PY
