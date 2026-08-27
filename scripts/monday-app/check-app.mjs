@@ -95,7 +95,13 @@ function findTokenValue(searchIn) {
 
 async function checkInstallLink(clientId) {
   const url = INSTALL_URL(clientId);
-  const res = await fetch(url, { redirect: "manual" });
+  let res;
+  try {
+    res = await fetch(url, { redirect: "manual" });
+  } catch (e) {
+    console.error(`FAIL install link: request to ${url} failed: ${e.message}`);
+    return false;
+  }
   const location = res.headers.get("location") ?? "";
   const cookies = res.headers.getSetCookie?.() ?? [];
   const token =
@@ -137,7 +143,14 @@ async function checkApi(base, key) {
   const root = base.replace(/\/+$/, "");
   let allOk = true;
   for (const path of ["/posts", "/accounts"]) {
-    const res = await fetch(root + path, { headers: { Authorization: `Bearer ${key}` } });
+    let res;
+    try {
+      res = await fetch(root + path, { headers: { Authorization: `Bearer ${key}` } });
+    } catch (e) {
+      console.error(`FAIL api key: GET ${path} failed: ${e.message}`);
+      allOk = false;
+      continue;
+    }
     if (res.status === 200) {
       console.log(`ok   api key: GET ${path} -> 200`);
     } else {
