@@ -82,7 +82,8 @@ if ($Role -eq 'worker') {
   if (Test-Path $cfg) {
     $text = Get-Content $cfg -Raw
     $text = $text -replace '(?m)^\s*#?\s*PasswordAuthentication\s+\w+', 'PasswordAuthentication no'
-    Set-Content -Path $cfg -Value $text -Encoding utf8
+    # PS 5.1's -Encoding utf8 writes a BOM, which breaks Win32-OpenSSH's sshd_config parser.
+    [System.IO.File]::WriteAllText($cfg, $text, (New-Object System.Text.UTF8Encoding($false)))
     Restart-Service sshd
   }
 

@@ -74,6 +74,7 @@ fi
 tailscale status || true
 
 # --- inbound SSH, workers only, tailnet only ----------------------------------
+SSH_FIREWALL_ENFORCED="no"
 if [ "$ROLE" = "worker" ]; then
   say "inbound ssh (scoped to $TAILNET_CIDR)"
   if [ "$OS" = "Darwin" ]; then
@@ -84,6 +85,11 @@ if [ "$ROLE" = "worker" ]; then
     if command -v ufw >/dev/null 2>&1; then
       sudo ufw allow from "$TAILNET_CIDR" to any port 22 proto tcp
       # Deliberately not `ufw allow ssh` — that opens 22 on hostile Wi-Fi too.
+      if sudo ufw status | grep -q "^Status: active"; then
+        SSH_FIREWALL_ENFORCED="yes"
+      else
+        echo "WARNING: ufw is installed but inactive, so the rule above is not enforced and sshd is reachable from any network. Run 'sudo ufw enable' to apply it." >&2
+      fi
     else
       echo "ufw not present; scope port 22 to $TAILNET_CIDR in your firewall by hand."
     fi
@@ -93,6 +99,8 @@ if [ "$ROLE" = "worker" ]; then
   if [ -d /etc/ssh/sshd_config.d ]; then
     printf 'PasswordAuthentication no\nKbdInteractiveAuthentication no\n' | sudo tee "$SSHD_DROPIN" >/dev/null
     sudo systemctl reload ssh 2>/dev/null || sudo systemctl reload sshd 2>/dev/null || true
+  else
+    echo "WARNING: /etc/ssh/sshd_config.d not found; PasswordAuthentication was NOT disabled. Edit sshd_config by hand to add 'PasswordAuthentication no'." >&2
   fi
 fi
 
@@ -104,7 +112,16 @@ printf 'os              %s\n' "$OS"
 printf 'role            %s\n' "$ROLE"
 printf 'tailscale ip    %s\n' "$IP"
 printf 'tag             %s\n' "${TAG:-none}"
-printf 'inbound ssh     %s\n' "$([ "$ROLE" = worker ] && echo "yes, $TAILNET_CIDR only" || echo no)"
+if [ "$ROLE" != "worker" ]; then
+  SSH_REPORT="no"
+elif [ "$OS" = "Darwin" ]; then
+  SSH_REPORT="yes, ACL-only (no host firewall CIDR scoping on macOS)"
+elif [ "$SSH_FIREWALL_ENFORCED" = "yes" ]; then
+  SSH_REPORT="yes, $TAILNET_CIDR enforced by ufw"
+else
+  SSH_REPORT="yes, ACL-only ($TAILNET_CIDR intended but NOT enforced by a host firewall)"
+fi
+printf 'inbound ssh     %s\n' "$SSH_REPORT"
 printf 'runner capable  %s\n' "$([ "$ROLE" = worker ] && echo "yes, native" || echo no)"
 
 if tailscale status 2>&1 | grep -qi "health check\|failed to set the DNS"; then
