@@ -19,6 +19,8 @@ Center playbook):
 ./check-app.mjs --client-id <clientId>                    # install link is live
 ./check-app.mjs --api-base <url> --api-key <key>          # reviewer key works
 ./check-app.mjs --client-id <id> --api-base <url> --api-key <key>   # both
+
+MONDAY_API_KEY=<key> ./check-app.mjs --api-base <url>      # key via env, not argv
 ```
 
 The client-id check follows `auth.monday.com/oauth2/authorize?...response_type=install`

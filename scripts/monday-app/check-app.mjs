@@ -36,6 +36,8 @@ Options:
   --api-base <url>      Your API base URL (e.g. https://api.example.com).
   --api-key <key>       Bearer key handed to reviewers. GET /posts and
                         GET /accounts must both return 200.
+                        Pass via --api-key or env MONDAY_API_KEY (avoids
+                        putting the key in shell history / ps output).
   -h, --help            Show this help.
 
 Runs whichever checks its options enable; pass all three to run both.
@@ -61,11 +63,12 @@ function parseArgs(argv) {
       usageError(`unknown argument: ${a}`);
     }
   }
+  opts.apiKey = opts.apiKey ?? process.env.MONDAY_API_KEY;
   if (!opts.clientId && !(opts.apiBase && opts.apiKey)) {
-    usageError("need --client-id, or --api-base + --api-key, or all three");
+    usageError("need --client-id, or --api-base + --api-key (or env MONDAY_API_KEY), or all three");
   }
   if (opts.apiBase && opts.clientId && !opts.apiKey) {
-    usageError("--api-base also needs --api-key");
+    usageError("--api-base also needs --api-key (or env MONDAY_API_KEY)");
   }
   if (opts.apiKey && !opts.apiBase) usageError("--api-key also needs --api-base");
   return opts;
