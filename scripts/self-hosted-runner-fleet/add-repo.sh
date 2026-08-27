@@ -33,14 +33,17 @@ require_private() {
 }
 
 # base64 keeps PowerShell (the usual Windows OpenSSH shell) and WSL from mangling quotes.
+# Piped through ssh's stdin rather than spliced into the remote command line: the
+# registration token lands in this payload, and a command-line argument sits in `ps`
+# output (readable by any other local user on the runner host) for as long as the
+# registration takes, not just the moment it's used.
 remote_bash() {
-  local encoded; encoded="$(base64 | tr -d '\n')"
   if [[ -n "$wsl_distro" ]]; then
-    ssh -i "$ssh_key" -o IdentitiesOnly=yes -o BatchMode=yes "$RUNNER_SSH_TARGET" \
-      "wsl.exe -d $wsl_distro --user root -- bash -lc 'echo $encoded | base64 -d | bash'"
+    base64 | ssh -i "$ssh_key" -o IdentitiesOnly=yes -o BatchMode=yes "$RUNNER_SSH_TARGET" \
+      "wsl.exe -d $wsl_distro --user root -- bash -lc 'base64 -d | bash'"
   else
-    ssh -i "$ssh_key" -o IdentitiesOnly=yes -o BatchMode=yes "$RUNNER_SSH_TARGET" \
-      "sudo -n bash -lc 'echo $encoded | base64 -d | bash'"
+    base64 | ssh -i "$ssh_key" -o IdentitiesOnly=yes -o BatchMode=yes "$RUNNER_SSH_TARGET" \
+      "sudo -n bash -lc 'base64 -d | bash'"
   fi
 }
 
