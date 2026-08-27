@@ -13,9 +13,13 @@ type R2Object = {
 class FakeR2Bucket {
   store = new Map<string, R2Object>();
 
-  async put(key: string, value: ArrayBuffer | Uint8Array | string, opts?: { httpMetadata?: { contentType?: string }; customMetadata?: Record<string, string> }) {
+  async put(key: string, value: ArrayBuffer | Uint8Array | string | ReadableStream, opts?: { httpMetadata?: { contentType?: string }; customMetadata?: Record<string, string> }) {
     let body: ArrayBuffer;
-    if (value instanceof ArrayBuffer) body = value;
+    // The worker streams uploads straight to R2, so the mock has to drain a
+    // ReadableStream the way the real bucket does. A mock that only accepts a
+    // buffer would pass while the deployed worker failed.
+    if (value instanceof ReadableStream) body = await new Response(value).arrayBuffer();
+    else if (value instanceof ArrayBuffer) body = value;
     else if (value instanceof Uint8Array) body = value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength) as ArrayBuffer;
     else body = new TextEncoder().encode(value as string).buffer as ArrayBuffer;
     const obj: R2Object = {
@@ -276,5 +280,56 @@ describe("team scoping", () => {
       env,
     );
     expect(await got.text()).toBe("A-payload");
+  });
+});
+
+describe("team scope pinning", () => {
+  const TOKEN = "test-token-123";
+  const auth = { authorization: `Bearer ${TOKEN}` };
+
+  it("serves the pinned team", async () => {
+    const env = { ...envWithToken(TOKEN), ALLOWED_TEAM: "acme" };
+    const put = await worker.fetch(
+      req(`${BASE}/v8/artifacts/abc123?teamId=acme`, { method: "PUT", body: "ok", headers: auth }),
+      env,
+    );
+    expect(put.status).toBe(200);
+  });
+
+  it("rejects another team even with a valid token", async () => {
+    const env = { ...envWithToken(TOKEN), ALLOWED_TEAM: "acme" };
+    const res = await worker.fetch(
+      req(`${BASE}/v8/artifacts/abc123?teamId=other`, { headers: auth }),
+      env,
+    );
+    expect(res.status).toBe(403);
+  });
+
+  it("serves any valid team when no pin is configured", async () => {
+    const env = envWithToken(TOKEN);
+    const res = await worker.fetch(
+      req(`${BASE}/v8/artifacts/abc123?teamId=whatever`, { headers: auth }),
+      env,
+    );
+    expect(res.status).toBe(404); // reached the bucket, found nothing
+  });
+});
+
+describe("streaming upload", () => {
+  it("stores a streamed body byte-for-byte", async () => {
+    const TOKEN = "test-token-123";
+    const env = envWithToken(TOKEN);
+    const payload = "x".repeat(200_000);
+    await worker.fetch(
+      req(`${BASE}/v8/artifacts/bigone?teamId=t`, {
+        method: "PUT", body: payload, headers: { authorization: `Bearer ${TOKEN}` },
+      }),
+      env,
+    );
+    const got = await worker.fetch(
+      req(`${BASE}/v8/artifacts/bigone?teamId=t`, { headers: { authorization: `Bearer ${TOKEN}` } }),
+      env,
+    );
+    expect((await got.text()).length).toBe(payload.length);
   });
 });

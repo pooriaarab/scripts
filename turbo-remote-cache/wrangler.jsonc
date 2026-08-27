@@ -12,5 +12,12 @@
   ],
   // Secrets (not vars) — set with `wrangler secret put TURBO_TOKEN`.
   // vars = non-secret config; keep TURBO_TOKEN out of here.
-  "vars": {}
+  //
+  // ALLOWED_TEAM pins this deployment to one team scope. The token is shared,
+  // so without the pin anyone holding it can read or overwrite any team's
+  // artifacts just by changing ?teamId=. Serving a second trust boundary means
+  // a second Worker, not a second team name.
+  "vars": {
+    "ALLOWED_TEAM": "pooriaarab"
+  }
 }
