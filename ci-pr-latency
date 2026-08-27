@@ -60,6 +60,7 @@ done
 [[ -n "$REPO" ]] || { usage >&2; exit 2; }
 command -v gh >/dev/null 2>&1 || { echo "error: gh CLI not found" >&2; exit 3; }
 gh auth status >/dev/null 2>&1 || { echo "error: gh is not authenticated (run: gh auth login)" >&2; exit 3; }
+command -v python3 >/dev/null 2>&1 || { echo "error: python3 not found. Install python3." >&2; exit 3; }
 
 runs=$(gh api "repos/$REPO/actions/runs?status=completed&event=$EVENT&per_page=$LIMIT" \
         --jq '.workflow_runs[] | [.id, .name, .created_at] | @tsv' 2>/dev/null </dev/null) || {
