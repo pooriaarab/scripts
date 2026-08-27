@@ -18,16 +18,20 @@ npm run dev                    # serves OAuth + sync loop on localhost
 # open the landing page: connect Notion (OAuth), paste your API key + database id
 ```
 
-Notion side (portal-review — no publish API):
-1. At `https://www.notion.so/my-integrations`, create a **public** integration →
-   copy the client id/secret into `.env`. Set installation scope to **"Any
-   workspace"** (not "Selected workspaces only" — that can't be listed).
-2. Register the redirect URI exactly as `NOTION_REDIRECT_URI` (localhost for dev, HTTPS for prod).
+Notion side (**portal-review** — no listing API). Portal:
+`app.notion.com/developers/connections`. Listings: `www.notion.so/profile/connections`.
+1. Create a **public** connection with installation scope **"Any workspace"**
+   (not "Selected workspaces only" — immutable, and ineligible to list) → copy
+   the OAuth client id/secret into `.env`.
+2. Host on public HTTPS. Register the redirect URI exactly as `NOTION_REDIRECT_URI`
+   (localhost for dev, HTTPS for prod) so authorize + token-exchange match.
 3. Set capabilities to only what the code calls (read/update/insert content).
-4. Grant content: pick the database on the OAuth consent screen (public), or share it via `…` → Connections.
-5. List it: Marketplace listing dashboard → **Listings → Connections** → **Start a
-   new connection listing** → fill name/description/tags/images/logo + support
-   contact → **Submit**. Security + privacy review, ~5–10 business days by email.
+4. Grant content: pick the database on the OAuth consent screen (that picker IS
+   the access grant).
+5. Listings → Connections → **Start a new connection listing** → attach the
+   public connection → fill name/description/tags/logo + listing images (exact px:
+   verify) + support contact → **Submit**. Security + content review, ~5–10
+   business days by email. Listing is optional for the OAuth flow itself.
 
 ## Traps (each = one round-trip)
 

@@ -20,13 +20,15 @@ npm run typecheck && npm run build
 npx shopify app deploy           # push shopify.app.toml (webhooks, scopes, URLs) — REQUIRED after any toml edit
 ```
 
-Then in the Partner Dashboard (`partners.shopify.com`) — portal-review, free.
-`shopify app deploy` releases an app *version*, it does NOT submit for review:
+Then in the Partner / Dev Dashboard (`partners.shopify.com`) — **portal-review**.
+`shopify app deploy` releases an app *version*; it does NOT host the Remix app
+and does NOT file the review. Public HTTPS hosting is required; distribution is
+one-way. Paid apps must use Shopify App Pricing.
 1. Apps → Create app (once) → copy Client ID/secret into `.env` + `client_id` in `shopify.app.toml`.
-2. Host the production build on a public HTTPS URL (valid SSL); set `SHOPIFY_APP_URL`, update `application_url` + `redirect_urls`, `shopify app deploy` again.
-3. **Apps → [app] → Distribution → Shopify App Store**: set primary language, complete configuration (app URLs, GDPR webhooks, app icon, emergency contact); if you touch buyer data, complete the **protected customer data** request.
-4. Listing assets: **1200×1200 icon** (no text), **1600×900 feature image**, **3–6 screenshots at 1600×900**, a **demo screencast** (English/subtitled), public **privacy-policy URL**.
-5. Run the **automated checks** (+ optional AI self-review) → **Submit for review** — reviewers install on a test store with none of your state. Reviews run 2+ weeks. After approval, the App Store distribution goes live.
+2. Host the production build on a public HTTPS URL (hostname must not contain "Shopify"); set `SHOPIFY_APP_URL`, update `application_url` + `redirect_urls`, subscribe the three GDPR webhooks, `shopify app deploy` again.
+3. **Apps → [your app] → Distribution → Shopify App Store**: set primary language, complete configuration (URLs, GDPR webhooks, **1200×1200** JPEG/PNG icon, emergency contact email + phone). If you touch buyer data, file **protected customer data** *before* review.
+4. Listing: name ≤30 chars, 100-char intro + 500-char details, **3–6 screenshots at 1600×900**, optional 1600×900 feature image / 2–3 min promo, demo-store URL, pricing, support + **privacy-policy URL**, reviewer screencast + test credentials.
+5. Pass the **automated checks** (+ optional AI self-review) → **Submit for review**. Reviewers install on a test store with none of your state. SLA commonly weeks `(verify)`.
 
 ## Traps (each = one round-trip)
 
