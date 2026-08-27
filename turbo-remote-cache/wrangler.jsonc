@@ -3,12 +3,11 @@
   "name": "turbo-remote-cache",
   "main": "src/index.ts",
   "compatibility_date": "2025-08-01",
-  // Replace with your real bucket name after `wrangler r2 bucket create <name>`.
-  // This placeholder must be changed before deploy; see README.md.
+  // Created with `wrangler r2 bucket create turbo-remote-cache`.
   "r2_buckets": [
     {
       "binding": "CACHE",
-      "bucket_name": "YOUR_R2_BUCKET_NAME"
+      "bucket_name": "turbo-remote-cache"
     }
   ],
   // Secrets (not vars) — set with `wrangler secret put TURBO_TOKEN`.
