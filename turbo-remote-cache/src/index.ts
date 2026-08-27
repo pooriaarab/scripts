@@ -15,6 +15,16 @@
 export interface Env {
   TURBO_TOKEN: string;
   CACHE: R2Bucket;
+  /**
+   * Optional. When set, only this exact team scope is served, and any other
+   * `teamId`/`slug` is rejected with 403.
+   *
+   * Without it the token is the ONLY credential: it is shared, and every
+   * syntactically valid team scope is reachable by anyone holding it. That is
+   * fine when one trust boundary shares one token, and wrong the moment two do.
+   * Setting it makes the isolation real rather than implied.
+   */
+  ALLOWED_TEAM?: string;
 }
 
 // Hash must be a safe R2 key segment. Allow hex / base64url-ish identifiers.
@@ -70,9 +80,15 @@ function teamSegment(url: URL): string | null {
   return "default";
 }
 
-function r2Key(url: URL, hash: string): string | null {
+type KeyResult = { key: string } | { error: "team"; status: 400 | 403 };
+
+function r2Key(url: URL, hash: string, env: Env): KeyResult {
   const team = teamSegment(url);
-  return team === null ? null : `${team}/${hash}`;
+  if (team === null) return { error: "team", status: 400 };
+  // A valid token must not reach another team's artifacts. Pin the worker to
+  // one scope when the deployment only serves one.
+  if (env.ALLOWED_TEAM && team !== env.ALLOWED_TEAM) return { error: "team", status: 403 };
+  return { key: `${team}/${hash}` };
 }
 
 function json(data: unknown, init?: ResponseInit): Response {
@@ -124,18 +140,26 @@ export default {
         return json({ error: "Invalid hash" }, { status: 400 });
       }
 
-      const key = r2Key(url, hash);
-      if (key === null) {
-        return json({ error: "Invalid team" }, { status: 400 });
+      const scoped = r2Key(url, hash, env);
+      if ("error" in scoped) {
+        return json(
+          { error: scoped.status === 403 ? "Team not served by this cache" : "Invalid team" },
+          { status: scoped.status },
+        );
       }
+      const key = scoped.key;
 
       if (method === "PUT") {
-        const body = await request.arrayBuffer();
         const tag = request.headers.get("x-artifact-tag") ?? request.headers.get("X-Artifact-Tag") ?? undefined;
 
         const customMetadata: Record<string, string> | undefined = tag ? { "x-artifact-tag": tag } : undefined;
 
-        await env.CACHE.put(key, body, {
+        // Stream straight to R2. Buffering with arrayBuffer() held the whole
+        // artifact in memory, and a Workers isolate shares roughly 128 MB
+        // across every request in flight -- a few concurrent uploads of a large
+        // cache entry is enough to reach that ceiling.
+        const body = request.body ?? new ArrayBuffer(0);
+        await env.CACHE.put(key, body as ReadableStream | ArrayBuffer, {
           httpMetadata: { contentType: "application/octet-stream" },
           customMetadata,
         });
