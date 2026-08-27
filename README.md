@@ -21,3 +21,4 @@ The [`agents`](https://github.com/pooriaarab/agents) repo is the hub — a porta
 |---|---|
 | `ci-runner-audit` | Inventory which runner tier every job is on (`self-hosted` / `cloud` / `hosted`), flag `services:` and `actions/cache` misuse on self-hosted |
 | `ci-job-timings` | Report real per-job durations (count, median, p95, max, runner) so tiering uses measurements |
+| `turbo-remote-cache/` | Deployable Cloudflare Worker: a Turborepo remote cache backed by R2 |
