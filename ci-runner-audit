@@ -63,17 +63,37 @@ for n,b in jobs:
         #   runs-on:
         #     - self-hosted
         #     - linux
+        # or runner-group map form:
+        #   runs-on:
+        #     group: my-group
+        #     labels: [self-hosted, linux]
         lm=re.search(r'^\s+runs-on:\s*$', b, re.M)
         items=[]
+        map_parts=[]
         if lm:
             for line in b[lm.end():].splitlines():
                 if not line.strip():
                     continue
                 im=re.match(r'^\s+-\s*(.+?)\s*$', line)
-                if not im:
-                    break
-                items.append(im.group(1).strip())
-        runs=", ".join(items) if items else "(unknown)"
+                if im:
+                    items.append(im.group(1).strip())
+                    continue
+                km=re.match(r'^\s+(group|labels):\s*(.+?)\s*$', line)
+                if km:
+                    key, val = km.group(1), km.group(2).strip()
+                    if key == 'labels':
+                        val = val.strip('[]')
+                        map_parts.extend(x.strip().strip('"').strip("'") for x in val.split(',') if x.strip())
+                    else:
+                        map_parts.append(val.strip('"').strip("'"))
+                    continue
+                break
+        if items:
+            runs=", ".join(items)
+        elif map_parts:
+            runs=", ".join(map_parts)
+        else:
+            runs="(unknown)"
     runs=re.sub(r'\s+#.*$', '', runs).strip().strip('"').strip("'")
     has_s=1 if re.search(r'^\s+services:\s*$', b, re.M) else 0
     has_c=1 if 'actions/cache' in b else 0

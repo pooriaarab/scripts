@@ -24,14 +24,24 @@ while (( $# )); do
     --limit)
       if [[ -z "${2:-}" ]]; then echo "error: --limit requires a value" >&2; exit 2; fi
       LIMIT="$2"
-      if ! [[ "$LIMIT" =~ ^[0-9]+$ ]] || (( LIMIT == 0 )); then
+      if ! [[ "$LIMIT" =~ ^[0-9]+$ ]]; then
+        echo "error: --limit must be a positive integer" >&2; exit 2
+      fi
+      # Force base-10: a bare (( )) treats a leading zero (e.g. "08") as
+      # octal, which is invalid and errors out instead of just being 8.
+      LIMIT=$((10#$LIMIT))
+      if (( LIMIT == 0 )); then
         echo "error: --limit must be a positive integer" >&2; exit 2
       fi
       shift 2
       ;;
     --limit=*)
       LIMIT="${1#--limit=}"
-      if ! [[ "$LIMIT" =~ ^[0-9]+$ ]] || (( LIMIT == 0 )); then
+      if ! [[ "$LIMIT" =~ ^[0-9]+$ ]]; then
+        echo "error: --limit must be a positive integer" >&2; exit 2
+      fi
+      LIMIT=$((10#$LIMIT))
+      if (( LIMIT == 0 )); then
         echo "error: --limit must be a positive integer" >&2; exit 2
       fi
       shift
@@ -108,6 +118,14 @@ fi
 # Extract run IDs (limit to LIMIT even if per_page capped)
 run_ids=$(echo "$runs_json" | jq -r ".workflow_runs[:$LIMIT] | .[].id")
 
+# Map run id -> workflow file path so jobs with the same name in different
+# workflows (e.g. two workflows both defining a "test" job) aren't merged
+# into one row.
+declare -A run_workflow
+while IFS=$'\t' read -r rid wpath; do
+  run_workflow["$rid"]="$wpath"
+done < <(echo "$runs_json" | jq -r '.workflow_runs[] | "\(.id)\t\(.path // .name // "unknown")"')
+
 tmp_jobs=$(mktemp)
 tmp_agg=$(mktemp)
 trap 'rm -f "$tmp_jobs" "$tmp_agg" 2>/dev/null; true' EXIT
@@ -116,6 +134,7 @@ trap 'rm -f "$tmp_jobs" "$tmp_agg" 2>/dev/null; true' EXIT
 count_runs=0
 for rid in $run_ids; do
   count_runs=$((count_runs+1))
+  wf="${run_workflow[$rid]:-unknown}"
   # Fetch jobs for this run; sequential to avoid rate limit burst
   # --paginate follows all pages so matrix runs with >30 jobs aren't truncated
   jobs_json=$(gh api --paginate "repos/$REPO/actions/runs/$rid/jobs?per_page=100" 2>&1 || true)
@@ -124,7 +143,7 @@ for rid in $run_ids; do
     continue
   fi
   # Extract relevant fields for completed jobs with timestamps
-  echo "$jobs_json" | jq -c '.jobs[] | select(.started_at != null and .completed_at != null) | {name: .name, started_at: .started_at, completed_at: .completed_at, labels: .labels, runner_name: .runner_name}' >> "$tmp_jobs" 2>/dev/null || true
+  echo "$jobs_json" | jq -c --arg wf "$wf" '.jobs[] | select(.started_at != null and .completed_at != null) | {name: .name, workflow: $wf, started_at: .started_at, completed_at: .completed_at, labels: .labels, runner_name: .runner_name}' >> "$tmp_jobs" 2>/dev/null || true
   sleep 0.08
 done
 
@@ -172,7 +191,9 @@ with open(tmp_jobs_path) as f:
             obj = json.loads(line)
         except:
             continue
-        name = obj.get('name') or '(unknown)'
+        job_name = obj.get('name') or '(unknown)'
+        workflow = (obj.get('workflow') or 'unknown').rsplit('/', 1)[-1]
+        name = f"{workflow}/{job_name}"
         sa = obj.get('started_at')
         ca = obj.get('completed_at')
         if not sa or not ca:
