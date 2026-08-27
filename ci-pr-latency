@@ -56,20 +56,18 @@ command -v gh >/dev/null 2>&1 || { echo "error: gh CLI not found" >&2; exit 3; }
 gh auth status >/dev/null 2>&1 || { echo "error: gh is not authenticated (run: gh auth login)" >&2; exit 3; }
 
 runs=$(gh api "repos/$REPO/actions/runs?status=completed&per_page=$LIMIT" \
-        --jq '.workflow_runs[] | {id, name, created_at, event}' 2>/dev/null </dev/null) || {
+        --jq '.workflow_runs[] | [.id, .name, .created_at] | @tsv' 2>/dev/null </dev/null) || {
   echo "error: cannot read runs for $REPO" >&2; exit 4; }
 [[ -n "$runs" ]] || { echo "no completed runs for $REPO"; exit 0; }
 
 # Collect each run's jobs. gh is called with stdin closed on purpose: it reads
 # stdin otherwise and eats the loop's input, which silently truncates the sweep.
+# Runs are read as TSV (not parsed out of JSON text with sed) so a workflow
+# name containing a literal `"` can't truncate the field and break --workflow.
 tmp=$(mktemp); trap 'rm -f "$tmp" "$tmp.runs"' EXIT
 printf '%s\n' "$runs" > "$tmp.runs"
-while IFS= read -r line <&3; do
-  [[ -z "$line" ]] && continue
-  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
-  wfname=$(printf '%s' "$line" | sed -n 's/.*"name":"\([^"]*\)".*/\1/p')
-  created=$(printf '%s' "$line" | sed -n 's/.*"created_at":"\([^"]*\)".*/\1/p')
-  [[ -n "$id" ]] || continue
+while IFS=$'\t' read -r id wfname created <&3; do
+  [[ -z "$id" ]] && continue
   [[ -n "$WORKFLOW" && "$wfname" != "$WORKFLOW" ]] && continue
   [[ -n "$SINCE" && "${created%%T*}" < "$SINCE" ]] && continue
   # RUNID must be exported for gh itself -- jq reads it via env.RUNID. Setting it
@@ -83,7 +81,7 @@ while IFS= read -r line <&3; do
 done 3< "$tmp.runs"
 
 REPO="$REPO" LIMIT="$LIMIT" JSON="$JSON" python3 - "$tmp" "$tmp.runs" <<'PY'
-import sys, os, json, datetime, collections, re
+import sys, os, json, datetime, collections
 
 jobs_file, runs_file = sys.argv[1], sys.argv[2]
 repo, as_json = os.environ["REPO"], os.environ["JSON"] == "1"
@@ -99,11 +97,12 @@ def tier(labels):
 
 runs = {}
 for line in open(runs_file):
-    line = line.strip()
+    line = line.rstrip("\n")
     if not line: continue
-    m_id = re.search(r'"id":(\d+)', line)
-    m_cr = re.search(r'"created_at":"([^"]+)"', line)
-    if m_id and m_cr: runs[m_id.group(1)] = parse(m_cr.group(1))
+    parts = line.split("\t")
+    if len(parts) < 3: continue
+    rid, created = parts[0], parts[2]
+    if rid and created: runs[rid] = parse(created)
 
 per_run = collections.defaultdict(list)
 for line in open(jobs_file):
