@@ -13,15 +13,22 @@ cd integrations/<app>                 # add-on source (src/, manifest.json, asse
 npm install
 npx @adobe/ccweb-add-on-scripts start # HTTPS local preview; load it inside Express (add-on dev mode)
 # ... build the React panel against addOnUISdk ...
-npm run build                         # produces the bundle to upload
+npm run build                         # produces the bundle
+npm run package                       # dist.zip — manifest.json must be at the zip root, ≤50 MB
 ```
 
-Then in the **Adobe Developer Distribution** portal (portal-review, free):
-1. One-time: create a **Publisher Profile** (public name, site, description, **250×250 px** logo).
-2. Create the add-on listing; upload the packaged bundle.
-3. Pick distribution: **public** (in-app Marketplace, full assets) or **private/link** (one 36×36 icon, no listing).
-4. Public assets: icons **36×36 / 64×64 / 144×144 px**, **1–5 screenshots at 1360×800 px**, **privacy-policy URL** + EULA + support contact; test credentials (with credits) if the add-on gates features.
-5. **Submit for review** — human review, target 10 business days (often 2–3).
+Then **inside Adobe Express** (Add-ons → **Manage add-ons**; enable Add-on
+Development first) — **portal-review**, no submit API. Adobe hosts the zip.
+1. Create a new add-on listing (name ≤25 chars, unique).
+2. **Public listing** tab → upload `dist.zip`. Required: 50-char summary, 1000-char
+   description, **help URL**, **support email**, **144×144** icon (auto-resized to
+   36/64/144), **≥1 screenshot at 1360×800** (up to 5). Optional privacy-notice +
+   EULA URLs. First-time: **250×250** publisher logo + EU trader info.
+3. Declare generative-AI usage + monetization model (checkout is outside Express).
+   Give review test credentials (with credits) if the add-on gates features.
+4. Submit. Private-link path skips review: zip + 144×144 icon + release notes →
+   copy the link; promote to public later. Target review ~10 business days.
+   Contact: `ccintrev@adobe.com`.
 
 ## Traps (each = one round-trip)
 

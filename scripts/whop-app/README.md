@@ -10,17 +10,21 @@ npm install
 npx whop-proxy            # dev proxy: loads the local app inside a real Whop
 npm run build             # bundle served at your hosted app URL
 ```
-Submission (portal-review; no dev fee). `POST /apps` can create the app record
-(`name`, `company_id`, `base_url`, `route`, `icon`, `redirect_uris`), but the
-`marketplace_status` transition has no endpoint — you publish in the dashboard:
-1. `dev.whop.com` → create the app; set the HTTPS `base_url`/`route` + redirect URIs.
-2. Fill the listing: name, icon, description, **2–3 screenshots**, **10–20 s demo
-   video**. Preview at `whop.com/apps/<app_id>`.
-3. Set visibility **live** (needs name + icon + description) → **Publish to App
-   Store**. Review checks the billing/entitlement flow; on pass it goes live.
+Submission is **scriptable (API + CLI)**. Dashboard: `whop.com/dashboard/developer`.
+REST: `POST https://api.whop.com/api/v1/apps`, `PATCH /apps/{id}`, `POST /files`
+then `POST /app_builds`, `POST /app_builds/{id}/promote`. CLI: `whop apps deploy`
+(`--preview` uploads without going live). Public HTTPS `base_url` required.
+1. Create the app (dashboard or `POST /apps`); set HTTPS `base_url`/`route` +
+   OAuth redirects + Hosting paths (`/experiences/[experienceId]`, `/dashboard/[companyId]`).
+2. Fill store metadata: name, icon, short description, longer `app_store_description`.
+   Screenshots / 10–20 s demo if the listing UI asks `(verify)`.
+3. Test inside a real Whop via `whop-proxy` / `whop apps dev`.
+4. Upload a versioned web build (`POST /app_builds` or `whop apps deploy`).
+5. Promote (`POST /app_builds/{id}/promote` or `whop apps builds promote <id>`).
+   Draft builds enter review first; an approved build becomes the App Store version.
 
-Revenue: dev rev-share **10–30%**, or a one-time install fee, or a per-member sub.
-Whop's platform cut on top, icon px, and review SLA are not in the docs `(verify)`.
+Revenue: often quoted as 10–30% dev rev-share plus a platform cut `(verify)`.
+Icon px spec and review SLA are not pinned in the docs `(verify)`.
 
 ## Traps
 - **Whop OAuth ≠ your API's auth.** "Sign in with Whop" identifies the user; your own API
