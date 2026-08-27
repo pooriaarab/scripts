@@ -1,0 +1,291 @@
+#!/usr/bin/env bash
+# Report real per-job durations so tiering decisions use measurements, not guesses.
+# Usage: ci-job-timings owner/repo [--limit N] [--json]
+# Default limit is 25.
+set -euo pipefail
+
+usage() {
+  cat <<'USAGE'
+Usage: ci-job-timings owner/repo [--limit N] [--json]
+  owner/repo  repository to inspect (e.g. pooriaarab/usegeoaeo)
+  --limit N   how many recent completed runs to read (default: 25)
+  --json      machine-readable JSON output
+  --help      show this help
+USAGE
+}
+
+REPO=""
+LIMIT=25
+JSON=0
+POSITIONAL=()
+while (( $# )); do
+  case "$1" in
+    --json) JSON=1; shift ;;
+    --limit)
+      if [[ -z "${2:-}" ]]; then echo "error: --limit requires a value" >&2; exit 2; fi
+      LIMIT="$2"
+      if ! [[ "$LIMIT" =~ ^[0-9]+$ ]]; then
+        echo "error: --limit must be a positive integer" >&2; exit 2
+      fi
+      # Force base-10: a bare (( )) treats a leading zero (e.g. "08") as
+      # octal, which is invalid and errors out instead of just being 8.
+      LIMIT=$((10#$LIMIT))
+      if (( LIMIT == 0 )); then
+        echo "error: --limit must be a positive integer" >&2; exit 2
+      fi
+      shift 2
+      ;;
+    --limit=*)
+      LIMIT="${1#--limit=}"
+      if ! [[ "$LIMIT" =~ ^[0-9]+$ ]]; then
+        echo "error: --limit must be a positive integer" >&2; exit 2
+      fi
+      LIMIT=$((10#$LIMIT))
+      if (( LIMIT == 0 )); then
+        echo "error: --limit must be a positive integer" >&2; exit 2
+      fi
+      shift
+      ;;
+    -h|--help) usage; exit 0 ;;
+    --) shift; break ;;
+    --*) echo "error: unknown option: $1" >&2; usage >&2; exit 2 ;;
+    *) POSITIONAL+=("$1"); shift ;;
+  esac
+done
+if (( ${#POSITIONAL[@]} == 0 )); then
+  echo "error: owner/repo is required" >&2; usage >&2; exit 2
+fi
+if (( ${#POSITIONAL[@]} > 1 )); then
+  echo "error: too many arguments" >&2; usage >&2; exit 2
+fi
+REPO="${POSITIONAL[0]}"
+if ! [[ "$REPO" =~ ^[A-Za-z0-9_.\-]+/[A-Za-z0-9_.\-]+$ ]]; then
+  echo "error: owner/repo must match [A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+" >&2
+  exit 2
+fi
+
+if ! command -v gh >/dev/null 2>&1; then
+  echo "error: gh CLI not found. Install https://cli.github.com/ and run 'gh auth login'." >&2
+  exit 1
+fi
+if ! gh auth status --hostname github.com >/dev/null 2>&1; then
+  echo "error: gh not authenticated. Run 'gh auth login'." >&2
+  exit 1
+fi
+if ! command -v jq >/dev/null 2>&1; then
+  echo "error: jq not found. Install jq." >&2
+  exit 1
+fi
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "error: python3 not found. Install python3." >&2
+  exit 1
+fi
+
+# Cap per_page at 100 (GitHub API max)
+PER_PAGE=$LIMIT
+if (( PER_PAGE > 100 )); then
+  echo "warning: --limit capped at 100 (GitHub API page limit)" >&2
+  PER_PAGE=100
+  LIMIT=100
+fi
+
+# Fetch recent completed runs
+runs_json=$(gh api "repos/$REPO/actions/runs?per_page=$PER_PAGE&status=completed" 2>&1 || true)
+if ! echo "$runs_json" | jq -e '.workflow_runs' >/dev/null 2>&1; then
+  if echo "$runs_json" | jq -e '.message' >/dev/null 2>&1; then
+    msg=$(echo "$runs_json" | jq -r '.message')
+    echo "error: $msg" >&2
+    exit 1
+  fi
+  echo "error: failed to fetch runs for $REPO" >&2
+  echo "$runs_json" >&2
+  exit 1
+fi
+
+# Handle repos with no workflows gracefully: empty workflow_runs is ok
+total_runs=$(echo "$runs_json" | jq '.workflow_runs | length')
+if (( total_runs == 0 )); then
+  if (( JSON )); then
+    echo "[]"
+  else
+    echo "No completed runs found for $REPO." >&2
+    printf "%-28s %5s %8s %8s %8s %s\n" "JOB" "COUNT" "MEDIAN" "P95" "MAX" "RUNNER"
+    printf "%-28s %5s %8s %8s %8s %s\n" "----------------------------" "-----" "--------" "--------" "--------" "------"
+  fi
+  exit 0
+fi
+
+# Extract run IDs (limit to LIMIT even if per_page capped)
+run_ids=$(echo "$runs_json" | jq -r ".workflow_runs[:$LIMIT] | .[].id")
+
+# Map run id -> workflow file path so jobs with the same name in different
+# workflows (e.g. two workflows both defining a "test" job) aren't merged
+# into one row.
+declare -A run_workflow
+while IFS=$'\t' read -r rid wpath; do
+  run_workflow["$rid"]="$wpath"
+done < <(echo "$runs_json" | jq -r '.workflow_runs[] | "\(.id)\t\(.path // .name // "unknown")"')
+
+tmp_jobs=$(mktemp)
+tmp_agg=$(mktemp)
+trap 'rm -f "$tmp_jobs" "$tmp_agg" 2>/dev/null; true' EXIT
+: > "$tmp_jobs"
+
+count_runs=0
+for rid in $run_ids; do
+  count_runs=$((count_runs+1))
+  wf="${run_workflow[$rid]:-unknown}"
+  # Fetch jobs for this run; sequential to avoid rate limit burst
+  # --paginate follows all pages so matrix runs with >30 jobs aren't truncated
+  jobs_json=$(gh api --paginate "repos/$REPO/actions/runs/$rid/jobs?per_page=100" 2>&1 || true)
+  if ! echo "$jobs_json" | jq -e '.jobs' >/dev/null 2>&1; then
+    # skip failed fetch, don't crash
+    continue
+  fi
+  # Extract relevant fields for completed jobs with timestamps
+  echo "$jobs_json" | jq -c --arg wf "$wf" '.jobs[] | select(.started_at != null and .completed_at != null) | {name: .name, workflow: $wf, started_at: .started_at, completed_at: .completed_at, labels: .labels, runner_name: .runner_name}' >> "$tmp_jobs" 2>/dev/null || true
+  sleep 0.08
+done
+
+if [[ ! -s "$tmp_jobs" ]]; then
+  if (( JSON )); then
+    echo "[]"
+  else
+    echo "No job timing data found for $REPO (runs: $count_runs)." >&2
+    printf "%-28s %5s %8s %8s %8s %s\n" "JOB" "COUNT" "MEDIAN" "P95" "MAX" "RUNNER"
+    printf "%-28s %5s %8s %8s %8s %s\n" "----------------------------" "-----" "--------" "--------" "--------" "------"
+  fi
+  exit 0
+fi
+
+# Aggregate with python: group by job name, compute durations, stats, runner label
+python3 - "$tmp_jobs" "$tmp_agg" "$JSON" <<'PY'
+import sys, json
+from datetime import datetime, timezone
+from collections import defaultdict, Counter
+
+tmp_jobs_path = sys.argv[1]
+tmp_agg_path = sys.argv[2]
+json_mode = sys.argv[3] == "1"
+
+def parse_ts(s):
+    # GitHub format: 2026-08-27T17:07:51Z
+    try:
+        # handle Z
+        if s.endswith('Z'):
+            s = s[:-1] + '+00:00'
+        dt = datetime.fromisoformat(s)
+        return dt.timestamp()
+    except Exception:
+        return None
+
+groups = defaultdict(list)
+runners = defaultdict(list)
+
+with open(tmp_jobs_path) as f:
+    for line in f:
+        line=line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except:
+            continue
+        job_name = obj.get('name') or '(unknown)'
+        workflow = (obj.get('workflow') or 'unknown').rsplit('/', 1)[-1]
+        name = f"{workflow}/{job_name}"
+        sa = obj.get('started_at')
+        ca = obj.get('completed_at')
+        if not sa or not ca:
+            continue
+        s = parse_ts(sa)
+        e = parse_ts(ca)
+        if s is None or e is None:
+            continue
+        dur = int(round(e - s))
+        if dur < 0:
+            continue
+        groups[name].append(dur)
+        labels = obj.get('labels') or []
+        # labels is list of strings; join with comma for display
+        if isinstance(labels, list) and labels:
+            r = ",".join(labels)
+        else:
+            r = obj.get('runner_name') or ""
+        runners[name].append(r)
+
+# compute stats
+rows = []
+for name, durations in groups.items():
+    durations_sorted = sorted(durations)
+    n = len(durations_sorted)
+    # median
+    if n % 2 == 1:
+        median = durations_sorted[n//2]
+    else:
+        median = (durations_sorted[n//2 -1] + durations_sorted[n//2]) / 2
+        # keep as int if .5? round to nearest sec
+        median = int(round(median))
+    # p95: ceil(0.95*n) index
+    import math
+    p95_idx = math.ceil(0.95 * n) -1
+    if p95_idx < 0: p95_idx=0
+    if p95_idx >= n: p95_idx=n-1
+    p95 = durations_sorted[p95_idx]
+    mx = max(durations_sorted)
+    # most common runner label
+    cnt = Counter(runners[name])
+    common_runner = cnt.most_common(1)[0][0] if cnt else ""
+    rows.append({
+        "job": name,
+        "count": n,
+        "median": int(median),
+        "p95": int(p95),
+        "max": int(mx),
+        "runner": common_runner,
+        "durations": durations_sorted,
+    })
+
+# sort slowest median first
+rows.sort(key=lambda r: r["median"], reverse=True)
+
+# write json for bash to consume
+with open(tmp_agg_path, 'w') as out:
+    json.dump(rows, out)
+
+if json_mode:
+    # output json array without durations
+    out_rows = []
+    for r in rows:
+        out_rows.append({k: r[k] for k in ["job","count","median","p95","max","runner"]})
+    print(json.dumps(out_rows, indent=2))
+else:
+    # table output handled by bash; just ensure file exists
+    pass
+PY
+
+if (( JSON )); then
+  # python already printed json
+  exit 0
+fi
+
+# Table mode: read tmp_agg and print
+if [[ ! -s "$tmp_agg" ]]; then
+  printf "%-28s %5s %8s %8s %8s %s\n" "JOB" "COUNT" "MEDIAN" "P95" "MAX" "RUNNER"
+  printf "%-28s %5s %8s %8s %8s %s\n" "----------------------------" "-----" "--------" "--------" "--------" "------"
+  exit 0
+fi
+
+printf "%-28s %5s %8s %8s %8s %s\n" "JOB" "COUNT" "MEDIAN" "P95" "MAX" "RUNNER"
+printf "%-28s %5s %8s %8s %8s %s\n" "----------------------------" "-----" "--------" "--------" "--------" "------"
+
+python3 - "$tmp_agg" <<'PY'
+import json, sys
+with open(sys.argv[1]) as f:
+    rows=json.load(f)
+for r in rows:
+    job=r["job"]
+    # truncate job name for table
+    display_job = job if len(job) <= 28 else job[:25]+"..."
+    print(f"{display_job:<28} {r['count']:>5} {r['median']:>8} {r['p95']:>8} {r['max']:>8} {r['runner']}")
+PY
