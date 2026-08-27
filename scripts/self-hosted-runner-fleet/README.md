@@ -102,12 +102,61 @@ PowerShell. Send bash as base64 and decode on the far side instead of fighting q
 artifact root from the runner's home, which is not a parent of a workspace under
 `/opt/actions-runner`. Leave it hosted and comment why in the workflow.
 
+## Toolchains the hosted image has and your host does not
+
+Beyond Node, three more prerequisites each cost a red job before they were found:
+
+| Missing | Symptom |
+|---|---|
+| Docker | `docker: command not found` for any workflow using `services:` — also put the service account in the `docker` group and restart the runner services |
+| Rust | `failed to run 'cargo metadata'` on Tauri builds. Symlink the **toolchain** binaries into `/usr/local/bin`, not the `rustup` shims: a shim needs `RUSTUP_HOME`, which a per-service `HOME` does not have (`rustup could not choose a version of cargo to run`) |
+| `xdg-utils`, `desktop-file-utils` | `failed to bundle project xdg-mime binary not found` |
+
+## A fixed-port service container cannot run twice on one host
+
+This is the ceiling on a single-machine fleet. Three test shards that each declare
+`ports: ["5432:5432"]` are fine on hosted runners, where every job gets its own VM. On one
+machine the second shard dies:
+
+```
+Bind for 0.0.0.0:5432 failed: port is already allocated
+```
+
+So that repository gets exactly one runner service and its jobs serialize. If that is too
+slow, the answer is an ephemeral per-job runner, not more services on the same box.
+
 ## Remote-dev tools are a separate fight
 
 A synced remote-dev tool (Crabbox and similar) verifies the workspace it just synced by
-fetching the target commit from the forge **on the host**, with Git credential helpers
-neutralized (`GIT_CONFIG_GLOBAL`, `GIT_CONFIG_SYSTEM`, `-c credential.helper=`). On a
-private repository that fails even though a plain `git fetch` on the host succeeds. SSH
-transport is unaffected by the neutralization, so the fix is an SSH key on the host — an
-account-level key covers every repository, a deploy key covers one and needs a host alias
-and a URL rewrite per repository.
+fetching the target commit from the forge **on the host**, with Git's config neutralized
+(`GIT_CONFIG_GLOBAL`, `GIT_CONFIG_SYSTEM`, `GIT_CONFIG_NOSYSTEM`). Its failure messages are
+generic — "remote git seed failed", "align remote Git metadata".
+
+**Do not assume that failure is authentication.** It looks like it must be: no config, no
+credential helper, private repository. Tested directly on a Windows host, Git for Windows
+cloned a *private* repository with `GIT_CONFIG_GLOBAL=NUL GIT_CONFIG_SYSTEM=NUL` and no
+credential config, silently and successfully. Acting on the guess instead of the test cost
+hours and produced SSH keys that were not needed.
+
+What did reproduce, and generalizes: **PowerShell with `$ErrorActionPreference = "Stop"`
+turns anything a native command writes to stderr into a terminating error.** Recent OpenSSH
+clients print
+
+```
+** WARNING: connection is not using a post-quantum key exchange algorithm.
+```
+
+to stderr on every connection, so a successful `git clone` over SSH kills the script that
+ran it. Fix it per host:
+
+```
+Host github.com
+  LogLevel ERROR
+```
+
+Verify with `@(& git clone ... 2>&1).Count` — it should be 0.
+
+Also: these tools check that the commit being synced is on the branch they advertise, so an
+unpushed local branch fails with an unhelpful message and is not a host problem. And when
+every step of the tool passes by hand but the tool still fails, the bug is upstream — file
+it with that evidence rather than rebuilding the machine around it.
