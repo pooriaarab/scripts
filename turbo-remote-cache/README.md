@@ -33,14 +33,15 @@ other unsafe characters.
 
 ### 1. Create the R2 bucket
 
+`wrangler.jsonc` already points `bucket_name` at `turbo-remote-cache`, the
+bucket backing the deployed instance for this org. If you are standing up
+your own instance instead of using the shared one, create your own bucket
+and update `bucket_name` to match:
+
 ```bash
 wrangler r2 bucket create <your-bucket-name>
 # example: wrangler r2 bucket create my-turbo-cache
 ```
-
-Then edit `wrangler.jsonc` and replace `YOUR_R2_BUCKET_NAME` with the real
-bucket name. The placeholder is intentional — do not commit a real bucket name
-until you own it.
 
 ### 2. Set the secret
 
