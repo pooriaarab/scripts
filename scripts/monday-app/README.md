@@ -9,18 +9,23 @@ cd integrations/<app>
 npm install
 npm run build             # tsc --noEmit && vite build
 ```
-Submit via the monday Developer Center (portal-review, free — no publish API; the
-`@mondaydotcomorg/apps-cli` deploys code, not the listing):
+Submit via the monday Developer Center (**portal-review** — no listing API; the
+`@mondaydotcomorg/apps-cli` deploys code, not the listing). No-code / "vibe code"
+apps are not eligible. Public hosting URL required (your host or monday code).
 1. `apps.developer.monday.com` → Create app → build the view, set OAuth scopes +
-   HTTPS hosting URL (or host on monday-code).
-2. Listing assets (exact px): app + developer icon **192×192**, card image
-   **592×348**, **3–5 gallery images 1920×960**, demo video **30–60 s MP4 ≤50 MB**.
-   Copy limits are hard (name ≤30, short desc ≤60). App terms required.
-3. App's **Share** tab → generate the `auth.monday.com` install link → complete the
-   marketplace **submission form** (`forms.monday.com`). First response ~72h.
+   HTTPS hosting URL.
+2. Listing assets: app + developer icon **192×192**, card image **592×348**,
+   **3–5 gallery images 1920×960**, promo video ≤120 s / 50 MB (guidelines prefer
+   30–60 s HD MP4 — verify). Copy limits: name ≤30 (do not start with "monday"),
+   short desc ≤60, long desc 200–2,000. **Privacy-policy + ToS URLs** required;
+   support email on a domain you prove you own.
+3. **Share** tab → publish (produces the `auth.monday.com` install link) → complete
+   the marketplace **submission form** (`forms.monday.com`; exact form id: verify).
+   First reply ~72 business hours on a shared review board. Review includes a
+   **Burp scan** of every domain.
 
-Payments run through monday billing; rev-share 0% until $200k lifetime, then 85/15.
-Security questionnaire/SOC2 is optional (Shield Badge only, not required to list).
+Paid apps bill through monday; rev-share often quoted 0% until $200k lifetime,
+then 85/15 `(verify)`. SOC2/ISO is optional (Shield Badge only).
 
 ## Traps
 - **monday's session token ≠ your API's auth** — carry your own key (per-installation).
