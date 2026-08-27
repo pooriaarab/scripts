@@ -24,6 +24,9 @@ cannot read each other's cache entries. Hashes are validated against
 `^[A-Za-z0-9_-]{1,256}$` and rejected with `400` if they contain `.` `/` or
 other unsafe characters.
 
+If `ALLOWED_TEAM` is set (see below), only that exact team scope is served —
+requests for any other `teamId`/`slug` get `403`, even with a valid token.
+
 ## Prerequisites
 
 - Cloudflare account with Workers and R2 enabled (`R2` requires billing, free tier includes 10 GB).
@@ -54,6 +57,13 @@ wrangler secret put TURBO_TOKEN
 `TURBO_TOKEN` is the only secret. It is read from `env.TURBO_TOKEN` at runtime;
 never put it in `wrangler.jsonc` `vars`.
 
+`ALLOWED_TEAM` (optional, set in `wrangler.jsonc` `vars`) pins this deployment
+to one team scope — the deployed instance for this org is pinned to
+`pooriaarab`, so every consumer of the shared instance must set
+`TURBO_TEAM=pooriaarab` (see "Wire a consumer repo" below). Leave it unset
+only if you are standing up your own instance for multiple teams that don't
+trust each other with the same token.
+
 ### 3. Deploy
 
 ```bash
@@ -83,7 +93,7 @@ TURBO_TEAM=<teamId or slug that scopes the cache key>
 
 Where they go:
 
-- **Local dev** — `.env` / `.env.local` or `export` in your shell before `turbo run`. `TURBO_TEAM` can be any stable string per repo (e.g. the repo slug).
+- **Local dev** — `.env` / `.env.local` or `export` in your shell before `turbo run`. `TURBO_TEAM` can be any stable string per repo (e.g. the repo slug) — unless the instance you're pointing at sets `ALLOWED_TEAM`, in which case `TURBO_TEAM` must match it exactly or requests get `403`. The shared instance for this org pins `ALLOWED_TEAM=pooriaarab`.
 - **CI** — repo or org secrets / environment variables. Example (GitHub Actions):
 
   ```yaml
@@ -124,3 +134,7 @@ npm test
   avoid timing side-channels. Do not change it to `===`.
 - Hashes are validated before interpolation into R2 keys to prevent path
   traversal.
+- The token is the only credential and is shared by everyone who holds it —
+  set `ALLOWED_TEAM` whenever a deployment should serve just one team, or any
+  holder of the token can read/overwrite every other team's artifacts by
+  changing `?teamId=`.
