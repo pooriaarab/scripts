@@ -66,7 +66,7 @@ runs=$(gh api "repos/$REPO/actions/runs?status=completed&event=$EVENT&per_page=$
   echo "error: cannot read runs for $REPO" >&2; exit 4; }
 if [[ -z "$runs" ]]; then
   if [[ "$JSON" == "1" ]]; then
-    printf '{"repo":"%s","event":"%s","runs_sampled":0}\n' "$REPO" "$EVENT"
+    printf '{"repo":"%s","runs_sampled":0,"latency_p50_s":null,"latency_p95_s":null,"machine_p50_s":null,"machine_seconds_by_tier":{}}\n' "$REPO"
   else
     echo "no completed $EVENT runs for $REPO"
   fi
@@ -79,19 +79,34 @@ fi
 # name containing a literal `"` can't truncate the field and break --workflow.
 tmp=$(mktemp); trap 'rm -f "$tmp" "$tmp.runs"' EXIT
 printf '%s\n' "$runs" > "$tmp.runs"
+attempted=0
+failed=0
 while IFS=$'\t' read -r id wfname created <&3; do
   [[ -z "$id" ]] && continue
   [[ -n "$WORKFLOW" && "$wfname" != "$WORKFLOW" ]] && continue
   [[ -n "$SINCE" && "${created%%T*}" < "$SINCE" ]] && continue
+  attempted=$((attempted + 1))
   # RUNID must be exported for gh itself -- jq reads it via env.RUNID. Setting it
   # on a later pipeline stage leaves the field empty and silently collapses every
   # job into one pseudo-run, which looks like a working script reporting nonsense.
   # --paginate follows all pages so matrix runs with >100 jobs aren't truncated.
-  RUNID="$id" gh api --paginate "repos/$REPO/actions/runs/$id/jobs?per_page=100" \
+  if ! RUNID="$id" gh api --paginate "repos/$REPO/actions/runs/$id/jobs?per_page=100" \
     --jq '.jobs[] | select(.started_at != null and .completed_at != null)
           | [env.RUNID, .name, .started_at, .completed_at, (.labels|join("|"))] | @tsv' \
-    2>/dev/null </dev/null >> "$tmp" || true
+    2>/dev/null </dev/null >> "$tmp"; then
+    failed=$((failed + 1))
+  fi
 done 3< "$tmp.runs"
+
+# A run that fails to fetch looks identical to one with no eligible jobs unless
+# we track it: without this, a mid-sweep auth/rate-limit failure silently
+# produces "no job data" (exit 0) instead of surfacing the real cause.
+if (( attempted > 0 && failed == attempted )); then
+  echo "error: failed to fetch jobs for all $attempted matched run(s) (check gh auth / rate limit)" >&2
+  exit 4
+elif (( failed > 0 )); then
+  echo "warning: failed to fetch jobs for $failed of $attempted matched run(s); results are partial" >&2
+fi
 
 REPO="$REPO" LIMIT="$LIMIT" JSON="$JSON" python3 - "$tmp" "$tmp.runs" <<'PY'
 import sys, os, json, datetime, collections
@@ -125,9 +140,15 @@ for line in open(jobs_file):
     per_run[rid].append((name, parse(s), parse(e), tier(labels)))
 
 if not per_run:
-    # A consumer piping --json must still get JSON, not prose.
+    # A consumer piping --json must still get JSON with the same keys as the
+    # success shape below, not a subset -- otherwise a fixed-schema consumer
+    # breaks whenever a sample happens to come back empty.
     if as_json:
-        print(json.dumps({"repo": repo, "runs_sampled": 0}, indent=2))
+        print(json.dumps({
+            "repo": repo, "runs_sampled": 0,
+            "latency_p50_s": None, "latency_p95_s": None, "machine_p50_s": None,
+            "machine_seconds_by_tier": {},
+        }, indent=2))
     else:
         print(f"{repo}: no job data in the sampled runs")
     sys.exit(0)
