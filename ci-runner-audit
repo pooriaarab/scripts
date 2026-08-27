@@ -1,0 +1,139 @@
+#!/usr/bin/env bash
+# Inventory which runner tier every job in every repo is on.
+# Usage: ci-runner-audit [owner] [--json]
+set -euo pipefail
+
+usage() {
+  cat <<'USAGE'
+Usage: ci-runner-audit [owner] [--json]
+  owner   GitHub owner to audit (default: pooriaarab)
+  --json  machine-readable JSON output
+  --help  show this help
+USAGE
+}
+
+OWNER=""
+JSON=0
+POSITIONAL=()
+while (( $# )); do
+  case "$1" in
+    --json) JSON=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    --) shift; break ;;
+    --*) echo "error: unknown option: $1" >&2; usage >&2; exit 2 ;;
+    *) POSITIONAL+=("$1"); shift ;;
+  esac
+done
+if (( ${#POSITIONAL[@]} > 1 )); then echo "error: too many arguments" >&2; usage >&2; exit 2; fi
+if (( ${#POSITIONAL[@]} == 1 )); then OWNER="${POSITIONAL[0]}"; else OWNER="pooriaarab"; fi
+
+if ! command -v gh >/dev/null 2>&1; then echo "error: gh CLI not found. Install https://cli.github.com/ and run 'gh auth login'." >&2; exit 1; fi
+if ! gh auth status --hostname github.com >/dev/null 2>&1; then echo "error: gh not authenticated. Run 'gh auth login'." >&2; exit 1; fi
+if ! command -v jq >/dev/null 2>&1; then echo "error: jq not found." >&2; exit 1; fi
+
+tmp_rows=$(mktemp)
+_parse_py=$(mktemp)
+cat > "$_parse_py" <<'PYEOF'
+import re, sys
+text=sys.stdin.read()
+lines=text.splitlines()
+jobs=[]
+cur=None
+blk=[]
+in_jobs=False
+for line in lines:
+    if re.match(r'^jobs:\s*$', line):
+        in_jobs=True; continue
+    if not in_jobs: continue
+    m=re.match(r'^  ([A-Za-z0-9_.\-]+):\s*(#.*)?$', line)
+    if m:
+        if cur is not None: jobs.append((cur, "\n".join(blk)))
+        cur=m.group(1); blk=[line]
+    elif cur is not None:
+        if re.match(r'^[A-Za-z0-9_\-]+:\s', line) and not line.startswith(' '):
+            break
+        blk.append(line)
+if cur is not None: jobs.append((cur, "\n".join(blk)))
+for n,b in jobs:
+    m=re.search(r'^\s+runs-on:\s*(.+?)\s*$', b, re.M)
+    runs=m.group(1).strip() if m else "(unknown)"
+    runs=re.sub(r'\s+#.*$', '', runs).strip().strip('"').strip("'")
+    has_s=1 if re.search(r'^\s+services:\s*$', b, re.M) else 0
+    has_c=1 if 'actions/cache' in b else 0
+    print(f"{n}\t{runs}\t{has_s}\t{has_c}")
+PYEOF
+trap 'rm -f "$tmp_rows" "$_parse_py" 2>/dev/null; true' EXIT
+
+tier_of() {
+  local r="$1"
+  if [[ "$r" == *"self-hosted"* ]]; then echo "self-hosted"
+  elif [[ "$r" == *"ubicloud"* ]]; then echo "cloud"
+  else echo "hosted"
+  fi
+}
+
+parse_workflow() {
+  python3 "$_parse_py"
+}
+
+# Fetch repos via gh repo list (handles private and pagination)
+if ! repos=$(gh repo list "$OWNER" --limit 200 --json name 2>/dev/null | jq -r '.[].name' 2>/dev/null); then
+  echo "error: failed to list repos for owner '$OWNER' (check owner name and gh auth)" >&2
+  exit 1
+fi
+if [[ -z "$repos" ]]; then
+  if (( JSON )); then echo "[]"; else echo "No repos found for owner '$OWNER'." >&2; printf "%-24s %-20s %-20s %-32s %-12s %s\n" "REPO" "WORKFLOW" "JOB" "RUNS-ON" "TIER" "WARNINGS"; fi
+  exit 0
+fi
+
+if (( ! JSON )); then
+  printf "%-24s %-20s %-20s %-32s %-12s %s\n" "REPO" "WORKFLOW" "JOB" "RUNS-ON" "TIER" "WARNINGS"
+  printf "%-24s %-20s %-20s %-32s %-12s %s\n" "------------------------" "--------------------" "--------------------" "--------------------------------" "------------" "--------"
+fi
+
+for repo in $repos; do
+  # List workflows; skip repo if no workflows (404)
+  wf_json=$(gh api "repos/$OWNER/$repo/contents/.github/workflows" 2>/dev/null || true)
+  if ! echo "$wf_json" | jq -e 'type=="array"' >/dev/null 2>&1; then
+    continue
+  fi
+  wf_files=$(echo "$wf_json" | jq -r '.[] | select(.type=="file") | .name' 2>/dev/null || true)
+  [[ -z "$wf_files" ]] && continue
+  while IFS= read -r wf_file; do
+    [[ -z "$wf_file" ]] && continue
+    b64=$(gh api "repos/$OWNER/$repo/contents/.github/workflows/$wf_file" 2>/dev/null | jq -r '.content // empty' 2>/dev/null || true)
+    [[ -z "$b64" ]] && continue
+    if ! content=$(echo "$b64" | base64 -d 2>/dev/null); then
+      content=$(echo "$b64" | base64 -D 2>/dev/null || true)
+    fi
+    [[ -z "$content" ]] && continue
+    parsed=$(echo "$content" | parse_workflow 2>/dev/null || true)
+    [[ -z "$parsed" ]] && continue
+    while IFS=$'\t' read -r job runs_on has_services has_cache; do
+      [[ -z "$job" ]] && continue
+      tier=$(tier_of "$runs_on")
+      warnings=()
+      if [[ "$tier" == "self-hosted" && "$has_services" == "1" ]]; then warnings+=("services on self-hosted (fixed ports cannot be shared)"); fi
+      if [[ "$tier" == "self-hosted" && "$has_cache" == "1" ]]; then warnings+=("actions/cache on self-hosted (round-trips to provider)"); fi
+      warn_str=""
+      if (( ${#warnings[@]} )); then warn_str=$(IFS='; '; echo "${warnings[*]}"); fi
+      if (( JSON )); then
+        entry=$(jq -n --arg repo "$repo" --arg workflow "$wf_file" --arg job "$job" --arg runs_on "$runs_on" --arg tier "$tier" --argjson hs "$has_services" --argjson hc "$has_cache" '{repo:$repo, workflow:$workflow, job:$job, "runs-on":$runs_on, tier:$tier, has_services:($hs==1), has_cache:($hc==1), warnings:[]}')
+        if (( ${#warnings[@]} )); then
+          wj=$(printf '%s\n' "${warnings[@]}" | jq -R . | jq -s .)
+          entry=$(echo "$entry" | jq --argjson w "$wj" '.warnings=$w')
+        fi
+        echo "$entry" >> "$tmp_rows"
+      else
+        disp="$runs_on"
+        if (( ${#disp} > 30 )); then disp="${disp:0:27}..."; fi
+        printf "%-24s %-20s %-20s %-32s %-12s %s\n" "$repo" "$wf_file" "$job" "$disp" "$tier" "$warn_str"
+      fi
+    done <<< "$parsed"
+  done <<< "$wf_files"
+  sleep 0.07
+done
+
+if (( JSON )); then
+  if [[ -s "$tmp_rows" ]]; then jq -s '.' "$tmp_rows"; else echo "[]"; fi
+fi
