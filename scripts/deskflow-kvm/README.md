@@ -120,3 +120,23 @@ at all. Measure the actual delivered modifier state before theorising:
 
 Note the `*` prefix. A plain `~LButton::` only fires when **no** modifiers are
 held, so it silently records nothing during exactly the case being debugged.
+
+### Confirmed resolution
+
+The working shape is to **not touch the forwarded modifier at all**. Add the
+modifier the target platform needs on top and leave the original held:
+
+```ahk
+CmdClick(btn) {
+    Send "{Blind}{LCtrl down}"          ; do NOT release Win
+    Click (btn = "RButton" ? "Right Down" : "Down")
+    KeyWait btn                          ; preserves Cmd+drag
+    Click (btn = "RButton" ? "Right Up" : "Up")
+    Send "{Blind}{LCtrl up}"
+}
+```
+
+Verified by effect rather than by log: Explorer's `SelectedItems().Count` went
+to 8 across eight Cmd+clicks in a single hold, with the trace showing one
+`LWin` key-down and one `LControl` per click. Explorer ignores Win for click
+semantics, so leaving it held costs nothing.
