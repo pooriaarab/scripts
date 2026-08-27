@@ -7,6 +7,8 @@ set -euo pipefail
 : "${RUNNER_SSH_TARGET:?export RUNNER_SSH_TARGET=user@host}"
 : "${RUNNER_NAME:?export RUNNER_NAME=RUNNER-NAME}"
 : "${RUNNER_LABEL:?export RUNNER_LABEL=your-label}"
+[[ "$RUNNER_NAME" =~ ^[A-Za-z0-9_-]+$ ]] || { echo "RUNNER_NAME must match [A-Za-z0-9_-]+" >&2; exit 2; }
+[[ "$RUNNER_LABEL" =~ ^[A-Za-z0-9_-]+$ ]] || { echo "RUNNER_LABEL must match [A-Za-z0-9_-]+" >&2; exit 2; }
 ssh_key="${RUNNER_SSH_KEY:-$HOME/.ssh/id_ed25519}"
 wsl_distro="${RUNNER_WSL_DISTRO:-}"
 service_user="${RUNNER_SERVICE_USER:-actions}"
@@ -44,6 +46,8 @@ remote_bash() {
 
 register() {
   local repo="$1" instance="${2:-1}" name dir svc
+  [[ "$repo" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || { echo "owner/repo must match [A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+" >&2; exit 2; }
+  [[ "$instance" =~ ^[0-9]+$ ]] || { echo "instance must be a positive integer" >&2; exit 2; }
   require_private "$repo"
   name="${repo#*/}"
   if [[ "$instance" == 1 ]]; then dir="$install_root/$name"; svc="$RUNNER_NAME"
@@ -64,9 +68,15 @@ su $service_user -s /bin/bash -c 'cd $dir \
 && tar xzf $tarball && rm $tarball \
 && ./config.sh --unattended --url https://github.com/$repo --token $token \
 --name $svc --labels $RUNNER_LABEL --work _work --replace'
+trap - ERR
 cd '$dir'
 ./svc.sh install $service_user
-unit="\$(systemctl list-unit-files 'actions.runner.*' --no-legend | awk '{print \$1}' | grep -F '$svc' | tail -1)"
+mapfile -t units < <(systemctl list-unit-files 'actions.runner.*' --no-legend | awk '{print \$1}' | grep -F '.$svc.service')
+if [ "\${#units[@]}" -ne 1 ]; then
+  echo "Expected exactly one unit matching .$svc.service, found \${#units[@]}" >&2
+  exit 1
+fi
+unit="\${units[0]}"
 install -d "/etc/systemd/system/\$unit.d"
 printf '[Service]\nEnvironment=HOME=%s\n' '$dir/home' > "/etc/systemd/system/\$unit.d/home.conf"
 systemctl daemon-reload
