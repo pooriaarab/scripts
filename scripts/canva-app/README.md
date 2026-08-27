@@ -66,3 +66,66 @@ Then in `developer.canva.com` (portal-review, free — no publish CLI; `@canva/c
 
 `example.ts` (next to this README) — the smallest real wiring: export the current design,
 upload the rendition, create the downstream action. Copy it as a starting point.
+
+## Pre-submission gate: run Canva's own doctor
+
+```bash
+npx @canva/cli@latest apps doctor      # 21 checks: SDK versions, lint, format, config
+```
+
+It flags outdated `@canva/*` packages (reviewers look at this), a missing `test` script,
+and a missing `canva-app.json`. Pulling that config needs an **interactive** login:
+
+```bash
+npx @canva/cli apps config pull        # requires `canva login` first
+```
+
+`canva login` mints a CLI token against the account, so it cannot be automated
+unattended — run it once by hand.
+
+## Upload BOTH artefacts, every time
+
+```bash
+npx @canva/app-scripts build                  # -> dist/app.js
+npx @canva/app-scripts extract-translations   # -> dist/messages_en.json
+```
+
+The portal's Code upload page has two separate file inputs. Uploading only `app.js`
+leaves stale strings live once the app is localised. Selectors, if you are driving it:
+`input[type=file][accept*="text/javascript"]` and `input[type=file][accept="application/json"]`.
+
+## Verify-by-reload, because the portal's "saved" indicator lies
+
+Every settings page autosaves and there is no Save button. "All changes saved" is a
+page-global banner and does **not** mean the field you just set persisted. After each
+edit: reload, re-read, then assert. Specifically:
+
+- The address input is an autocomplete; typed text is discarded unless you click the
+  **Add Manually** link (a link, not a button) and fill the structured subfields —
+  including the post code, or the identity block stays invalid with no visible error.
+- The compliance checkbox fires **zero** network requests on click; it only persists
+  inside the identity payload. Don't burn attempts automating it.
+- Scope checkboxes are visually hidden custom controls: a normal click reports "element
+  is outside of the viewport". Click the element directly instead
+  (`el.click()` inside `page.evaluate`), then reload to confirm.
+
+## Declare the minimum scope, with evidence
+
+Grep what the app actually imports before ticking scopes — over-declaring is a
+documented rejection cause:
+
+```bash
+grep -rhoE 'from "@canva/[a-z]+"|requestExport|createRenditions|brandkit|brandTemplate' src/ | sort | uniq -c
+```
+
+An app whose whole surface is `requestExport` + `requestOpenExternalUrl` needs
+`design:content:read` and nothing else. No `@canva/asset` dependency means the
+`asset:private:*` scopes are dead weight.
+
+## Driving the portal over CDP
+
+A real-profile Chrome clone loads every extension, and each one opens an onboarding tab
+— 30+ CDP targets makes `connectOverCDP` time out. Close the non-target tabs first
+(`/json/close/<id>`) and pass a generous `{ timeout }`. The portal is also an SPA whose
+client-side routing races `page.goto`: always wait for a **page-specific marker element**
+before trusting the DOM, or you will read and edit the previous page's fields.
