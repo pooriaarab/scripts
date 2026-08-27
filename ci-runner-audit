@@ -30,6 +30,7 @@ if (( ${#POSITIONAL[@]} == 1 )); then OWNER="${POSITIONAL[0]}"; else OWNER="poor
 if ! command -v gh >/dev/null 2>&1; then echo "error: gh CLI not found. Install https://cli.github.com/ and run 'gh auth login'." >&2; exit 1; fi
 if ! gh auth status --hostname github.com >/dev/null 2>&1; then echo "error: gh not authenticated. Run 'gh auth login'." >&2; exit 1; fi
 if ! command -v jq >/dev/null 2>&1; then echo "error: jq not found." >&2; exit 1; fi
+if ! command -v python3 >/dev/null 2>&1; then echo "error: python3 not found. Install python3." >&2; exit 1; fi
 
 tmp_rows=$(mktemp)
 _parse_py=$(mktemp)
@@ -92,10 +93,15 @@ parse_workflow() {
   python3 "$_parse_py"
 }
 
-# Fetch repos via gh repo list (handles private and pagination)
-if ! repos=$(gh repo list "$OWNER" --limit 200 --json name 2>/dev/null | jq -r '.[].name' 2>/dev/null); then
+# Fetch repos via gh repo list. --limit is a hard cap, not a page size, so ask for
+# far more than any realistic owner has and warn if we still hit the cap.
+REPO_LIST_LIMIT=5000
+if ! repos=$(gh repo list "$OWNER" --limit "$REPO_LIST_LIMIT" --json name 2>/dev/null | jq -r '.[].name' 2>/dev/null); then
   echo "error: failed to list repos for owner '$OWNER' (check owner name and gh auth)" >&2
   exit 1
+fi
+if [[ "$(echo "$repos" | grep -c . || true)" == "$REPO_LIST_LIMIT" ]]; then
+  echo "warning: hit the repo list cap of $REPO_LIST_LIMIT; results may be incomplete" >&2
 fi
 if [[ -z "$repos" ]]; then
   if (( JSON )); then echo "[]"; else echo "No repos found for owner '$OWNER'." >&2; printf "%-24s %-20s %-20s %-32s %-12s %s\n" "REPO" "WORKFLOW" "JOB" "RUNS-ON" "TIER" "WARNINGS"; fi
