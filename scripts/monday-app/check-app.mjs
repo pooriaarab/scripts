@@ -63,7 +63,7 @@ function parseArgs(argv) {
       usageError(`unknown argument: ${a}`);
     }
   }
-  opts.apiKey = opts.apiKey ?? process.env.MONDAY_API_KEY;
+  if (opts.apiBase) opts.apiKey = opts.apiKey ?? process.env.MONDAY_API_KEY;
   if (!opts.clientId && !(opts.apiBase && opts.apiKey)) {
     usageError("need --client-id, or --api-base + --api-key (or env MONDAY_API_KEY), or all three");
   }
