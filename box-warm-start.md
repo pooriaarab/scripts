@@ -637,6 +637,64 @@ One shared `agent-roster-ready` snapshot serves every repo, so the **10 named
 snapshots per account** cap never binds. There is no need for a snapshot per
 repo.
 
+## Running the work on a Box instead of the laptop
+
+This is the point of the whole exercise, and it is a different thing from
+attaching. Attaching keeps a Box in sync with your checkout. **`box-work`**
+starts a Box that is ready to work and runs the job there.
+
+```sh
+box-work <repo>                      # start or reuse; syncs your uncommitted edits
+box-work <repo> --agent pi "brief"   # run one agent on the Box, headless
+box-work <repo> --ssh                # a shell on the Box
+box-work <repo> --stop               # stop it
+box-work --list / --stop-all
+```
+
+Measured:
+
+```
+first start for a repo ........ ~100s  (snapshot restore + git fetch + install)
+reuse an existing Box ......... 4.1s
+one agent doing real work ..... 24.0s
+```
+
+Verified end to end, not inferred: `box-work adscapi --agent pi "...89 times 97..."`
+created `BOX_PROOF.md` containing `8633` **on the Box**, and the laptop copy of
+the repo was untouched.
+
+Three repos in parallel — three Boxes, three agents, one command each —
+finished in **129.6s wall clock**, each agent returning its own repo's correct
+`git ls-files` count (DishRadar 80, supportsheep 1497, usegeoaeo 293).
+
+The economics: a Box is 4 vCPU / 8 GB against a 12-core / 36 GB laptop, so a
+single Box is not faster. Ten of them are, and the laptop stays free. The cap is
+100 concurrent Boxes; the binding limit is **50 starts per hour**, so keep Boxes
+warm and reuse them rather than starting one per task. At $0.036/h, ten Boxes
+running for an hour is 36 cents.
+
+### The brief has to be base64
+
+`box-work --agent pi "Create a file named ..."` first delivered only the word
+`Create`. `box exec` joins argv into a shell command string, so a multi-word
+brief is split across argv and the agent sees just the first word. It then asks
+a clarifying question and does nothing, while the call reports success. The
+brief is base64-encoded now. Same lesson as the payload and the delete list:
+give `box exec` one shell-safe word.
+
+### T3 Code, concretely
+
+A T3 thread runs the agent on the laptop, always. T3 shells out to provider CLIs
+on its own disk, so there is no per-thread Box to arrange, and pointing a
+provider `binaryPath` at a Box wrapper gives a green thread that changed
+nothing. Two real options:
+
+- **Run the work with `box-work` instead of in a T3 thread** when the job is
+  heavy or you want several at once. This is the tested path.
+- **Run the whole T3 server on a Box** and reach it over `box host`. Then T3's
+  "own disk" is the Box. That is one Box for all threads, not one per repo. The
+  shape is written up in `t3-code-on-a-box.md`.
+
 ## Still open
 
 - **Content Rabbit has no warm snapshot yet.** Its repo is not connected to the

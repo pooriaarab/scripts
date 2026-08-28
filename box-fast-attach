@@ -159,9 +159,16 @@ build_tar() {  # $1 = output path; file list on stdin
 
 ensure_unpack() {  # these must exist on the Box or every delta fails
   [[ -f "$UNPACK_SRC" ]] || { echo "[fast-attach] missing $UNPACK_SRC" >&2; return 1; }
-  "$BOX_BIN" scp "$UNPACK_SRC" "$BOX_ID:/home/user/box-unpack.sh" >/dev/null
+  "$BOX_BIN" scp "$UNPACK_SRC" "$BOX_ID:/home/user/box-unpack.sh" >/dev/null 2>&1
   local gs="${UNPACK_SRC%/*}/box-git-sync.sh"
-  [[ -f "$gs" ]] && "$BOX_BIN" scp "$gs" "$BOX_ID:/home/user/box-git-sync.sh" >/dev/null
+  [[ -f "$gs" ]] && "$BOX_BIN" scp "$gs" "$BOX_ID:/home/user/box-git-sync.sh" >/dev/null 2>&1
+  # Verify it landed. A silent scp failure here shows up much later as exit 127
+  # from the delta, which then falls back to a full seed -- a 2s job turning
+  # into 100s for no visible reason.
+  "$BOX_BIN" exec "$BOX_ID" --timeout 60 --json -- test -f /home/user/box-unpack.sh 2>/dev/null \
+    | python3 -c 'import sys,json
+try: sys.exit(0 if json.load(sys.stdin).get("exitCode")==0 else 1)
+except Exception: sys.exit(1)'
 }
 
 # If the Box already has the repo (an environment cloned it), do not upload the
@@ -242,8 +249,32 @@ send_delta() {  # $1 = changed paths that exist, $2 = paths deleted locally
   # newline inside an argument ends the line and the next path runs as a command.
   local del_b64=""
   [[ -n "$deleted" ]] && del_b64="$(printf '%s\n' "$deleted" | base64 | tr -d '\n')"
-  "$BOX_BIN" exec "$BOX_ID" --timeout 550 -- \
-    bash /home/user/box-unpack.sh "$b64" "$REMOTE_DIR" "$LOCK_HASH" "$del_b64"
+  local out rc
+  out="$("$BOX_BIN" exec "$BOX_ID" --timeout 550 --json -- \
+    bash /home/user/box-unpack.sh "$b64" "$REMOTE_DIR" "$LOCK_HASH" "$del_b64" 2>&1)"
+  rc="$(printf '%s' "$out" | python3 -c 'import sys,json
+try: print(json.load(sys.stdin).get("exitCode",1))
+except Exception: print(1)')"
+  # 127 means the helper is not on the Box. Ship it and retry once rather than
+  # falling back to a full tree upload.
+  if [[ "$rc" == "127" ]]; then
+    echo "[fast-attach] unpack helper missing on the Box; installing and retrying"
+    ensure_unpack || return 1
+    out="$("$BOX_BIN" exec "$BOX_ID" --timeout 550 --json -- \
+      bash /home/user/box-unpack.sh "$b64" "$REMOTE_DIR" "$LOCK_HASH" "$del_b64" 2>&1)"
+    rc="$(printf '%s' "$out" | python3 -c 'import sys,json
+try: print(json.load(sys.stdin).get("exitCode",1))
+except Exception: print(1)')"
+  fi
+  printf '%s' "$out" | python3 -c 'import sys,json
+try:
+    d=json.load(sys.stdin)
+    o=(d.get("stdout") or "").strip()
+    e=(d.get("stderr") or "").strip()
+    if o: print(o)
+    if e and d.get("exitCode") not in (0,None): print(e, file=sys.stderr)
+except Exception: pass'
+  return "${rc:-1}"
 }
 
 if (( RESEED )) || [[ ! -f "$STATE_SHA" ]]; then
