@@ -22,7 +22,8 @@ stops you from optimising a job that does not matter.
 
 | Step | Script | Question it answers |
 |---|---|---|
-| 1 | `ci-pr-latency` | Which number is bad — the wall clock you wait for, or the machine seconds you pay for? They move independently, so never report one CI number. |
+| 1 | `claude-token-rotate` | Rotate a Claude OAuth token into every repo running the review action; reads it from a hidden prompt, never an argument |
+| `ci-pr-latency` | Which number is bad — the wall clock you wait for, or the machine seconds you pay for? They move independently, so never report one CI number. |
 | 2 | `ci-job-timings` | Which job is the critical path? Jobs run in parallel, so wall clock is the longest job, not the sum. A win on any other job buys machine time only. |
 | 3 | `ci-cache-health` | Do the caches actually hit? A cache that restores nothing still prints a green success line, and a disabled remote cache prints one grey line. |
 | 4 | `ci-runner-audit` | Is each job on a tier that can run it? Flags `services:` and `actions/cache` misuse on self-hosted runners. |
