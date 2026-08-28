@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+# Inventory the personal repos that could use a warm ascii.dev Box.
+#
+# Answers, per repo: can it build, how big is the tree we would ship, does it
+# declare its secrets, and does it already have a Box environment. Reports only;
+# it changes nothing and provisions nothing.
+set -uo pipefail
+export PATH="$HOME/.ascii/bin:$PATH"
+
+# --tsv emits tab-separated rows. The aligned table is for reading; one of these
+# repo paths contains a space ("Gmail AI reply slack bot"), so anything parsing
+# the table with awk $NF gets a truncated path.
+TSV=0
+[[ "${1:-}" == "--tsv" ]] && TSV=1
+
+ROOTS=( "$HOME/Documents/Personal" "$HOME/code" "$HOME/nova-wt" )
+BOX_ENVS="$( (box env list --json 2>/dev/null || echo '{}') | python3 -c 'import sys,json
+try: print(" ".join(e["name"] for e in json.load(sys.stdin).get("environments",[])))
+except Exception: print("")' )"
+SNAPS="$( (box snapshots --json 2>/dev/null || echo '{}') | python3 -c 'import sys,json
+try: print(" ".join(s["name"] for s in json.load(sys.stdin).get("named",[])))
+except Exception: print("")' )"
+
+if (( TSV )); then
+  printf 'repo\tpkgmgr\tfiles\ttreegz_kb\tsecrets\tturbo\tboxenv\tsnapshot\tpath\n'
+else
+  printf '%-22s %-8s %-7s %-8s %-9s %-7s %-7s %-6s %s\n' \
+    REPO PKGMGR FILES TREEGZ SECRETS TURBO BOXENV SNAP PATH
+  printf '%.0s-' {1..118}; echo
+fi
+
+seen=""
+for root in "${ROOTS[@]}"; do
+  [[ -d "$root" ]] || continue
+  while IFS= read -r gitdir; do
+    d="$(dirname "$gitdir")"
+    case "$d" in *"/worktrees/"*|*/node_modules/*) continue ;; esac
+    remote="$(git -C "$d" remote get-url origin 2>/dev/null || true)"
+    case "$remote" in *pooriaarab/*) : ;; *) continue ;; esac
+    name="$(basename -s .git "$remote")"
+    case " $seen " in *" $name "*) continue ;; esac
+    seen="$seen $name"
+
+    pm=none
+    [[ -f "$d/bun.lock" || -f "$d/bun.lockb" ]] && pm=bun
+    [[ $pm == none && -f "$d/pnpm-lock.yaml" ]] && pm=pnpm
+    [[ $pm == none && -f "$d/package-lock.json" ]] && pm=npm
+    [[ $pm == none && -f "$d/yarn.lock" ]] && pm=yarn
+
+    files=$(git -C "$d" ls-files 2>/dev/null | wc -l | tr -d ' ')
+    treegz="-"
+    if [[ "$files" -gt 0 && "$files" -lt 60000 ]]; then
+      treegz=$( (cd "$d" && git ls-files -z 2>/dev/null | tar -czf - --null -T - 2>/dev/null | wc -c) | tr -d ' ')
+      treegz=$(( treegz / 1024 ))KB
+    fi
+
+    sec=no; [[ -f "$d/.crabbox-secrets" ]] && sec=yes
+    turbo=no
+    [[ -f "$d/.env.local" ]] && grep -q '^TURBO_TOKEN=' "$d/.env.local" 2>/dev/null && turbo=yes
+    benv=no; case " $BOX_ENVS " in *" $name "*) benv=yes ;; esac
+    snap=no; case " $SNAPS " in *" $name-ready "*) snap=yes ;; esac
+
+    if (( TSV )); then
+      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$name" "$pm" "$files" "${treegz%KB}" "$sec" "$turbo" "$benv" "$snap" "$d"
+    else
+      printf '%-22s %-8s %-7s %-8s %-9s %-7s %-7s %-6s %s\n' \
+        "$name" "$pm" "$files" "$treegz" "$sec" "$turbo" "$benv" "$snap" "${d/#$HOME/~}"
+    fi
+  done < <(find "$root" -maxdepth 4 -name .git -maxdepth 4 2>/dev/null)
+done
