@@ -41,6 +41,15 @@ skill.
 
 ## Other scripts
 
+Not part of the diagnosis order above.
+
+| Script | What |
+|---|---|
+| `claude-token-rotate` | Rotate a Claude OAuth token into every repo that runs the review action. Reads the token from a hidden prompt, never an argument, because an argument lands in shell history and the process list. |
+
+
+## Other scripts
+
 | Script | What |
 |---|---|
 | `box-reap` | Report what ascii.dev Boxes are costing and stop the unused ones. Never reaps on Box state, which lies |
