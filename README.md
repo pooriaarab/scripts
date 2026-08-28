@@ -15,14 +15,34 @@ The [`agents`](https://github.com/pooriaarab/agents) repo is the hub — a porta
 | [scripts](https://github.com/pooriaarab/scripts) | Automation scripts |
 | [prompts](https://github.com/pooriaarab/prompts) | Refined prompts |
 
-## Scripts
+## Diagnose CI in this order
+
+The four `ci-*` scripts are one workflow, not four tools. Run them in order. Each step
+stops you from optimising a job that does not matter.
+
+| Step | Script | Question it answers |
+|---|---|---|
+| 1 | `ci-pr-latency` | Which number is bad — the wall clock you wait for, or the machine seconds you pay for? They move independently, so never report one CI number. |
+| 2 | `ci-job-timings` | Which job is the critical path? Jobs run in parallel, so wall clock is the longest job, not the sum. A win on any other job buys machine time only. |
+| 3 | `ci-cache-health` | Do the caches actually hit? A cache that restores nothing still prints a green success line, and a disabled remote cache prints one grey line. |
+| 4 | `ci-runner-audit` | Is each job on a tier that can run it? Flags `services:` and `actions/cache` misuse on self-hosted runners. |
+
+Only optimise after step 4. The reasoning behind the order, and the checklist of defects
+that hide behind a green check, are in the
+[`ci-speed-diagnosis`](https://github.com/pooriaarab/skills/blob/main/ci-speed-diagnosis/SKILL.md)
+skill.
+
+```bash
+./ci-pr-latency   owner/repo
+./ci-job-timings  owner/repo
+./ci-cache-health owner/repo --limit 12
+./ci-runner-audit owner
+```
+
+## Other scripts
 
 | Script | What |
 |---|---|
-| `ci-runner-audit` | Inventory which runner tier every job is on (`self-hosted` / `cloud` / `hosted`), flag `services:` and `actions/cache` misuse on self-hosted |
-| `ci-pr-latency` | The metric to optimise against: wall-clock latency (what you wait for) and machine seconds (what you pay for), reported separately |
-| `ci-job-timings` | Report real per-job durations (count, median, p95, max, runner) so tiering uses measurements |
-| `ci-cache-health` | Prove the caches work: reads job logs for payload size, primary-key hit rate, and Turborepo remote-cache state, so a cache that is green but never hits cannot hide |
 | `box-reap` | Report what ascii.dev Boxes are costing and stop the unused ones. Never reaps on Box state, which lies |
 | `turbo-remote-cache/` | Deployable Cloudflare Worker: a Turborepo remote cache backed by R2 |
 | `box-setup/` | Provision the personal agent-CLI roster (claude x3, codex, gemini, kimi, pi, muse) inside an ascii.dev Box |

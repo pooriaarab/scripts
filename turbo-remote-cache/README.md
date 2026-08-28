@@ -128,6 +128,24 @@ npm install
 npm test
 ```
 
+## Operational gotchas
+
+Each of these left the cache configured, green, and never hitting.
+
+- **Set the secret from a file.** `gh secret set TURBO_TOKEN --body -` does **not** read
+  stdin — it stores the literal string `-`. Use
+  `gh secret set TURBO_TOKEN -R owner/repo < token.txt`. A secret holding an empty or
+  wrong value produces one grey `Remote caching disabled` line and cold misses forever.
+- **Turbo's strict env mode strips `TURBO_*` from child processes**, so a nested
+  `turbo run` never reaches this Worker. List the variables in `globalPassThroughEnv`.
+  Pass-through values do not join the cache key, so a dummy token gives an identical
+  task hash.
+- **Keep the incremental build cache out of a task's `outputs`.** A `.next/**` glob
+  sweeps in `.next/cache`, and the resulting artifact is large enough that the upload
+  fails without an error — so the task can never hit. Exclude `!.next/cache/**`.
+- **Deploy after you fix.** A fix on `main` is not a fix in production. Re-verify against
+  the live URL with the `status` call above, not against the source.
+
 ## Security notes
 
 - Auth uses a constant-time (`timingSafeEqual`) comparison over UTF-8 bytes to
