@@ -19,8 +19,15 @@
 set -uo pipefail
 
 BIN="$HOME/.local/bin"
-mkdir -p "$BIN" "$HOME/.agents"
-export PATH="$HOME/.kimi-code/bin:$BIN:$PATH"
+# Install npm globals outside nvm. A box built from a snapshot can boot with a
+# different node on PATH than the box the snapshot came from, and anything
+# installed into ~/.nvm/versions/node/<v>/bin then disappears.
+# Pass --prefix per install rather than `npm config set prefix`: the latter
+# writes ~/.npmrc, and nvm warns on every shell when it finds a prefix there.
+NPM_PREFIX="$HOME/.npm-global"
+mkdir -p "$BIN" "$HOME/.agents" "$NPM_PREFIX"
+npm config delete prefix >/dev/null 2>&1
+export PATH="$HOME/.kimi-code/bin:$BIN:$NPM_PREFIX/bin:$PATH"
 
 STATUS_FILE="$HOME/.agents/install-status.txt"
 : > "$STATUS_FILE"
@@ -41,7 +48,7 @@ npm_install() { # <bin-name> <package>
     return 0
   fi
   note "installing $pkg"
-  if npm install -g --no-fund --no-audit "$pkg" >/dev/null 2>&1 && have "$bin"; then
+  if npm install -g --prefix "$NPM_PREFIX" --no-fund --no-audit "$pkg" >/dev/null 2>&1 && have "$bin"; then
     mark "$bin" "installed"
   else
     mark "$bin" "FAILED (npm install $pkg)"
@@ -256,7 +263,12 @@ for rc in "$HOME/.bashrc" "$HOME/.profile"; do
   [ -f "$rc" ] || touch "$rc"
   grep -q 'agent-cli roster PATH' "$rc" 2>/dev/null || cat >> "$rc" <<'RC'
 # agent-cli roster PATH
-export PATH="$HOME/.kimi-code/bin:$HOME/.local/bin:$PATH"
+export PATH="$HOME/.kimi-code/bin:$HOME/.local/bin:$HOME/.npm-global/bin:$PATH"
+# Prefer the newest nvm node; a snapshot can boot on an older system node.
+for d in "$HOME"/.nvm/versions/node/*/bin; do
+  [ -d "$d" ] && NVM_NEWEST="$d"
+done
+[ -n "${NVM_NEWEST:-}" ] && export PATH="$NVM_NEWEST:$PATH"
 RC
 done
 
