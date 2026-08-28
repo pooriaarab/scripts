@@ -49,6 +49,8 @@ skill.
 | `box-setup/` | Provision the personal agent-CLI roster (claude x3, codex, gemini, kimi, pi, muse) inside an ascii.dev Box |
 | `box-warm-shim` | Stand in for the `box` CLI so crabbox can start a Box from a named environment and a warm snapshot |
 | `box-repo-audit` | Per-repo readiness for a warm Box: package manager, tracked files, gzipped tree size, secrets manifest, turbo creds, existing env and snapshot. `--tsv` for parsing |
+| `box-env-provision` | Give a repo a warm `box env`: repo auto-clone, the env files its `.crabbox-secrets` declares, `TURBO_*`, credentials capped. `--all --private-only` does the whole account |
+| `box-git-sync.sh` | Runs inside a Box that already has the repo: fetches the commit the laptop is on instead of uploading a tree |
 | `box-fast-attach` | Attach a worktree to a running Box in ~2s over `box host`, instead of ~84s through crabbox |
 | `box-unpack.sh` | Runs inside a Box: unpacks the delta `box-fast-attach` sends and installs only when the lockfile moved |
 

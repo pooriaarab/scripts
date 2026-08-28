@@ -13,9 +13,12 @@ b64="$1"; dest="$2"; lock="${3:-}"; deletions_b64="${4:-}"
 
 # A caller could pass anything here, so refuse a destination that escapes the
 # work root. os.path.basename-style trimming is not enough: ".." survives it.
+# `box env add-repo` clones to /home/user/<repo>, and box-fast-attach seeds to
+# /home/user/work/<repo>, so both live under the home directory. Require that,
+# reject the home directory itself, and reject any traversal.
 case "$dest" in
-  /home/user/work/*) : ;;
-  *) echo "ERR: destination outside /home/user/work" >&2; exit 2 ;;
+  /home/user/?*) : ;;
+  *) echo "ERR: destination outside /home/user" >&2; exit 2 ;;
 esac
 case "$dest" in
   *..*) echo "ERR: destination contains .." >&2; exit 2 ;;

@@ -77,7 +77,10 @@ if [[ -n "$PREV_BOX" && "$PREV_BOX" != "$BOX_ID" ]]; then
   RESEED=1
 fi
 
-REMOTE_DIR="/home/user/work/$REPO_SLUG"
+# `box env add-repo` clones the repo to <workspace>/<repo>, so prefer that path.
+# A box started from an environment already holds the committed tree and every
+# declared secret, which is the whole point -- there is nothing to upload.
+REMOTE_DIR="${BOX_REMOTE_DIR:-/home/user/$REPO_SLUG}"
 cd "$WORKTREE_ROOT"
 
 # Gitignored files the repo declares in .crabbox-secrets, so this path and
@@ -154,9 +157,39 @@ build_tar() {  # $1 = output path; file list on stdin
   return 0
 }
 
-ensure_unpack() {  # box-unpack.sh must exist on the Box or every delta fails
+ensure_unpack() {  # these must exist on the Box or every delta fails
   [[ -f "$UNPACK_SRC" ]] || { echo "[fast-attach] missing $UNPACK_SRC" >&2; return 1; }
   "$BOX_BIN" scp "$UNPACK_SRC" "$BOX_ID:/home/user/box-unpack.sh" >/dev/null
+  local gs="${UNPACK_SRC%/*}/box-git-sync.sh"
+  [[ -f "$gs" ]] && "$BOX_BIN" scp "$gs" "$BOX_ID:/home/user/box-git-sync.sh" >/dev/null
+}
+
+# If the Box already has the repo (an environment cloned it), do not upload the
+# tree at all. Let the Box fetch from GitHub -- measured 3.2s for a 5,868-file
+# repo against 42.7s to push the same tree up from the laptop -- and then send
+# only the uncommitted work.
+remote_has_repo() {
+  # Use the exit code of a plain `test`, with no shell metacharacters at all.
+  # `box exec` joins argv into a shell command string, so
+  #   bash -c "test -d '$D/.git' && echo yes || echo no"
+  # loses its quotes and degenerates to `bash -c test` plus stray words -- it
+  # answered "no" even when the directory was plainly there.
+  "$BOX_BIN" exec "$BOX_ID" --timeout 60 --json -- test -d "$REMOTE_DIR/.git" 2>/dev/null \
+    | python3 -c 'import sys,json
+try: print("yes" if json.load(sys.stdin).get("exitCode")==0 else "no")
+except Exception: print("no")' 2>/dev/null
+}
+
+sync_via_git() {  # returns non-zero if the Box cannot reach the commit
+  echo "[fast-attach] Box has the repo; fetching $HEAD_SHA there instead of uploading"
+  ensure_unpack
+  "$BOX_BIN" exec "$BOX_ID" --timeout 550 --json -- \
+    bash /home/user/box-git-sync.sh "$REMOTE_DIR" "$HEAD_SHA" "$LOCK_HASH" \
+    | python3 -c 'import sys,json
+d=json.load(sys.stdin)
+print((d.get("stdout") or "").strip())
+import sys as s
+s.exit(0 if d.get("exitCode")==0 else 1)'
 }
 
 send_full() {
@@ -214,7 +247,19 @@ send_delta() {  # $1 = changed paths that exist, $2 = paths deleted locally
 }
 
 if (( RESEED )) || [[ ! -f "$STATE_SHA" ]]; then
-  send_full
+  if [[ "$(remote_has_repo)" == "yes" ]] && sync_via_git; then
+    : # the Box fetched the committed state itself
+  else
+    send_full
+  fi
+  # Uncommitted work never reaches GitHub, so it still has to be sent.
+  DIRTY_NOW="$(printf '%s\n' "$CUR_DIRTY" | sed '/^$/d' | while IFS= read -r c; do [[ -f "$c" ]] && printf '%s\n' "$c"; done)"
+  for sp in "${SECRET_PATHS[@]:-}"; do [[ -f "$sp" ]] && DIRTY_NOW="$DIRTY_NOW"$'\n'"$sp"; done
+  DIRTY_NOW="$(printf '%s\n' "$DIRTY_NOW" | sed '/^$/d' | sort -u)"
+  if [[ -n "$DIRTY_NOW" ]]; then
+    echo "[fast-attach] overlaying $(printf '%s\n' "$DIRTY_NOW" | wc -l | tr -d ' ') uncommitted/secret file(s)"
+    send_delta "$DIRTY_NOW" "" || send_full
+  fi
 else
   prev_sha="$(tr -d '[:space:]' < "$STATE_SHA")"
   prev_dirty="$(cat "$STATE_DIRTY" 2>/dev/null || true)"
