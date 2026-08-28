@@ -24,3 +24,4 @@ The [`agents`](https://github.com/pooriaarab/agents) repo is the hub — a porta
 | `ci-job-timings` | Report real per-job durations (count, median, p95, max, runner) so tiering uses measurements |
 | `ci-cache-health` | Prove the caches work: reads job logs for payload size, primary-key hit rate, and Turborepo remote-cache state, so a cache that is green but never hits cannot hide |
 | `turbo-remote-cache/` | Deployable Cloudflare Worker: a Turborepo remote cache backed by R2 |
+| `box-setup/` | Provision the personal agent-CLI roster (claude x3, codex, gemini, kimi, pi, muse) inside an ascii.dev Box |
