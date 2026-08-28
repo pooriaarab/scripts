@@ -171,3 +171,36 @@ launchctl kickstart -k "gui/$(id -u)/com.pooriaarab.box-reap"
 launchctl list | grep box-reap        # second column must be 0, not 126
 tail ~/.local/state/box-reap/reap.log # the timestamp must advance
 ```
+
+
+## The unbounded Box, and why the guard is not a rule (2026-08-28)
+
+`box new --no-auto-stop` creates a Box with `archiveAfter: null`. No TTL will
+ever fire and the platform will never stop it. Five accumulated in a single
+afternoon, all idle at load 0.00, on track for roughly $155/month.
+
+It surfaced only because `box-reap-cron` started propagating the reaper's exit
+status. `launchctl list` began showing `exit=3` and the log said:
+
+```text
+WARNING: auto-stop is OFF on 2 Box(es) (...); nothing will ever stop them.
+```
+
+Before that fix the wrapper always exited 0 and nobody would have known.
+
+**The fix cannot live at the call site.** `box` is a plain binary that any
+agent, script or session can invoke, and the zsh `box()` wrapper exists only in
+an interactive shell. A convention every caller must remember is not a control.
+
+So `box-guard` repairs the state instead. It sweeps for Boxes with no deadline
+and gives them one with `box extend --ttl`, which sets the remaining lifetime on
+a **running** Box in place — no stop, no restart, so it cannot interrupt real
+work. It runs hourly from `box-reap-cron`, before the reap.
+
+Two things checked while diagnosing this, both worth keeping:
+
+- **`box resume` does NOT drop the TTL.** Create with `--ttl 900`, stop, resume:
+  `archiveAfter` is still set. Resume keeps whatever the Box had, so a Box
+  created with `--no-auto-stop` stays unbounded across resumes.
+- **`box new` with no `--ttl` is fine.** It reports `ttlSeconds: 3600` and sets
+  `archiveAfter` an hour out. The default is safe; only the explicit flag is not.

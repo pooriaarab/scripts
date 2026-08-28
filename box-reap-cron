@@ -41,6 +41,19 @@ AGE="${BOX_REAP_AGE:-45m}"
 # thrown away and the trailing log-rotation `if` becomes the script's exit code,
 # so a reaper that failed on a missing credential or an API error still exits 0
 # and `launchctl list` shows a healthy job while nothing is being stopped.
+# Bound anything unbounded FIRST. `box new --no-auto-stop` leaves
+# `archiveAfter: null` and nothing will ever stop that Box -- five accumulated
+# in one afternoon here, idle, on track for ~$155/month. box-guard only sets a
+# deadline; it never stops a Box, so it cannot interrupt real work.
+GUARD="${BOX_GUARD_BIN:-$HOME/.local/bin/box-guard}"
+[[ -x "$GUARD" ]] || GUARD="$HOME/Documents/Personal/scripts/box-guard"
+if [[ -x "$GUARD" ]]; then
+  {
+    echo "===== $(date -u +%FT%TZ) box-guard --apply"
+    "$GUARD" --apply --ttl "${BOX_GUARD_TTL:-7200}" 2>&1
+  } >> "$LOG" 2>&1
+fi
+
 echo "===== $(date -u +%FT%TZ) box-reap --stop-idle-older-than $AGE --execute" >> "$LOG"
 "$REAP" --stop-idle-older-than "$AGE" --execute >> "$LOG" 2>&1
 rc=$?

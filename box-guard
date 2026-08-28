@@ -1,0 +1,88 @@
+#!/usr/bin/env bash
+# Give every Box a deadline. Never stops anything.
+#
+# THE PROBLEM
+# `box new --no-auto-stop` creates a Box with `archiveAfter: null`. Nothing will
+# ever stop it -- not a TTL, not the platform. It bills $0.036/h until a human
+# notices. Six accumulated here in one afternoon, idle at load 0.00, on track
+# for ~$155/month.
+#
+# WHY A GUARD AND NOT A RULE
+# You cannot enforce this at the call site. The `box` CLI is a plain binary that
+# any agent, script or session can invoke, and the zsh `box()` wrapper only
+# exists in an interactive shell. A convention that depends on every caller
+# remembering a flag is not a control. So repair the state instead of policing
+# the callers: sweep for Boxes with no deadline and give them one.
+#
+# `box extend --ttl` sets the remaining lifetime on a RUNNING Box in place. It
+# does not stop, restart or disturb it. A Box doing real work keeps working; it
+# just now has an end.
+#
+#   box-guard              report Boxes with no deadline
+#   box-guard --apply      give each of them one (default 1h)
+#   box-guard --apply --ttl 7200
+#
+# Pair it with box-reap: this one bounds the worst case, box-reap reclaims the
+# idle ones sooner. A Box that must genuinely outlive its TTL should carry
+# ~/.box-reap-keep and be extended deliberately.
+set -uo pipefail
+export PATH="$HOME/.ascii/bin:$PATH"
+BOX="${BOX_CLI:-$HOME/.ascii/bin/box}"
+
+for S in "$HOME/.config/ascii-box/env" "$HOME/Documents/Personal/.secrets/crabbox.env"; do
+  [[ -r "$S" ]] && { set -a; . "$S"; set +a; break; }
+done
+
+APPLY=0; TTL=3600
+while (( $# )); do
+  case "$1" in
+    --apply) APPLY=1; shift ;;
+    --ttl) TTL="${2:?--ttl needs seconds}"; shift 2 ;;
+    -h|--help) sed -n '2,28p' "$0"; exit 0 ;;
+    *) echo "box-guard: unknown argument $1" >&2; exit 2 ;;
+  esac
+done
+
+listing="$("$BOX" list --json 2>/dev/null)" || { echo "box-guard: cannot list Boxes" >&2; exit 1; }
+mapfile_compat() { while IFS= read -r l; do [[ -n "$l" ]] && printf '%s\n' "$l"; done; }
+UNBOUNDED="$(printf '%s' "$listing" | python3 -c '
+import sys, json
+try:
+    boxes = json.load(sys.stdin).get("boxes", [])
+except Exception:
+    sys.exit(0)
+for b in boxes:
+    if not b.get("archiveAfter"):
+        print("%s\t%s\t%s" % (b["id"], b.get("state","?"), b.get("environment","-")))
+' | mapfile_compat)"
+
+if [[ -z "$UNBOUNDED" ]]; then
+  echo "box-guard: every running Box has a deadline."
+  exit 0
+fi
+
+n=0
+while IFS=$'\t' read -r id state env; do
+  [[ -z "$id" ]] && continue
+  n=$((n+1))
+  if (( APPLY )); then
+    if "$BOX" extend "$id" --ttl "$TTL" >/dev/null 2>&1; then
+      after="$("$BOX" info "$id" --json 2>/dev/null | python3 -c '
+import sys,json
+try: print(json.load(sys.stdin)["box"].get("archiveAfter") or "STILL NONE")
+except Exception: print("?")')"
+      echo "  bounded $id ($state, env=$env) -> $after"
+    else
+      echo "  FAILED to bound $id ($state, env=$env)" >&2
+    fi
+  else
+    echo "  UNBOUNDED $id ($state, env=$env) -- nothing will ever stop it"
+  fi
+done <<< "$UNBOUNDED"
+
+if (( APPLY )); then
+  echo "box-guard: gave $n Box(es) a ${TTL}s deadline."
+else
+  echo "box-guard: $n Box(es) have no deadline. Re-run with --apply to bound them."
+  exit 1
+fi
