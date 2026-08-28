@@ -1,0 +1,100 @@
+#!/usr/bin/env bash
+# Measure the Box path end to end and flag regressions against a baseline.
+#
+# WHY: the slow failures here are invisible. `box-fast-attach` silently fell
+# back to a full tree upload when a helper was missing on the Box, turning a 2s
+# attach into 100s while still reporting success. Nothing failed, nothing
+# logged, it was just 50x slower. A green run proves nothing; only a timing does.
+#
+#   box-perf-check <repo>            measure and compare against the baseline
+#   box-perf-check <repo> --baseline record the current numbers as the baseline
+#
+# It reuses a warm Box if one exists, so a check costs seconds, not a start.
+set -uo pipefail
+export PATH="$HOME/.ascii/bin:$PATH"
+STATE="${XDG_STATE_HOME:-$HOME/.local/state}/box-perf"
+mkdir -p "$STATE"
+BOXWORK="${BOX_WORK_BIN:-$HOME/.local/bin/box-work}"
+[[ -x "$BOXWORK" ]] || BOXWORK="$HOME/Documents/Personal/scripts/box-work"
+ATTACH="$HOME/Documents/Personal/scripts/box-fast-attach"
+[[ -x "$ATTACH" ]] || ATTACH="$HOME/.local/bin/box-fast-attach"
+
+# Tolerance before we call it a regression. Generous on purpose: the hardware
+# lottery alone moves these numbers, so only a real change should trip it.
+FACTOR="${BOX_PERF_FACTOR:-2.5}"
+
+REPO="${1:?usage: box-perf-check <repo> [--baseline]}"; shift || true
+MODE="${1:-check}"
+
+resolve() {
+  local a="$1" d
+  [[ -d "$a" ]] && { git -C "$a" rev-parse --show-toplevel 2>/dev/null; return; }
+  for root in "$HOME/Documents/Personal" "$HOME/code" "$HOME/nova-wt"; do
+    [[ -d "$root" ]] || continue
+    while IFS= read -r g; do
+      d="$(dirname "$g")"
+      case "$d" in *"/worktrees/"*|*/node_modules/*) continue ;; esac
+      [[ "$(basename -s .git "$(git -C "$d" remote get-url origin 2>/dev/null)")" == "$a" ]] && { printf '%s\n' "$d"; return; }
+    done < <(find "$root" -maxdepth 4 -name .git 2>/dev/null)
+  done
+  return 1
+}
+DIR="$(resolve "$REPO")" || { echo "no local clone for $REPO" >&2; exit 2; }
+NAME="$(basename -s .git "$(git -C "$DIR" remote get-url origin)")"
+IDFILE="${XDG_STATE_HOME:-$HOME/.local/state}/box-work/$NAME.id"
+
+"$BOXWORK" "$DIR" >/dev/null 2>&1 || { echo "could not get a Box for $NAME" >&2; exit 1; }
+ID="$(tr -d '[:space:]' < "$IDFILE")"
+
+now() { python3 -c 'import time;print(time.time())'; }
+elapsed() { python3 -c "print(f'{$2-$1:.2f}')"; }
+
+cd "$DIR"
+# 1. a no-op attach: pure round-trip cost
+a0=$(now); "$ATTACH" >/dev/null 2>&1; a1=$(now); T_NOOP=$(elapsed "$a0" "$a1")
+# 2. one changed file: the common case.
+# The probe MUST be a git-TRACKED file. box-fast-attach reads
+# `git status --untracked-files=no`, so an untracked probe is invisible and the
+# "delta" measurement silently degrades into a second no-op -- the check would
+# then report a healthy number while measuring nothing.
+PROBE="$(git ls-files | grep -iE '(^|/)(README|readme)[^/]*$' | head -1)"
+[[ -n "$PROBE" ]] || PROBE="$(git ls-files | head -1)"
+if [[ -n "$PROBE" && -f "$PROBE" ]]; then
+  cp "$PROBE" "$STATE/.probe-backup"
+  printf '\n<!-- box-perf-check %s -->\n' "$(date -u +%FT%TZ)" >> "$PROBE"
+  b0=$(now); "$ATTACH" >/dev/null 2>&1; b1=$(now); T_DELTA=$(elapsed "$b0" "$b1")
+  cp "$STATE/.probe-backup" "$PROBE"; rm -f "$STATE/.probe-backup"
+  "$ATTACH" >/dev/null 2>&1
+else
+  T_DELTA="$T_NOOP"
+fi
+# 3. a trivial round trip to the Box
+c0=$(now); box exec "$ID" --timeout 60 -- true >/dev/null 2>&1; c1=$(now); T_EXEC=$(elapsed "$c0" "$c1")
+
+BASE="$STATE/$NAME.baseline"
+if [[ "$MODE" == "--baseline" ]]; then
+  printf 'noop=%s\ndelta=%s\nexec=%s\n' "$T_NOOP" "$T_DELTA" "$T_EXEC" > "$BASE"
+  echo "baseline recorded for $NAME: noop=${T_NOOP}s delta=${T_DELTA}s exec=${T_EXEC}s"
+  exit 0
+fi
+
+printf 'now:  noop=%ss delta=%ss exec=%ss\n' "$T_NOOP" "$T_DELTA" "$T_EXEC"
+[[ -f "$BASE" ]] || { echo "no baseline yet; run: box-perf-check $NAME --baseline"; exit 0; }
+# shellcheck disable=SC1090
+. "$BASE"
+printf 'base: noop=%ss delta=%ss exec=%ss\n' "$noop" "$delta" "$exec"
+python3 - "$T_NOOP" "$T_DELTA" "$T_EXEC" "$noop" "$delta" "$exec" "$FACTOR" <<'PY'
+import sys
+cur = dict(zip(("noop","delta","exec"), map(float, sys.argv[1:4])))
+base = dict(zip(("noop","delta","exec"), map(float, sys.argv[4:7])))
+factor = float(sys.argv[7])
+bad = []
+for k in cur:
+    if base[k] > 0 and cur[k] > base[k] * factor:
+        bad.append("%s %.2fs vs %.2fs baseline (%.1fx)" % (k, cur[k], base[k], cur[k]/base[k]))
+if bad:
+    print("REGRESSION:")
+    for b in bad: print("  " + b)
+    sys.exit(1)
+print("OK: within %.1fx of baseline" % factor)
+PY

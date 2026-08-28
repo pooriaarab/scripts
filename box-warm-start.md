@@ -248,7 +248,7 @@ Streaming a tar into `box ssh` gives a working ~6.7s attach. Good, not 2s.
 that never touches SSH. Put a small receiver on that port, POST the tree to it,
 and let it extract and decide about installing:
 
-```
+```text
 attach 1:  2.23s   attach 4:  1.82s
 attach 2:  1.99s   attach 5:  1.86s
 attach 3:  1.87s
@@ -271,7 +271,7 @@ mistake was mine, not the platform's. The blob was interpolated into a
 
 Passed as its **own argv word**, the payload arrives intact:
 
-```
+```text
 sent 100000 chars -> box received 100000
 sent 130000 chars -> box received 130000
 sent 150000 chars -> E2BIG: argument list too long, posix_spawn 'bash'
@@ -291,7 +291,7 @@ Detecting *what* changed turned out to cost more than sending it. Hashing 694
 files with one `shasum` process each took 8.4s locally, against 0.6s of actual
 work on the Box. Asking git instead is free.
 
-```
+```text
 seed (full tree, once) .......... 7.43s
 attach, nothing changed ......... 0.43 / 0.72s
 attach, one changed file ........ 1.41 / 1.49 / 1.51s
@@ -327,7 +327,7 @@ reported success. Pass it as an argument.
 
 Hardening cost nothing measurable:
 
-```
+```text
 attach, nothing changed .... 1.62 / 1.81s
 attach, one changed file ... 1.49 / 1.53 / 1.97s
 ```
@@ -377,7 +377,7 @@ Both produced a confident, fast, wrong answer:
 Content Rabbit is the worst case here: 5,699 tracked files, a 29 MB gzipped
 tree, a large bun monorepo.
 
-```
+```text
 seed (once per Box) ......... 42.7s
 attach, nothing changed ..... 1.99 / 2.06s
 attach, one changed file .... 1.80 / 1.92 / 2.00s
@@ -442,7 +442,7 @@ looked like success:
 
 Final numbers after all of it:
 
-```
+```text
 seed .......................... 12.0s
 attach, nothing changed ....... 1.53 / 1.55s
 attach, one changed file ...... 1.35 / 1.50 / 1.53s
@@ -491,7 +491,7 @@ the laptop. Uploading was always the wrong direction.
 writes the gitignored env files in. One `box new --environment content-rabbit`
 now gives, with **nothing uploaded**:
 
-```
+```text
 box ready and usable ................ 8.4 - 10.7s
   repo cloned, 5,870 files, on main
   content-rabbit/.env.local ......... 7 keys
@@ -590,7 +590,7 @@ The two credential switches deserve opposite answers:
 The attach is a `git()` shell function in `~/.zshrc` that intercepts
 `git worktree add`. A shell function exists only in an interactive zsh:
 
-```
+```text
 zsh -ic 'whence -w git'   ->  git: function
 zsh  -c 'whence -w git'   ->  git: command
 ```
@@ -636,6 +636,131 @@ nothing to run them.
 One shared `agent-roster-ready` snapshot serves every repo, so the **10 named
 snapshots per account** cap never binds. There is no need for a snapshot per
 repo.
+
+## Running the work on a Box instead of the laptop
+
+This is the point of the whole exercise, and it is a different thing from
+attaching. Attaching keeps a Box in sync with your checkout. **`box-work`**
+starts a Box that is ready to work and runs the job there.
+
+```sh
+box-work <repo>                      # start or reuse; syncs your uncommitted edits
+box-work <repo> --agent pi "brief"   # run one agent on the Box, headless
+box-work <repo> --ssh                # a shell on the Box
+box-work <repo> --stop               # stop it
+box-work --list / --stop-all
+```
+
+Measured:
+
+```text
+first start for a repo ........ ~100s  (snapshot restore + git fetch + install)
+reuse an existing Box ......... 4.1s
+one agent doing real work ..... 24.0s
+```
+
+Verified end to end, not inferred: `box-work adscapi --agent pi "...89 times 97..."`
+created `BOX_PROOF.md` containing `8633` **on the Box**, and the laptop copy of
+the repo was untouched.
+
+Three repos in parallel — three Boxes, three agents, one command each —
+finished in **129.6s wall clock**, each agent returning its own repo's correct
+`git ls-files` count (DishRadar 80, supportsheep 1497, usegeoaeo 293).
+
+The economics: a Box is 4 vCPU / 8 GB against a 12-core / 36 GB laptop, so a
+single Box is not faster. Ten of them are, and the laptop stays free. The cap is
+100 concurrent Boxes; the binding limit is **50 starts per hour**, so keep Boxes
+warm and reuse them rather than starting one per task. At $0.036/h, ten Boxes
+running for an hour is 36 cents.
+
+### The brief has to be base64
+
+`box-work --agent pi "Create a file named ..."` first delivered only the word
+`Create`. `box exec` joins argv into a shell command string, so a multi-word
+brief is split across argv and the agent sees just the first word. It then asks
+a clarifying question and does nothing, while the call reports success. The
+brief is base64-encoded now. Same lesson as the payload and the delete list:
+give `box exec` one shell-safe word.
+
+### T3 Code, concretely
+
+A T3 thread runs the agent on the laptop, always. T3 shells out to provider CLIs
+on its own disk, so there is no per-thread Box to arrange, and pointing a
+provider `binaryPath` at a Box wrapper gives a green thread that changed
+nothing. Two real options:
+
+- **Run the work with `box-work` instead of in a T3 thread** when the job is
+  heavy or you want several at once. This is the tested path.
+- **Run the whole T3 server on a Box** and reach it over `box host`. Then T3's
+  "own disk" is the Box. That is one Box for all threads, not one per repo. The
+  shape is written up in `t3-code-on-a-box.md`.
+
+## When a Box starts, and when it stops
+
+`box-work` was a command you had to remember. `box-session` makes it automatic
+by hanging off the agent harness's own session hooks:
+
+```
+SessionStart -> box-session start   # warms a Box for this repo in the background
+SessionEnd   -> box-session end     # stops it
+```
+
+Wired into `~/.claude-personal{,-1,-2}/settings.json` (personal only; the work
+config is untouched). Two gates keep it honest:
+
+- **Opt-in per repo.** No `.crabbox-default-on` marker at the repo root, no Box,
+  no cost. Today that is 4 repos, not 61.
+- **Non-blocking.** A cold start is ~100s and a session must never wait on it.
+  The hook forks and returns in **0.38s measured**. By the time you have read
+  the diff, the Box is up; `box-work <repo>` then reuses it in ~4s.
+
+Verified end to end: the hook returned in 0.38s, the Box came up in the
+background, and it had the repo (123,159 files with deps), the 221-key
+`apps/website/.env.local`, 3 `TURBO_*` vars, **1.9 GB of installed
+node_modules**, and all six agent CLIs. `SessionEnd` stopped it.
+
+Three independent things stop a Box, which is the right number for something
+that bills by the second: the session hook, the 60-minute default TTL, and the
+hourly `box-reap`.
+
+## Watch the timings, not the exit codes
+
+The expensive failures here are silent. `box-fast-attach` fell back to a full
+tree upload when a helper was missing on the Box: exit 0, no warning, **50x
+slower**. Nothing but a stopwatch catches that.
+
+`box-perf-check <repo>` measures a no-op attach, a real one-file delta and a
+bare `box exec` round trip, and compares them against a recorded baseline.
+`com.pooriaarab.box-perf` runs it weekly.
+
+Proof it works — helpers deleted from the Box:
+
+```text
+now:  noop=0.51s delta=13.15s exec=0.91s
+base: noop=0.52s delta=1.43s  exec=0.93s
+REGRESSION:
+  delta 13.15s vs 1.43s baseline (9.2x)
+```
+
+**The probe has to be a git-tracked file.** My first version wrote an untracked
+one, and `box-fast-attach` reads `git status --untracked-files=no`, so the probe
+was invisible and the "delta" silently became a second no-op. The check reported
+a healthy 0.41s while measuring nothing — the same class of bug it exists to
+catch.
+
+## The reaper's exit code immediately earned its keep
+
+Making `box-reap-cron` propagate the reaper's status (it used to always exit 0)
+turned up a real problem within minutes: `launchctl list` started showing
+`exit=3`, and the log said
+
+```text
+WARNING: auto-stop is OFF on 2 Box(es) (...); nothing will ever stop them.
+```
+
+Two Boxes had been started with `--no-auto-stop`, so `archiveAfter` was null and
+no TTL would ever fire. Both were idle at load 0.00. Before the fix this exited
+0 and nobody would have known.
 
 ## Still open
 
