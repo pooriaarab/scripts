@@ -262,6 +262,33 @@ transport. About **45x faster than crabbox's ~84s**.
 Setup costs ~10s once per Box; every attach after that is ~2s. Install is
 skipped unless the lockfile hash actually moves.
 
+### Keep the hosted port token-gated
+
+`box host <id> <port>` defaults to `--private` and returns a URL with a
+`?_token=` on it. **Do not pass `--public`.** The receiver extracts a tar into
+the Box, so an ungated URL lets anyone who guesses the subdomain write arbitrary
+files there. I used `--public` while prototyping, which was wrong. Verified
+after the fix: a POST with no token returns `403 Access denied`.
+
+The gated URL needs one extra step. It answers with a 302 that sets a session
+cookie, and curl turns a 302 into a GET and drops the body — so POSTing straight
+at the token URL uploads nothing and says nothing. Do the handshake once into a
+cookie jar, then POST the bare URL with that jar. Token-gated attach measures
+1.68 / 1.77 / 1.79s, no worse than the ungated one.
+
+The URL and the cookie jar both carry live credentials, so `box-fast-attach`
+keeps them in `~/.local/state/box-fast-attach/<hash>` at mode 700, never in the
+worktree where they could be committed.
+
+### There is a first-party file API, and it may be better still
+
+The docs describe `PUT /boxes/{boxId}/files` and `GET /boxes/{boxId}/files` on
+`https://ascii.dev/api/box/v1`, alongside the `POST /boxes/{boxId}/commands`
+that `box exec` already uses. That is the same HTTPS transport that makes
+`box exec` a 1.2s call, and it needs no receiver process and no exposed port —
+so it would likely be a bit faster than this and strictly safer. I have not
+measured it. It is the first thing to try next.
+
 ### Two bugs in this that are worth remembering
 
 Both produced a confident, fast, wrong answer:

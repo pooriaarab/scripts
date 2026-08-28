@@ -52,8 +52,13 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-ID_FILE="$WORKTREE_ROOT/.box-fast-id"
-URL_FILE="$WORKTREE_ROOT/.box-fast-url"
+# State lives OUTSIDE the worktree. The hosted-port URL carries an access token
+# and the cookie jar holds a live session, so neither belongs anywhere near a
+# git tree where it could be committed.
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/box-fast-attach/$(printf '%s' "$WORKTREE_ROOT" | shasum | cut -d' ' -f1)"
+mkdir -p "$STATE_DIR"; chmod 700 "$STATE_DIR"
+ID_FILE="$STATE_DIR/box-id"
+URL_FILE="$STATE_DIR/url"
 [[ -z "$BOX_ID" && -f "$ID_FILE" ]] && BOX_ID="$(tr -d '[:space:]' < "$ID_FILE")"
 [[ -n "$BOX_ID" ]] || { echo "[fast-attach] no Box id. Run once with --box bx_xxx --setup." >&2; exit 2; }
 printf '%s\n' "$BOX_ID" > "$ID_FILE"
@@ -63,13 +68,25 @@ if (( DO_SETUP )); then
   "$BOX_BIN" scp "$RECEIVER" "$BOX_ID:/home/user/box-attach-receiver.py" >/dev/null
   "$BOX_BIN" exec "$BOX_ID" --timeout 60 -- pkill -f box-attach-receiver.py >/dev/null 2>&1 || true
   "$BOX_BIN" exec "$BOX_ID" --detach -- python3 /home/user/box-attach-receiver.py >/dev/null
-  URL="$("$BOX_BIN" host "$BOX_ID" "$PORT" --public --json | python3 -c 'import sys,json;print(json.load(sys.stdin)["url"])')"
+  # --private (the default) returns a token-gated URL. Do NOT use --public: the
+  # receiver extracts a tar into the Box, so an ungated URL lets anyone who
+  # guesses it write arbitrary files there.
+  URL="$("$BOX_BIN" host "$BOX_ID" "$PORT" --private --json | python3 -c 'import sys,json;d=json.load(sys.stdin);u=d["url"];t=d.get("token") or d.get("_token");print(u+("?_token="+t if t and "_token=" not in u else ""))')"
   printf '%s\n' "$URL" > "$URL_FILE"
   echo "[fast-attach] receiver hosted at $URL"
 fi
 
 [[ -f "$URL_FILE" ]] || { echo "[fast-attach] no hosted URL. Re-run with --setup." >&2; exit 2; }
 URL="$(tr -d '[:space:]' < "$URL_FILE")"
+BASE_URL="${URL%%\?*}"
+JAR="$STATE_DIR/cookies"
+
+# A token-gated hosted port answers the ?_token= URL with a 302 that sets a
+# session cookie. curl turns a 302 into a GET and drops the body, so POSTing
+# straight at the token URL silently uploads nothing. Do the handshake once,
+# keep the cookie, then POST against the bare URL.
+gated_get() { curl -s -c "$JAR" -L -o /dev/null "$URL" || true; }
+[[ -s "$JAR" ]] || gated_get
 
 cd "$WORKTREE_ROOT"
 
@@ -101,10 +118,18 @@ printf '%s\n' "$FILES" \
   | COPYFILE_DISABLE=1 tar -czhf /tmp/box-fast-attach.$$.tgz -T - 2>/dev/null
 trap 'rm -f /tmp/box-fast-attach.$$.tgz' EXIT
 
-resp="$(curl -sS --fail-with-body -X POST \
-  -H "X-Repo: $REPO_SLUG" -H "X-Lock-Hash: $LOCK_HASH" \
-  --data-binary "@/tmp/box-fast-attach.$$.tgz" "$URL")" || {
-    echo "[fast-attach] upload failed: $resp" >&2; exit 1; }
+post() {
+  curl -sS --fail-with-body -b "$JAR" -X POST \
+    -H "X-Repo: $REPO_SLUG" -H "X-Lock-Hash: $LOCK_HASH" \
+    --data-binary "@/tmp/box-fast-attach.$$.tgz" "$BASE_URL"
+}
+resp="$(post || true)"
+# The session cookie expires. One silent retry after a fresh handshake keeps a
+# long-lived worktree working without the caller noticing.
+case "$resp" in
+  *extract_rc=*) ;;
+  *) gated_get; resp="$(post || true)" ;;
+esac
 
 echo "[fast-attach] $resp"
 case "$resp" in
