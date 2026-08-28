@@ -23,3 +23,4 @@ The [`agents`](https://github.com/pooriaarab/agents) repo is the hub — a porta
 | `ci-pr-latency` | The metric to optimise against: wall-clock latency (what you wait for) and machine seconds (what you pay for), reported separately |
 | `ci-job-timings` | Report real per-job durations (count, median, p95, max, runner) so tiering uses measurements |
 | `turbo-remote-cache/` | Deployable Cloudflare Worker: a Turborepo remote cache backed by R2 |
+| `box-setup/` | Provision the personal agent-CLI roster (claude x3, codex, gemini, kimi, pi, muse) inside an ascii.dev Box |
