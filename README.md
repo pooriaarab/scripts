@@ -46,11 +46,13 @@ skill.
 | `box-reap` | Report what ascii.dev Boxes are costing and stop the unused ones. Never reaps on Box state, which lies |
 | `turbo-remote-cache/` | Deployable Cloudflare Worker: a Turborepo remote cache backed by R2 |
 | `box-setup/` | Provision the personal agent-CLI roster (claude x3, codex, gemini, kimi, pi, muse) inside an ascii.dev Box |
+| `box-warm-shim` | Stand in for the `box` CLI so crabbox can start a Box from a named environment and a warm snapshot |
 
 ## Notes
 
 | Doc | What |
 |---|---|
 | `box-cost-discipline.md` | How to keep ascii.dev Boxes cheap, and why `state: idle` is not an idleness signal |
+| `box-warm-start.md` | Where the ~77s Box attach actually goes, and what a warm snapshot does and does not buy |
 | `t3-code-on-a-box.md` | Running T3 Code on a Box and reaching it over `box host` |
 | `silent-failover-discipline.md` | Why a working primary/backup credential failover can take a whole fleet down silently, and what to alert on instead |
