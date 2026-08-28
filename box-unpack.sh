@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
 # Runs inside an ascii.dev Box. Unpacks the delta box-fast-attach sends.
 #   $1 = base64 of a gzipped tar   $2 = destination dir
-#   $3 = lockfile hash              $4 = newline-separated paths to delete
+#   $3 = lockfile hash              $4 = base64 of the newline-separated
+#                                        paths to delete
 #
 # The payload arrives as its OWN argv word, never interpolated into a -c
 # string: `bash -lc "...$VAR"` mangles a large blob into a single byte and
 # still exits 0.
 set -euo pipefail
 
-b64="$1"; dest="$2"; lock="${3:-}"; deletions="${4:-}"
+b64="$1"; dest="$2"; lock="${3:-}"; deletions_b64="${4:-}"
 
 # A caller could pass anything here, so refuse a destination that escapes the
 # work root. os.path.basename-style trimming is not enough: ".." survives it.
@@ -31,11 +32,17 @@ fi
 tar -xzf "$tmp" --warning=no-unknown-keyword -C "$dest"
 
 # Delete files the caller says are gone. Same escape checks apply.
-# This arrives as an ARGUMENT, not an environment variable: `box exec` runs the
-# command on the Box, so a variable exported around the local `box` process
-# never reaches it. That silently skipped every deletion.
-if [ -n "$deletions" ]; then
-  printf '%s\n' "$deletions" | while IFS= read -r rel; do
+#
+# Two things this argument has already got wrong:
+#  - it was an environment variable first. `box exec` runs the command on the
+#    Box, so a variable exported around the local `box` process never arrives,
+#    and every deletion was skipped while the call still reported success.
+#  - then it was a raw newline-separated argument. `box exec` joins argv into a
+#    shell command string, so an embedded newline ended the line and ran the
+#    next path as a command ("bash: docs/space: No such file or directory").
+# Base64 keeps it to a single word with no shell-significant characters.
+if [ -n "$deletions_b64" ]; then
+  printf '%s' "$deletions_b64" | base64 -d | while IFS= read -r rel; do
     [ -z "$rel" ] && continue
     case "$rel" in /*|*..*) continue ;; esac
     rm -f "$dest/$rel"

@@ -414,6 +414,40 @@ repos would fix it.
 It does not block anything here. `box-fast-attach` pushes the tree from the
 laptop and never asks GitHub, so a private repo warms exactly like a public one.
 
+## The second review pass, and seven more bugs
+
+The follow-up council review found four Major and three Minor issues. All seven
+were real. Fixed and each verified against a live Box:
+
+| finding | fix | proof |
+|---|---|---|
+| `box-reap-cron` discarded the reaper's exit status, so launchd showed a healthy job while nothing was being stopped | run the reaper outside the redirect block, capture `$?`, `exit "$rc"` | stub reaper exiting 3 -> wrapper exits 3; real reaper -> 0 |
+| the full seed wrote the lock marker even when the install failed | same guard the delta path already had | seed with a broken lockfile -> exit 1, no marker |
+| files listed in `.crabbox-secrets` were never re-checked after the first seed, so an edited `.env.local` left stale credentials on the Box | hash the declared secret files and diff that fingerprint each run | edited `.env.local` -> synced, probe line read back off the Box |
+| the Box id was recorded before the seed succeeded, so a failed seed left the next run taking the delta branch against an empty Box | write every state file only after the transfer returns 0 | failed seed -> no state files written |
+| `box-unpack.sh` was never actually copied to the Box | the seed ships it | fresh Box with no unpack script -> present after seed |
+| `git status | awk '{print $NF}'` truncated any path containing a space and then misclassified it as deleted | `git status -z` with NUL-aware parsing | `docs/space test/a file.md` -> synced, then deleted correctly |
+| the full seed never removed files deleted locally | clear the destination first, keeping `node_modules` and the lock marker | deleted file -> gone after reseed |
+
+Two of my own bugs surfaced while fixing those, both worth naming because both
+looked like success:
+
+- **macOS `bsdtar` exits 1 on warnings.** With `set -o pipefail` that failed the
+  seed *after* it had already completed on the Box. Treat 0 and 1 as success,
+  and confirm the archive lists.
+- **`box exec` joins argv into a shell command string.** A newline inside an
+  argument ends the line, so the next path ran as a command
+  (`bash: docs/space: No such file or directory`). The delete list is base64 now.
+  This is the same lesson as the payload: give `box exec` one shell-safe word.
+
+Final numbers after all of it:
+
+```
+seed .......................... 12.0s
+attach, nothing changed ....... 1.53 / 1.55s
+attach, one changed file ...... 1.35 / 1.50 / 1.53s
+```
+
 ## Still open
 
 - **Content Rabbit has no warm snapshot yet.** Its repo is not connected to the
