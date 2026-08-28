@@ -123,17 +123,17 @@ collect_changed() {
 send_full() {
   echo "[fast-attach] seeding the full tree over box ssh"
   printf '%s\n' "${FILES[@]}" \
-    | COPYFILE_DISABLE=1 tar -czhf - -T - 2>/dev/null \
+    | COPYFILE_DISABLE=1 tar --no-xattrs -czhf - -T - 2>/dev/null \
     | "$BOX_BIN" ssh "$BOX_ID" -- "mkdir -p '$REMOTE_DIR' && tar -xzf - --warning=no-unknown-keyword -C '$REMOTE_DIR' && cd '$REMOTE_DIR' && { prev=\$(cat .box-lock-hash 2>/dev/null || true); if [ \"\$prev\" != '$LOCK_HASH' ]; then bun install --frozen-lockfile >/dev/null 2>&1 || bun install >/dev/null 2>&1; printf %s '$LOCK_HASH' > .box-lock-hash; echo 'seeded installed=yes'; else echo 'seeded installed=no'; fi; }"
 }
 
 send_delta() {  # $1 = changed paths that exist, $2 = paths deleted locally
   local changed="$1" deleted="${2:-}" b64
   if [[ -n "$changed" ]]; then
-    COPYFILE_DISABLE=1 tar -czhf "$STATE_DIR/delta.tgz" -T <(printf '%s\n' "$changed") 2>/dev/null
+    COPYFILE_DISABLE=1 tar --no-xattrs -czhf "$STATE_DIR/delta.tgz" -T <(printf '%s\n' "$changed") 2>/dev/null
   else
     # An empty tar still gives box-unpack.sh something valid to extract.
-    COPYFILE_DISABLE=1 tar -czf "$STATE_DIR/delta.tgz" -T /dev/null 2>/dev/null
+    COPYFILE_DISABLE=1 tar --no-xattrs -czf "$STATE_DIR/delta.tgz" -T /dev/null 2>/dev/null
   fi
   b64="$(base64 -i "$STATE_DIR/delta.tgz" | tr -d '\n')"
   if (( ${#b64} > MAX_ARG )); then return 3; fi

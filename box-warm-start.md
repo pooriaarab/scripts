@@ -372,6 +372,48 @@ Both produced a confident, fast, wrong answer:
   a consistent 90s. The timing looked stable, so it read as a real measurement
   rather than a bug. Use `ThreadingHTTPServer` and send `Connection: close`.
 
+## It holds on the biggest repo, and what it costs per repo
+
+Content Rabbit is the worst case here: 5,699 tracked files, a 29 MB gzipped
+tree, a large bun monorepo.
+
+```
+seed (once per Box) ......... 42.7s
+attach, nothing changed ..... 1.99 / 2.06s
+attach, one changed file .... 1.80 / 1.92 / 2.00s
+```
+
+Same shape as the 1.1 MB repo, because the steady-state cost is one `box exec`
+round trip and not the size of the tree. Only the one-time seed scales.
+
+`scripts/box-repo-audit` reports readiness per repo. Across 95 locally-cloned
+`pooriaarab/*` repos, 46 have a lockfile and are candidates. The seed cost is
+the number to plan against:
+
+| repo | pkg | files | tree gz |
+|---|---|---|---|
+| content-rabbit | bun | 5,776 | 29 MB |
+| popcornteam | bun | 11,744 | 21 MB |
+| nova | bun | 11,041 | 20 MB |
+| pooriaarab.com | npm | 792 | 16 MB |
+| beeloud | npm | 752 | 16 MB |
+| replytosocial | bun | 693 | 1.1 MB |
+| imecore | bun | 892 | 1.9 MB |
+
+The audit takes `--tsv` for parsing. It has to: one repo path contains a space,
+so parsing the aligned table with `awk $NF` silently truncates it.
+
+### The GitHub app is scoped to public repos only
+
+`box env add-repo` fails for every private repo, and so does an in-box
+`gh repo clone`. Measured from inside a Box: the token sees **44 public repos
+and 0 private ones**, so content-rabbit, imecore, replytosocial, popcornteam
+and agents-private all 404. Granting the ascii GitHub App access to private
+repos would fix it.
+
+It does not block anything here. `box-fast-attach` pushes the tree from the
+laptop and never asks GitHub, so a private repo warms exactly like a public one.
+
 ## Still open
 
 - **Content Rabbit has no warm snapshot yet.** Its repo is not connected to the
