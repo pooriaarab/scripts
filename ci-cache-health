@@ -1,0 +1,685 @@
+#!/usr/bin/env bash
+# Prove CI caches actually work. Reads job logs and reports payload sizes,
+# primary-key hit rates, and Turborepo remote-cache health, so a cache that is
+# configured, green, and never hitting cannot hide.
+# Usage: ci-cache-health owner/repo [--limit N] [--json] [--min-cache-bytes N]
+# Default limit is 12. This reads job logs, so it is slower than ci-job-timings.
+set -euo pipefail
+
+usage() {
+  cat <<'USAGE'
+Usage: ci-cache-health owner/repo [--limit N] [--json] [--min-cache-bytes N]
+  owner/repo             repository to inspect (e.g. pooriaarab/popcornteam)
+  --limit N              how many recent completed runs to read (default: 12)
+  --min-cache-bytes N    flag a cache payload smaller than N bytes (default: 1048576)
+  --json                 machine-readable JSON output
+  --help                 show this help
+
+Reads the log of every job in the selected runs (one API call per job), so it is
+much slower than ci-job-timings. A low --limit is enough for this signal.
+
+Reports three things per repo:
+  A  actions/cache steps whose payload is suspiciously small (an empty cache
+     still logs "Cache restored successfully" in green)
+  B  actions/cache steps that never hit their primary key, only a restore-key
+     prefix, which means the key can never match
+  C  Turborepo remote-cache state ("Remote caching disabled") and the share of
+     turbo tasks served from cache
+USAGE
+}
+
+REPO=""
+LIMIT=12
+MIN_BYTES=1048576
+JSON=0
+PARALLEL=8
+POSITIONAL=()
+
+# Force base-10: a bare (( )) treats a leading zero (e.g. "08") as octal, which
+# is invalid and errors out instead of just being 8.
+parse_positive_int() {
+  local value="$1" flag="$2"
+  if ! [[ "$value" =~ ^[0-9]+$ ]]; then
+    echo "error: $flag must be a positive integer" >&2; exit 2
+  fi
+  value=$((10#$value))
+  if (( value == 0 )); then
+    echo "error: $flag must be a positive integer" >&2; exit 2
+  fi
+  printf '%s' "$value"
+}
+
+while (( $# )); do
+  case "$1" in
+    --json) JSON=1; shift ;;
+    --limit)
+      if [[ -z "${2:-}" ]]; then echo "error: --limit requires a value" >&2; exit 2; fi
+      LIMIT=$(parse_positive_int "$2" "--limit"); shift 2 ;;
+    --limit=*)
+      LIMIT=$(parse_positive_int "${1#--limit=}" "--limit"); shift ;;
+    --min-cache-bytes)
+      if [[ -z "${2:-}" ]]; then echo "error: --min-cache-bytes requires a value" >&2; exit 2; fi
+      MIN_BYTES=$(parse_positive_int "$2" "--min-cache-bytes"); shift 2 ;;
+    --min-cache-bytes=*)
+      MIN_BYTES=$(parse_positive_int "${1#--min-cache-bytes=}" "--min-cache-bytes"); shift ;;
+    -h|--help) usage; exit 0 ;;
+    --) shift; break ;;
+    --*) echo "error: unknown option: $1" >&2; usage >&2; exit 2 ;;
+    *) POSITIONAL+=("$1"); shift ;;
+  esac
+done
+while (( $# )); do POSITIONAL+=("$1"); shift; done
+
+if (( ${#POSITIONAL[@]} == 0 )); then
+  echo "error: owner/repo is required" >&2; usage >&2; exit 2
+fi
+if (( ${#POSITIONAL[@]} > 1 )); then
+  echo "error: too many arguments" >&2; usage >&2; exit 2
+fi
+REPO="${POSITIONAL[0]}"
+if ! [[ "$REPO" =~ ^[A-Za-z0-9_.\-]+/[A-Za-z0-9_.\-]+$ ]]; then
+  echo "error: owner/repo must match [A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+" >&2
+  exit 2
+fi
+
+if ! command -v gh >/dev/null 2>&1; then
+  echo "error: gh CLI not found. Install https://cli.github.com/ and run 'gh auth login'." >&2
+  exit 1
+fi
+if ! gh auth status --hostname github.com >/dev/null 2>&1; then
+  echo "error: gh not authenticated. Run 'gh auth login'." >&2
+  exit 1
+fi
+if ! command -v jq >/dev/null 2>&1; then
+  echo "error: jq not found. Install jq." >&2
+  exit 1
+fi
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "error: python3 not found. Install python3." >&2
+  exit 1
+fi
+
+# Cap per_page at 100 (GitHub API max)
+PER_PAGE=$LIMIT
+if (( PER_PAGE > 100 )); then
+  echo "warning: --limit capped at 100 (GitHub API page limit)" >&2
+  PER_PAGE=100
+  LIMIT=100
+fi
+
+WORKDIR=$(mktemp -d)
+trap 'rm -rf "$WORKDIR" 2>/dev/null; true' EXIT
+LOGDIR="$WORKDIR/logs"
+META="$WORKDIR/jobs.tsv"
+mkdir -p "$LOGDIR"
+: > "$META"
+
+runs_json=$(gh api "repos/$REPO/actions/runs?per_page=$PER_PAGE&status=completed" 2>&1 || true)
+if ! echo "$runs_json" | jq -e '.workflow_runs' >/dev/null 2>&1; then
+  if echo "$runs_json" | jq -e '.message' >/dev/null 2>&1; then
+    echo "error: $(echo "$runs_json" | jq -r '.message')" >&2
+    exit 1
+  fi
+  echo "error: failed to fetch runs for $REPO" >&2
+  echo "$runs_json" >&2
+  exit 1
+fi
+
+empty_report() {
+  if (( JSON )); then
+    jq -n --arg repo "$REPO" --argjson runs "$1" --argjson minb "$MIN_BYTES" \
+      '{repo:$repo, runs_scanned:$runs, jobs_with_logs:0, jobs_without_logs:0,
+        min_cache_bytes:$minb, cache_steps:[], turbo:[], findings:[]}'
+  else
+    echo "$2" >&2
+  fi
+  exit 0
+}
+
+total_runs=$(echo "$runs_json" | jq '.workflow_runs | length')
+if (( total_runs == 0 )); then
+  empty_report 0 "No completed runs found for $REPO."
+fi
+
+# Map run id -> workflow file so two workflows that both define a "build" job
+# stay distinguishable in the report. Kept as a lookup file rather than an
+# associative array so this still runs on the bash 3.2 that ships with macOS.
+WF_MAP="$WORKDIR/workflows.tsv"
+echo "$runs_json" \
+  | jq -r '.workflow_runs[] | "\(.id)\t\((.path // .name // "unknown") | split("/") | last)"' \
+  > "$WF_MAP"
+
+run_ids=$(echo "$runs_json" | jq -r ".workflow_runs[:$LIMIT] | .[].id")
+runs_scanned=0
+for rid in $run_ids; do
+  runs_scanned=$((runs_scanned+1))
+  wf=$(awk -F'\t' -v id="$rid" '$1==id {print $2; exit}' "$WF_MAP")
+  [[ -z "$wf" ]] && wf="unknown"
+  jobs_json=$(gh api --paginate "repos/$REPO/actions/runs/$rid/jobs?per_page=100" 2>/dev/null || true)
+  if ! echo "$jobs_json" | jq -e '.jobs' >/dev/null 2>&1; then
+    continue
+  fi
+  # A skipped job has no log to read, so do not spend an API call on it.
+  echo "$jobs_json" | jq -r --arg wf "$wf" \
+    '.jobs[] | select(.conclusion != "skipped") | "\(.id)\t\($wf)\t\(.name)"' >> "$META" 2>/dev/null || true
+  sleep 0.05
+done
+
+if [[ ! -s "$META" ]]; then
+  empty_report "$runs_scanned" "No readable jobs found for $REPO (runs: $runs_scanned)."
+fi
+
+# Keep only the lines that carry cache or turbo signal. Job logs run to hundreds
+# of thousands of lines; filtering at download keeps this tractable.
+FILTER_RE='##\[group\]Run |##\[start-action display=|Z[[:space:]]+(key|restore-keys|path):[[:space:]]|Cache Size: |Cache restored successfully|Cache restored from key: |Cache saved successfully|Cache saved with key: |Cache not found for input keys: |Cache hit for restore-key: |Cache hit occurred on the primary key |Remote caching (disabled|enabled)|Tasks:[[:space:]]+[0-9]+ successful|Cached:[[:space:]]+[0-9]+ cached|cache miss, executing |cache hit, replaying logs|cache hit \(outputs already on disk\)|cache bypass, force executing '
+
+# BSD sed does not understand \x1b, so build the escape byte explicitly.
+ESC=$(printf '\033')
+SED_ANSI="s/${ESC}\\[[0-9;]*m//g"
+
+# shellcheck disable=SC2016  # the inner script takes its values as positional
+# arguments, so the single quotes are deliberate.
+cut -f1 "$META" | xargs -P "$PARALLEL" -I{} bash -c '
+  jid="$1"; repo="$2"; dir="$3"; ansi="$4"; re="$5"
+  # A job with no log (expired retention, cancelled before start) is skipped
+  # quietly rather than aborting the sweep.
+  gh api "repos/$repo/actions/jobs/$jid/logs" 2>/dev/null \
+    | sed "$ansi" \
+    | grep -aE "$re" > "$dir/$jid.txt" || true
+' _ {} "$REPO" "$LOGDIR" "$SED_ANSI" "$FILTER_RE"
+
+python3 - "$LOGDIR" "$META" "$REPO" "$MIN_BYTES" "$JSON" "$runs_scanned" <<'PY'
+import json, os, re, sys
+from collections import defaultdict
+
+log_dir, meta_path, repo, min_bytes, json_mode, runs_scanned = (
+    sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4]),
+    sys.argv[5] == "1", int(sys.argv[6]),
+)
+
+TS = re.compile(r"^\S+Z\s")
+GROUP_RUN = re.compile(r"##\[group\]Run\s+(.*)$")
+START_ACTION = re.compile(r"##\[start-action display=(.*?);id=")
+CACHE_ACTION = re.compile(r"##\[group\]Run\s+actions/cache(?:/(restore|save))?@")
+FIELD = re.compile(r"^(key|restore-keys|path):\s*(.*)$")
+SIZE = re.compile(r"Cache Size: ~[\d.]+\s*\w+ \((\d+) B\)")
+RESTORED_FROM = re.compile(r"Cache restored from key:\s*(\S+)")
+SAVED_WITH = re.compile(r"Cache saved with key:\s*(\S+)")
+RESTORE_KEY_HIT = re.compile(r"Cache hit for restore-key:\s*(\S+)")
+NOT_FOUND = re.compile(r"Cache not found for input keys:\s*(.*)$")
+PRIMARY_NOSAVE = re.compile(r"Cache hit occurred on the primary key\s+(\S+?),")
+TURBO_CMD = re.compile(r"((?:bunx |npx |pnpm |yarn |bun |bun run )?turbo run [\w:.\- ]*)")
+TASKS = re.compile(r"Tasks:\s+(\d+) successful, (\d+) total")
+# Match turbo's own status line only. A review job that quotes the phrase in
+# prose must not be counted as a turbo invocation.
+REMOTE_CACHE = re.compile(r"^(?:\u2022\s*)?Remote caching (disabled|enabled)$")
+CACHED = re.compile(r"Cached:\s+(\d+) cached, (\d+) total")
+HEX = re.compile(r"^[0-9a-f]{8,}$")
+# Never echo a raw log line. Print only parsed fields, reduced to a safe charset.
+SAFE = re.compile(r"[^A-Za-z0-9._\-/~+:@* ]")
+MASK = re.compile(r"\*{2,}")
+SPLIT = re.compile(r"-+")
+
+
+def clean(value, limit=160):
+    value = SAFE.sub("", (value or "").strip())
+    return value[:limit]
+
+
+def unmask(value):
+    """Undo log redaction before grouping.
+
+    GitHub replaces every occurrence of a secret's value in a log. A repo whose
+    secret is a literal "-" therefore prints every hyphen as "***", so the same
+    cache key reads as "next-webpack-Linux-..." in one job and
+    "next***webpack***Linux..." in the next. Treat the redaction marker as the
+    separator it stands in for, or one cache step splits into many rows.
+    """
+    return MASK.sub("-", value or "")
+
+
+def label_for(cmd, step_name):
+    """Name a step by the command the log shows it running.
+
+    The step display name is not reliable: a composite action can print
+    "Install functions dependencies (npm)" immediately before a group that
+    actually runs "bun run typecheck". The group command is what produced the
+    output being parsed, so prefer it.
+    """
+    label = unmask(clean(cmd.split("\n")[0].strip(), 48))
+    return label or unmask(clean(step_name, 48)) or "(unnamed)"
+
+
+def key_prefix(key):
+    """Collapse the hashed tail so one cache step is one row."""
+    parts = [p for p in SPLIT.split(unmask(clean(key))) if p != ""]
+    while parts and (HEX.match(parts[-1]) or parts[-1].isdigit()):
+        parts.pop()
+    return "-".join(parts) if parts else clean(key, 40) or "(unnamed)"
+
+
+def human(n):
+    if n is None:
+        return "-"
+    for unit, size in (("GB", 1 << 30), ("MB", 1 << 20), ("KB", 1 << 10)):
+        if n >= size:
+            return f"{n / size:.1f} {unit}"
+    return f"{n} B"
+
+
+def median(values):
+    if not values:
+        return None
+    values = sorted(values)
+    n = len(values)
+    if n % 2:
+        return values[n // 2]
+    return int(round((values[n // 2 - 1] + values[n // 2]) / 2))
+
+
+jobs = {}
+with open(meta_path) as fh:
+    for line in fh:
+        parts = line.rstrip("\n").split("\t")
+        if len(parts) >= 3:
+            jobs[parts[0]] = (parts[1], parts[2])
+
+cache_events = []
+turbo_runs = []
+with_logs = 0
+without_logs = 0
+
+for job_id, (workflow, job_name) in jobs.items():
+    path = os.path.join(log_dir, f"{job_id}.txt")
+    if not os.path.exists(path) or os.path.getsize(path) == 0:
+        without_logs += 1
+        continue
+    with_logs += 1
+
+    step = ""
+    op = None           # the open actions/cache step
+    turbo = None        # the open turbo invocation
+    last_cmd = ""
+
+    def emit(outcome, key_used=None):
+        """Record one cache operation and close it."""
+        global op
+        if op is None:
+            return
+        key = op["key"] or key_used or ""
+        cache_events.append({
+            "workflow": workflow,
+            "job": job_name,
+            "step": op["step"],
+            "path": op["path"],
+            "kind": op["kind"],
+            "key": clean(key),
+            "key_prefix": key_prefix(key) if key else (op["label"] or "(unnamed)"),
+            "has_restore_keys": op["restore_keys"],
+            "bytes": op["bytes"],
+            "outcome": outcome,
+        })
+        op = None
+
+    def close_op():
+        """A step ends at the next group. Flush a restore that never named a key."""
+        global op
+        if op is not None and op.get("pending_hit"):
+            emit("hit")
+        op = None
+
+    with open(path, errors="replace") as fh:
+        for raw in fh:
+            line = TS.sub("", raw.rstrip("\n").replace("\r", ""))
+            stripped = line.strip()
+
+            m = START_ACTION.search(line)
+            if m:
+                step = clean(m.group(1), 60)
+                continue
+
+            m = GROUP_RUN.search(line)
+            if m:
+                last_cmd = m.group(1)
+                cm = CACHE_ACTION.search(line)
+                if cm:
+                    op = {
+                        "kind": cm.group(1) or "cache",
+                        "step": step,
+                        "label": label_for(last_cmd, step),
+                        "key": "",
+                        "path": "",
+                        "restore_keys": False,
+                        "bytes": None,
+                    }
+                else:
+                    close_op()
+                continue
+
+            if op is not None:
+                m = FIELD.match(stripped)
+                if m:
+                    field, value = m.group(1), m.group(2)
+                    if field == "key":
+                        op["key"] = value
+                    elif field == "restore-keys":
+                        op["restore_keys"] = bool(value.strip())
+                    else:
+                        op["path"] = clean(value, 80)
+                    continue
+
+            m = SIZE.search(line)
+            if m:
+                if op is None:
+                    # A cache bundled inside another action (setup-bun and
+                    # friends) reports a size without a group we opened.
+                    op = {"kind": "cache", "step": step,
+                          "label": label_for(last_cmd, step),
+                          "key": "", "path": "", "restore_keys": False,
+                          "bytes": None}
+                op["bytes"] = int(m.group(1))
+                continue
+
+            m = RESTORE_KEY_HIT.search(line)
+            if m:
+                if op is not None:
+                    op["fallback"] = m.group(1)
+                continue
+
+            m = RESTORED_FROM.search(line)
+            if m:
+                used = m.group(1)
+                if op is not None and op["key"]:
+                    outcome = "primary" if clean(op["key"]) == clean(used) else "restore-key"
+                else:
+                    outcome = "hit"
+                emit(outcome, used)
+                continue
+
+            if "Cache restored successfully" in line:
+                # setup-* actions restore without ever naming the key.
+                if op is not None:
+                    op["pending_hit"] = True
+                continue
+
+            m = NOT_FOUND.search(line)
+            if m:
+                if op is None:
+                    op = {"kind": "cache", "step": step,
+                          "label": label_for(last_cmd, step),
+                          "key": "", "path": "", "restore_keys": False,
+                          "bytes": None}
+                if not op["key"]:
+                    op["key"] = m.group(1).split(",")[0]
+                op["bytes"] = None
+                emit("miss")
+                continue
+
+            m = SAVED_WITH.search(line)
+            if m:
+                if op is None:
+                    op = {"kind": "save", "step": step,
+                          "label": label_for(last_cmd, step),
+                          "key": "", "path": "", "restore_keys": False,
+                          "bytes": None}
+                emit("saved", m.group(1))
+                continue
+
+            if "Cache saved successfully" in line:
+                continue
+
+            if PRIMARY_NOSAVE.search(line):
+                close_op()
+                continue
+
+            m = REMOTE_CACHE.match(stripped)
+            if m:
+                cm = TURBO_CMD.search(unmask(last_cmd))
+                label = unmask(clean(cm.group(1))) if cm else label_for(last_cmd, step)
+                turbo = {
+                    "workflow": workflow,
+                    "job": job_name,
+                    "command": label,
+                    "remote_cache": m.group(1) == "enabled",
+                    "tasks_total": 0,
+                    "tasks_cached": 0,
+                    "task_hits": 0,
+                    "task_misses": 0,
+                    "has_summary": False,
+                }
+                turbo_runs.append(turbo)
+                continue
+
+            if turbo is not None:
+                if "cache hit" in line:
+                    turbo["task_hits"] += 1
+                    continue
+                if "cache miss, executing" in line or "cache bypass, force executing" in line:
+                    turbo["task_misses"] += 1
+                    continue
+                m = CACHED.search(line)
+                if m:
+                    turbo["tasks_cached"] += int(m.group(1))
+                    turbo["tasks_total"] += int(m.group(2))
+                    turbo["has_summary"] = True
+                    continue
+                m = TASKS.search(line)
+                if m:
+                    turbo["tasks_run"] = int(m.group(2))
+                    continue
+
+    close_op()
+
+# ---- aggregate actions/cache steps -----------------------------------------
+steps = defaultdict(lambda: {
+    "ops": 0, "primary": 0, "fallback": 0, "unknown": 0, "miss": 0, "saves": 0,
+    "sizes": [], "where": set(), "example_key": "", "restore_keys": False,
+    "paths": set(),
+})
+for ev in cache_events:
+    row = steps[ev["key_prefix"]]
+    row["where"].add(f"{ev['workflow']}/{ev['job']}")
+    if ev["path"]:
+        row["paths"].add(ev["path"])
+    if not row["example_key"]:
+        row["example_key"] = ev["key"]
+    row["restore_keys"] = row["restore_keys"] or ev["has_restore_keys"]
+    if ev["outcome"] == "saved":
+        row["saves"] += 1
+    else:
+        row["ops"] += 1
+        if ev["outcome"] == "primary":
+            row["primary"] += 1
+        elif ev["outcome"] == "restore-key":
+            row["fallback"] += 1
+        elif ev["outcome"] == "hit":
+            # An action that restores its own cache (setup-bun and friends)
+            # never prints the key, so primary-vs-fallback is unknowable.
+            row["unknown"] += 1
+        else:
+            row["miss"] += 1
+    if ev["bytes"]:
+        row["sizes"].append(ev["bytes"])
+
+cache_rows = []
+for prefix, row in steps.items():
+    med = median(row["sizes"])
+    keyed = row["primary"] + row["fallback"] + row["miss"]
+    cache_rows.append({
+        "key_prefix": prefix,
+        "example_key": row["example_key"],
+        "path": sorted(row["paths"])[0] if row["paths"] else "",
+        "restores": row["ops"],
+        "hits": row["primary"] + row["fallback"] + row["unknown"],
+        "keyed_restores": keyed,
+        "primary_hits": row["primary"],
+        "restore_key_hits": row["fallback"],
+        "unnamed_key_hits": row["unknown"],
+        "misses": row["miss"],
+        "saves": row["saves"],
+        "median_payload_bytes": med,
+        "smallest_payload_bytes": min(row["sizes"]) if row["sizes"] else None,
+        "where": sorted(row["where"]),
+    })
+cache_rows.sort(key=lambda r: (r["median_payload_bytes"] is None,
+                               r["median_payload_bytes"] or 0))
+
+# ---- aggregate turbo --------------------------------------------------------
+turbo_groups = defaultdict(lambda: {
+    "invocations": 0, "remote_on": 0, "remote_off": 0,
+    "tasks_total": 0, "tasks_cached": 0, "where": set(),
+})
+for t in turbo_runs:
+    row = turbo_groups[t["command"]]
+    row["invocations"] += 1
+    row["remote_on" if t["remote_cache"] else "remote_off"] += 1
+    # Prefer turbo's own summary line; fall back to counting per-task lines.
+    if t.get("has_summary"):
+        row["tasks_total"] += t["tasks_total"]
+        row["tasks_cached"] += t["tasks_cached"]
+    else:
+        row["tasks_total"] += t["task_hits"] + t["task_misses"]
+        row["tasks_cached"] += t["task_hits"]
+    row["where"].add(f"{t['workflow']}/{t['job']}")
+
+turbo_rows = []
+for command, row in turbo_groups.items():
+    rate = (row["tasks_cached"] / row["tasks_total"]) if row["tasks_total"] else None
+    turbo_rows.append({
+        "command": command,
+        "invocations": row["invocations"],
+        "remote_cache_on": row["remote_on"],
+        "remote_cache_off": row["remote_off"],
+        "tasks_total": row["tasks_total"],
+        "tasks_cached": row["tasks_cached"],
+        "cache_hit_rate": round(rate, 4) if rate is not None else None,
+        "where": sorted(row["where"]),
+    })
+turbo_rows.sort(key=lambda r: (r["cache_hit_rate"] is None, r["cache_hit_rate"] or 0))
+
+# ---- findings ---------------------------------------------------------------
+findings = []
+for row in cache_rows:
+    where = ", ".join(row["where"][:3])
+    smallest = row["smallest_payload_bytes"]
+    if smallest is not None and smallest < min_bytes:
+        findings.append({
+            "check": "cache-payload-tiny",
+            "repo": repo,
+            "where": row["where"],
+            "key": row["key_prefix"],
+            "detail": (f"cache '{row['key_prefix']}' moves only "
+                       f"{human(smallest)} (median {human(row['median_payload_bytes'])}). "
+                       f"The step reports success, so the empty payload is invisible. "
+                       f"Seen in {where}."),
+        })
+    # Only judge a key we could actually read. Bundled caches (setup-bun) never
+    # print theirs, so primary-vs-fallback is unknowable and not a finding.
+    if row["keyed_restores"] >= 2 and row["primary_hits"] == 0:
+        if row["restore_key_hits"] > 0:
+            why = (f"only the restore-keys prefix ever matches "
+                   f"({row['restore_key_hits']}/{row['keyed_restores']} restores)")
+        else:
+            why = f"every one of {row['keyed_restores']} restores missed"
+        findings.append({
+            "check": "cache-never-hits-primary",
+            "repo": repo,
+            "where": row["where"],
+            "key": row["key_prefix"],
+            "detail": (f"cache '{row['key_prefix']}' never hits its primary key: {why}. "
+                       f"A key hashed over all source files cannot match on a new commit. "
+                       f"Seen in {where}."),
+        })
+
+for row in turbo_rows:
+    where = ", ".join(row["where"][:3])
+    if row["remote_cache_off"]:
+        findings.append({
+            "check": "turbo-remote-cache-off",
+            "repo": repo,
+            "where": row["where"],
+            "key": row["command"],
+            "detail": (f"'{row['command']}' printed 'Remote caching disabled' in "
+                       f"{row['remote_cache_off']} of {row['invocations']} invocations. "
+                       f"Every task is a cold miss. Seen in {where}."),
+        })
+    if row["tasks_total"] and row["tasks_cached"] == 0:
+        findings.append({
+            "check": "turbo-zero-cache-hits",
+            "repo": repo,
+            "where": row["where"],
+            "key": row["command"],
+            "detail": (f"'{row['command']}' served 0 of {row['tasks_total']} tasks from "
+                       f"cache across {row['invocations']} invocations. Seen in {where}."),
+        })
+
+report = {
+    "repo": repo,
+    "runs_scanned": runs_scanned,
+    "jobs_with_logs": with_logs,
+    "jobs_without_logs": without_logs,
+    "min_cache_bytes": min_bytes,
+    "cache_steps": cache_rows,
+    "turbo": turbo_rows,
+    "findings": findings,
+}
+
+if json_mode:
+    print(json.dumps(report, indent=2))
+    sys.exit(0)
+
+print(f"Repo: {repo}   runs: {runs_scanned}   jobs read: {with_logs}   "
+      f"jobs without logs: {without_logs}")
+print()
+
+print("actions/cache steps")
+head = f"{'KEY PREFIX':<34} {'READS':>5} {'HITS':>5} {'PRIMARY':>7} {'MISS':>5} {'SAVES':>5} {'MEDIAN':>9}  WHERE"
+print(head)
+print("-" * len(head))
+if not cache_rows:
+    print("(none seen)")
+for row in cache_rows:
+    name = row["key_prefix"]
+    if len(name) > 34:
+        name = name[:31] + "..."
+    where = ", ".join(row["where"][:2])
+    if len(row["where"]) > 2:
+        where += f" (+{len(row['where']) - 2})"
+    primary = str(row["primary_hits"]) if row["keyed_restores"] else "?"
+    print(f"{name:<34} {row['restores']:>5} {row['hits']:>5} {primary:>7} "
+          f"{row['misses']:>5} {row['saves']:>5} "
+          f"{human(row['median_payload_bytes']):>9}  {where}")
+print()
+
+print("Turborepo")
+head = f"{'COMMAND':<34} {'RUNS':>5} {'REMOTE':>8} {'TASKS':>6} {'CACHED':>6} {'HIT RATE':>8}  WHERE"
+print(head)
+print("-" * len(head))
+if not turbo_rows:
+    print("(no turbo invocations seen)")
+for row in turbo_rows:
+    name = row["command"]
+    if len(name) > 34:
+        name = name[:31] + "..."
+    if row["remote_cache_off"] and row["remote_cache_on"]:
+        remote = f"{row['remote_cache_on']}/{row['invocations']} on"
+    elif row["remote_cache_off"]:
+        remote = "OFF"
+    else:
+        remote = "on"
+    rate = "-" if row["cache_hit_rate"] is None else f"{row['cache_hit_rate'] * 100:.0f}%"
+    where = ", ".join(row["where"][:2])
+    if len(row["where"]) > 2:
+        where += f" (+{len(row['where']) - 2})"
+    print(f"{name:<34} {row['invocations']:>5} {remote:>8} {row['tasks_total']:>6} "
+          f"{row['tasks_cached']:>6} {rate:>8}  {where}")
+print()
+
+print("Findings")
+if not findings:
+    print(f"  No cache problems found. Every cache read moves at least "
+          f"{human(min_bytes)} and turbo caching is live.")
+else:
+    for f in findings:
+        print(f"  [{f['check']}] {f['detail']}")
+PY
