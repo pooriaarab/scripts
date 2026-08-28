@@ -121,20 +121,21 @@ run_ids=$(echo "$runs_json" | jq -r ".workflow_runs[:$LIMIT] | .[].id")
 # Map run id -> workflow file path so jobs with the same name in different
 # workflows (e.g. two workflows both defining a "test" job) aren't merged
 # into one row.
-declare -A run_workflow
-while IFS=$'\t' read -r rid wpath; do
-  run_workflow["$rid"]="$wpath"
-done < <(echo "$runs_json" | jq -r '.workflow_runs[] | "\(.id)\t\(.path // .name // "unknown")"')
-
+# Kept as a lookup FILE rather than an associative array: `declare -A` needs
+# bash 4, and macOS still ships bash 3.2, so the array form made this script
+# unrunnable on the machine it is most often run from.
+tmp_wf=$(mktemp)
 tmp_jobs=$(mktemp)
 tmp_agg=$(mktemp)
-trap 'rm -f "$tmp_jobs" "$tmp_agg" 2>/dev/null; true' EXIT
+trap 'rm -f "$tmp_wf" "$tmp_jobs" "$tmp_agg" 2>/dev/null; true' EXIT
+echo "$runs_json" | jq -r '.workflow_runs[] | "\(.id)\t\(.path // .name // "unknown")"' > "$tmp_wf"
 : > "$tmp_jobs"
 
 count_runs=0
 for rid in $run_ids; do
   count_runs=$((count_runs+1))
-  wf="${run_workflow[$rid]:-unknown}"
+  wf=$(awk -F'\t' -v r="$rid" '$1 == r { print $2; exit }' "$tmp_wf")
+  [[ -n "$wf" ]] || wf="unknown"
   # Fetch jobs for this run; sequential to avoid rate limit burst
   # --paginate follows all pages so matrix runs with >30 jobs aren't truncated
   jobs_json=$(gh api --paginate "repos/$REPO/actions/runs/$rid/jobs?per_page=100" 2>&1 || true)
