@@ -98,6 +98,9 @@ else
   rm -f "$BIN/muse"
   mark muse "FAILED (api.meta.ai/muse-launcher.sh)"
 fi
+# Pre-warm: the launcher downloads a ~166 MB binary on first use, which is
+# longer than a `box exec` round trip. Pay that cost during setup instead.
+[ -x "$BIN/muse" ] && "$BIN/muse" --version >/dev/null 2>&1
 
 # --------------------------------------------------------- codex-personal ----
 # The box image injects the owner's own ChatGPT credential at ~/.codex/auth.json.
