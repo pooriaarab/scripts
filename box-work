@@ -1,0 +1,223 @@
+#!/usr/bin/env bash
+# Start (or reuse) an ascii.dev Box that is ready to WORK on a repo, and run the
+# work there instead of on the laptop.
+#
+# The point is not speed of a single task. It is that a Box is a whole other
+# 4 vCPU / 8 GB machine, so N of them run N jobs at once without the laptop
+# swapping. The cap is 100 concurrent Boxes; the real limit is 50 starts/hour.
+#
+# A Box started this way has, in ~15s and with nothing uploaded:
+#   - the repo cloned at its default branch        (box env add-repo)
+#   - the gitignored env files .crabbox-secrets declares (box env set-file)
+#   - TURBO_API / TURBO_TOKEN / TURBO_TEAM         (box env set-var)
+#   - claude, codex, gemini, kimi, pi, muse        (agent-roster-ready snapshot)
+#
+# Usage
+#   box-work <repo>                    start or reuse a Box, sync local edits, print how to enter
+#   box-work <repo> --agent pi "brief" run one agent headlessly on the Box and print its output
+#   box-work <repo> --ssh              open a shell on the Box
+#   box-work <repo> --stop             stop this repo's Box
+#   box-work --list                    every Box this tool started, and what it costs
+#   box-work --stop-all                stop all of them
+set -uo pipefail
+export PATH="$HOME/.ascii/bin:$PATH"
+BOX="${BOX_CLI:-$HOME/.ascii/bin/box}"   # BOX_CLI lets tests inject a stub
+SNAPSHOT="${BOX_WORK_SNAPSHOT:-agent-roster-ready}"
+STATE="${XDG_STATE_HOME:-$HOME/.local/state}/box-work"
+mkdir -p "$STATE"; chmod 700 "$STATE"
+
+die() { echo "box-work: $*" >&2; exit 1; }
+
+resolve_repo() {   # accept a directory or a bare repo name
+  local a="$1"
+  if [[ -d "$a" ]]; then
+    git -C "$a" rev-parse --show-toplevel 2>/dev/null && return
+  fi
+  # a bare name: find a local clone whose remote matches
+  local d
+  for root in "$HOME/Documents/Personal" "$HOME/code" "$HOME/nova-wt"; do
+    [[ -d "$root" ]] || continue
+    while IFS= read -r g; do
+      d="$(dirname "$g")"
+      case "$d" in *"/worktrees/"*|*/node_modules/*) continue ;; esac
+      if [[ "$(basename -s .git "$(git -C "$d" remote get-url origin 2>/dev/null)")" == "$a" ]]; then
+        printf '%s\n' "$d"; return
+      fi
+    done < <(find "$root" -maxdepth 4 -name .git 2>/dev/null)
+  done
+  return 1
+}
+
+list_boxes() {
+  printf '%-26s %-14s %-9s %s\n' REPO BOX STATE URL
+  local f name id info
+  for f in "$STATE"/*.id; do
+    [[ -e "$f" ]] || continue
+    name="$(basename "$f" .id)"; id="$(tr -d '[:space:]' < "$f")"
+    info="$("$BOX" info "$id" --json 2>/dev/null | python3 -c '
+import sys,json
+try:
+    b=json.load(sys.stdin)["box"]; print(b.get("state","?"), b.get("url","-"))
+except Exception: print("gone -")' )"
+    printf '%-26s %-14s %s\n' "$name" "$id" "$info"
+  done
+}
+
+case "${1:-}" in
+  ""|-h|--help) sed -n '2,25p' "$0"; exit 0 ;;
+  --list) list_boxes; exit 0 ;;
+  --stop-all)
+    for f in "$STATE"/*.id; do
+      [[ -e "$f" ]] || continue
+      id="$(tr -d '[:space:]' < "$f")"
+      # Only forget the Box once it is actually stopped. Dropping the id on a
+      # failed stop leaves a RUNNING Box that nothing tracks any more -- and
+      # nothing will ever stop it.
+      if "$BOX" stop "$id" >/dev/null 2>&1; then
+        echo "stopped $(basename "$f" .id) ($id)"; rm -f "$f"
+      else
+        echo "FAILED to stop $(basename "$f" .id) ($id) -- keeping the id so you can retry" >&2
+      fi
+    done
+    exit 0 ;;
+esac
+
+TARGET="$1"; shift
+REPO_DIR="$(resolve_repo "$TARGET")" || die "no local clone found for '$TARGET'"
+REMOTE="$(git -C "$REPO_DIR" remote get-url origin 2>/dev/null || true)"
+case "$REMOTE" in
+  *Mozilla-Ocho*|*mozilla-ocho*|*mozilla.org*|*moz-ocho*)
+    die "REFUSING: $REMOTE is a work repo. Boxes are personal-only." ;;
+  *pooriaarab/*) : ;;
+  *) die "REFUSING: $REMOTE is not a pooriaarab remote." ;;
+esac
+NAME="$(basename -s .git "$REMOTE")"
+IDFILE="$STATE/$NAME.id"
+
+MODE=start; AGENT=""; BRIEF=""
+while (( $# )); do
+  case "$1" in
+    --stop) MODE=stop; shift ;;
+    --ssh) MODE=ssh; shift ;;
+    --agent) MODE=agent; AGENT="${2:-}"; BRIEF="${3:-}"; shift 3 || shift $# ;;
+    *) die "unknown argument: $1" ;;
+  esac
+done
+
+if [[ "$MODE" == stop ]]; then
+  [[ -f "$IDFILE" ]] || die "no Box recorded for $NAME"
+  id="$(tr -d '[:space:]' < "$IDFILE")"
+  if "$BOX" stop "$id" >/dev/null 2>&1; then
+    echo "stopped $NAME ($id)"; rm -f "$IDFILE"; exit 0
+  fi
+  echo "FAILED to stop $NAME ($id) -- keeping the id so you can retry" >&2
+  exit 1
+fi
+
+# Reuse a live Box before starting another. Starts are capped at 50/hour, and a
+# second Box for the same repo is pure waste.
+ID=""
+if [[ -f "$IDFILE" ]]; then
+  cand="$(tr -d '[:space:]' < "$IDFILE")"
+  st="$("$BOX" info "$cand" --json 2>/dev/null | python3 -c '
+import sys,json
+try: print(json.load(sys.stdin)["box"].get("state",""))
+except Exception: print("")')"
+  case "$st" in
+    ready|idle|running) ID="$cand"; echo "[box-work] reusing $NAME box $ID ($st)" ;;
+    stopped|archived)   "$BOX" resume "$cand" >/dev/null 2>&1 && ID="$cand" && echo "[box-work] resumed $NAME box $ID" ;;
+  esac
+fi
+
+if [[ -z "$ID" ]]; then
+  echo "[box-work] starting a Box for $NAME (snapshot=$SNAPSHOT environment=$NAME)"
+  stream="$(mktemp)"
+  "$BOX" new --json --from "$SNAPSHOT" --environment "$NAME" > "$stream" 2>&1
+  ID="$(python3 -c '
+import sys,json
+for line in open(sys.argv[1]):
+    line=line.strip()
+    if not line: continue
+    try: d=json.loads(line)
+    except Exception: continue
+    if str(d.get("id","")).startswith("bx_"): print(d["id"]); break
+' "$stream")"
+  rm -f "$stream"
+  [[ -n "$ID" ]] || die "could not start a Box for $NAME"
+  printf '%s\n' "$ID" > "$IDFILE"
+fi
+
+# Wait for the Box to answer, then push whatever is uncommitted here. The Box
+# already has the committed tree from GitHub; only local edits are missing.
+ready=0
+for _ in $(seq 1 60); do "$BOX" exec "$ID" -- true >/dev/null 2>&1 && { ready=1; break; }; done
+(( ready )) || die "Box $ID never answered. It may still be starting; retry, or 'box info $ID'."
+
+ATTACH="$HOME/Documents/Personal/scripts/box-fast-attach"
+[[ -x "$ATTACH" ]] || ATTACH="$HOME/.local/bin/box-fast-attach"
+if [[ -x "$ATTACH" ]]; then
+  # A failed sync means the Box holds a stale tree. Saying "ready" then would
+  # send an agent at the wrong code, which is worse than stopping here.
+  ( cd "$REPO_DIR" && BOX_REMOTE_DIR="/home/user/$NAME" "$ATTACH" --box "$ID" 2>&1 | sed 's/^/[sync] /'
+    exit "${PIPESTATUS[0]}" ) || die "sync to $ID failed; the Box tree may be stale."
+else
+  echo "[box-work] warning: box-fast-attach not found; the Box has the committed tree only" >&2
+fi
+
+case "$MODE" in
+  ssh)   exec "$BOX" ssh "$ID" ;;
+  agent)
+    [[ -n "$AGENT" && -n "$BRIEF" ]] || die "--agent needs a CLI name and a brief"
+    runner="$(mktemp)"
+    # Never a bare `claude`: ascii injects its own CLAUDE_CODE_OAUTH_TOKEN and
+    # that silently bills the wrong subscription.
+    cat > "$runner" <<RUNNER
+#!/usr/bin/env bash
+export PATH="\$HOME/.local/bin:\$HOME/.kimi-code/bin:\$HOME/.npm-global/bin:\$PATH"
+set -a; [ -f "\$HOME/.agents/agent-clis.env" ] && . "\$HOME/.agents/agent-clis.env"; set +a
+cd "/home/user/$NAME" || exit 1
+# The brief arrives base64-encoded. `box exec` joins argv into a shell command
+# string, so a multi-word brief passed raw is split across argv and the agent
+# receives only its first word -- it then asks a clarifying question and does
+# nothing, while the call still reports success.
+BRIEF="\$(printf %s "\$1" | base64 -d)"
+set -- "\$BRIEF"
+case "$AGENT" in
+  pi)     PI_WORKER=1 pi -p --no-extensions --provider zai-api --model glm-5.3-flash -a --tools read,grep,find,ls,edit,write,bash "\$1" ;;
+  muse)   muse exec --workspace "/home/user/$NAME" "\$1" ;;
+  kimi)   kimi -m moonshot-ai/kimi-k3 -p "\$1" ;;
+  codex)  codex exec "\$1" ;;
+  gemini) gemini -p "\$1" ;;
+  *) echo "unsupported agent: $AGENT" >&2; exit 2 ;;
+esac
+RUNNER
+    "$BOX" scp "$runner" "$ID:/home/user/box-work-run.sh" >/dev/null 2>&1
+    rm -f "$runner"
+    b64brief="$(printf '%s' "$BRIEF" | base64 | tr -d '\n')"
+    "$BOX" exec "$ID" --timeout 580 --json -- bash /home/user/box-work-run.sh "$b64brief" \
+      | python3 -c 'import sys,json
+d=json.load(sys.stdin)
+o=(d.get("stdout") or "").rstrip()
+e=(d.get("stderr") or "").rstrip()
+if o: print(o)
+if e: print(e, file=sys.stderr)
+sys.exit(d.get("exitCode") or 0)' 
+    ;;
+  start)
+    url="$("$BOX" info "$ID" --json 2>/dev/null | python3 -c '
+import sys,json
+try: print(json.load(sys.stdin)["box"].get("url","-"))
+except Exception: print("-")')"
+    cat <<EOF
+
+  $NAME is ready on $ID
+    repo      /home/user/$NAME
+    shell     box-work $NAME --ssh
+    one agent box-work $NAME --agent pi "your brief"
+    stop      box-work $NAME --stop
+    url       $url
+
+  Costs \$0.036/h while running. Default TTL is 60 minutes from start.
+EOF
+    ;;
+esac

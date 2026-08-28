@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# Weekly regression sweep over the repos that have a perf baseline.
+#
+# A Box path degrades silently: the attach that fell back to a full tree upload
+# still exited 0 and printed nothing unusual, it was just 50x slower. Only a
+# timing catches that, so take one every week.
+#
+# Each check reuses a warm Box if one is up and starts one if not, so a sweep of
+# a few repos costs a few starts. It stops every Box it started.
+set -uo pipefail
+export PATH="$HOME/.local/bin:$HOME/.ascii/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+for SECRETS in "$HOME/.config/ascii-box/env" "$HOME/Documents/Personal/.secrets/crabbox.env"; do
+  [[ -r "$SECRETS" ]] && { set -a; . "$SECRETS"; set +a; break; }
+done
+LOG="${BOX_PERF_LOG:-$HOME/.local/state/box-perf/sweep.log}"
+mkdir -p "$(dirname "$LOG")"
+STATE="${XDG_STATE_HOME:-$HOME/.local/state}/box-perf"
+CHECK="$HOME/.local/bin/box-perf-check"
+[[ -x "$CHECK" ]] || CHECK="$HOME/Documents/Personal/scripts/box-perf-check"
+
+fail=0
+{
+  echo "===== $(date -u +%FT%TZ) weekly box perf sweep"
+  shopt -s nullglob
+  for b in "$STATE"/*.baseline; do
+    repo="$(basename "$b" .baseline)"
+    echo "--- $repo"
+    "$CHECK" "$repo" 2>&1 || fail=1
+  done
+  # Never leave a Box running just because a check started one.
+  "$HOME/.local/bin/box-work" --stop-all 2>&1 || true
+  echo "----- exit=$fail"
+} >> "$LOG" 2>&1
+exit "$fail"
