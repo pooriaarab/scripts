@@ -74,7 +74,10 @@ IDLE DETECTION
 CRON
   Safe to run unattended. Exit status is 0 for a clean run, 1 for an error, and
   3 when a warning fired (credit projected to run out, or a quota near its cap).
-    */15 * * * * PATH=$HOME/.ascii/bin:$PATH box-reap --stop-idle-older-than 2h --execute --json >> ~/.box-reap.log 2>&1
+    */15 * * * * PATH=$HOME/.ascii/bin:$PATH box-reap --stop-idle-older-than 2h --require-heartbeat --execute --json >> ~/.box-reap.log 2>&1
+
+  --require-heartbeat is deliberate in that line: unattended reaping without it
+  can stop an I/O-bound job that never opted in.
 USAGE
 }
 
@@ -517,6 +520,12 @@ if (( py_status != 0 && py_status != 3 )); then
   exit "$py_status"
 fi
 
+# In --json mode stdout must stay one parseable document, so progress goes to
+# stderr instead.
+progress() {
+  if (( JSON )); then printf '%s\n' "$*" >&2; else printf '%s\n' "$*"; fi
+}
+
 stopped=0
 failed=0
 if [[ -s "$tmp_plan" ]]; then
@@ -524,14 +533,14 @@ if [[ -s "$tmp_plan" ]]; then
     while IFS= read -r bid; do
       [[ -n "$bid" ]] || continue
       if box stop "$bid" >/dev/null 2>&1; then
-        echo "stopped $bid"
+        progress "stopped $bid"
         stopped=$((stopped + 1))
       else
         echo "error: failed to stop $bid" >&2
         failed=$((failed + 1))
       fi
     done < "$tmp_plan"
-    echo "Stopped $stopped Box(es); $failed failed. Stopped Boxes are free and keep their snapshot."
+    progress "Stopped $stopped Box(es); $failed failed. Stopped Boxes are free and keep their snapshot."
   elif (( ! JSON )); then
     echo
     echo "DRY RUN. Would stop: $(tr '\n' ' ' < "$tmp_plan")"

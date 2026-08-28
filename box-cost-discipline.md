@@ -123,9 +123,17 @@ Start in dry-run for a few days and read the log before adding `--execute`:
 # every 15 minutes, report only
 */15 * * * * PATH=$HOME/.ascii/bin:$PATH box-reap --stop-idle-older-than 2h --json >> ~/.box-reap.log 2>&1
 
-# once you trust it, add --execute
-# */15 * * * * PATH=$HOME/.ascii/bin:$PATH box-reap --stop-idle-older-than 2h --execute --json >> ~/.box-reap.log 2>&1
+# once you trust it, add --execute. Keep --require-heartbeat: unattended
+# reaping without it can stop an I/O-bound job that never opted in.
+# */15 * * * * PATH=$HOME/.ascii/bin:$PATH box-reap --stop-idle-older-than 2h --require-heartbeat --execute --json >> ~/.box-reap.log 2>&1
 ```
+
+Drop `--require-heartbeat` only once every long-running job on the account
+writes a heartbeat. Until then it is the difference between a reaper that
+cleans up and one that interrupts work while you are asleep.
+
+In `--json` mode stdout stays a single parseable document; stop progress goes
+to stderr, so `box-reap --json ... | jq` works even with `--execute`.
 
 `box-reap` exits 0 on a clean run, 1 on error, and 3 when a warning fired, so a
 monitor can alert on 3. The warnings cover credit projected to run out before

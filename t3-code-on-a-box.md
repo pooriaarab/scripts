@@ -124,9 +124,35 @@ codex login
 #    A detached process does not; /etc is snapshotted, so a unit does.
 npx t3@latest service install
 
-# 5. Expose it and pair from the browser.
+# 5. Configure the unit BEFORE hosting. See the warning below.
+systemctl --user edit t3code
+
+# 6. Expose it and pair from the browser.
 box host <id> 3773
 ```
+
+**The systemd unit needs configuring, or `box host` will not reach it.** The
+installed unit does not set `T3CODE_HOST`, `T3CODE_PORT` or `PATH`. The server
+therefore binds `127.0.0.1` by default, which `box host` cannot reach, and it
+may choose a port other than 3773. Provider CLIs installed under `~/.local/bin`
+or similar are also invisible to the service without a `PATH`. Add a drop-in:
+
+```ini
+# ~/.config/systemd/user/t3code.service.d/override.conf
+[Service]
+Environment=T3CODE_HOST=0.0.0.0
+Environment=T3CODE_PORT=3773
+Environment=PATH=/home/user/.local/bin:/usr/local/bin:/usr/bin:/bin
+```
+
+```bash
+systemctl --user daemon-reload
+systemctl --user restart t3code
+ss -ltn | grep 3773        # confirm it is on 0.0.0.0, not 127.0.0.1
+```
+
+I tested `t3 serve --host 0.0.0.0 --port 3773` directly, not the systemd path.
+Verify the listener with `ss` before assuming the unit came up correctly.
 
 ## The two constraints, handled
 
@@ -150,8 +176,13 @@ symlink `.env`:
 }
 ```
 
-Add one to each repo you run threads against and every fresh worktree bootstraps
-itself. Nothing about running on a Box changes this.
+T3's own repo ships exactly this file, so the mechanism is real. **Do not assume
+a checked-in `t3.json` is picked up with no further action, though.** Project
+scripts are also editable per user in project settings, and upstream has an open
+request to make a checked-in file apply without a manual import, which implies
+the automatic path is not guaranteed today. I did not test this end to end.
+Add the file, create one throwaway thread, and confirm the setup script actually
+ran before you rely on it. Nothing about running on a Box changes any of this.
 
 **One `CLAUDE_CONFIG_DIR` per provider entry, fixed at thread start.** This is
 still true, and it works the same on a Box: add one provider instance per config
