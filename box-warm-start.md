@@ -248,7 +248,7 @@ Streaming a tar into `box ssh` gives a working ~6.7s attach. Good, not 2s.
 that never touches SSH. Put a small receiver on that port, POST the tree to it,
 and let it extract and decide about installing:
 
-```
+```text
 attach 1:  2.23s   attach 4:  1.82s
 attach 2:  1.99s   attach 5:  1.86s
 attach 3:  1.87s
@@ -271,7 +271,7 @@ mistake was mine, not the platform's. The blob was interpolated into a
 
 Passed as its **own argv word**, the payload arrives intact:
 
-```
+```text
 sent 100000 chars -> box received 100000
 sent 130000 chars -> box received 130000
 sent 150000 chars -> E2BIG: argument list too long, posix_spawn 'bash'
@@ -291,7 +291,7 @@ Detecting *what* changed turned out to cost more than sending it. Hashing 694
 files with one `shasum` process each took 8.4s locally, against 0.6s of actual
 work on the Box. Asking git instead is free.
 
-```
+```text
 seed (full tree, once) .......... 7.43s
 attach, nothing changed ......... 0.43 / 0.72s
 attach, one changed file ........ 1.41 / 1.49 / 1.51s
@@ -327,7 +327,7 @@ reported success. Pass it as an argument.
 
 Hardening cost nothing measurable:
 
-```
+```text
 attach, nothing changed .... 1.62 / 1.81s
 attach, one changed file ... 1.49 / 1.53 / 1.97s
 ```
@@ -377,7 +377,7 @@ Both produced a confident, fast, wrong answer:
 Content Rabbit is the worst case here: 5,699 tracked files, a 29 MB gzipped
 tree, a large bun monorepo.
 
-```
+```text
 seed (once per Box) ......... 42.7s
 attach, nothing changed ..... 1.99 / 2.06s
 attach, one changed file .... 1.80 / 1.92 / 2.00s
@@ -442,7 +442,7 @@ looked like success:
 
 Final numbers after all of it:
 
-```
+```text
 seed .......................... 12.0s
 attach, nothing changed ....... 1.53 / 1.55s
 attach, one changed file ...... 1.35 / 1.50 / 1.53s
@@ -491,7 +491,7 @@ the laptop. Uploading was always the wrong direction.
 writes the gitignored env files in. One `box new --environment content-rabbit`
 now gives, with **nothing uploaded**:
 
-```
+```text
 box ready and usable ................ 8.4 - 10.7s
   repo cloned, 5,870 files, on main
   content-rabbit/.env.local ......... 7 keys
@@ -590,7 +590,7 @@ The two credential switches deserve opposite answers:
 The attach is a `git()` shell function in `~/.zshrc` that intercepts
 `git worktree add`. A shell function exists only in an interactive zsh:
 
-```
+```text
 zsh -ic 'whence -w git'   ->  git: function
 zsh  -c 'whence -w git'   ->  git: command
 ```
@@ -653,7 +653,7 @@ box-work --list / --stop-all
 
 Measured:
 
-```
+```text
 first start for a repo ........ ~100s  (snapshot restore + git fetch + install)
 reuse an existing Box ......... 4.1s
 one agent doing real work ..... 24.0s
@@ -735,7 +735,7 @@ bare `box exec` round trip, and compares them against a recorded baseline.
 
 Proof it works — helpers deleted from the Box:
 
-```
+```text
 now:  noop=0.51s delta=13.15s exec=0.91s
 base: noop=0.52s delta=1.43s  exec=0.93s
 REGRESSION:
@@ -754,7 +754,7 @@ Making `box-reap-cron` propagate the reaper's status (it used to always exit 0)
 turned up a real problem within minutes: `launchctl list` started showing
 `exit=3`, and the log said
 
-```
+```text
 WARNING: auto-stop is OFF on 2 Box(es) (...); nothing will ever stop them.
 ```
 

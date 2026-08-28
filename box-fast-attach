@@ -232,6 +232,46 @@ send_full() {
   rm -f "$STATE_DIR/seed.tgz"
 }
 
+# `box exec --json` emits JSONL, and a stray diagnostic can share the stream.
+# Scan for the record that carries exitCode instead of assuming one clean object.
+box_exec_rc() {
+  printf '%s' "$1" | python3 -c '
+import sys, json
+rc = 1
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        d = json.loads(line)
+    except Exception:
+        continue
+    if isinstance(d, dict) and "exitCode" in d:
+        rc = d["exitCode"]
+print(rc if rc is not None else 0)'
+}
+
+box_exec_report() {
+  printf '%s' "$1" | python3 -c '
+import sys, json
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        d = json.loads(line)
+    except Exception:
+        continue
+    if not isinstance(d, dict):
+        continue
+    o = (d.get("stdout") or "").strip()
+    e = (d.get("stderr") or "").strip()
+    if o:
+        print(o)
+    if e and d.get("exitCode") not in (0, None):
+        print(e, file=sys.stderr)'
+}
+
 send_delta() {  # $1 = changed paths that exist, $2 = paths deleted locally
   local changed="$1" deleted="${2:-}" b64
   if [[ -n "$changed" ]]; then
@@ -250,30 +290,24 @@ send_delta() {  # $1 = changed paths that exist, $2 = paths deleted locally
   local del_b64=""
   [[ -n "$deleted" ]] && del_b64="$(printf '%s\n' "$deleted" | base64 | tr -d '\n')"
   local out rc
+  # `set -e` + a command substitution: if `box exec` exits 127 the assignment
+  # itself fails and the function dies HERE, before the retry below ever runs.
+  # `|| out=...` keeps the failure local. And stderr stays OUT of the capture:
+  # merging it can put a diagnostic line in front of the JSON, json parsing then
+  # fails, rc defaults to 1, and the 127 retry is skipped again.
   out="$("$BOX_BIN" exec "$BOX_ID" --timeout 550 --json -- \
-    bash /home/user/box-unpack.sh "$b64" "$REMOTE_DIR" "$LOCK_HASH" "$del_b64" 2>&1)"
-  rc="$(printf '%s' "$out" | python3 -c 'import sys,json
-try: print(json.load(sys.stdin).get("exitCode",1))
-except Exception: print(1)')"
+    bash /home/user/box-unpack.sh "$b64" "$REMOTE_DIR" "$LOCK_HASH" "$del_b64" 2>/dev/null)" || out="$out"
+  rc="$(box_exec_rc "$out")"
   # 127 means the helper is not on the Box. Ship it and retry once rather than
   # falling back to a full tree upload.
   if [[ "$rc" == "127" ]]; then
     echo "[fast-attach] unpack helper missing on the Box; installing and retrying"
     ensure_unpack || return 1
     out="$("$BOX_BIN" exec "$BOX_ID" --timeout 550 --json -- \
-      bash /home/user/box-unpack.sh "$b64" "$REMOTE_DIR" "$LOCK_HASH" "$del_b64" 2>&1)"
-    rc="$(printf '%s' "$out" | python3 -c 'import sys,json
-try: print(json.load(sys.stdin).get("exitCode",1))
-except Exception: print(1)')"
+      bash /home/user/box-unpack.sh "$b64" "$REMOTE_DIR" "$LOCK_HASH" "$del_b64" 2>/dev/null)" || out="$out"
+    rc="$(box_exec_rc "$out")"
   fi
-  printf '%s' "$out" | python3 -c 'import sys,json
-try:
-    d=json.load(sys.stdin)
-    o=(d.get("stdout") or "").strip()
-    e=(d.get("stderr") or "").strip()
-    if o: print(o)
-    if e and d.get("exitCode") not in (0,None): print(e, file=sys.stderr)
-except Exception: pass'
+  box_exec_report "$out"
   return "${rc:-1}"
 }
 

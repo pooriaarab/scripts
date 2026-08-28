@@ -21,7 +21,7 @@
 #   box-work --stop-all                stop all of them
 set -uo pipefail
 export PATH="$HOME/.ascii/bin:$PATH"
-BOX="$HOME/.ascii/bin/box"
+BOX="${BOX_CLI:-$HOME/.ascii/bin/box}"   # BOX_CLI lets tests inject a stub
 SNAPSHOT="${BOX_WORK_SNAPSHOT:-agent-roster-ready}"
 STATE="${XDG_STATE_HOME:-$HOME/.local/state}/box-work"
 mkdir -p "$STATE"; chmod 700 "$STATE"
@@ -70,8 +70,14 @@ case "${1:-}" in
     for f in "$STATE"/*.id; do
       [[ -e "$f" ]] || continue
       id="$(tr -d '[:space:]' < "$f")"
-      "$BOX" stop "$id" >/dev/null 2>&1 && echo "stopped $(basename "$f" .id) ($id)"
-      rm -f "$f"
+      # Only forget the Box once it is actually stopped. Dropping the id on a
+      # failed stop leaves a RUNNING Box that nothing tracks any more -- and
+      # nothing will ever stop it.
+      if "$BOX" stop "$id" >/dev/null 2>&1; then
+        echo "stopped $(basename "$f" .id) ($id)"; rm -f "$f"
+      else
+        echo "FAILED to stop $(basename "$f" .id) ($id) -- keeping the id so you can retry" >&2
+      fi
     done
     exit 0 ;;
 esac
@@ -101,8 +107,11 @@ done
 if [[ "$MODE" == stop ]]; then
   [[ -f "$IDFILE" ]] || die "no Box recorded for $NAME"
   id="$(tr -d '[:space:]' < "$IDFILE")"
-  "$BOX" stop "$id" >/dev/null 2>&1 && echo "stopped $NAME ($id)"
-  rm -f "$IDFILE"; exit 0
+  if "$BOX" stop "$id" >/dev/null 2>&1; then
+    echo "stopped $NAME ($id)"; rm -f "$IDFILE"; exit 0
+  fi
+  echo "FAILED to stop $NAME ($id) -- keeping the id so you can retry" >&2
+  exit 1
 fi
 
 # Reuse a live Box before starting another. Starts are capped at 50/hour, and a
@@ -140,10 +149,19 @@ fi
 
 # Wait for the Box to answer, then push whatever is uncommitted here. The Box
 # already has the committed tree from GitHub; only local edits are missing.
-for _ in $(seq 1 60); do "$BOX" exec "$ID" -- true >/dev/null 2>&1 && break; done
-if [[ -x "$HOME/Documents/Personal/scripts/box-fast-attach" ]]; then
-  ( cd "$REPO_DIR" && BOX_REMOTE_DIR="/home/user/$NAME" \
-      "$HOME/Documents/Personal/scripts/box-fast-attach" --box "$ID" 2>&1 | sed 's/^/[sync] /' )
+ready=0
+for _ in $(seq 1 60); do "$BOX" exec "$ID" -- true >/dev/null 2>&1 && { ready=1; break; }; done
+(( ready )) || die "Box $ID never answered. It may still be starting; retry, or 'box info $ID'."
+
+ATTACH="$HOME/Documents/Personal/scripts/box-fast-attach"
+[[ -x "$ATTACH" ]] || ATTACH="$HOME/.local/bin/box-fast-attach"
+if [[ -x "$ATTACH" ]]; then
+  # A failed sync means the Box holds a stale tree. Saying "ready" then would
+  # send an agent at the wrong code, which is worse than stopping here.
+  ( cd "$REPO_DIR" && BOX_REMOTE_DIR="/home/user/$NAME" "$ATTACH" --box "$ID" 2>&1 | sed 's/^/[sync] /'
+    exit "${PIPESTATUS[0]}" ) || die "sync to $ID failed; the Box tree may be stale."
+else
+  echo "[box-work] warning: box-fast-attach not found; the Box has the committed tree only" >&2
 fi
 
 case "$MODE" in
