@@ -127,12 +127,25 @@ Two traps cost real time here, both silent:
 Verified end to end: box pinned to environment `replytosocial` v5, **732MB of
 `node_modules` restored**, `TURBO_*` present, warmup 17.1s.
 
-### 4. The base image already has the toolchain
+### 4. The base image already has the toolchain (and crabbox already knows)
 
-crabbox apt-installs `curl git build-essential python3 pkg-config` and then
-installs bun. All of it is already on the base image: `node` 24, `bun` 1.3.14,
-`git`, `gh`, `rg`, `jq`, `docker`, `ffmpeg`, Chrome, plus Go, Rust, Java, Ruby,
-PHP and more. That work is pure waste on every single attach.
+The base image ships `node` 24, `bun` 1.3.14, `git`, `gh`, `gcc`, `make`,
+`python3`, `pkg-config`, `rg`, `jq`, `docker`, `ffmpeg`, Chrome, plus Go, Rust,
+Java, Ruby and PHP.
+
+My first reading of `crabbox-attach.sh` was that its apt-install step was pure
+waste on every attach. **That was wrong.** The step is guarded by
+`command -v curl / git / gcc`, and all three are present, so it never fires.
+Verified on a real box:
+
+```
+curl /usr/bin/curl   git /usr/bin/git   gcc /usr/bin/gcc
+VERDICT: crabbox apt block SKIPS
+```
+
+So there is nothing to cut here. The 14.9s "command" phase is the package
+manager install (7.2s of it `bun install`) plus overhead, not apt. Worth
+recording because it is the obvious-looking optimisation that is not there.
 
 ## Cost and reaping
 
