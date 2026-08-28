@@ -605,6 +605,38 @@ actually want a remote build. T3's own hook would be a `t3.json` at the repo
 root with a `scripts[]` entry marked `runOnWorktreeCreate: true` — documented,
 untested here.
 
+## The launch command
+
+Snapshot and environment compose, and together they give the whole thing:
+
+```sh
+box new --from agent-roster-ready --environment <repo>
+```
+
+Measured on content-rabbit, usable in **15.34s**:
+
+| what | where it comes from |
+|---|---|
+| repo cloned, 5,876 files | the **environment** (`box env add-repo`) |
+| `.env.local` 7 keys, `apps/website/.env.local` 221 keys | the **environment** (`box env set-file`) |
+| `TURBO_API` / `TURBO_TOKEN` / `TURBO_TEAM` | the **environment** (`box env set-var`) |
+| claude, codex, gemini, kimi, pi, muse | the **snapshot** |
+
+Agents verified with arithmetic on the Box, not "reply OK": pi on `zai-api`
+answered 4087 and muse answered 667. `kimi` fails with a 429 — the Moonshot
+account is suspended for insufficient balance, which is an account problem, not
+a Box one.
+
+**Credentials alone are not enough.** Copying `agent-roster`'s five secret files
+into a repo environment puts the logins on the Box, but the base image ships
+only claude, codex and kimi — `gemini`, `pi` and `muse` are missing. The
+snapshot is what supplies the binaries. Use both flags or you get keys with
+nothing to run them.
+
+One shared `agent-roster-ready` snapshot serves every repo, so the **10 named
+snapshots per account** cap never binds. There is no need for a snapshot per
+repo.
+
 ## Still open
 
 - **Content Rabbit has no warm snapshot yet.** Its repo is not connected to the
