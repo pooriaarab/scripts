@@ -231,6 +231,50 @@ Not worth wiring, with reasons:
 - **`box api-key`** — one key already exists and works. Rotate, do not automate.
 - **`--type large`** — twice the price, and measurably not faster.
 
+## Getting the attach from ~84s to ~2s
+
+The warm snapshot was a wash because it attacks install, which is the small
+half. The transport is the big half. Round trips against a running Box:
+
+| transport | round trip | usable as a payload channel? |
+|---|---|---|
+| `box exec` | 1.13 / 1.17 / 1.31 s | **No.** It silently DROPS a large argument. A 43k-char base64 blob arrived as 1 byte, and the box reported `gzip: unexpected end of file`. It exits 0 on the way in. |
+| `box ssh`  | 5.17 / 5.17 / 5.72 s | Yes, and it takes stdin. This is the honest floor for anything SSH-based. |
+| `box scp`  | 6.05 / 6.14 / 9.83 s | Yes, but it rides SSH too, so it is no better. |
+
+Streaming a tar into `box ssh` gives a working ~6.7s attach. Good, not 2s.
+
+**`box host` is the way through.** It publishes a Box port on a stable HTTPS URL
+that never touches SSH. Put a small receiver on that port, POST the tree to it,
+and let it extract and decide about installing:
+
+```
+attach 1:  2.23s   attach 4:  1.82s
+attach 2:  1.99s   attach 5:  1.86s
+attach 3:  1.87s
+```
+
+Five consecutive runs, tar build included, `extract_rc=0` each time, and the
+change verified by reading a marker back off the box over a different
+transport. About **45x faster than crabbox's ~84s**.
+
+`scripts/box-fast-attach` plus `scripts/box-attach-receiver.py` implement this.
+Setup costs ~10s once per Box; every attach after that is ~2s. Install is
+skipped unless the lockfile hash actually moves.
+
+### Two bugs in this that are worth remembering
+
+Both produced a confident, fast, wrong answer:
+
+- **`set -o pipefail` plus `cat` on absent lockfiles.** `cat bun.lockb ...`
+  returns non-zero for the files that do not exist, pipefail fails the whole
+  pipeline, and `set -e` kills the script at that line. It exits in 0.4s and
+  looks like a very fast success. Feed `cat` only the files that exist.
+- **HTTP/1.1 keep-alive on a single-threaded receiver.** One idle connection
+  blocks the next request until it times out, which turned the 1.7s attach into
+  a consistent 90s. The timing looked stable, so it read as a real measurement
+  rather than a bug. Use `ThreadingHTTPServer` and send `Connection: close`.
+
 ## Still open
 
 - **Content Rabbit has no warm snapshot yet.** Its repo is not connected to the

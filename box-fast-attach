@@ -1,0 +1,113 @@
+#!/usr/bin/env bash
+# Attach the current worktree to a long-lived ascii.dev Box in ~2s.
+#
+# MEASURED, 2026-08-28, replytosocial (694 tracked files, 1.1 MB gzipped):
+#   crabbox attach, end to end .................. ~84s
+#   this script, steady state ................... 1.82 / 1.87 / 1.99 / 2.23s
+#
+# WHY IT IS FASTER
+# Every transport the box CLI offers pays a fresh SSH handshake. Measured round
+# trips against a running Box:
+#   box exec  1.13 / 1.17 / 1.31 s   -- fast, but it silently DROPS a large
+#                                       argument, so it cannot carry a payload
+#   box ssh   5.17 / 5.17 / 5.72 s
+#   box scp   6.05 / 6.14 / 9.83 s   (also rides SSH)
+# `box host` publishes a Box port on a stable HTTPS URL that does not go through
+# SSH at all. Posting the tree to a small receiver on that port moves 1.1 MB,
+# extracts it, and decides about installing in under two seconds.
+#
+# crabbox spends its time differently: ~13s lease + ~10s bootstrap + ~43s sync,
+# where the sync is rsync wrapped in fingerprint / git-seed / manifest-write /
+# prune / finalize passes costing ~21.6s of fixed per-run bookkeeping. That
+# floor does not shrink when you change one file.
+#
+# Usage:
+#   box-fast-attach --box bx_xxx --setup    # once per Box: install + host the receiver
+#   box-fast-attach                          # thereafter; reads .box-fast-id
+set -euo pipefail
+
+export PATH="$HOME/.ascii/bin:$PATH"
+BOX_BIN="$(eval echo "~$(id -un)")/.ascii/bin/box"
+RECEIVER="${BOX_ATTACH_RECEIVER:-$HOME/Documents/Personal/scripts/box-attach-receiver.py}"
+PORT=8077
+
+WORKTREE_ROOT="$(git rev-parse --show-toplevel)"
+REPO_REMOTE="$(git -C "$WORKTREE_ROOT" remote get-url origin 2>/dev/null || true)"
+
+# Same ownership guard as crabbox-attach.sh. ascii.dev is a third-party
+# provider and must never hold work source. Ask the remote, not the path.
+case "$REPO_REMOTE" in
+  *Mozilla-Ocho*|*mozilla-ocho*|*mozilla.org*|*moz-ocho*)
+    echo "[fast-attach] REFUSING: work repo ($REPO_REMOTE). Boxes are personal-only." >&2
+    exit 1 ;;
+esac
+
+REPO_SLUG="$(basename -s .git "${REPO_REMOTE:-$WORKTREE_ROOT}")"
+BOX_ID=""; DO_SETUP=0
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --box) BOX_ID="$2"; shift 2 ;;
+    --setup) DO_SETUP=1; shift ;;
+    *) echo "[fast-attach] unknown argument: $1" >&2; exit 2 ;;
+  esac
+done
+
+ID_FILE="$WORKTREE_ROOT/.box-fast-id"
+URL_FILE="$WORKTREE_ROOT/.box-fast-url"
+[[ -z "$BOX_ID" && -f "$ID_FILE" ]] && BOX_ID="$(tr -d '[:space:]' < "$ID_FILE")"
+[[ -n "$BOX_ID" ]] || { echo "[fast-attach] no Box id. Run once with --box bx_xxx --setup." >&2; exit 2; }
+printf '%s\n' "$BOX_ID" > "$ID_FILE"
+
+if (( DO_SETUP )); then
+  echo "[fast-attach] installing the receiver on $BOX_ID"
+  "$BOX_BIN" scp "$RECEIVER" "$BOX_ID:/home/user/box-attach-receiver.py" >/dev/null
+  "$BOX_BIN" exec "$BOX_ID" --timeout 60 -- pkill -f box-attach-receiver.py >/dev/null 2>&1 || true
+  "$BOX_BIN" exec "$BOX_ID" --detach -- python3 /home/user/box-attach-receiver.py >/dev/null
+  URL="$("$BOX_BIN" host "$BOX_ID" "$PORT" --public --json | python3 -c 'import sys,json;print(json.load(sys.stdin)["url"])')"
+  printf '%s\n' "$URL" > "$URL_FILE"
+  echo "[fast-attach] receiver hosted at $URL"
+fi
+
+[[ -f "$URL_FILE" ]] || { echo "[fast-attach] no hosted URL. Re-run with --setup." >&2; exit 2; }
+URL="$(tr -d '[:space:]' < "$URL_FILE")"
+
+cd "$WORKTREE_ROOT"
+
+# Everything git tracks, plus the gitignored files the repo declares in
+# .crabbox-secrets, so this path and crabbox agree on what a box needs.
+FILES="$(git ls-files)"
+if [[ -f .crabbox-secrets ]]; then
+  while IFS= read -r p || [[ -n "$p" ]]; do
+    p="${p#"${p%%[![:space:]]*}"}"; p="${p%"${p##*[![:space:]]}"}"
+    [[ -z "$p" || "${p#\#}" != "$p" ]] && continue
+    [[ -e "$p" ]] && FILES="$FILES"$'\n'"$p"
+  done < .crabbox-secrets
+fi
+
+# `cat` on a lockfile that does not exist returns non-zero, and with
+# `set -o pipefail` that kills the script here -- silently, in 0.4s, looking
+# like a very fast success. Only feed cat the files that exist.
+LOCK_SRC=()
+for f in bun.lock bun.lockb pnpm-lock.yaml package-lock.json yarn.lock; do
+  [[ -f "$f" ]] && LOCK_SRC+=( "$f" )
+done
+LOCK_HASH="$( ( (( ${#LOCK_SRC[@]} )) && cat "${LOCK_SRC[@]}" ) | shasum | cut -d' ' -f1 )"
+
+# -h dereferences symlinks: bin/setup-worktree.sh symlinks the env files in from
+# the main repo, and a symlink would arrive dangling. COPYFILE_DISABLE stops
+# macOS tar writing ._ AppleDouble entries that GNU tar then warns about for
+# every file.
+printf '%s\n' "$FILES" \
+  | COPYFILE_DISABLE=1 tar -czhf /tmp/box-fast-attach.$$.tgz -T - 2>/dev/null
+trap 'rm -f /tmp/box-fast-attach.$$.tgz' EXIT
+
+resp="$(curl -sS --fail-with-body -X POST \
+  -H "X-Repo: $REPO_SLUG" -H "X-Lock-Hash: $LOCK_HASH" \
+  --data-binary "@/tmp/box-fast-attach.$$.tgz" "$URL")" || {
+    echo "[fast-attach] upload failed: $resp" >&2; exit 1; }
+
+echo "[fast-attach] $resp"
+case "$resp" in
+  *extract_rc=0*) ;;
+  *) echo "[fast-attach] extract failed on the box" >&2; exit 1 ;;
+esac
