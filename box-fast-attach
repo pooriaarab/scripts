@@ -57,8 +57,18 @@ done
 STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/box-fast-attach/$(printf '%s' "$WORKTREE_ROOT" | shasum | cut -d' ' -f1)"
 mkdir -p "$STATE_DIR"; chmod 700 "$STATE_DIR"
 ID_FILE="$STATE_DIR/box-id"; MANIFEST="$STATE_DIR/manifest"
-[[ -z "$BOX_ID" && -f "$ID_FILE" ]] && BOX_ID="$(tr -d '[:space:]' < "$ID_FILE")"
+PREV_BOX=""
+[[ -f "$ID_FILE" ]] && PREV_BOX="$(tr -d '[:space:]' < "$ID_FILE")"
+[[ -z "$BOX_ID" ]] && BOX_ID="$PREV_BOX"
 [[ -n "$BOX_ID" ]] || { echo "[fast-attach] no Box id. Run once with --box bx_xxx." >&2; exit 2; }
+
+# A delta only makes sense against the Box that already holds the tree. Point
+# this at a different Box and the delta lands on a machine with nothing under
+# it, which looks like a fast success and leaves a broken checkout.
+if [[ -n "$PREV_BOX" && "$PREV_BOX" != "$BOX_ID" ]]; then
+  echo "[fast-attach] Box changed ($PREV_BOX -> $BOX_ID); reseeding"
+  RESEED=1
+fi
 printf '%s\n' "$BOX_ID" > "$ID_FILE"
 
 REMOTE_DIR="/home/user/work/$REPO_SLUG"
@@ -117,28 +127,41 @@ send_full() {
     | "$BOX_BIN" ssh "$BOX_ID" -- "mkdir -p '$REMOTE_DIR' && tar -xzf - --warning=no-unknown-keyword -C '$REMOTE_DIR' && cd '$REMOTE_DIR' && { prev=\$(cat .box-lock-hash 2>/dev/null || true); if [ \"\$prev\" != '$LOCK_HASH' ]; then bun install --frozen-lockfile >/dev/null 2>&1 || bun install >/dev/null 2>&1; printf %s '$LOCK_HASH' > .box-lock-hash; echo 'seeded installed=yes'; else echo 'seeded installed=no'; fi; }"
 }
 
-send_delta() {  # $1 = newline-separated changed paths
-  local changed="$1" b64
-  COPYFILE_DISABLE=1 tar -czhf "$STATE_DIR/delta.tgz" -T <(printf '%s\n' "$changed") 2>/dev/null
+send_delta() {  # $1 = changed paths that exist, $2 = paths deleted locally
+  local changed="$1" deleted="${2:-}" b64
+  if [[ -n "$changed" ]]; then
+    COPYFILE_DISABLE=1 tar -czhf "$STATE_DIR/delta.tgz" -T <(printf '%s\n' "$changed") 2>/dev/null
+  else
+    # An empty tar still gives box-unpack.sh something valid to extract.
+    COPYFILE_DISABLE=1 tar -czf "$STATE_DIR/delta.tgz" -T /dev/null 2>/dev/null
+  fi
   b64="$(base64 -i "$STATE_DIR/delta.tgz" | tr -d '\n')"
   if (( ${#b64} > MAX_ARG )); then return 3; fi
   # The payload is its OWN argv word. Do not interpolate it into a -c string.
   "$BOX_BIN" exec "$BOX_ID" --timeout 550 -- \
-    bash /home/user/box-unpack.sh "$b64" "$REMOTE_DIR" "$LOCK_HASH"
+    bash /home/user/box-unpack.sh "$b64" "$REMOTE_DIR" "$LOCK_HASH" "$deleted"
 }
 
 if (( RESEED )) || [[ ! -f "$STATE_SHA" ]]; then
   send_full
 else
-  CHANGED="$(collect_changed)"
-  # Only send paths that still exist and that we would sync at all.
-  CHANGED="$(printf '%s\n' "$CHANGED" | while IFS= read -r c; do [[ -n "$c" && -f "$c" ]] && printf '%s\n' "$c"; done)"
-  if [[ -z "$CHANGED" ]]; then
+  ALL_CHANGED="$(collect_changed)"
+  # Split into "send this" and "delete this". Dropping the vanished paths, as an
+  # earlier version did, leaves the deleted file sitting on the Box forever.
+  CHANGED=""; DELETED=""
+  while IFS= read -r c; do
+    [[ -z "$c" ]] && continue
+    if [[ -f "$c" ]]; then CHANGED="$CHANGED$c"$'\n'; else DELETED="$DELETED$c"$'\n'; fi
+  done <<< "$ALL_CHANGED"
+  CHANGED="${CHANGED%$'\n'}"; DELETED="${DELETED%$'\n'}"
+
+  if [[ -z "$CHANGED" && -z "$DELETED" ]]; then
     echo "[fast-attach] nothing changed"
   else
-    n=$(printf '%s\n' "$CHANGED" | wc -l | tr -d ' ')
-    echo "[fast-attach] $n changed file(s)"
-    if ! send_delta "$CHANGED"; then
+    nc=$([[ -n "$CHANGED" ]] && printf '%s\n' "$CHANGED" | wc -l | tr -d ' ' || echo 0)
+    nd=$([[ -n "$DELETED" ]] && printf '%s\n' "$DELETED" | wc -l | tr -d ' ' || echo 0)
+    echo "[fast-attach] $nc changed, $nd deleted"
+    if ! send_delta "$CHANGED" "$DELETED"; then
       echo "[fast-attach] delta over the ARG_MAX ceiling; sending the full tree"
       send_full
     fi

@@ -300,6 +300,38 @@ attach, one changed file ........ 1.41 / 1.49 / 1.51s
 Verified by reading a marker back off the Box. Against crabbox's ~84s that is
 about **56x**. `scripts/box-fast-attach` plus `scripts/box-unpack.sh`.
 
+### The review caught five real bugs
+
+The council review on scripts#47 flagged the prototype receiver, and it was
+right. Rather than harden it, I deleted it: the final design seeds over
+`box ssh` and sends deltas over `box exec`, so the HTTP receiver and its open
+port are no longer part of the path at all. That removes the critical finding
+by removing the component.
+
+The other four were real bugs in code that stayed, all fixed and each verified
+against a live Box:
+
+| finding | fix | proof |
+|---|---|---|
+| tar members could escape the destination | reject any member matching `../` or a leading `/` before extracting | crafted `../../pwned.txt` archive -> exit 2 |
+| `X-Repo: ..` escaped the work root | destination must live under `/home/user/work` and contain no `..` | `dest=/home/user` -> exit 2 |
+| a failed install still wrote the lock marker, hiding a broken `node_modules` until the lockfile changed again | only write the marker when the install returns 0, and surface the output | install of a nonexistent package -> exit 1, marker absent |
+| pointing at a different Box sent a delta to a machine with nothing on it | reseed whenever the Box id changes | `--box bx_DIFFERENT` -> "Box changed; reseeding" |
+| a locally deleted file stayed on the Box forever | split the change set into changed and deleted, and remove the deleted ones | file removed locally -> "0 changed, 1 deleted" -> gone from the Box |
+
+The deletion fix hid a second bug worth naming. I first passed the delete list
+as an environment variable around the `box exec` call. `box exec` runs the
+command **on the Box**, so a variable exported around the local `box` process
+never arrives, and every deletion was silently skipped while the call still
+reported success. Pass it as an argument.
+
+Hardening cost nothing measurable:
+
+```
+attach, nothing changed .... 1.62 / 1.81s
+attach, one changed file ... 1.49 / 1.53 / 1.97s
+```
+
 ### Keep the hosted port token-gated
 
 `box host <id> <port>` defaults to `--private` and returns a URL with a
