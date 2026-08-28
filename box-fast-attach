@@ -1,0 +1,306 @@
+#!/usr/bin/env bash
+# Attach the current worktree to a long-lived ascii.dev Box in ~1.5s.
+#
+# MEASURED 2026-08-28:
+#   replytosocial   694 files, 1.1 MB : seed 7.4s, then 1.49-1.97s
+#   content-rabbit 5699 files,  29 MB : seed 42.7s, then 1.80-2.06s
+#   crabbox, either repo .............. ~84s every time
+#
+# Steady-state cost is one `box exec` round trip, so it barely moves with repo
+# size. Only the one-time seed scales.
+#
+# WHY IT IS FASTER
+# crabbox spends ~13s lease + ~10s bootstrap + ~43s sync, where the sync is
+# rsync wrapped in fingerprint / git-seed / manifest-write / prune / finalize
+# passes costing ~21.6s of fixed per-run bookkeeping. That floor does not shrink
+# when you change one file.
+#
+# Transport round trips against a running Box:
+#   box exec  1.2s   <- HTTPS, no SSH, no open port. Use this.
+#   box ssh   5.2s   <- fresh SSH handshake per call, but takes stdin
+#   box scp   6.1s   <- also rides SSH
+#
+# `box exec` carries a payload fine AS AN ARGV WORD. It is `bash -lc "...$VAR"`
+# that mangles it: a 43k-char blob interpolated into a -c string arrived as one
+# byte and exited 0. Passed as its own argument, 130,000 chars arrive intact;
+# 150,000 fails with `E2BIG`. The ceiling is the box-side ARG_MAX, ~128 KiB.
+#
+# Usage:
+#   box-fast-attach --box bx_xxx    # first run seeds, later runs send deltas
+#   box-fast-attach --reseed        # force a full re-send
+set -euo pipefail
+
+export PATH="$HOME/.ascii/bin:$PATH"
+BOX_BIN="$(eval echo "~$(id -un)")/.ascii/bin/box"
+UNPACK_SRC="${BOX_UNPACK_SRC:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/box-unpack.sh}"
+MAX_ARG=120000   # under the measured ~128 KiB ARG_MAX ceiling
+
+WORKTREE_ROOT="$(git rev-parse --show-toplevel)"
+REPO_REMOTE="$(git -C "$WORKTREE_ROOT" remote get-url origin 2>/dev/null || true)"
+
+# Same ownership guard as crabbox-attach.sh. ascii.dev is a third-party
+# provider and must never hold work source. Ask the remote, not the path.
+case "$REPO_REMOTE" in
+  *Mozilla-Ocho*|*mozilla-ocho*|*mozilla.org*|*moz-ocho*)
+    echo "[fast-attach] REFUSING: work repo ($REPO_REMOTE). Boxes are personal-only." >&2
+    exit 1 ;;
+esac
+
+REPO_SLUG="$(basename -s .git "${REPO_REMOTE:-$WORKTREE_ROOT}")"
+BOX_ID=""; RESEED=0
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --box) BOX_ID="$2"; shift 2 ;;
+    --reseed) RESEED=1; shift ;;
+    *) echo "[fast-attach] unknown argument: $1" >&2; exit 2 ;;
+  esac
+done
+
+# State lives OUTSIDE the worktree so nothing here can be committed.
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/box-fast-attach/$(printf '%s' "$WORKTREE_ROOT" | shasum | cut -d' ' -f1)"
+mkdir -p "$STATE_DIR"; chmod 700 "$STATE_DIR"
+ID_FILE="$STATE_DIR/box-id"
+STATE_SHA="$STATE_DIR/synced-sha"
+STATE_DIRTY="$STATE_DIR/synced-dirty"
+STATE_SECRETS="$STATE_DIR/synced-secrets"
+
+PREV_BOX=""
+[[ -f "$ID_FILE" ]] && PREV_BOX="$(tr -d '[:space:]' < "$ID_FILE")"
+[[ -z "$BOX_ID" ]] && BOX_ID="$PREV_BOX"
+[[ -n "$BOX_ID" ]] || { echo "[fast-attach] no Box id. Run once with --box bx_xxx." >&2; exit 2; }
+
+# A delta only makes sense against the Box that already holds the tree. Point
+# this at a different Box and the delta lands on a machine with nothing under
+# it, which looks like a fast success and leaves a broken checkout.
+if [[ -n "$PREV_BOX" && "$PREV_BOX" != "$BOX_ID" ]]; then
+  echo "[fast-attach] Box changed ($PREV_BOX -> $BOX_ID); reseeding"
+  RESEED=1
+fi
+
+# `box env add-repo` clones the repo to <workspace>/<repo>, so prefer that path.
+# A box started from an environment already holds the committed tree and every
+# declared secret, which is the whole point -- there is nothing to upload.
+REMOTE_DIR="${BOX_REMOTE_DIR:-/home/user/$REPO_SLUG}"
+cd "$WORKTREE_ROOT"
+
+# Gitignored files the repo declares in .crabbox-secrets, so this path and
+# crabbox agree on what a box needs.
+SECRET_PATHS=()
+if [[ -f .crabbox-secrets ]]; then
+  while IFS= read -r p || [[ -n "$p" ]]; do
+    p="${p#"${p%%[![:space:]]*}"}"; p="${p%"${p##*[![:space:]]}"}"
+    [[ -z "$p" || "${p#\#}" != "$p" ]] && continue
+    [[ -e "$p" ]] && SECRET_PATHS+=( "$p" )
+  done < .crabbox-secrets
+fi
+
+# git does not track these, so git cannot tell us when they change. Hash them.
+# Without this, editing .env.local after the first seed reports "nothing
+# changed" and leaves stale credentials on the Box -- the exact failure the
+# manifest exists to prevent.
+secret_fingerprint() {
+  local f
+  for f in "${SECRET_PATHS[@]:-}"; do
+    [[ -f "$f" ]] && printf '%s %s\n' "$(shasum "$f" | cut -d' ' -f1)" "$f"
+  done
+}
+
+# `cat` on a lockfile that does not exist returns non-zero, and with
+# `set -o pipefail` that kills the script here -- silently, in 0.4s, looking
+# like a very fast success. Only feed cat the files that exist.
+LOCK_SRC=()
+for f in bun.lock bun.lockb pnpm-lock.yaml package-lock.json yarn.lock; do
+  [[ -f "$f" ]] && LOCK_SRC+=( "$f" )
+done
+LOCK_HASH="$( ( (( ${#LOCK_SRC[@]} )) && cat "${LOCK_SRC[@]}" ) | shasum | cut -d' ' -f1 )"
+
+HEAD_SHA="$(git rev-parse HEAD)"
+# -z gives NUL-separated, quote-free paths. Parsing `git status` with
+# `awk '{print $NF}'` truncates any path containing a space and then
+# misclassifies it as deleted.
+CUR_DIRTY="$(git status --porcelain=v1 -z --untracked-files=no \
+  | python3 -c 'import sys
+raw=sys.stdin.buffer.read().split(b"\0")
+out=[]
+i=0
+while i < len(raw):
+    e=raw[i]
+    if not e: i+=1; continue
+    st, path = e[:2], e[3:]
+    out.append(path.decode())
+    # a rename entry is followed by its origin path in the next NUL field
+    if b"R" in st or b"C" in st:
+        i+=1
+        if i < len(raw) and raw[i]: out.append(raw[i].decode())
+    i+=1
+print("\n".join(out))')"
+
+all_files() {   # everything we would ship
+  git ls-files
+  local s
+  for s in "${SECRET_PATHS[@]:-}"; do [[ -f "$s" ]] && printf '%s\n' "$s"; done
+}
+
+# macOS bsdtar exits 1 on warnings even when the archive is fine, and with
+# `set -o pipefail` that failed the whole seed after it had already succeeded on
+# the Box. Treat 0 and 1 as success, anything higher as a real error, and always
+# confirm the archive actually lists.
+build_tar() {  # $1 = output path; file list on stdin
+  local out="$1" rc=0
+  COPYFILE_DISABLE=1 tar --no-xattrs -czhf "$out" -T - 2>/dev/null || rc=$?
+  if (( rc > 1 )); then echo "[fast-attach] tar failed (rc=$rc)" >&2; return "$rc"; fi
+  # An archive with no members is legitimate: a delta can be deletions only.
+  # Requiring a non-empty archive here made every deletion-only attach fail,
+  # and the caller then reported it as an ARG_MAX overflow.
+  [[ -f "$out" ]] || { echo "[fast-attach] tar produced no archive" >&2; return 1; }
+  tar -tzf "$out" >/dev/null 2>&1 || { echo "[fast-attach] tar archive is unreadable" >&2; return 1; }
+  return 0
+}
+
+ensure_unpack() {  # these must exist on the Box or every delta fails
+  [[ -f "$UNPACK_SRC" ]] || { echo "[fast-attach] missing $UNPACK_SRC" >&2; return 1; }
+  "$BOX_BIN" scp "$UNPACK_SRC" "$BOX_ID:/home/user/box-unpack.sh" >/dev/null
+  local gs="${UNPACK_SRC%/*}/box-git-sync.sh"
+  [[ -f "$gs" ]] && "$BOX_BIN" scp "$gs" "$BOX_ID:/home/user/box-git-sync.sh" >/dev/null
+}
+
+# If the Box already has the repo (an environment cloned it), do not upload the
+# tree at all. Let the Box fetch from GitHub -- measured 3.2s for a 5,868-file
+# repo against 42.7s to push the same tree up from the laptop -- and then send
+# only the uncommitted work.
+remote_has_repo() {
+  # Use the exit code of a plain `test`, with no shell metacharacters at all.
+  # `box exec` joins argv into a shell command string, so
+  #   bash -c "test -d '$D/.git' && echo yes || echo no"
+  # loses its quotes and degenerates to `bash -c test` plus stray words -- it
+  # answered "no" even when the directory was plainly there.
+  "$BOX_BIN" exec "$BOX_ID" --timeout 60 --json -- test -d "$REMOTE_DIR/.git" 2>/dev/null \
+    | python3 -c 'import sys,json
+try: print("yes" if json.load(sys.stdin).get("exitCode")==0 else "no")
+except Exception: print("no")' 2>/dev/null
+}
+
+sync_via_git() {  # returns non-zero if the Box cannot reach the commit
+  echo "[fast-attach] Box has the repo; fetching $HEAD_SHA there instead of uploading"
+  ensure_unpack
+  "$BOX_BIN" exec "$BOX_ID" --timeout 550 --json -- \
+    bash /home/user/box-git-sync.sh "$REMOTE_DIR" "$HEAD_SHA" "$LOCK_HASH" \
+    | python3 -c 'import sys,json
+d=json.load(sys.stdin)
+print((d.get("stdout") or "").strip())
+import sys as s
+s.exit(0 if d.get("exitCode")==0 else 1)'
+}
+
+send_full() {
+  echo "[fast-attach] seeding the full tree over box ssh"
+  ensure_unpack
+  # Mirror, do not merge. Without clearing first, a file deleted locally before
+  # a reseed survives on the Box forever. node_modules and the lock marker are
+  # the whole point of the warm Box, so they stay.
+  all_files | build_tar "$STATE_DIR/seed.tgz"
+  "$BOX_BIN" ssh "$BOX_ID" -- "
+        set -e
+        mkdir -p '$REMOTE_DIR'
+        find '$REMOTE_DIR' -mindepth 1 -maxdepth 1 \
+          ! -name node_modules ! -name .box-lock-hash -exec rm -rf {} +
+        tar -xzf - --warning=no-unknown-keyword -C '$REMOTE_DIR'
+        cd '$REMOTE_DIR'
+        prev=\$(cat .box-lock-hash 2>/dev/null || true)
+        if [ \"\$prev\" != '$LOCK_HASH' ]; then
+          # Only record the lockfile as installed when the install succeeded.
+          # Writing the marker anyway hides a broken node_modules until the
+          # lockfile changes again, which can be never.
+          if out=\$(bun install --frozen-lockfile 2>&1) || out=\$(bun install 2>&1); then
+            printf %s '$LOCK_HASH' > .box-lock-hash
+            echo 'seeded installed=yes'
+          else
+            echo 'seeded install=FAILED' >&2
+            printf '%s\n' \"\$out\" | tail -20 >&2
+            exit 1
+          fi
+        else
+          echo 'seeded installed=no'
+        fi" < "$STATE_DIR/seed.tgz"
+  rm -f "$STATE_DIR/seed.tgz"
+}
+
+send_delta() {  # $1 = changed paths that exist, $2 = paths deleted locally
+  local changed="$1" deleted="${2:-}" b64
+  if [[ -n "$changed" ]]; then
+    printf '%s\n' "$changed" | build_tar "$STATE_DIR/delta.tgz"
+  else
+    build_tar "$STATE_DIR/delta.tgz" < /dev/null
+  fi
+  b64="$(base64 -i "$STATE_DIR/delta.tgz" | tr -d '\n')"
+  # 3 means "too big for one box exec"; every other non-zero is a real error.
+  if (( ${#b64} > MAX_ARG )); then return 3; fi
+  # The payload is its OWN argv word. Do not interpolate it into a -c string.
+  # The delete list is an argument too: `box exec` runs on the Box, so a
+  # variable exported around the local process never reaches it.
+  # Base64 the delete list too: `box exec` joins argv into a shell string, so a
+  # newline inside an argument ends the line and the next path runs as a command.
+  local del_b64=""
+  [[ -n "$deleted" ]] && del_b64="$(printf '%s\n' "$deleted" | base64 | tr -d '\n')"
+  "$BOX_BIN" exec "$BOX_ID" --timeout 550 -- \
+    bash /home/user/box-unpack.sh "$b64" "$REMOTE_DIR" "$LOCK_HASH" "$del_b64"
+}
+
+if (( RESEED )) || [[ ! -f "$STATE_SHA" ]]; then
+  if [[ "$(remote_has_repo)" == "yes" ]] && sync_via_git; then
+    : # the Box fetched the committed state itself
+  else
+    send_full
+  fi
+  # Uncommitted work never reaches GitHub, so it still has to be sent.
+  DIRTY_NOW="$(printf '%s\n' "$CUR_DIRTY" | sed '/^$/d' | while IFS= read -r c; do [[ -f "$c" ]] && printf '%s\n' "$c"; done)"
+  for sp in "${SECRET_PATHS[@]:-}"; do [[ -f "$sp" ]] && DIRTY_NOW="$DIRTY_NOW"$'\n'"$sp"; done
+  DIRTY_NOW="$(printf '%s\n' "$DIRTY_NOW" | sed '/^$/d' | sort -u)"
+  if [[ -n "$DIRTY_NOW" ]]; then
+    echo "[fast-attach] overlaying $(printf '%s\n' "$DIRTY_NOW" | wc -l | tr -d ' ') uncommitted/secret file(s)"
+    send_delta "$DIRTY_NOW" "" || send_full
+  fi
+else
+  prev_sha="$(tr -d '[:space:]' < "$STATE_SHA")"
+  prev_dirty="$(cat "$STATE_DIRTY" 2>/dev/null || true)"
+  ALL_CHANGED="$( {
+      [[ -n "$prev_sha" ]] && git diff --name-only "$prev_sha" "$HEAD_SHA" 2>/dev/null
+      printf '%s\n' "$CUR_DIRTY"
+      printf '%s\n' "$prev_dirty"
+      # secret files whose contents moved since the last sync
+      diff <(cat "$STATE_SECRETS" 2>/dev/null) <(secret_fingerprint) 2>/dev/null \
+        | sed -n 's/^[<>] [0-9a-f]* //p'
+    } | sed '/^$/d' | sort -u )"
+
+  CHANGED=""; DELETED=""
+  while IFS= read -r c; do
+    [[ -z "$c" ]] && continue
+    if [[ -f "$c" ]]; then CHANGED="$CHANGED$c"$'\n'; else DELETED="$DELETED$c"$'\n'; fi
+  done <<< "$ALL_CHANGED"
+  CHANGED="${CHANGED%$'\n'}"; DELETED="${DELETED%$'\n'}"
+
+  if [[ -z "$CHANGED" && -z "$DELETED" ]]; then
+    echo "[fast-attach] nothing changed"
+  else
+    nc=$([[ -n "$CHANGED" ]] && printf '%s\n' "$CHANGED" | wc -l | tr -d ' ' || echo 0)
+    nd=$([[ -n "$DELETED" ]] && printf '%s\n' "$DELETED" | wc -l | tr -d ' ' || echo 0)
+    echo "[fast-attach] $nc changed, $nd deleted"
+    drc=0; send_delta "$CHANGED" "$DELETED" || drc=$?
+    if (( drc == 3 )); then
+      echo "[fast-attach] delta over the ARG_MAX ceiling; sending the full tree"
+      send_full
+    elif (( drc != 0 )); then
+      echo "[fast-attach] delta failed (rc=$drc)" >&2
+      exit "$drc"
+    fi
+  fi
+fi
+
+# Record state ONLY after the transfer succeeded. Writing the Box id up front
+# means a seed that dies partway leaves the id recorded and the sync point
+# stale, so the next run takes the delta branch against a Box that never got
+# the tree -- a fast-looking success over a broken checkout.
+printf '%s\n' "$BOX_ID"    > "$ID_FILE"
+printf '%s\n' "$HEAD_SHA"  > "$STATE_SHA"
+printf '%s\n' "$CUR_DIRTY" > "$STATE_DIRTY"
+secret_fingerprint         > "$STATE_SECRETS"
