@@ -548,6 +548,63 @@ box exec "$ID" -- test -d "$DIR/.git"
 The general rule for `box exec`: one shell-safe word per argument, no
 metacharacters, no newlines, and never a `-c` string you interpolated into.
 
+## Setup scripts do not work, and both routes fail quietly
+
+Neither documented way to run per-repo setup on a Box works. Verified 2026-08-28:
+
+- **`setupScript` on an environment's repo entry.** The field is in the API
+  response. `PUT /api/box/v1/environments/{id}` with it populated returns
+  **200 `environment.updated`** — and the field reads back empty. A clean
+  success that changed nothing. `box env add-repo` has no `--setup-script` flag.
+- **`box new --setup-file <path>`.** `setupStatus` stayed `pending`
+  indefinitely, `setupError` stayed null, the script never ran and
+  `node_modules` was never installed. It also made the Box **6x slower to first
+  usable command: 52.7s against 8.5s without the flag.**
+
+Do the install yourself after boot. `box exec` is ~1.2s and verified, and
+`box exec --detach` runs past the 600s cap. That is what `box-git-sync.sh` does.
+
+## Agent credentials: I had this backwards
+
+I first set `--agents-credentials false` on every repo environment, reasoning
+that a build Box needs no agent logins and one compromised Box should not expose
+the whole personal AI spend surface.
+
+That made every repo Box useless for delegated work. The agent CLI logins live
+in a separate `agent-roster` environment, so a Box started from a repo
+environment had **no muse, pi, gemini or codex at all** — only whatever the base
+image ships. A second agent hit exactly this and reported the Box as unusable.
+
+The two credential switches deserve opposite answers:
+
+- `--box-credentials false` — always. These let a Box create and control other
+  Boxes, which is the escalation that actually matters.
+- `--agents-credentials true` — plus a copy of `agent-roster`'s five secret
+  files, via `box-env-provision --with-agents`. This does widen the blast
+  radius. It is a deliberate trade: the keys already sit on ascii under
+  `agent-roster`, so copying them hands them to nobody new — it only means more
+  Boxes carry them.
+
+## T3 Code threads get no Box, and that is correct
+
+The attach is a `git()` shell function in `~/.zshrc` that intercepts
+`git worktree add`. A shell function exists only in an interactive zsh:
+
+```
+zsh -ic 'whence -w git'   ->  git: function
+zsh  -c 'whence -w git'   ->  git: command
+```
+
+T3 Code creates its worktrees from a Node child process, so `git` is the plain
+binary and the wrapper never fires. Independently, T3 runs git, diffs and
+terminals on its own disk, so an attached Box would sit idle and bill while the
+agent worked on the laptop.
+
+So do not auto-attach on T3 worktree creation. Run `box-fast-attach` when you
+actually want a remote build. T3's own hook would be a `t3.json` at the repo
+root with a `scripts[]` entry marked `runOnWorktreeCreate: true` — documented,
+untested here.
+
 ## Still open
 
 - **Content Rabbit has no warm snapshot yet.** Its repo is not connected to the

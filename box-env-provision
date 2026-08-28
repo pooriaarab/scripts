@@ -22,18 +22,22 @@
 set -uo pipefail
 export PATH="$HOME/.ascii/bin:$PATH"
 
-DRY=0; ALL=0; PRIVATE_ONLY=0; TARGETS=()
+DRY=0; ALL=0; PRIVATE_ONLY=0; WITH_AGENTS=0; TARGETS=()
 while (( $# )); do
   case "$1" in
     --dry-run) DRY=1; shift ;;
     --all) ALL=1; shift ;;
     --private-only) PRIVATE_ONLY=1; shift ;;
+    --with-agents) WITH_AGENTS=1; shift ;;
     -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
     *) TARGETS+=( "$1" ); shift ;;
   esac
 done
 
 run() { if (( DRY )); then echo "    would: $*"; else "$@" >/dev/null 2>&1; fi; }
+
+AGENT_CRED_DIR="${AGENT_CRED_DIR:-/tmp/boxwork/agentcreds}"
+AGENT_CRED_MANIFEST="$AGENT_CRED_DIR/manifest.json"
 
 # One API call for the whole private list beats one `gh repo view` per repo.
 PRIVATE_LIST=""
@@ -106,9 +110,30 @@ provision() {
   fi
   [[ -n "$tmpman" ]] && rm -f "$tmpman"
 
-  # A build box needs neither the Box CLI key nor the agent logins. One
-  # compromised box should not expose the whole personal AI spend surface.
-  run box env set "$name" --box-credentials false --agents-credentials false
+  # Agent CLI logins. A repo box is useless for delegated work without them:
+  # they live in the separate `agent-roster` environment, so a box started from
+  # a repo environment had no muse, pi, gemini or codex at all.
+  #
+  # This widens the blast radius, and that is a deliberate trade. The keys are
+  # already stored on ascii under `agent-roster`, so copying them to more
+  # environments does not hand them to anyone new -- it only means more boxes
+  # carry them. Box CLI credentials stay OFF, because those let a box create
+  # and control other boxes, which is the escalation that actually matters.
+  if (( WITH_AGENTS )) && [[ -f "$AGENT_CRED_MANIFEST" ]]; then
+    local n_ag=0 inbox src
+    while IFS=$'\t' read -r inbox src; do
+      [[ -z "$inbox" ]] && continue
+      run box env set-file "$name" "$inbox" --from "$AGENT_CRED_DIR/$src"
+      n_ag=$((n_ag+1))
+    done < <(python3 -c '
+import json,sys
+for path,safe,_ in json.load(open(sys.argv[1])): print(path+"\t"+safe)
+' "$AGENT_CRED_MANIFEST")
+    echo "    agent CLI credentials: $n_ag file(s)"
+    run box env set "$name" --box-credentials false --agents-credentials true
+  else
+    run box env set "$name" --box-credentials false --agents-credentials false
+  fi
 }
 
 if (( ALL )); then
