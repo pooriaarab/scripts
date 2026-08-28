@@ -1,0 +1,143 @@
+# Keeping ascii.dev Boxes cheap
+
+A Box bills every second it is powered on. A stopped Box is free. Nothing turns
+a Box off for you except its TTL, so the whole cost problem is one habit: turn
+the machine off when the work is done.
+
+The `box-reap` script in this repo reports what is burning and stops what is
+not being used. This page is the convention it enforces.
+
+## The five rules
+
+**1. Always pass a `--ttl`, and size it to the worst case.**
+
+```bash
+box new --type small --ttl 3600
+```
+
+The TTL is a hard wall-clock deadline, not an idle timer. It counts from
+creation or resume and never from your last activity, so a Box with a one-hour
+TTL stops one hour later **even in the middle of a build**. Size it to the
+longest the job could plausibly take, not the average. The default is one hour.
+
+**2. Stop the Box yourself when the work finishes. Do not wait for the TTL.**
+
+The TTL is a backstop for a caller that crashed. It is not the shutdown
+mechanism. A job that finishes in 4 minutes under a 1-hour TTL wastes 56
+minutes of credit.
+
+```bash
+box new --type small --ttl 1800 --json | ...   # capture the id
+trap 'box stop "$BOX_ID"' EXIT                 # stop on any exit path
+```
+
+**3. Prefer `small` unless the job is CPU-bound.**
+
+| Type | vCPU | RAM | Rate | Cost per hour |
+|---|---|---|---|---|
+| `small` | 2 | 4 GB | 0.5x | $0.018 |
+| `default` | 4 | 8 GB | 1x | $0.036 |
+| `large` | 8 | 16 GB | 2x | $0.072 |
+
+A `large` Box left running for a day costs the same as four `small` ones. Most
+agent work is I/O-bound and does not notice the difference.
+
+**4. `box stop`, not `box delete`.**
+
+Stopping snapshots the filesystem and pauses billing. `box resume` brings the
+Box back with its files intact. Delete only when the filesystem is genuinely
+disposable, because deletion is permanent.
+
+**5. Long jobs write a heartbeat.**
+
+This is what lets an automated reaper tell your build apart from an abandoned
+machine. Costs nothing, and it is the only fully reliable signal:
+
+```bash
+# in the Box, alongside the real work
+while :; do touch /home/user/.box-reap-heartbeat; sleep 30; done &
+```
+
+Or opt a Box out of reaping entirely:
+
+```bash
+touch /home/user/.box-reap-keep
+```
+
+## Why "idle" is a trap
+
+`box list` reports a state of `idle` for almost every Box you will ever look at.
+It is not an activity signal, and reaping on it destroys live work.
+
+The vendor docs are explicit: `idle` and `running` "only reflect work queued
+through `POST /boxes/{boxId}/prompt` … a box can show `idle` while your own
+agent works inside it."
+
+That is reproducible. A Box pegged at 100% CPU for four minutes, driven over
+`box exec`, reported `state: idle` in every one of ten samples, and its
+`updatedAt` never moved — not during the load, and not after a `box extend`
+either. `updatedAt` only moved when a Box-managed prompt was queued.
+
+So `box-reap` never decides on state alone. It measures CPU utilisation inside
+the Box, and it prefers the heartbeat file when one exists. On a 2 vCPU Box, an
+unused machine reads 0-10% CPU and one busy core reads 50-60%, which separates
+cleanly. The 1-minute load average does not: unused reads 0.12-0.29 and busy
+reads 0.42-0.65, which overlaps.
+
+The honest limit: an I/O-bound job, such as a long `npm install`, uses little
+CPU and looks like an unused Box. Write the heartbeat, or run the reaper with
+`--require-heartbeat` so it only ever touches Boxes that opted in.
+
+## Running the reaper
+
+Report only. Changes nothing:
+
+```bash
+box-reap
+```
+
+Plan a reap. Still changes nothing:
+
+```bash
+box-reap --stop-idle-older-than 2h
+```
+
+Actually stop them:
+
+```bash
+box-reap --stop-idle-older-than 2h --execute
+```
+
+Strictest mode, for when heartbeats are wired up everywhere:
+
+```bash
+box-reap --stop-idle-older-than 2h --require-heartbeat --execute
+```
+
+## Optional: run it on a schedule
+
+**No cron job is installed by this repo.** Add one yourself if you want it.
+Start in dry-run for a few days and read the log before adding `--execute`:
+
+```cron
+# every 15 minutes, report only
+*/15 * * * * PATH=$HOME/.ascii/bin:$PATH box-reap --stop-idle-older-than 2h --json >> ~/.box-reap.log 2>&1
+
+# once you trust it, add --execute. Keep --require-heartbeat: unattended
+# reaping without it can stop an I/O-bound job that never opted in.
+# */15 * * * * PATH=$HOME/.ascii/bin:$PATH box-reap --stop-idle-older-than 2h --require-heartbeat --execute --json >> ~/.box-reap.log 2>&1
+```
+
+Drop `--require-heartbeat` only once every long-running job on the account
+writes a heartbeat. Until then it is the difference between a reaper that
+cleans up and one that interrupts work while you are asleep.
+
+In `--json` mode stdout stays a single parseable document; stop progress goes
+to stderr, so `box-reap --json ... | jq` works even with `--execute`.
+
+`box-reap` exits 0 on a clean run, 1 on error, and 3 when a warning fired, so a
+monitor can alert on 3. The warnings cover credit projected to run out before
+the billing period ends, the 100-Box concurrency cap, the creation rate limits,
+and any Box running with auto-stop disabled.
+
+`box` must be on `PATH`; cron does not read your shell profile.
