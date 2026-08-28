@@ -53,3 +53,4 @@ skill.
 |---|---|
 | `box-cost-discipline.md` | How to keep ascii.dev Boxes cheap, and why `state: idle` is not an idleness signal |
 | `t3-code-on-a-box.md` | Running T3 Code on a Box and reaching it over `box host` |
+| `silent-failover-discipline.md` | Why a working primary/backup credential failover can take a whole fleet down silently, and what to alert on instead |

@@ -4,6 +4,14 @@
 # configured, green, and never hitting cannot hide.
 # Usage: ci-cache-health owner/repo [--limit N] [--json] [--min-cache-bytes N]
 # Default limit is 12. This reads job logs, so it is slower than ci-job-timings.
+#
+# Known gap, left undetected on purpose: a build tool can discard a correctly
+# restored, correctly sized cache pack over a build dependency the cache key
+# missed (e.g. a config file). That decision happens inside the build tool
+# after this script's restore check already passed, so no log line here
+# distinguishes it from a real hit. Cross-check against ci-job-timings: a
+# reported primary-key hit next to a duration matching the cold-build
+# baseline is the tell.
 set -euo pipefail
 
 usage() {
