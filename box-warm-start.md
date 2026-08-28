@@ -448,6 +448,29 @@ attach, nothing changed ....... 1.53 / 1.55s
 attach, one changed file ...... 1.35 / 1.50 / 1.53s
 ```
 
+### One more: a security check that fails open
+
+The third review pass found a subtle one. The path-escape guard was:
+
+```sh
+if tar -tzf "$tmp" | grep -qE '(^|/)\.\.(/|$)|^/'; then reject; fi
+```
+
+Under `set -o pipefail`, `grep -q` exits the moment it matches, `tar` then dies
+of SIGPIPE (141), and pipefail reports **141** for the pipeline instead of
+grep's 0. The `if` evaluates false and the archive extracts. The check fails
+**open**, and the bigger the archive the likelier the race — backwards for a
+security control.
+
+Fixed by writing the listing to a file and grepping the file. Verified on a Box:
+a crafted archive with `../../pwned.txt` returns exit 2 and nothing lands
+outside the destination.
+
+Honest caveat: I could not reproduce the bypass locally — my 20,001-member
+archive still rejected correctly, because the listing fit the pipe buffer. The
+mechanism is real and the fix costs nothing, so it stands, but I am reporting a
+closed race rather than a demonstrated exploit.
+
 ## Still open
 
 - **Content Rabbit has no warm snapshot yet.** Its repo is not connected to the

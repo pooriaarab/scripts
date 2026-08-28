@@ -24,9 +24,18 @@ mkdir -p "$dest"
 
 # Refuse a tar that would write outside dest. GNU tar strips a leading "/" but
 # happily follows "../", so check the member list before extracting anything.
-tmp="$(mktemp)"; trap 'rm -f "$tmp"' EXIT
+#
+# Do NOT pipe `tar -tzf` straight into `grep -q`. Under `set -o pipefail`,
+# `grep -q` exits as soon as it matches, `tar` then dies of SIGPIPE (141), and
+# pipefail reports 141 for the pipeline instead of grep's 0 -- so the `if` that
+# is supposed to REJECT the archive evaluates false and extraction proceeds.
+# The bigger the archive the more likely the race, which is backwards for a
+# security check. Materialise the listing first, then grep the file.
+tmp="$(mktemp)"; listing="$(mktemp)"
+trap 'rm -f "$tmp" "$listing"' EXIT
 printf '%s' "$b64" | base64 -d > "$tmp"
-if tar -tzf "$tmp" | grep -qE '(^|/)\.\.(/|$)|^/'; then
+tar -tzf "$tmp" > "$listing"
+if grep -qE '(^|/)\.\.(/|$)|^/' "$listing"; then
   echo "ERR: archive contains a path escaping the destination" >&2; exit 2
 fi
 tar -xzf "$tmp" --warning=no-unknown-keyword -C "$dest"
