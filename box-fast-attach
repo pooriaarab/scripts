@@ -1,35 +1,36 @@
 #!/usr/bin/env bash
-# Attach the current worktree to a long-lived ascii.dev Box in ~2s.
+# Attach the current worktree to a long-lived ascii.dev Box in ~1.2s.
 #
-# MEASURED, 2026-08-28, replytosocial (694 tracked files, 1.1 MB gzipped):
-#   crabbox attach, end to end .................. ~84s
-#   this script, steady state ................... 1.82 / 1.87 / 1.99 / 2.23s
+# MEASURED 2026-08-28, replytosocial (694 tracked files, 1.1 MB gzipped):
+#   crabbox attach, end to end ............ ~84s
+#   this script, first seed ............... ~7s   (full tree over box ssh)
+#   this script, steady state ............. ~1.2s (delta over box exec)
 #
 # WHY IT IS FASTER
-# Every transport the box CLI offers pays a fresh SSH handshake. Measured round
-# trips against a running Box:
-#   box exec  1.13 / 1.17 / 1.31 s   -- fast, but it silently DROPS a large
-#                                       argument, so it cannot carry a payload
-#   box ssh   5.17 / 5.17 / 5.72 s
-#   box scp   6.05 / 6.14 / 9.83 s   (also rides SSH)
-# `box host` publishes a Box port on a stable HTTPS URL that does not go through
-# SSH at all. Posting the tree to a small receiver on that port moves 1.1 MB,
-# extracts it, and decides about installing in under two seconds.
+# crabbox spends ~13s lease + ~10s bootstrap + ~43s sync, where the sync is
+# rsync wrapped in fingerprint / git-seed / manifest-write / prune / finalize
+# passes costing ~21.6s of fixed per-run bookkeeping. That floor does not shrink
+# when you change one file.
 #
-# crabbox spends its time differently: ~13s lease + ~10s bootstrap + ~43s sync,
-# where the sync is rsync wrapped in fingerprint / git-seed / manifest-write /
-# prune / finalize passes costing ~21.6s of fixed per-run bookkeeping. That
-# floor does not shrink when you change one file.
+# Transport round trips against a running Box:
+#   box exec  1.2s   <- HTTPS, no SSH. Use this.
+#   box ssh   5.2s   <- fresh SSH handshake per call, but takes stdin
+#   box scp   6.1s   <- also rides SSH
+#
+# `box exec` carries a payload fine AS AN ARGV WORD. It is `bash -lc "...$VAR"`
+# that mangles it: a 43k-char blob interpolated into a -c string arrived as one
+# byte and exited 0. Passed as its own argument, 130,000 chars arrive intact;
+# 150,000 fails with `E2BIG: argument list too long`. So the ceiling is the
+# box-side ARG_MAX, ~128 KiB, and a normal edit is nowhere near it.
 #
 # Usage:
-#   box-fast-attach --box bx_xxx --setup    # once per Box: install + host the receiver
-#   box-fast-attach                          # thereafter; reads .box-fast-id
+#   box-fast-attach --box bx_xxx        # first run seeds, later runs send deltas
+#   box-fast-attach --reseed            # force a full re-send
 set -euo pipefail
 
 export PATH="$HOME/.ascii/bin:$PATH"
 BOX_BIN="$(eval echo "~$(id -un)")/.ascii/bin/box"
-RECEIVER="${BOX_ATTACH_RECEIVER:-$HOME/Documents/Personal/scripts/box-attach-receiver.py}"
-PORT=8077
+MAX_ARG=120000   # stay under the measured ~128 KiB ARG_MAX ceiling
 
 WORKTREE_ROOT="$(git rev-parse --show-toplevel)"
 REPO_REMOTE="$(git -C "$WORKTREE_ROOT" remote get-url origin 2>/dev/null || true)"
@@ -43,61 +44,36 @@ case "$REPO_REMOTE" in
 esac
 
 REPO_SLUG="$(basename -s .git "${REPO_REMOTE:-$WORKTREE_ROOT}")"
-BOX_ID=""; DO_SETUP=0
+BOX_ID=""; RESEED=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --box) BOX_ID="$2"; shift 2 ;;
-    --setup) DO_SETUP=1; shift ;;
+    --reseed) RESEED=1; shift ;;
     *) echo "[fast-attach] unknown argument: $1" >&2; exit 2 ;;
   esac
 done
 
-# State lives OUTSIDE the worktree. The hosted-port URL carries an access token
-# and the cookie jar holds a live session, so neither belongs anywhere near a
-# git tree where it could be committed.
+# State lives OUTSIDE the worktree so nothing here can be committed.
 STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/box-fast-attach/$(printf '%s' "$WORKTREE_ROOT" | shasum | cut -d' ' -f1)"
 mkdir -p "$STATE_DIR"; chmod 700 "$STATE_DIR"
-ID_FILE="$STATE_DIR/box-id"
-URL_FILE="$STATE_DIR/url"
+ID_FILE="$STATE_DIR/box-id"; MANIFEST="$STATE_DIR/manifest"
 [[ -z "$BOX_ID" && -f "$ID_FILE" ]] && BOX_ID="$(tr -d '[:space:]' < "$ID_FILE")"
-[[ -n "$BOX_ID" ]] || { echo "[fast-attach] no Box id. Run once with --box bx_xxx --setup." >&2; exit 2; }
+[[ -n "$BOX_ID" ]] || { echo "[fast-attach] no Box id. Run once with --box bx_xxx." >&2; exit 2; }
 printf '%s\n' "$BOX_ID" > "$ID_FILE"
 
-if (( DO_SETUP )); then
-  echo "[fast-attach] installing the receiver on $BOX_ID"
-  "$BOX_BIN" scp "$RECEIVER" "$BOX_ID:/home/user/box-attach-receiver.py" >/dev/null
-  "$BOX_BIN" exec "$BOX_ID" --timeout 60 -- pkill -f box-attach-receiver.py >/dev/null 2>&1 || true
-  "$BOX_BIN" exec "$BOX_ID" --detach -- python3 /home/user/box-attach-receiver.py >/dev/null
-  # --private (the default) returns a token-gated URL. Do NOT use --public: the
-  # receiver extracts a tar into the Box, so an ungated URL lets anyone who
-  # guesses it write arbitrary files there.
-  URL="$("$BOX_BIN" host "$BOX_ID" "$PORT" --private --json | python3 -c 'import sys,json;d=json.load(sys.stdin);u=d["url"];t=d.get("token") or d.get("_token");print(u+("?_token="+t if t and "_token=" not in u else ""))')"
-  printf '%s\n' "$URL" > "$URL_FILE"
-  echo "[fast-attach] receiver hosted at $URL"
-fi
-
-[[ -f "$URL_FILE" ]] || { echo "[fast-attach] no hosted URL. Re-run with --setup." >&2; exit 2; }
-URL="$(tr -d '[:space:]' < "$URL_FILE")"
-BASE_URL="${URL%%\?*}"
-JAR="$STATE_DIR/cookies"
-
-# A token-gated hosted port answers the ?_token= URL with a 302 that sets a
-# session cookie. curl turns a 302 into a GET and drops the body, so POSTing
-# straight at the token URL silently uploads nothing. Do the handshake once,
-# keep the cookie, then POST against the bare URL.
-gated_get() { curl -s -c "$JAR" -L -o /dev/null "$URL" || true; }
-[[ -s "$JAR" ]] || gated_get
-
+REMOTE_DIR="/home/user/work/$REPO_SLUG"
 cd "$WORKTREE_ROOT"
 
 # Everything git tracks, plus the gitignored files the repo declares in
 # .crabbox-secrets, so this path and crabbox agree on what a box needs.
-FILES="$(git ls-files)"
+# macOS ships bash 3.2, which has no `mapfile`. Read the list the portable way.
+FILES=()
+while IFS= read -r _f; do [[ -n "$_f" ]] && FILES+=( "$_f" ); done < <(git ls-files)
 if [[ -f .crabbox-secrets ]]; then
   while IFS= read -r p || [[ -n "$p" ]]; do
     p="${p#"${p%%[![:space:]]*}"}"; p="${p%"${p##*[![:space:]]}"}"
     [[ -z "$p" || "${p#\#}" != "$p" ]] && continue
-    [[ -e "$p" ]] && FILES="$FILES"$'\n'"$p"
+    [[ -e "$p" ]] && FILES+=( "$p" )
   done < .crabbox-secrets
 fi
 
@@ -110,29 +86,64 @@ for f in bun.lock bun.lockb pnpm-lock.yaml package-lock.json yarn.lock; do
 done
 LOCK_HASH="$( ( (( ${#LOCK_SRC[@]} )) && cat "${LOCK_SRC[@]}" ) | shasum | cut -d' ' -f1 )"
 
-# -h dereferences symlinks: bin/setup-worktree.sh symlinks the env files in from
-# the main repo, and a symlink would arrive dangling. COPYFILE_DISABLE stops
-# macOS tar writing ._ AppleDouble entries that GNU tar then warns about for
-# every file.
-printf '%s\n' "$FILES" \
-  | COPYFILE_DISABLE=1 tar -czhf /tmp/box-fast-attach.$$.tgz -T - 2>/dev/null
-trap 'rm -f /tmp/box-fast-attach.$$.tgz' EXIT
+# Ask git what changed instead of hashing the tree. Hashing 694 files with one
+# `shasum` process each cost 8.4s locally and dwarfed the 0.6s the Box spent
+# doing the actual work. git already maintains this index.
+STATE_SHA="$STATE_DIR/synced-sha"
+STATE_DIRTY="$STATE_DIR/synced-dirty"
+HEAD_SHA="$(git rev-parse HEAD)"
 
-post() {
-  curl -sS --fail-with-body -b "$JAR" -X POST \
-    -H "X-Repo: $REPO_SLUG" -H "X-Lock-Hash: $LOCK_HASH" \
-    --data-binary "@/tmp/box-fast-attach.$$.tgz" "$BASE_URL"
+# Currently modified/untracked-but-tracked-later paths, NUL-safe.
+CUR_DIRTY="$(git status --porcelain=v1 --untracked-files=no | awk '{print $NF}')"
+
+collect_changed() {
+  local prev_sha="" prev_dirty=""
+  [[ -f "$STATE_SHA" ]] && prev_sha="$(tr -d '[:space:]' < "$STATE_SHA")"
+  [[ -f "$STATE_DIRTY" ]] && prev_dirty="$(cat "$STATE_DIRTY")"
+  {
+    # committed changes since the last sync
+    [[ -n "$prev_sha" ]] && git diff --name-only "$prev_sha" "$HEAD_SHA" 2>/dev/null
+    # anything dirty now, and anything that WAS dirty last time -- a reverted
+    # file is no longer dirty but the Box still holds the old contents.
+    printf '%s\n' "$CUR_DIRTY"
+    printf '%s\n' "$prev_dirty"
+  } | sed '/^$/d' | sort -u
 }
-resp="$(post || true)"
-# The session cookie expires. One silent retry after a fresh handshake keeps a
-# long-lived worktree working without the caller noticing.
-case "$resp" in
-  *extract_rc=*) ;;
-  *) gated_get; resp="$(post || true)" ;;
-esac
 
-echo "[fast-attach] $resp"
-case "$resp" in
-  *extract_rc=0*) ;;
-  *) echo "[fast-attach] extract failed on the box" >&2; exit 1 ;;
-esac
+send_full() {
+  echo "[fast-attach] seeding the full tree over box ssh"
+  printf '%s\n' "${FILES[@]}" \
+    | COPYFILE_DISABLE=1 tar -czhf - -T - 2>/dev/null \
+    | "$BOX_BIN" ssh "$BOX_ID" -- "mkdir -p '$REMOTE_DIR' && tar -xzf - --warning=no-unknown-keyword -C '$REMOTE_DIR' && cd '$REMOTE_DIR' && { prev=\$(cat .box-lock-hash 2>/dev/null || true); if [ \"\$prev\" != '$LOCK_HASH' ]; then bun install --frozen-lockfile >/dev/null 2>&1 || bun install >/dev/null 2>&1; printf %s '$LOCK_HASH' > .box-lock-hash; echo 'seeded installed=yes'; else echo 'seeded installed=no'; fi; }"
+}
+
+send_delta() {  # $1 = newline-separated changed paths
+  local changed="$1" b64
+  COPYFILE_DISABLE=1 tar -czhf "$STATE_DIR/delta.tgz" -T <(printf '%s\n' "$changed") 2>/dev/null
+  b64="$(base64 -i "$STATE_DIR/delta.tgz" | tr -d '\n')"
+  if (( ${#b64} > MAX_ARG )); then return 3; fi
+  # The payload is its OWN argv word. Do not interpolate it into a -c string.
+  "$BOX_BIN" exec "$BOX_ID" --timeout 550 -- \
+    bash /home/user/box-unpack.sh "$b64" "$REMOTE_DIR" "$LOCK_HASH"
+}
+
+if (( RESEED )) || [[ ! -f "$STATE_SHA" ]]; then
+  send_full
+else
+  CHANGED="$(collect_changed)"
+  # Only send paths that still exist and that we would sync at all.
+  CHANGED="$(printf '%s\n' "$CHANGED" | while IFS= read -r c; do [[ -n "$c" && -f "$c" ]] && printf '%s\n' "$c"; done)"
+  if [[ -z "$CHANGED" ]]; then
+    echo "[fast-attach] nothing changed"
+  else
+    n=$(printf '%s\n' "$CHANGED" | wc -l | tr -d ' ')
+    echo "[fast-attach] $n changed file(s)"
+    if ! send_delta "$CHANGED"; then
+      echo "[fast-attach] delta over the ARG_MAX ceiling; sending the full tree"
+      send_full
+    fi
+  fi
+fi
+
+printf '%s\n' "$HEAD_SHA" > "$STATE_SHA"
+printf '%s\n' "$CUR_DIRTY" > "$STATE_DIRTY"

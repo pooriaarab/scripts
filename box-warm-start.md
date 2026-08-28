@@ -238,7 +238,7 @@ half. The transport is the big half. Round trips against a running Box:
 
 | transport | round trip | usable as a payload channel? |
 |---|---|---|
-| `box exec` | 1.13 / 1.17 / 1.31 s | **No.** It silently DROPS a large argument. A 43k-char base64 blob arrived as 1 byte, and the box reported `gzip: unexpected end of file`. It exits 0 on the way in. |
+| `box exec` | 1.13 / 1.17 / 1.31 s | **Yes — as an argv word.** See the correction below. |
 | `box ssh`  | 5.17 / 5.17 / 5.72 s | Yes, and it takes stdin. This is the honest floor for anything SSH-based. |
 | `box scp`  | 6.05 / 6.14 / 9.83 s | Yes, but it rides SSH too, so it is no better. |
 
@@ -261,6 +261,44 @@ transport. About **45x faster than crabbox's ~84s**.
 `scripts/box-fast-attach` plus `scripts/box-attach-receiver.py` implement this.
 Setup costs ~10s once per Box; every attach after that is ~2s. Install is
 skipped unless the lockfile hash actually moves.
+
+### Correction: `box exec` DOES carry a payload
+
+I first concluded that `box exec` silently drops a large argument, after a
+43k-char base64 blob arrived as one byte. That conclusion was wrong, and the
+mistake was mine, not the platform's. The blob was interpolated into a
+`bash -lc "...$VAR"` string, and the quoting is what destroyed it.
+
+Passed as its **own argv word**, the payload arrives intact:
+
+```
+sent 100000 chars -> box received 100000
+sent 130000 chars -> box received 130000
+sent 150000 chars -> E2BIG: argument list too long, posix_spawn 'bash'
+```
+
+So the ceiling is the box-side ARG_MAX, ~128 KiB, and a normal edit is nowhere
+near it. `box exec` is HTTPS, needs no SSH and no open port, and the round trip
+is ~1.2s. That makes it the right transport, better than the hosted port on
+both speed and exposure.
+
+The rule that generalises: pass a payload as an argument, never interpolate it
+into a `-c` string.
+
+### The final shape, and where the time really went
+
+Detecting *what* changed turned out to cost more than sending it. Hashing 694
+files with one `shasum` process each took 8.4s locally, against 0.6s of actual
+work on the Box. Asking git instead is free.
+
+```
+seed (full tree, once) .......... 7.43s
+attach, nothing changed ......... 0.43 / 0.72s
+attach, one changed file ........ 1.41 / 1.49 / 1.51s
+```
+
+Verified by reading a marker back off the Box. Against crabbox's ~84s that is
+about **56x**. `scripts/box-fast-attach` plus `scripts/box-unpack.sh`.
 
 ### Keep the hosted port token-gated
 
