@@ -141,3 +141,33 @@ the billing period ends, the 100-Box concurrency cap, the creation rate limits,
 and any Box running with auto-stop disabled.
 
 `box` must be on `PATH`; cron does not read your shell profile.
+
+## The hourly reaper (added 2026-08-28)
+
+Nothing was stopping Boxes. `com.pooriaarab.crabbox-sweep` existed but was
+**not loaded** in launchd, ran once a day at 09:00, still defaulted to
+`provider=gcp`, and did not scan `~/Documents/Personal`.
+
+`com.pooriaarab.box-reap` replaces it. It runs `box-reap` hourly with
+`--stop-idle-older-than 45m --execute`, so the decision still goes through the
+CPU/load/heartbeat checks and never reaps on Box state.
+
+**macOS TCC is the trap.** A launchd agent cannot read `~/Documents` without
+Full Disk Access granted by hand. The first install failed with
+`Operation not permitted` and launchd exit code 126 — and the job still showed
+up as registered, so `launchctl list` alone did not reveal it. The reaper and
+its credential therefore live outside the protected paths:
+
+```
+~/.local/bin/box-reap        ~/.local/bin/box-reap-cron
+~/.config/ascii-box/env      (mode 600, the API key)
+~/.local/state/box-reap/reap.log
+```
+
+Verify a change actually took, rather than trusting `launchctl load`:
+
+```
+launchctl kickstart -k "gui/$(id -u)/com.pooriaarab.box-reap"
+launchctl list | grep box-reap        # second column must be 0, not 126
+tail ~/.local/state/box-reap/reap.log # the timestamp must advance
+```

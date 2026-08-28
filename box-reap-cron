@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+# Hourly wrapper around box-reap, for launchd.
+#
+# WHY THIS EXISTS
+# ascii.dev has no idle timer. `--ttl` counts from creation or resume, never
+# from last activity, so it kills a job mid-work and never stops an unused Box
+# early. Nothing stops a Box for being idle. A forgotten `default` Box bills
+# $0.036/h forever, and a `large` one is $52/month.
+#
+# The previous safety net, com.pooriaarab.crabbox-sweep, ran once a day at
+# 09:00, defaulted to provider=gcp, did not scan ~/Documents/Personal, and was
+# NOT LOADED in launchd at all. So in practice nothing was stopping boxes.
+#
+# This runs hourly and delegates the decision to box-reap, which never reaps on
+# Box state -- a Box pegged at 100% CPU still reports `idle`. It measures CPU
+# and load and honours the heartbeat and keep files.
+set -uo pipefail
+
+LOG="${BOX_REAP_LOG:-$HOME/.local/state/box-reap/reap.log}"
+mkdir -p "$(dirname "$LOG")"
+
+export PATH="$HOME/.ascii/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+
+# The API key is not in launchd's environment, and macOS TCC blocks a launchd
+# agent from reading ~/Documents at all ("Operation not permitted", exit 126)
+# unless you grant Full Disk Access by hand. So the credential and the reaper
+# both live under ~/.config and ~/.local, which TCC does not gate.
+for SECRETS in "$HOME/.config/ascii-box/env" "$HOME/Documents/Personal/.secrets/crabbox.env"; do
+  if [[ -r "$SECRETS" ]]; then set -a; . "$SECRETS"; set +a; break; fi
+done
+
+REAP="${BOX_REAP_BIN:-$HOME/.local/bin/box-reap}"
+[[ -x "$REAP" ]] || REAP="$HOME/Documents/Personal/scripts/box-reap"
+[[ -x "$REAP" ]] || { echo "$(date -u +%FT%TZ) box-reap missing at $REAP" >> "$LOG"; exit 1; }
+
+# 45m is deliberately generous: an attach-and-build cycle is minutes, so a Box
+# quiet for 45 minutes with low CPU and no heartbeat is genuinely abandoned.
+AGE="${BOX_REAP_AGE:-45m}"
+
+{
+  echo "===== $(date -u +%FT%TZ) box-reap --stop-idle-older-than $AGE --execute"
+  "$REAP" --stop-idle-older-than "$AGE" --execute 2>&1
+  echo "----- exit=$?"
+} >> "$LOG" 2>&1
+
+# Keep the log from growing without bound.
+if [[ -f "$LOG" ]] && [[ $(wc -l < "$LOG") -gt 5000 ]]; then
+  tail -2000 "$LOG" > "$LOG.tmp" && mv "$LOG.tmp" "$LOG"
+fi
