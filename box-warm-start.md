@@ -695,6 +695,73 @@ nothing. Two real options:
   "own disk" is the Box. That is one Box for all threads, not one per repo. The
   shape is written up in `t3-code-on-a-box.md`.
 
+## When a Box starts, and when it stops
+
+`box-work` was a command you had to remember. `box-session` makes it automatic
+by hanging off the agent harness's own session hooks:
+
+```
+SessionStart -> box-session start   # warms a Box for this repo in the background
+SessionEnd   -> box-session end     # stops it
+```
+
+Wired into `~/.claude-personal{,-1,-2}/settings.json` (personal only; the work
+config is untouched). Two gates keep it honest:
+
+- **Opt-in per repo.** No `.crabbox-default-on` marker at the repo root, no Box,
+  no cost. Today that is 4 repos, not 61.
+- **Non-blocking.** A cold start is ~100s and a session must never wait on it.
+  The hook forks and returns in **0.38s measured**. By the time you have read
+  the diff, the Box is up; `box-work <repo>` then reuses it in ~4s.
+
+Verified end to end: the hook returned in 0.38s, the Box came up in the
+background, and it had the repo (123,159 files with deps), the 221-key
+`apps/website/.env.local`, 3 `TURBO_*` vars, **1.9 GB of installed
+node_modules**, and all six agent CLIs. `SessionEnd` stopped it.
+
+Three independent things stop a Box, which is the right number for something
+that bills by the second: the session hook, the 60-minute default TTL, and the
+hourly `box-reap`.
+
+## Watch the timings, not the exit codes
+
+The expensive failures here are silent. `box-fast-attach` fell back to a full
+tree upload when a helper was missing on the Box: exit 0, no warning, **50x
+slower**. Nothing but a stopwatch catches that.
+
+`box-perf-check <repo>` measures a no-op attach, a real one-file delta and a
+bare `box exec` round trip, and compares them against a recorded baseline.
+`com.pooriaarab.box-perf` runs it weekly.
+
+Proof it works — helpers deleted from the Box:
+
+```
+now:  noop=0.51s delta=13.15s exec=0.91s
+base: noop=0.52s delta=1.43s  exec=0.93s
+REGRESSION:
+  delta 13.15s vs 1.43s baseline (9.2x)
+```
+
+**The probe has to be a git-tracked file.** My first version wrote an untracked
+one, and `box-fast-attach` reads `git status --untracked-files=no`, so the probe
+was invisible and the "delta" silently became a second no-op. The check reported
+a healthy 0.41s while measuring nothing — the same class of bug it exists to
+catch.
+
+## The reaper's exit code immediately earned its keep
+
+Making `box-reap-cron` propagate the reaper's status (it used to always exit 0)
+turned up a real problem within minutes: `launchctl list` started showing
+`exit=3`, and the log said
+
+```
+WARNING: auto-stop is OFF on 2 Box(es) (...); nothing will ever stop them.
+```
+
+Two Boxes had been started with `--no-auto-stop`, so `archiveAfter` was null and
+no TTL would ever fire. Both were idle at load 0.00. Before the fix this exited
+0 and nobody would have known.
+
 ## Still open
 
 - **Content Rabbit has no warm snapshot yet.** Its repo is not connected to the
