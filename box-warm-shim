@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+# A drop-in stand-in for the `box` CLI that teaches crabbox to start warm.
+#
+# WHY THIS EXISTS
+# crabbox shells out to `box`, but it forwards only three ascii-box settings:
+#   -ascii-box-base-url, -ascii-box-cli, -ascii-box-workdir
+# There is no way to pass `--environment` or `--from`, so every crabbox warmup
+# starts from the bare `base` image and then reinstalls the world. That is the
+# ~65s. `-ascii-box-cli` is the seam: point crabbox at this script instead of
+# the real binary and it injects the two flags on `box new`, then execs the
+# real thing. Every other subcommand passes through untouched.
+#
+# Usage (from crabbox-attach.sh):
+#   CRABBOX_BOX_ENVIRONMENT=content-rabbit \
+#   CRABBOX_BOX_SNAPSHOT=content-rabbit-ready \
+#   crabbox warmup --ascii-box-cli /path/to/box-warm-shim ...
+set -euo pipefail
+
+# crabbox runs the box CLI with HOME pointed at its own state directory
+# (~/.local/state/crabbox/ascii-box), so $HOME here is NOT the login home and
+# $HOME/.ascii/bin/box does not exist. Resolve the real home from the OS user
+# instead. Credentials still come from crabbox's HOME, which it seeds itself.
+REAL_HOME="$(eval echo "~$(id -un)")"
+REAL_BOX="${BOX_WARM_SHIM_REAL:-$REAL_HOME/.ascii/bin/box}"
+[[ -x "$REAL_BOX" ]] || { echo "[box-warm-shim] real box CLI not found at $REAL_BOX" >&2; exit 127; }
+
+# The subcommand is NOT $1. crabbox calls:
+#   box --no-update --json --api-url https://ascii.dev new --ttl 900
+# so the first bare word is the VALUE of --api-url, not the subcommand. Skip
+# the value that follows a value-taking global flag. Getting this wrong is
+# silent -- the shim passes through and you get a cold box that looks fine.
+subcmd=""
+skip_next=0
+for a in "$@"; do
+  if (( skip_next )); then skip_next=0; continue; fi
+  case "$a" in
+    --api-url|--org) skip_next=1; continue ;;
+    -*) continue ;;
+    *) subcmd="$a"; break ;;
+  esac
+done
+
+if [[ "$subcmd" != "new" ]]; then
+  exec "$REAL_BOX" "$@"
+fi
+
+args=( "$@" )
+has_flag() { local f="$1"; shift; for a in "$@"; do [[ "$a" == "$f" ]] && return 0; done; return 1; }
+
+# An environment carries the repo's env vars (TURBO_*) and its safety toggles.
+if [[ -n "${CRABBOX_BOX_ENVIRONMENT:-}" ]] && ! has_flag --environment "${args[@]}"; then
+  args+=( --environment "$CRABBOX_BOX_ENVIRONMENT" )
+  echo "[box-warm-shim] --environment $CRABBOX_BOX_ENVIRONMENT" >&2
+fi
+
+# A snapshot carries the installed dependency tree. Pass it ONLY if it really
+# exists: `box new --from` on a missing name fails outright, and a failed
+# warmup is far worse than a cold one.
+if [[ -n "${CRABBOX_BOX_SNAPSHOT:-}" ]] && ! has_flag --from "${args[@]}"; then
+  if "$REAL_BOX" snapshots --json 2>/dev/null \
+      | python3 -c 'import sys,json;print("\n".join(s["name"] for s in json.load(sys.stdin).get("named",[])))' 2>/dev/null \
+      | grep -qx "$CRABBOX_BOX_SNAPSHOT"; then
+    args+=( --from "$CRABBOX_BOX_SNAPSHOT" )
+    echo "[box-warm-shim] --from $CRABBOX_BOX_SNAPSHOT" >&2
+  else
+    echo "[box-warm-shim] snapshot '$CRABBOX_BOX_SNAPSHOT' not found; starting cold" >&2
+  fi
+fi
+
+exec "$REAL_BOX" "${args[@]}"

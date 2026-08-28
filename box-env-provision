@@ -1,0 +1,161 @@
+#!/usr/bin/env bash
+# Give a personal repo a warm ascii.dev Box environment.
+#
+# A named environment carries, into every new box it starts:
+#   - the repo, already cloned at its default branch
+#   - the gitignored env files the repo declares in .crabbox-secrets
+#   - TURBO_API / TURBO_TOKEN / TURBO_TEAM for the remote build cache
+#   - credentials capped: no Box CLI key, no agent logins
+#
+# MEASURED on content-rabbit (5,870 files, 221-key app env): a box created this
+# way is usable in 8.5s with the repo checked out and every secret in place, and
+# nothing is uploaded from the laptop. Compare ~84s through crabbox.
+#
+# Environments cost nothing. Billing is per running second only -- `box limits`
+# exposes no storage or snapshot quota, and every billing field it returns is
+# time-based. So there is no reason not to give every repo one.
+#
+# Usage:
+#   box-env-provision <repo-dir> [...]     provision those repos
+#   box-env-provision --all                every cloned private pooriaarab repo
+#   box-env-provision --dry-run --all      show what it would do
+set -uo pipefail
+export PATH="$HOME/.ascii/bin:$PATH"
+
+DRY=0; ALL=0; PRIVATE_ONLY=0; WITH_AGENTS=0; TARGETS=()
+while (( $# )); do
+  case "$1" in
+    --dry-run) DRY=1; shift ;;
+    --all) ALL=1; shift ;;
+    --private-only) PRIVATE_ONLY=1; shift ;;
+    --with-agents) WITH_AGENTS=1; shift ;;
+    -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
+    *) TARGETS+=( "$1" ); shift ;;
+  esac
+done
+
+run() { if (( DRY )); then echo "    would: $*"; else "$@" >/dev/null 2>&1; fi; }
+
+AGENT_CRED_DIR="${AGENT_CRED_DIR:-/tmp/boxwork/agentcreds}"
+AGENT_CRED_MANIFEST="$AGENT_CRED_DIR/manifest.json"
+
+# One API call for the whole private list beats one `gh repo view` per repo.
+PRIVATE_LIST=""
+if (( PRIVATE_ONLY )); then
+  PRIVATE_LIST=" $(gh repo list pooriaarab --limit 300 --json name,isPrivate,isArchived \
+    --jq '.[]|select(.isPrivate and (.isArchived|not))|.name' 2>/dev/null | tr '\n' ' ') "
+  echo "private repos on the account: $(printf '%s' "$PRIVATE_LIST" | wc -w | tr -d ' ')"
+fi
+
+provision() {
+  local d="$1"
+  local remote; remote="$(git -C "$d" remote get-url origin 2>/dev/null || true)"
+
+  # ascii.dev is a third-party provider. Ask the remote who owns the code, never
+  # the path: ~/code holds personal repos next to clones of work ones.
+  case "$remote" in
+    *pooriaarab/*) : ;;
+    *) echo "  SKIP $d -- not a pooriaarab remote ($remote)"; return ;;
+  esac
+  local name; name="$(basename -s .git "$remote")"
+
+  if (( PRIVATE_ONLY )); then
+    case " ${PRIVATE_LIST:-} " in
+      *" $name "*) : ;;
+      *) echo "  skip $name (public)"; return ;;
+    esac
+  fi
+
+  echo "  $name"
+  run box env new "$name"
+  run box env add-repo "$name" "pooriaarab/$name" --branch "$(git -C "$d" symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|^origin/||' || echo main)"
+
+  # Build-cache credentials, read from the repo's own root .env.local so the
+  # value stays in one place.
+  local envfile="$d/.env.local" k v
+  if [[ -f "$envfile" ]]; then
+    for k in TURBO_API TURBO_TOKEN TURBO_TEAM; do
+      v="$(grep -E "^$k=" "$envfile" | head -1 | cut -d= -f2- | tr -d '"'"'"'')"
+      [[ -n "$v" ]] && run box env set-var "$name" "$k=$v"
+    done
+  fi
+
+  # The repo lands at <workspace>/<repo>, so a secret file's in-box path is the
+  # manifest path prefixed with the repo name.
+  # Prefer the working copy, but fall back to the default branch: a checkout
+  # sitting on an older branch does not have the manifest yet even though it is
+  # merged, and silently provisioning zero secret files is the failure this
+  # whole manifest exists to prevent.
+  local manifest="$d/.crabbox-secrets" p n=0 tmpman=""
+  if [[ ! -f "$manifest" ]]; then
+    tmpman="$(mktemp)"
+    if git -C "$d" show "origin/HEAD:.crabbox-secrets" > "$tmpman" 2>/dev/null && [[ -s "$tmpman" ]]; then
+      manifest="$tmpman"
+      echo "    (manifest read from origin/HEAD; this checkout predates it)"
+    else
+      rm -f "$tmpman"; tmpman=""
+    fi
+  fi
+  if [[ -f "$manifest" ]]; then
+    while IFS= read -r p || [[ -n "$p" ]]; do
+      p="${p#"${p%%[![:space:]]*}"}"; p="${p%"${p##*[![:space:]]}"}"
+      [[ -z "$p" || "${p#\#}" != "$p" ]] && continue
+      [[ -f "$d/$p" ]] || continue
+      run box env set-file "$name" "$name/$p" --from "$d/$p"
+      n=$((n+1))
+    done < "$manifest"
+    echo "    secret files: $n"
+  else
+    echo "    secret files: 0 (no .crabbox-secrets manifest)"
+  fi
+  [[ -n "$tmpman" ]] && rm -f "$tmpman"
+
+  # Agent CLI logins. A repo box is useless for delegated work without them:
+  # they live in the separate `agent-roster` environment, so a box started from
+  # a repo environment had no muse, pi, gemini or codex at all.
+  #
+  # This widens the blast radius, and that is a deliberate trade. The keys are
+  # already stored on ascii under `agent-roster`, so copying them to more
+  # environments does not hand them to anyone new -- it only means more boxes
+  # carry them. Box CLI credentials stay OFF, because those let a box create
+  # and control other boxes, which is the escalation that actually matters.
+  if (( WITH_AGENTS )) && [[ -f "$AGENT_CRED_MANIFEST" ]]; then
+    local n_ag=0 inbox src
+    while IFS=$'\t' read -r inbox src; do
+      [[ -z "$inbox" ]] && continue
+      run box env set-file "$name" "$inbox" --from "$AGENT_CRED_DIR/$src"
+      n_ag=$((n_ag+1))
+    done < <(python3 -c '
+import json,sys
+for path,safe,_ in json.load(open(sys.argv[1])): print(path+"\t"+safe)
+' "$AGENT_CRED_MANIFEST")
+    echo "    agent CLI credentials: $n_ag file(s)"
+    run box env set "$name" --box-credentials false --agents-credentials true
+  else
+    run box env set "$name" --box-credentials false --agents-credentials false
+  fi
+}
+
+if (( ALL )); then
+  while IFS= read -r d; do TARGETS+=( "$d" ); done < <(
+    for root in "$HOME/Documents/Personal" "$HOME/code" "$HOME/nova-wt"; do
+      [[ -d "$root" ]] || continue
+      find "$root" -maxdepth 4 -name .git -type d 2>/dev/null | while IFS= read -r g; do
+        dirname "$g"
+      done
+    done | sort -u
+  )
+fi
+
+(( ${#TARGETS[@]} )) || { echo "nothing to do; pass repo dirs or --all" >&2; exit 2; }
+
+seen=""
+for d in "${TARGETS[@]}"; do
+  case "$d" in *"/worktrees/"*|*/node_modules/*) continue ;; esac
+  r="$(git -C "$d" remote get-url origin 2>/dev/null || true)"
+  [[ -n "$r" ]] || continue
+  nm="$(basename -s .git "$r")"
+  case " $seen " in *" $nm "*) continue ;; esac
+  seen="$seen $nm"
+  provision "$d"
+done
