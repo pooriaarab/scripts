@@ -471,6 +471,83 @@ archive still rejected correctly, because the listing fit the pipe buffer. The
 mechanism is real and the fix costs nothing, so it stands, but I am reporting a
 closed race rather than a demonstrated exploit.
 
+## The GitHub connection changes the whole design
+
+Once the ascii GitHub App got access to private repos, the box stopped needing
+anything from the laptop. Measured from inside a Box:
+
+```
+git clone --depth 1 content-rabbit (5,863 files) .... 3.23s
+git clone --depth 1 replytosocial  (  722 files) .... 1.06s
+bun install, content-rabbit ......................... 9.80s  -> 1.9 GB node_modules
+```
+
+3.2s for the Box to fetch the tree against 42.7s to push the same tree up from
+the laptop. Uploading was always the wrong direction.
+
+### A `box env` per repo is the whole answer
+
+`box env add-repo` clones the repo into every new box, and `box env set-file`
+writes the gitignored env files in. One `box new --environment content-rabbit`
+now gives, with **nothing uploaded**:
+
+```
+box ready and usable ................ 8.4 - 10.7s
+  repo cloned, 5,870 files, on main
+  content-rabbit/.env.local ......... 7 keys
+  apps/website/.env.local ........... 221 keys
+  TURBO_API / TURBO_TOKEN / TURBO_TEAM
+```
+
+Key counts read off the Box, not inferred from the file existing.
+
+So the two tools now split cleanly. The **environment** supplies the committed
+state and every secret. **`box-fast-attach`** supplies only what GitHub cannot
+know: your uncommitted work. It detects that the Box already has the repo, has
+the Box fetch your HEAD commit itself, and then overlays the dirty files.
+
+```
+1. box new --environment <repo> ................. 10.7s
+2. first attach (fetch HEAD + install + dirty) .. 27.6s
+3. every attach after that ...................... 1.69 / 1.78s
+```
+
+### Environments are free
+
+`box limits` exposes no storage quota, no snapshot quota and no byte counter —
+every billing field it returns is time-based (`creditBalanceSeconds`,
+`last24hUsageSeconds`, `subscriptionQuotaSeconds`). I hold 7.0 GB of automatic
+snapshots and 689 MB of named ones, and the balance has only ever moved with
+running seconds. So there is no reason not to give every repo an environment.
+**61 private repos now have one.**
+
+### The default TTL is 60 minutes
+
+Measured: `box new` with no `--ttl` reports `ttlSeconds: 3600`, and
+`archiveAfter` lands exactly 60.0 minutes after `createdAt`. So a forgotten Box
+costs at most about $0.036, not an unbounded amount. That does not retire the
+reaper — `--no-auto-stop` removes the limit, `box resume` restarts the clock,
+and crabbox passes `--ttl 90m` — but the exposure is bounded by default.
+
+### `box exec` joins argv into a shell string, again
+
+This trap has now cost three separate bugs. The probe
+
+```sh
+box exec "$ID" -- bash -c "test -d '$DIR/.git' && echo yes || echo no"
+```
+
+always answered `no`, even with the directory plainly present, because the
+quotes are lost when argv is joined: it degenerates to `bash -c test` plus
+stray words. Use the exit code of a plain `test` with no shell metacharacters:
+
+```sh
+box exec "$ID" -- test -d "$DIR/.git"
+```
+
+The general rule for `box exec`: one shell-safe word per argument, no
+metacharacters, no newlines, and never a `-c` string you interpolated into.
+
 ## Still open
 
 - **Content Rabbit has no warm snapshot yet.** Its repo is not connected to the
