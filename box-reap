@@ -1,0 +1,546 @@
+#!/usr/bin/env bash
+# Report what ascii.dev Boxes are costing, and stop the ones that are genuinely
+# unused. A running Box bills every second; a stopped Box is free. Nothing stops
+# a Box early on its own, so an abandoned Box bills until its TTL expires.
+#
+# Reaping is deliberately hard to do by accident. `state: idle` does NOT mean a
+# Box is unused, so this script never reaps on state alone. See IDLE DETECTION.
+#
+# Usage: box-reap [--stop-idle-older-than DUR] [--execute] [--json] [options]
+set -euo pipefail
+
+usage() {
+  cat <<'USAGE'
+Usage: box-reap [--stop-idle-older-than DUR] [--execute] [--json] [options]
+
+Report mode (default, no flags): list every running Box with its age, size,
+billing multiplier and the credit it has burned, plus the account total,
+remaining balance and quota warnings.
+
+Reap mode (--stop-idle-older-than): additionally stop Boxes that are older than
+DUR AND prove quiet. Prints a plan and changes nothing until you add --execute.
+
+Options:
+  --stop-idle-older-than DUR  consider Boxes older than DUR for stopping
+                              (e.g. 45m, 2h, 1d, or bare seconds)
+  --execute                   actually stop them (default is a dry run)
+  --json                      machine-readable JSON output
+  --box ID                    limit to this Box id (repeatable)
+  --cpu-threshold PCT         CPU utilisation below which a Box counts as quiet
+                              (default: 20, measured over a 2-second sample)
+  --load-threshold N          1-minute load average PER vCPU below which a Box
+                              counts as quiet (default: 0.40)
+  --require-heartbeat         only reap Boxes that have a heartbeat file which
+                              has gone stale. The strictest mode: a Box that
+                              never opted in is never touched.
+  --heartbeat-file PATH       in-Box heartbeat path (default:
+                              /home/user/.box-reap-heartbeat)
+  --keep-file PATH            in-Box "never reap me" marker (default:
+                              /home/user/.box-reap-keep)
+  --probe-timeout SECS        per-Box probe timeout (default: 20)
+  --no-probe                  skip the in-Box probe; report only, refuses to reap
+  --force-age-only            reap on age alone, with no activity evidence.
+                              UNSAFE: this can kill a running build.
+  --help                      show this help
+
+IDLE DETECTION
+  Box state is not an activity signal for work you start yourself. The vendor
+  docs say so ("a box can show idle while your own agent works inside it"), and
+  it is reproducible: a Box pegged at 100% CPU still reports state "idle", and
+  its updatedAt does not move. So this script decides with, in priority order:
+
+    1. state "running" or any pending/stopping state  -> never reap
+    2. the keep-file exists                           -> never reap
+    3. a heartbeat file newer than DUR                -> never reap
+    4. the in-Box probe fails or times out            -> never reap (fail safe)
+    5. CPU use >= --cpu-threshold                     -> never reap
+    6. load average per vCPU >= --load-threshold      -> never reap
+    otherwise, and only if age >= DUR                 -> reap
+
+  Long jobs should touch the heartbeat file every minute or so:
+
+    while :; do touch /home/user/.box-reap-heartbeat; sleep 30; done &
+
+  That is the only fully reliable signal, because it is the workload declaring
+  its own liveness. Measured on a 2 vCPU Box, an unused Box sits at 0-10% CPU
+  and one busy core reads 50-60%, so the CPU gate separates them cleanly.
+
+  KNOWN LIMIT: an I/O-bound job, such as a long npm install, uses little CPU and
+  looks the same as an unused Box. Without a heartbeat it can be stopped. Use
+  --require-heartbeat if that matters, or accept the cost: stopping snapshots
+  the filesystem first, so the work is paused rather than lost, and
+  `box resume <id>` brings it back.
+
+CRON
+  Safe to run unattended. Exit status is 0 for a clean run, 1 for an error, and
+  3 when a warning fired (credit projected to run out, or a quota near its cap).
+    */15 * * * * PATH=$HOME/.ascii/bin:$PATH box-reap --stop-idle-older-than 2h --execute --json >> ~/.box-reap.log 2>&1
+USAGE
+}
+
+THRESHOLD=""
+EXECUTE=0
+JSON=0
+LOAD_THRESHOLD="0.40"
+CPU_THRESHOLD="20"
+REQUIRE_HEARTBEAT=0
+HEARTBEAT_FILE="/home/user/.box-reap-heartbeat"
+KEEP_FILE="/home/user/.box-reap-keep"
+PROBE_TIMEOUT=20
+NO_PROBE=0
+FORCE_AGE_ONLY=0
+BOX_FILTER=""
+
+need_value() {
+  if [[ -z "${2:-}" ]]; then echo "error: $1 requires a value" >&2; exit 2; fi
+}
+check_duration() {
+  if ! [[ "$1" =~ ^[0-9]+[smhd]?$ ]]; then
+    echo "error: --stop-idle-older-than must be a duration like 45m, 2h, 1d, or bare seconds" >&2
+    exit 2
+  fi
+}
+check_number() {
+  if ! [[ "$2" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+    echo "error: $1 must be a non-negative number" >&2; exit 2
+  fi
+}
+check_boxid() {
+  if ! [[ "$1" =~ ^[A-Za-z0-9_-]+$ ]]; then
+    echo "error: --box must match [A-Za-z0-9_-]+" >&2; exit 2
+  fi
+}
+
+POSITIONAL=()
+while (( $# )); do
+  case "$1" in
+    --stop-idle-older-than)
+      need_value "--stop-idle-older-than" "${2:-}"; check_duration "$2"; THRESHOLD="$2"; shift 2 ;;
+    --stop-idle-older-than=*)
+      THRESHOLD="${1#--stop-idle-older-than=}"; check_duration "$THRESHOLD"; shift ;;
+    --load-threshold)
+      need_value "--load-threshold" "${2:-}"; check_number "--load-threshold" "$2"; LOAD_THRESHOLD="$2"; shift 2 ;;
+    --load-threshold=*)
+      LOAD_THRESHOLD="${1#--load-threshold=}"; check_number "--load-threshold" "$LOAD_THRESHOLD"; shift ;;
+    --cpu-threshold)
+      need_value "--cpu-threshold" "${2:-}"; check_number "--cpu-threshold" "$2"; CPU_THRESHOLD="$2"; shift 2 ;;
+    --cpu-threshold=*)
+      CPU_THRESHOLD="${1#--cpu-threshold=}"; check_number "--cpu-threshold" "$CPU_THRESHOLD"; shift ;;
+    --require-heartbeat) REQUIRE_HEARTBEAT=1; shift ;;
+    --heartbeat-file)
+      need_value "--heartbeat-file" "${2:-}"; HEARTBEAT_FILE="$2"; shift 2 ;;
+    --heartbeat-file=*) HEARTBEAT_FILE="${1#--heartbeat-file=}"; shift ;;
+    --keep-file)
+      need_value "--keep-file" "${2:-}"; KEEP_FILE="$2"; shift 2 ;;
+    --keep-file=*) KEEP_FILE="${1#--keep-file=}"; shift ;;
+    --probe-timeout)
+      need_value "--probe-timeout" "${2:-}"
+      if ! [[ "$2" =~ ^[0-9]+$ ]]; then echo "error: --probe-timeout must be a positive integer" >&2; exit 2; fi
+      PROBE_TIMEOUT=$((10#$2))
+      if (( PROBE_TIMEOUT == 0 || PROBE_TIMEOUT > 600 )); then
+        echo "error: --probe-timeout must be between 1 and 600" >&2; exit 2
+      fi
+      shift 2 ;;
+    --probe-timeout=*)
+      PROBE_TIMEOUT="${1#--probe-timeout=}"
+      if ! [[ "$PROBE_TIMEOUT" =~ ^[0-9]+$ ]]; then echo "error: --probe-timeout must be a positive integer" >&2; exit 2; fi
+      PROBE_TIMEOUT=$((10#$PROBE_TIMEOUT))
+      if (( PROBE_TIMEOUT == 0 || PROBE_TIMEOUT > 600 )); then
+        echo "error: --probe-timeout must be between 1 and 600" >&2; exit 2
+      fi
+      shift ;;
+    --box)
+      need_value "--box" "${2:-}"; check_boxid "$2"; BOX_FILTER="$BOX_FILTER $2"; shift 2 ;;
+    --box=*)
+      b="${1#--box=}"; check_boxid "$b"; BOX_FILTER="$BOX_FILTER $b"; shift ;;
+    --execute) EXECUTE=1; shift ;;
+    --json) JSON=1; shift ;;
+    --no-probe) NO_PROBE=1; shift ;;
+    --force-age-only) FORCE_AGE_ONLY=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    --) shift; break ;;
+    --*) echo "error: unknown option: $1" >&2; usage >&2; exit 2 ;;
+    *) POSITIONAL+=("$1"); shift ;;
+  esac
+done
+if (( ${#POSITIONAL[@]} > 0 )); then
+  echo "error: unexpected argument: ${POSITIONAL[0]}" >&2; usage >&2; exit 2
+fi
+
+if (( EXECUTE )) && [[ -z "$THRESHOLD" ]]; then
+  echo "error: --execute needs --stop-idle-older-than; there is nothing to execute" >&2
+  exit 2
+fi
+if (( NO_PROBE )) && (( FORCE_AGE_ONLY )); then
+  : # allowed: age-only reaping with no probe, the explicitly unsafe combination
+elif (( NO_PROBE )) && [[ -n "$THRESHOLD" ]]; then
+  echo "error: --no-probe cannot reap, because age alone does not prove a Box is unused." >&2
+  echo "       Drop --no-probe, or add --force-age-only to accept that risk." >&2
+  exit 2
+fi
+
+if ! command -v box >/dev/null 2>&1; then
+  echo "error: box CLI not found. Install https://docs.ascii.dev/box/ and run 'box login'." >&2
+  echo "       If it is installed, add it to PATH: export PATH=\"\$HOME/.ascii/bin:\$PATH\"" >&2
+  exit 1
+fi
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "error: python3 not found. Install python3." >&2
+  exit 1
+fi
+
+tmp_limits=$(mktemp)
+tmp_boxes=$(mktemp)
+tmp_probe=$(mktemp)
+tmp_plan=$(mktemp)
+trap 'rm -f "$tmp_limits" "$tmp_boxes" "$tmp_probe" "$tmp_plan" 2>/dev/null; true' EXIT
+
+limits_json=$(box limits --json 2>&1 || true)
+if ! echo "$limits_json" | python3 -c 'import sys,json; json.load(sys.stdin)["creditBalanceSeconds"]' >/dev/null 2>&1; then
+  echo "error: box not authenticated, or 'box limits' failed. Run 'box login <api-key>'." >&2
+  echo "$limits_json" | head -3 >&2
+  exit 1
+fi
+printf '%s' "$limits_json" > "$tmp_limits"
+
+list_json=$(box list --json --filter r 2>&1 || true)
+if ! echo "$list_json" | python3 -c 'import sys,json; json.load(sys.stdin)["boxes"]' >/dev/null 2>&1; then
+  echo "error: failed to list Boxes." >&2
+  echo "$list_json" | head -3 >&2
+  exit 1
+fi
+printf '%s' "$list_json" > "$tmp_boxes"
+
+# Which Boxes are old enough to be worth probing. Probing costs a round trip per
+# Box, so in plain report mode we skip it entirely.
+: > "$tmp_probe"
+if [[ -n "$THRESHOLD" ]] && (( ! NO_PROBE )); then
+  candidates=$(python3 - "$tmp_boxes" "$THRESHOLD" "$BOX_FILTER" <<'PY'
+import sys, json, datetime
+boxes = json.load(open(sys.argv[1]))["boxes"]
+raw = sys.argv[2]
+unit = raw[-1] if raw[-1].isalpha() else "s"
+mult = {"s": 1, "m": 60, "h": 3600, "d": 86400}[unit]
+thr = int(raw[:-1] if raw[-1].isalpha() else raw) * mult
+only = set(sys.argv[3].split()) if sys.argv[3].strip() else None
+now = datetime.datetime.now(datetime.timezone.utc)
+for b in boxes:
+    if only and b["id"] not in only:
+        continue
+    if b.get("state") in ("running", "provisioning", "provisioned", "cloning", "archiving", "stopping"):
+        continue
+    created = datetime.datetime.fromisoformat(b["createdAt"].replace("Z", "+00:00"))
+    if (now - created).total_seconds() >= thr:
+        print(b["id"])
+PY
+)
+  for bid in $candidates; do
+    # One probe per Box: load average, heartbeat mtime, keep marker, busiest
+    # process. Any failure here leaves the Box unprobed, and unprobed means
+    # protected.
+    # Sample /proc/stat twice, two seconds apart, for real CPU utilisation. The
+    # 1-minute load average alone is too laggy and too noisy to decide on: on a
+    # 2 vCPU Box an unused machine reads 0.12-0.29 and a busy one 0.42-0.65.
+    probe_cmd="read _ a b c d e f g h _ < /proc/stat; t1=\$((a+b+c+d+e+f+g+h)); i1=\$d; sleep 2; read _ a b c d e f g h _ < /proc/stat; t2=\$((a+b+c+d+e+f+g+h)); i2=\$d; dt=\$((t2-t1)); di=\$((i2-i1)); if [ \"\$dt\" -gt 0 ]; then echo CPU=\$(( (100*(dt-di))/dt )); else echo CPU=100; fi; echo NOW=\$(date +%s); echo LOAD=\$(cut -d' ' -f1 /proc/loadavg); echo NPROC=\$(nproc 2>/dev/null || echo 1); echo HB=\$(stat -c %Y '$HEARTBEAT_FILE' 2>/dev/null || echo none); echo KEEP=\$(test -e '$KEEP_FILE' && echo yes || echo no); echo TOP=\$(ps -eo pcpu=,comm= --sort=-pcpu 2>/dev/null | sed -n 2p | tr -s ' ' | sed 's/^ //')"
+    out=$(box exec "$bid" --timeout "$PROBE_TIMEOUT" --json "$probe_cmd" 2>/dev/null || true)
+    printf '%s\t%s\n' "$bid" "$(printf '%s' "$out" | tr '\n' ' ')" >> "$tmp_probe"
+  done
+fi
+
+# The report exits 3 to signal a warning, so shield it from `set -e`.
+py_status=0
+set +e
+python3 - "$tmp_boxes" "$tmp_limits" "$tmp_probe" "$tmp_plan" \
+  "${THRESHOLD:-}" "$JSON" "$LOAD_THRESHOLD" "$BOX_FILTER" "$FORCE_AGE_ONLY" "$NO_PROBE" \
+  "$CPU_THRESHOLD" "$REQUIRE_HEARTBEAT" <<'PY'
+import sys, json, datetime
+
+boxes_path, limits_path, probe_path, plan_path = sys.argv[1:5]
+threshold_raw, json_mode, load_threshold, box_filter, force_age_only, no_probe = sys.argv[5:11]
+cpu_threshold, require_heartbeat = sys.argv[11:13]
+json_mode = json_mode == "1"
+force_age_only = force_age_only == "1"
+no_probe = no_probe == "1"
+require_heartbeat = require_heartbeat == "1"
+load_threshold = float(load_threshold)
+cpu_threshold = float(cpu_threshold)
+
+boxes = json.load(open(boxes_path))["boxes"]
+limits = json.load(open(limits_path))
+only = set(box_filter.split()) if box_filter.strip() else None
+
+threshold = None
+if threshold_raw:
+    unit = threshold_raw[-1] if threshold_raw[-1].isalpha() else "s"
+    mult = {"s": 1, "m": 60, "h": 3600, "d": 86400}[unit]
+    threshold = int(threshold_raw[:-1] if threshold_raw[-1].isalpha() else threshold_raw) * mult
+
+probes = {}
+try:
+    for line in open(probe_path):
+        if "\t" not in line:
+            continue
+        bid, blob = line.rstrip("\n").split("\t", 1)
+        try:
+            out = json.loads(blob)
+        except Exception:
+            continue
+        if not out.get("success") or out.get("exitCode") not in (0, None):
+            continue
+        fields = {}
+        for tok in out.get("stdout", "").split("\n"):
+            if "=" in tok:
+                k, v = tok.split("=", 1)
+                fields[k.strip()] = v.strip()
+        if "CPU" in fields and "NOW" in fields:
+            probes[bid] = fields
+except FileNotFoundError:
+    pass
+
+now = datetime.datetime.now(datetime.timezone.utc)
+SEC_PER_DOLLAR = limits.get("creditSecondsPerDollar") or 100000
+
+
+def parse_ts(s):
+    if not s:
+        return None
+    try:
+        return datetime.datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except Exception:
+        return None
+
+
+def human(sec):
+    sec = int(sec)
+    if sec < 0:
+        return "-"
+    d, r = divmod(sec, 86400)
+    h, r = divmod(r, 3600)
+    m = r // 60
+    if d:
+        return "%dd%dh" % (d, h)
+    if h:
+        return "%dh%02dm" % (h, m)
+    return "%dm" % m
+
+
+BUSY_STATES = ("running", "provisioning", "provisioned", "cloning", "archiving", "stopping")
+
+rows = []
+for b in boxes:
+    if only and b["id"] not in only:
+        continue
+    created = parse_ts(b.get("createdAt"))
+    age = (now - created).total_seconds() if created else 0
+    mult = float(b.get("billingMultiplier") or 1)
+    # Elapsed wall time since creation times the rate. This is an estimate: it
+    # cannot see a stop/resume gap, so it over-counts a Box that was paused.
+    # box limits is authoritative for the account total.
+    used_sec = age * mult
+    archive_after = parse_ts(b.get("archiveAfter"))
+    ttl_left = (archive_after - now).total_seconds() if archive_after else None
+
+    state = b.get("state") or "?"
+    p = probes.get(b["id"])
+    load = None
+    cpu = None
+    nproc = b.get("vcpu") or 1
+    hb_age = None
+    keep = False
+    top = ""
+    if p:
+        try:
+            load = float(p.get("LOAD", "nan"))
+        except ValueError:
+            load = None
+        try:
+            cpu = float(p.get("CPU", "nan"))
+        except ValueError:
+            cpu = None
+        try:
+            nproc = int(p.get("NPROC", nproc)) or 1
+        except ValueError:
+            pass
+        keep = p.get("KEEP") == "yes"
+        top = p.get("TOP", "")
+        if p.get("HB", "none") != "none":
+            try:
+                hb_age = int(p["NOW"]) - int(p["HB"])
+            except ValueError:
+                hb_age = None
+    load_per_cpu = (load / nproc) if load is not None else None
+
+    decision, reason = "keep", ""
+    if threshold is None:
+        decision, reason = "-", "report only"
+    elif state in BUSY_STATES:
+        decision, reason = "keep", "state %s" % state
+    elif age < threshold:
+        decision, reason = "keep", "younger than threshold"
+    elif keep:
+        decision, reason = "keep", "keep-file present"
+    elif hb_age is not None and hb_age < threshold:
+        decision, reason = "keep", "heartbeat %s old" % human(hb_age)
+    elif require_heartbeat and hb_age is None:
+        decision, reason = "keep", "no heartbeat, strict mode"
+    elif p is None:
+        if force_age_only:
+            decision, reason = "STOP", "age only, unverified"
+        elif no_probe:
+            decision, reason = "keep", "probe disabled"
+        else:
+            decision, reason = "keep", "probe failed, assuming busy"
+    elif cpu is None:
+        decision, reason = "keep", "cpu unreadable"
+    elif cpu >= cpu_threshold:
+        decision, reason = "keep", "cpu %d%%" % cpu
+    elif load_per_cpu is not None and load_per_cpu >= load_threshold:
+        decision, reason = "keep", "load %.2f/cpu" % load_per_cpu
+    else:
+        decision, reason = "STOP", "quiet %s" % human(age)
+
+    rows.append({
+        "id": b["id"], "name": b.get("name"), "type": b.get("type"), "state": state,
+        "vcpu": b.get("vcpu"), "memoryGB": b.get("memoryGB"), "billingMultiplier": mult,
+        "createdAt": b.get("createdAt"), "ageSeconds": int(age),
+        "ttlLeftSeconds": int(ttl_left) if ttl_left is not None else None,
+        "autoStop": archive_after is not None,
+        "estimatedBoxSeconds": int(used_sec),
+        "estimatedDollars": round(used_sec / SEC_PER_DOLLAR, 4),
+        "load1": load, "loadPerCpu": round(load_per_cpu, 3) if load_per_cpu is not None else None,
+        "cpuPercent": cpu, "heartbeatAgeSeconds": hb_age, "keepFile": keep, "topProcess": top,
+        "probed": p is not None, "decision": decision, "reason": reason,
+    })
+
+rows.sort(key=lambda r: r["estimatedBoxSeconds"], reverse=True)
+
+burn_rate = sum(r["billingMultiplier"] for r in rows)  # box-seconds per second
+balance = limits.get("creditBalanceSeconds") or 0
+period_end = parse_ts(limits.get("subscriptionCurrentPeriodEnd"))
+secs_left = (period_end - now).total_seconds() if period_end else None
+projected = burn_rate * secs_left if secs_left is not None else None
+
+active = limits.get("activeBoxes") or len(rows)
+max_active = limits.get("maxActiveBoxes") or 0
+starts = limits.get("starts") or {}
+per_min = starts.get("minute") or {}
+per_day = starts.get("day") or {}
+no_autostop = [r["id"] for r in rows if not r["autoStop"]]
+
+warnings = []
+if projected is not None and projected > balance:
+    short = projected - balance
+    warnings.append(
+        "credit: %d Box(es) burning %.1f box-seconds/sec will use ~%s of credit before the period "
+        "ends on %s, but only %s remain. Short by ~%s (~$%.2f). Stop something."
+        % (len(rows), burn_rate, human(projected), period_end.date(), human(balance),
+           human(short), short / SEC_PER_DOLLAR))
+elif projected is not None and balance and projected > 0.8 * balance:
+    warnings.append(
+        "credit: projected use to period end (~%s) is over 80%% of the remaining %s."
+        % (human(projected), human(balance)))
+if max_active and active >= 0.8 * max_active:
+    warnings.append("concurrency: %d of %d active Boxes used (>=80%% of the cap)." % (active, max_active))
+if per_min.get("limit") and per_min.get("remaining", 99) <= 2:
+    warnings.append("rate: only %d of %d creations left this minute."
+                    % (per_min["remaining"], per_min["limit"]))
+if per_day.get("limit") and per_day.get("remaining", 999) <= 15:
+    warnings.append("rate: only %d of %d creations left today."
+                    % (per_day["remaining"], per_day["limit"]))
+if no_autostop:
+    warnings.append("auto-stop is OFF on %d Box(es) (%s); nothing will ever stop them."
+                    % (len(no_autostop), ", ".join(no_autostop)))
+
+to_stop = [r["id"] for r in rows if r["decision"] == "STOP"]
+with open(plan_path, "w") as fh:
+    for bid in to_stop:
+        fh.write(bid + "\n")
+
+account = {
+    "plan": limits.get("boxPlanKey"),
+    "creditUsedSeconds": limits.get("creditUsedSeconds"),
+    "creditBalanceSeconds": balance,
+    "creditBalanceHours": limits.get("creditBalanceHours"),
+    "creditBalanceDollars": round(balance / SEC_PER_DOLLAR, 2),
+    "last24hUsageSeconds": limits.get("last24hUsageSeconds"),
+    "activeBoxes": active,
+    "maxActiveBoxes": max_active,
+    "startsRemainingThisMinute": per_min.get("remaining"),
+    "startsRemainingToday": per_day.get("remaining"),
+    "periodEnd": limits.get("subscriptionCurrentPeriodEnd"),
+    "currentBurnBoxSecondsPerSecond": burn_rate,
+    "projectedBoxSecondsToPeriodEnd": int(projected) if projected is not None else None,
+}
+
+if json_mode:
+    print(json.dumps({"boxes": rows, "account": account,
+                      "warnings": warnings, "wouldStop": to_stop}, indent=2))
+else:
+    if not rows:
+        print("No running Boxes. Nothing is billing.")
+    else:
+        print("%-14s %-8s %5s %-7s %8s %8s %9s %5s %-9s %s"
+              % ("BOX", "TYPE", "RATE", "STATE", "AGE", "TTL-LEFT", "EST-COST", "CPU", "DECISION", "WHY"))
+        print("%-14s %-8s %5s %-7s %8s %8s %9s %5s %-9s %s"
+              % ("-" * 14, "-" * 8, "-----", "-" * 7, "-" * 8, "-" * 8, "-" * 9, "-----", "-" * 9, "---"))
+        for r in rows:
+            ttl = human(r["ttlLeftSeconds"]) if r["ttlLeftSeconds"] is not None else "none"
+            cpu_s = "%d%%" % r["cpuPercent"] if r["cpuPercent"] is not None else "-"
+            print("%-14s %-8s %4.1fx %-7s %8s %8s %9s %5s %-9s %s"
+                  % (r["id"], r["type"] or "?", r["billingMultiplier"], r["state"],
+                     human(r["ageSeconds"]), ttl, "$%.4f" % r["estimatedDollars"],
+                     cpu_s, r["decision"], r["reason"]))
+        print()
+        total = sum(r["estimatedDollars"] for r in rows)
+        print("Running: %d Box(es), burning %.1f box-seconds/sec (~$%.4f/hour)."
+              % (len(rows), burn_rate, burn_rate * 3600 / SEC_PER_DOLLAR))
+        print("Estimated spend on these Boxes so far: $%.4f (age x rate; a stop/resume gap is not deducted)."
+              % total)
+    print()
+    print("Account: plan %s, %s of credit left (~$%.2f), %s used in the last 24h."
+          % (account["plan"], human(balance), account["creditBalanceDollars"],
+             human(account["last24hUsageSeconds"] or 0)))
+    print("         %d/%d active Boxes, %s creations left this minute, %s left today."
+          % (active, max_active, per_min.get("remaining", "?"), per_day.get("remaining", "?")))
+    if projected is not None:
+        print("         At the current rate this period needs ~%s more; %s remain."
+              % (human(projected), human(balance)))
+    for w in warnings:
+        print("WARNING: " + w)
+
+sys.exit(3 if warnings else 0)
+PY
+py_status=$?
+set -e
+
+if (( py_status != 0 && py_status != 3 )); then
+  exit "$py_status"
+fi
+
+stopped=0
+failed=0
+if [[ -s "$tmp_plan" ]]; then
+  if (( EXECUTE )); then
+    while IFS= read -r bid; do
+      [[ -n "$bid" ]] || continue
+      if box stop "$bid" >/dev/null 2>&1; then
+        echo "stopped $bid"
+        stopped=$((stopped + 1))
+      else
+        echo "error: failed to stop $bid" >&2
+        failed=$((failed + 1))
+      fi
+    done < "$tmp_plan"
+    echo "Stopped $stopped Box(es); $failed failed. Stopped Boxes are free and keep their snapshot."
+  elif (( ! JSON )); then
+    echo
+    echo "DRY RUN. Would stop: $(tr '\n' ' ' < "$tmp_plan")"
+    echo "Re-run with --execute to actually stop them."
+  fi
+elif [[ -n "$THRESHOLD" ]] && (( ! JSON )); then
+  echo
+  echo "Nothing to reap."
+fi
+
+if (( failed )); then exit 1; fi
+exit "$py_status"
