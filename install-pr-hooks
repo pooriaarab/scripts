@@ -119,9 +119,10 @@ while IFS='' read -r line; do
   read -r local_ref local_sha remote_ref remote_sha <<<"$line"
 
   # A deletion has an all-zero local-sha. Let deletions through.
-  if [ "$local_sha" = "0000000000000000000000000000000000000000" ]; then
-    continue
-  fi
+  case "$local_sha" in
+    *[^0]*) ;;
+    *) continue ;;
+  esac
 
   # Extract the branch name from the remote ref.
   case "$remote_ref" in
@@ -189,9 +190,11 @@ is_eligible() {
 installed=0 already=0 updated=0 removed=0 skipped=0 failed=0
 
 for root in "${ROOTS[@]}"; do
-  # Without this, a missing/mistyped --root makes find fail silently (stderr
-  # is discarded below) and the run reports "installed=0 ... failed=0" as if
-  # it had successfully scanned zero repos, instead of flagging the mistake.
+  # Without this, a missing or mistyped --root makes find fail silently (stderr
+  # is discarded below) and the run reports "installed=0 ... failed=0" as if it
+  # had successfully scanned zero repos, instead of flagging the mistake.
+  # Counting it rather than exiting keeps the remaining roots working and lets
+  # the tally carry the non-zero exit, like every other failure here.
   if [ ! -d "$root" ]; then
     echo "FAIL    $root (root not found)"; failed=$((failed+1)); continue
   fi
@@ -211,6 +214,19 @@ for root in "${ROOTS[@]}"; do
     # would never run.
     hooks_path=$(git -C "$repo" config --path --get core.hooksPath 2>/dev/null || true)
     if [ -n "$hooks_path" ]; then
+      # Only a REPO-LOCAL hooksPath is safe to write to. A global or system one
+      # points at a directory every repository on this machine shares, so
+      # installing there would put this hook in front of pushes from work and
+      # employer repositories that this tool must never touch. Refuse instead,
+      # and say what to change. Found the hard way: a test run installed the
+      # hook into a global ~/.git-hooks.
+      local_hooks_path=$(git -C "$repo" config --local --path --get core.hooksPath 2>/dev/null || true)
+      if [ -z "$local_hooks_path" ]; then
+        echo "SKIP    $repo  (core.hooksPath is set outside this repo, at $hooks_path)"
+        echo "        Installing there would hook every repo on this machine, including work ones."
+        echo "        Set core.hooksPath in this repo only, or unset it globally."
+        skipped=$((skipped+1)); continue
+      fi
       case "$hooks_path" in
         /*) hook_dir="$hooks_path" ;;
         ~/*) hook_dir="$HOME/${hooks_path#~/}" ;;
@@ -222,7 +238,8 @@ for root in "${ROOTS[@]}"; do
     version_marker="# install-pr-hooks $VERSION"
 
     if [ "$UNINSTALL" = 1 ]; then
-      if [ -f "$hook" ] && grep -q "install-pr-hooks" "$hook" 2>/dev/null; then
+      # A file without the exact sentinel line is never ours.
+      if [ -f "$hook" ] && grep -qE "^# install-pr-hooks v[0-9]+$" "$hook" 2>/dev/null; then
         if [ "$APPLY" = 1 ]; then
           rm -f "$hook" || { echo "FAIL    $repo (remove failed)"; failed=$((failed+1)); continue; }
         fi
@@ -232,7 +249,10 @@ for root in "${ROOTS[@]}"; do
     fi
 
     # An existing hook from this project. Check the version.
-    if [ -f "$hook" ] && grep -q "install-pr-hooks" "$hook" 2>/dev/null; then
+    # A loose substring match could accidentally clobber someone else's
+    # handwritten hook that happens to mention this script, so we require
+    # the exact sentinel line. A file without it is skipped as a foreign hook.
+    if [ -f "$hook" ] && grep -qE "^# install-pr-hooks v[0-9]+$" "$hook" 2>/dev/null; then
       if grep -qF "$version_marker" "$hook" 2>/dev/null; then
         # Right content is not enough. If a previous chmod failed, git refuses
         # to run the file and every later run would keep reporting OK.
