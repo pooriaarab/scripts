@@ -258,10 +258,14 @@ test('counts every GitHub closing keyword, not only Closes and Fixes', () => {
   // GitHub honours nine keywords. A checker that knows two of them lets a PR
   // close two issues while reporting one.
   for (const keyword of ['Close', 'Closes', 'Closed', 'Fix', 'Fixes', 'Fixed', 'Resolve', 'Resolves', 'Resolved']) {
-    assert.deepEqual(countClosingReferences(`${keyword} #7`), [7], `missed ${keyword}`);
+    assert.deepEqual(countClosingReferences(`${keyword} #7`), [{ repo: null, number: 7 }], `missed ${keyword}`);
   }
-  assert.deepEqual(countClosingReferences('Closes #1\n\nResolves #2'), [1, 2]);
-  assert.deepEqual(countClosingReferences('closes #3'), [3]);
+  assert.deepEqual(countClosingReferences('Closes #1\n\nResolves #2'), [{ repo: null, number: 1 }, { repo: null, number: 2 }]);
+  // GitHub accepts a colon after the keyword and a cross-repo reference.
+  assert.deepEqual(countClosingReferences('Closes: #4'), [{ repo: null, number: 4 }]);
+  assert.deepEqual(countClosingReferences('Fixes octo-org/octo-repo#100'), [{ repo: 'octo-org/octo-repo', number: 100 }]);
+  assert.equal(countClosingReferences('Closes #1\nFixes: #2').length, 2);
+  assert.deepEqual(countClosingReferences('closes #3'), [{ repo: null, number: 3 }]);
   // A comment is not a closing reference, and neither is prose about closing.
   assert.deepEqual(countClosingReferences('<!-- Closes #9 -->'), []);
   assert.deepEqual(countClosingReferences('This closes the gap'), []);
