@@ -402,6 +402,14 @@ print(json.dumps(payload))
   # (issue and branch reuse above mean a retry reaches this same head branch,
   # and `gh pr create` always fails when a PR for it is already open).
   EXISTING_PR=$(gh pr list --repo "$OWNER/$repo" --head "$BRANCH" --state open --json number --jq '.[0].number' 2>/dev/null)
+  if [ $? -ne 0 ]; then
+    # A transient failure here (auth, rate-limit) must not look like "no PR
+    # exists" -- gh pr create would then fail against the already-open PR and
+    # a repo that already succeeded would be reported as FAIL.
+    echo "FAIL  $repo  (PR lookup failed)"
+    fail_c=$(( fail_c + 1 ))
+    continue
+  fi
   if [ -n "$EXISTING_PR" ]; then
     echo "DONE  $repo  (#$ISSUE_NUM -> $BRANCH -> reusing PR #$EXISTING_PR)"
     done_c=$(( done_c + 1 ))
