@@ -298,8 +298,15 @@ for root in "${ROOTS[@]}"; do
   # "./foo" and an absolute one like "/foo/hooks" both normalize to strings
   # starting with "/foo", making the repo-containment check below compare
   # unrelated paths as if one were inside the other.
+  #
+  # pwd -P (not plain pwd) also resolves symlinks, because find below runs
+  # without -L: if --root is itself a symlink to a directory (a symlinked
+  # ~/Documents/Personal is exactly the stow/chezmoi setup this script
+  # already defends against elsewhere), find's default -P mode treats that
+  # symlink as a leaf and never descends into it, so every repo under it
+  # would silently go unscanned while the run still reports success.
   orig_root="$root"
-  if ! root="$(cd "$root" && pwd)"; then
+  if ! root="$(cd "$root" && pwd -P)"; then
     echo "FAIL    $orig_root (cannot resolve to an absolute path)"; failed=$((failed+1)); continue
   fi
 

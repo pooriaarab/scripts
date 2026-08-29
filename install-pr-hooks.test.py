@@ -98,10 +98,41 @@ def test_dangling_pre_push_symlink_is_refused():
     return ok
 
 
+def test_symlinked_root_is_scanned():
+    """A --root that is itself a symlink to a directory must still be scanned.
+
+    find runs without -L, so a symlink given as the search root is treated as
+    a leaf and never descended into -- unless the root is resolved to its
+    physical path first. Otherwise every repo under a symlinked --root (e.g.
+    a stow/chezmoi-managed ~/Documents/Personal) goes silently unscanned
+    while the run still reports success.
+    """
+    import shutil, subprocess as sp
+    d = tempfile.mkdtemp()
+    real = f"{d}/real"
+    repo = f"{real}/repo"
+    os.makedirs(f"{repo}/.github")
+    env = {**os.environ, "GIT_CONFIG_GLOBAL": "/dev/null"}
+    sp.run(["git", "-C", repo, "init", "-q"], check=True, env=env)
+    sp.run(["git", "-C", repo, "remote", "add", "origin",
+            "https://github.com/pooriaarab/testrepo.git"], check=True, env=env)
+    pathlib.Path(f"{repo}/.github/pr-standards.json").write_text('{"prefix":"tt"}')
+    os.symlink(real, f"{d}/linked-root")
+    out = sp.run([str(HERE / "install-pr-hooks"), "--root", f"{d}/linked-root"],
+                 capture_output=True, text=True, env=env).stdout
+    shutil.rmtree(d, ignore_errors=True)
+    ok = "INSTALL" in out and repo in out
+    print(f"  {'OK ' if ok else 'FAIL'} symlinked --root is scanned")
+    return ok
+
+
 if not test_symlinked_hook_dir_is_refused():
     sys.exit(1)
 
 if not test_dangling_pre_push_symlink_is_refused():
+    sys.exit(1)
+
+if not test_symlinked_root_is_scanned():
     sys.exit(1)
 
 sys.exit(0 if ALL_OK else 1)
