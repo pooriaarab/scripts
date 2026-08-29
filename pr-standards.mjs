@@ -37,7 +37,7 @@ export const DEFAULT_CONFIG = {
   maxTopLevelDirs: 3,
   minBodyChars: 120,
   overrideLabel: 'oversized-approved',
-  exemptBranches: ['main', 'master', 'release', 'refactor', 'gh-pages'],
+  exemptBranches: ['main', 'release', 'refactor', 'gh-pages'],
   excludeGlobs: DEFAULT_EXCLUDE_GLOBS,
 };
 
@@ -106,7 +106,9 @@ export function validateBranchName(name, config = DEFAULT_CONFIG) {
     }
   }
 
-  const pattern = new RegExp(`^${config.prefix}-([0-9]+)-([a-z0-9]+(?:-[a-z0-9]+)*)$`);
+  // [1-9][0-9]* rather than [0-9]+: there is no issue #0, and a leading zero
+  // makes cr-007-x and cr-7-x two branch names for one issue.
+  const pattern = new RegExp(`^${config.prefix}-([1-9][0-9]*)-([a-z0-9]+(?:-[a-z0-9]+)*)$`);
   const match = pattern.exec(branch);
   if (!match) {
     const expected = `${config.prefix}-<issue>-<slug>`;
@@ -254,15 +256,19 @@ export function validateTitle(title, prefix, issueNumber) {
   return { ok: failures.length === 0, failures };
 }
 
+// Every form GitHub actually treats as a closing reference. Three things are
+// easy to miss and each one lets a second concern in unseen: all nine keywords
+// rather than Closes and Fixes, an optional colon after the keyword
+// (`Closes: #10`), and the cross-repo `owner/name#100` form. A reference into
+// another repo still counts toward the one-reference rule, because it is still
+// a second thing this pull request closes, but it can never satisfy the branch
+// issue, so it is returned with its repo attached rather than as a bare number.
 export function countClosingReferences(body) {
   const references = [];
-  // GitHub closes an issue on any of nine keywords, not just these two. Counting
-  // only Closes and Fixes waves through `Closes #1` plus `Resolves #2`, which is
-  // two concerns in one pull request wearing one coat.
-  const pattern = /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#([0-9]+)\b/gi;
+  const pattern = /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s*(?:([\w.-]+\/[\w.-]+))?#([0-9]+)\b/gi;
   const visibleBody = String(body || '').replace(/<!--[\s\S]*?-->/g, '');
   for (const match of visibleBody.matchAll(pattern)) {
-    references.push(Number(match[1]));
+    references.push({ repo: match[1] || null, number: Number(match[2]) });
   }
   return references;
 }
@@ -321,10 +327,11 @@ export function validateBody(body, issueNumber, config = DEFAULT_CONFIG) {
         `exactly one Closes #${issueNumber} or Fixes #${issueNumber}`,
         `Keep only: Closes #${issueNumber}`,
       ));
-    } else if (references[0] !== issueNumber) {
+    } else if (references[0].repo || references[0].number !== issueNumber) {
+      const got = references[0].repo ? `${references[0].repo}#${references[0].number}` : `#${references[0].number}`;
       failures.push(fail(
         'closing issue reference',
-        `#${references[0]}`,
+        got,
         `#${issueNumber}`,
         `Replace it with: Closes #${issueNumber}`,
       ));
