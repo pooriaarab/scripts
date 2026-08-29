@@ -106,11 +106,23 @@ class RegistryTest(unittest.TestCase):
         # Without this the candidate ordering is untestable: every assertion above
         # only checks validity and uniqueness, which the alphabetic fallback also
         # satisfies. A prefix a human has to read should come from the name.
+        # Three names, so extension actually happens: with a single newcomer there
+        # is no collision and the candidate list is never consulted at all.
         registry = self.registry()
-        out, _ = self.run_main(list(registry) + ["vibenotebooks"], registry)
+        newcomers = ["vibenotebooks", "vibenotepad", "vibenoteworthy"]
+        out, _ = self.run_main(list(registry) + newcomers, registry)
         self.assertIsNotNone(out)
-        self.assertIn(out["vibenotebooks"], {"vibe", "vnot", "vib", "vi"},
-                      f"fell through to the fallback: {out['vibenotebooks']!r}")
+        # Every one should be a prefix of the squashed name or of its initials,
+        # not a letter the alphabetic fallback picked out of the air.
+        for name in newcomers:
+            prefix = out[name]
+            squashed = name.replace("-", "")
+            initials = "v" + "".join(c for c in name[4:5])
+            with self.subTest(name=name):
+                self.assertTrue(
+                    squashed.startswith(prefix) or prefix.startswith(initials),
+                    f"{name} -> {prefix!r} came from the fallback, not the name",
+                )
 
     def test_a_registered_prefix_is_never_reassigned(self):
         registry = self.registry()
