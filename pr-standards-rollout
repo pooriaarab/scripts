@@ -188,7 +188,7 @@ p = json.loads(c).get('prefix', '')
 print(p)
 " 2>/dev/null)
     if [ "$CONFIG_PREFIX" = "$PREFIX" ]; then
-      for F in ".github/pull_request_template.md" ".github/workflows/pr-standards.yml" "AGENTS.md"; do
+      for F in ".github/pull_request_template.md" ".github/workflows/pr-standards.yml"; do
         F_RESP=$(gh api "repos/$OWNER/$repo/contents/$F" --jq '.sha' 2>&1) || {
           if ! echo "$F_RESP" | grep -q '"Not Found"'; then
             echo "WARN  $repo  (companion lookup failed for $F)" >&2
@@ -199,6 +199,39 @@ print(p)
           REPAIR_MISSING+="$F "
         }
       done
+
+      # AGENTS.md needs its CONTENT checked, not just its existence. A repo with
+      # a hand-written AGENTS.md that has no markers, or one carrying a block
+      # from an older template, would otherwise report OK and never be repaired,
+      # which silently defeats the point: the non-Claude fleet members read this
+      # file to learn the standard. Existence is not adoption.
+      AGENTS_RESP=$(gh api "repos/$OWNER/$repo/contents/AGENTS.md" --jq '.content' 2>&1) || {
+        if ! echo "$AGENTS_RESP" | grep -q '"Not Found"'; then
+          echo "WARN  $repo  (companion lookup failed for AGENTS.md)" >&2
+          fail_c=$(( fail_c + 1 ))
+          continue
+        fi
+        AGENTS_RESP=""
+      }
+      EXPECTED_BLOCK=$(printf '%s' "$AGENTS_BLOCK_TPL" | sed "s|__PREFIX_UPPER__|$(printf '%s' "$PREFIX" | tr '[:lower:]' '[:upper:]')|g; s|__PREFIX__|$PREFIX|g")
+      if ! CURRENT_AGENTS=$(printf '%s' "$AGENTS_RESP" | base64 -d 2>/dev/null); then
+        CURRENT_AGENTS=""
+      fi
+      if ! AGENTS_BLOCK_MATCHES=$(EXPECTED="$EXPECTED_BLOCK" CURRENT="$CURRENT_AGENTS" python3 -c "
+import os, re
+current = os.environ.get('CURRENT', '')
+expected = os.environ.get('EXPECTED', '')
+start, end = '<!-- pr-standards:start -->', '<!-- pr-standards:end -->'
+m = re.search(re.escape(start) + '.*?' + re.escape(end), current, re.S)
+print('yes' if m and m.group(0).strip() == expected.strip() else 'no')
+" 2>/dev/null); then
+        echo "WARN  $repo  (could not compare the AGENTS.md block)" >&2
+        fail_c=$(( fail_c + 1 ))
+        continue
+      fi
+      if [ "$AGENTS_BLOCK_MATCHES" != "yes" ]; then
+        REPAIR_MISSING+="AGENTS.md "
+      fi
       if [ -z "$REPAIR_MISSING" ]; then
         echo "OK    $repo  (already has prefix '$PREFIX')"
         already_c=$(( already_c + 1 ))
