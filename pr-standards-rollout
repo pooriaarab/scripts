@@ -105,7 +105,11 @@ import os, re
 existing = os.environ.get('EXISTING', '')
 block = os.environ.get('BLOCK', '')
 start, end = '<!-- pr-standards:start -->', '<!-- pr-standards:end -->'
-if start in existing and end in existing:
+# Only replace when there is exactly one correctly ordered pair. A lone or
+# duplicated marker (manual edit, merge conflict) would make the non-greedy
+# regex span from the first stray marker to a later one, deleting whatever
+# real content sat between them -- appending fresh is the safe fallback.
+if existing.count(start) == 1 and existing.count(end) == 1 and existing.index(start) < existing.index(end):
     out = re.sub(re.escape(start) + '.*?' + re.escape(end), lambda _: block, existing, flags=re.S)
 elif existing.strip():
     out = existing.rstrip() + '\n\n' + block + '\n'
@@ -237,12 +241,27 @@ print(json.dumps(cfg, indent=2))
     # was deleted (e.g. auto-deleted after the original PR merged), there is
     # nothing to repair in place, so fall through to a full rollout below,
     # which opens a fresh issue/branch/PR and rewrites all four files.
-    BRANCH=$(gh api --paginate "repos/$OWNER/$repo/branches?per_page=100" --jq ".[].name | select(startswith(\"${PREFIX}-\") and endswith(\"-adopt-pr-standard\"))" 2>/dev/null | head -1)
+    # Piping straight into `head -1` would throw away gh's exit status, so a
+    # transient failure (auth, rate-limit) here would look identical to "no
+    # matching branch" and fall through to opening a brand-new issue/branch/PR
+    # for a repo that already has one in flight.
+    BRANCH_LIST=$(gh api --paginate "repos/$OWNER/$repo/branches?per_page=100" --jq ".[].name | select(startswith(\"${PREFIX}-\") and endswith(\"-adopt-pr-standard\"))" 2>/dev/null)
+    if [ $? -ne 0 ]; then
+      echo "FAIL  $repo  (REPAIR: branch listing failed)"
+      fail_c=$(( fail_c + 1 ))
+      continue
+    fi
+    BRANCH=$(echo "$BRANCH_LIST" | head -1)
     if [ -n "$BRANCH" ]; then
       # A branch that outlived its PR (merged without auto-delete, or closed)
       # has no way to get its new commits to the default branch. Only repair
       # in place when the branch still has an open PR behind it.
       OPEN_PR=$(gh pr list --repo "$OWNER/$repo" --head "$BRANCH" --state open --json number --jq '.[0].number // empty' 2>/dev/null)
+      if [ $? -ne 0 ]; then
+        echo "FAIL  $repo  (REPAIR: PR lookup failed)"
+        fail_c=$(( fail_c + 1 ))
+        continue
+      fi
       [ -z "$OPEN_PR" ] && BRANCH=""
     fi
     if [ -n "$BRANCH" ]; then
