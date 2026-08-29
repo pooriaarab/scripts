@@ -280,7 +280,7 @@ def main():
         sys.exit(1)
 
     for name, pref in prefixes.items():
-        if not (2 <= len(pref) <= 4) or not pref.islower() or not pref.isalpha():
+        if not re.fullmatch(r"[a-z]{2,4}", pref):
             print(f"ERROR: invalid prefix '{pref}' for repo '{name}'", file=sys.stderr)
             sys.exit(1)
 
