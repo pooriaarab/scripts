@@ -199,4 +199,43 @@ if not test_symlinked_root_is_scanned():
 if not test_deeply_nested_repo_is_scanned():
     sys.exit(1)
 
+
+def test_eligibility_checks_the_push_url_too():
+    """A repo that pushes somewhere else is not eligible, whatever it fetches from.
+
+    This hook runs on push. remote.origin.pushurl can differ from the fetch URL,
+    so checking only the fetch URL would install into a repo that pushes to a
+    work remote -- the one thing this tool must never do.
+    """
+    import shutil, subprocess as sp
+    results = []
+    for label, pushurl, want in [
+        ("no pushurl", None, True),
+        ("personal pushurl", "git@github.com:pooriaarab/other.git", True),
+        ("work pushurl", "git@github.com:some-employer/thing.git", False),
+        ("explicit-port ssh", "ssh://git@github.com:22/pooriaarab/other.git", True),
+    ]:
+        d = tempfile.mkdtemp(); repo = f"{d}/repo"
+        os.makedirs(f"{repo}/.github")
+        env = {**os.environ, "GIT_CONFIG_GLOBAL": "/dev/null"}
+        sp.run(["git", "-C", repo, "init", "-q"], check=True, env=env)
+        sp.run(["git", "-C", repo, "remote", "add", "origin",
+                "https://github.com/pooriaarab/testrepo.git"], check=True, env=env)
+        if pushurl:
+            sp.run(["git", "-C", repo, "remote", "set-url", "--push", "origin", pushurl],
+                   check=True, env=env)
+        pathlib.Path(f"{repo}/.github/pr-standards.json").write_text('{"prefix":"tt"}')
+        out = sp.run([str(HERE / "install-pr-hooks"), "--root", d],
+                     capture_output=True, text=True, env=env).stdout
+        eligible = "INSTALL" in out
+        shutil.rmtree(d, ignore_errors=True)
+        ok = eligible == want
+        results.append(ok)
+        print(f"  {'OK ' if ok else 'FAIL'} {label:<20} eligible={eligible} want={want}")
+    return all(results)
+
+
+if not test_eligibility_checks_the_push_url_too():
+    ALL_OK = False
+
 sys.exit(0 if ALL_OK else 1)
