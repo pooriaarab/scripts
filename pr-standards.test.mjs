@@ -393,4 +393,14 @@ test('the marketing footer check catches multi-codepoint emoji, not only a bare 
   ]) {
     assert.equal(validateCommits(commit(footer), config).ok, false, `missed ${JSON.stringify(footer)}`);
   }
+test('a banned name with punctuation still matches', () => {
+  // \b needs a word/non-word transition, so it never fires beside a name that
+  // starts with punctuation. Only reachable through the documented config, which
+  // is where a silent pass is hardest to notice.
+  const config = { ...DEFAULT_CONFIG, prefix: 'cr', bannedCommitTrailers: ['@cursor', 'pi'] };
+  const commit = (m) => [{ sha: 'abc1234', commit: { message: `Fix\n\n${m}` } }];
+  assert.equal(validateCommits(commit('Co-authored-by: @cursor <c@example.com>'), config).ok, false);
+  assert.equal(validateCommits(commit('Co-authored-by: pi <p@example.com>'), config).ok, false);
+  assert.equal(validateCommits(commit('Co-authored-by: mycursor <c@example.com>'), config).ok, true);
+  assert.equal(validateCommits(commit('Co-authored-by: Pia Gupta <p@example.com>'), config).ok, true);
 });

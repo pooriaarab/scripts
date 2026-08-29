@@ -684,8 +684,21 @@ export function validateCommits(commits, config, truncated = false) {
   // Word boundaries on both sides. Without them `pi` matches inside "Pia" and
   // `GPT` inside "Gupta", and a human co-author gets their PR failed for having
   // the wrong name.
+  // `\b` needs a word/non-word transition, so it never matches beside a name
+  // that starts or ends with punctuation: a configured `@cursor` could not fire
+  // against the space before it, and the trailer passed silently. Choose the
+  // boundary per name. Word char at the edge takes `\b`; anything else takes a
+  // whitespace boundary instead. The default list is all alphanumeric, so this
+  // only shows up once someone uses the documented config, which is exactly
+  // when a quiet failure is hardest to notice.
+  const bound = (name) => {
+    const quoted = escapeRegex(name);
+    const left = /^\w/.test(name) ? '\\b' : '(?<!\\S)';
+    const right = /\w$/.test(name) ? '\\b' : '(?!\\S)';
+    return `${left}${quoted}${right}`;
+  };
   const named = banned.length
-    ? new RegExp(`\\b(${banned.map(escapeRegex).join('|')})\\b`, 'i')
+    ? new RegExp(`(?:${banned.map(bound).join('|')})`, 'i')
     : null;
 
   for (const entry of commits) {
