@@ -99,6 +99,11 @@ printf '%s ALL=(ALL) NOPASSWD:ALL\n' "\$user" > /etc/sudoers.d/actions-runner
 chmod 0440 /etc/sudoers.d/actions-runner
 visudo -c -q -f /etc/sudoers.d/actions-runner
 echo "sudo: passwordless for \$user"
+command -v docker >/dev/null 2>&1 || echo "docker: MISSING — workflows with a services: container fail with 'docker: command not found'"
+id -nG "\$user" 2>/dev/null | tr ' ' '\n' | grep -qx docker || echo "docker: \$user is not in the docker group"
+command -v cargo >/dev/null 2>&1 || echo "rust: MISSING — Tauri builds fail with \"failed to run 'cargo metadata'\""
+command -v xdg-mime >/dev/null 2>&1 || echo "bundling: xdg-utils MISSING — 'xdg-mime binary not found'"
+command -v desktop-file-validate >/dev/null 2>&1 || echo "bundling: desktop-file-utils MISSING — 'failed to bundle project'"
 major="\$(node --version 2>/dev/null | sed 's/^v\([0-9]*\).*/\1/')"
 if [ -z "\$major" ] || [ "\$major" -lt 22 ]; then
   echo "node: \${major:-missing} is older than the hosted images; wrangler and friends will fail here only"
