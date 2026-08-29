@@ -240,6 +240,16 @@ def main():
     json.dump(sorted_map, sys.stdout, indent=2, ensure_ascii=False)
     print()
 
+    # Self-test: edge-case names that the derivation must handle.
+    # These test the one-character-prefix fix and non-alpha names.
+    edge_cases = {".github": "gith", "foo-": "foo", "123": "zz", "x": "xx",
+                  "---": "zz", "a.b": "ab"}
+    for ec_name, ec_expected in edge_cases.items():
+        ec_result = derive_prefix(ec_name)
+        if ec_result != ec_expected:
+            print(f"ERROR: edge-case '{ec_name}' -> '{ec_result}', expected '{ec_expected}'", file=sys.stderr)
+            sys.exit(1)
+
 
 if __name__ == "__main__":
     main()

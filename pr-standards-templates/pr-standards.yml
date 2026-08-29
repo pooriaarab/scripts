@@ -21,13 +21,24 @@ jobs:
       pull-requests: read
       issues: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       # The check lives in pooriaarab/scripts, not here. One engine, one set of
-      # rules, and a fix to the engine reaches every repo on the next PR without
-      # a second rollout. The cost of that choice is that this workflow tracks
-      # `main` of a public repo you own; pin the ref below to a commit SHA if a
-      # repo needs the rules frozen.
+      # rules, and a fix reaches every repo without editing sixty workflows.
+      #
+      # It is fetched from the moving tag `pr-standards-v1`, not from `main` and
+      # not from a bare SHA. Three options, and this is the least bad:
+      #
+      #   main       churns on every merge, so every repo runs whatever was
+      #              pushed minutes ago. Rejected.
+      #   a SHA      immutable, but shipping one engine fix then means opening
+      #              sixty pull requests to bump sixty URLs. Rejected.
+      #   a tag      the fleet updates when the tag is deliberately moved, which
+      #              makes releasing an act rather than a side effect of merging.
+      #
+      # `pr-standards-v1.0.0` and friends stay immutable, so pin one of those in
+      # place of the tag below where a repo needs the rules frozen.
+      #
       # Two files, not one: `pr-standards` is a thin launcher and the engine
       # lives in `pr-standards.mjs` beside it. Fetching only the launcher gets
       # you a job that fails on a missing import.
@@ -36,7 +47,7 @@ jobs:
           mkdir -p /tmp/prs
           for f in pr-standards pr-standards.mjs; do
             curl -fsSL -o "/tmp/prs/$f" \
-              "https://raw.githubusercontent.com/pooriaarab/scripts/main/$f"
+              "https://raw.githubusercontent.com/pooriaarab/scripts/pr-standards-v1/$f"
           done
           chmod +x /tmp/prs/pr-standards
 

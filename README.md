@@ -120,8 +120,8 @@ must be unique across the account.
 ./pr-standards-rollout --repo <name> --apply  # write + PR
 ```
 
-The rollout creates a GitHub issue per repo, then a branch and a PR.
-The branch and PR title conform to the new standard on first use.
+The rollout creates or reuses a GitHub issue per repo, then a branch and a PR.
+Repos that are already configured are skipped.
 
 ## Notes
 

@@ -87,7 +87,7 @@ done_c=0 already_c=0 repaired_c=0 skipped_c=0 fail_c=0
 build_agents_md() {
   local repo="$1" branch="$2" resp existing=""
   AGENTS_BLOCK=$(echo "$AGENTS_BLOCK_TPL" | sed "s|__PREFIX_UPPER__|$PREFIX_UPPER|g; s|__PREFIX__|$PREFIX|g")
-  resp=$(gh api "repos/$OWNER/$repo/contents/AGENTS.md?ref=$branch" 2>/dev/null) || {
+  resp=$(gh api "repos/$OWNER/$repo/contents/AGENTS.md?ref=$branch" 2>&1) || {
     if echo "$resp" | grep -q '"Not Found"'; then
       resp="__NOT_FOUND__"
     else
@@ -170,7 +170,7 @@ print(str(d['isFork']).lower(), str(d['isArchived']).lower(), d['diskUsage'])
   # All four managed files must be current before we skip a repo. If the
   # config matches but other files are missing, we repair under --apply.
   REPAIR_MISSING=""
-  CONFIG_RESP=$(gh api "repos/$OWNER/$repo/contents/.github/pr-standards.json" 2>/dev/null) && {
+  CONFIG_RESP=$(gh api "repos/$OWNER/$repo/contents/.github/pr-standards.json" 2>&1) && {
     CONFIG_PREFIX=$(echo "$CONFIG_RESP" | python3 -c "
 import json, base64, sys
 d = json.load(sys.stdin)
@@ -180,7 +180,15 @@ print(p)
 " 2>/dev/null)
     if [ "$CONFIG_PREFIX" = "$PREFIX" ]; then
       for F in ".github/pull_request_template.md" ".github/workflows/pr-standards.yml" "AGENTS.md"; do
-        gh api "repos/$OWNER/$repo/contents/$F" --jq '.sha' &>/dev/null || REPAIR_MISSING+="$F "
+        F_RESP=$(gh api "repos/$OWNER/$repo/contents/$F" --jq '.sha' 2>&1) || {
+          if ! echo "$F_RESP" | grep -q '"Not Found"'; then
+            echo "WARN  $repo  (companion lookup failed for $F)" >&2
+            fail_c=$(( fail_c + 1 ))
+            continue 2
+          fi
+          # 404 means file is genuinely missing -- add to repair list
+          REPAIR_MISSING+="$F "
+        }
       done
       if [ -z "$REPAIR_MISSING" ]; then
         echo "OK    $repo  (already has prefix '$PREFIX')"
@@ -261,7 +269,7 @@ print(json.dumps(cfg, indent=2))
         # other failure means we could not read a file that may well exist, and
         # sending no sha then overwrites it. Tell the two apart rather than
         # treating every error as "not there", the same way the config read does.
-        SHA_RESP=$(gh api "repos/$OWNER/$repo/contents/$FP?ref=$BRANCH" 2>/dev/null) || {
+        SHA_RESP=$(gh api "repos/$OWNER/$repo/contents/$FP?ref=$BRANCH" 2>&1) || {
           if ! echo "$SHA_RESP" | grep -q '"Not Found"'; then
             echo "WARN  $repo  (REPAIR: cannot read $FP)"
             REPAIR_FAIL=1
