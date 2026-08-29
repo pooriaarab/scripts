@@ -267,19 +267,26 @@ print(json.dumps(cfg, indent=2))
       fail_c=$(( fail_c + 1 ))
       continue
     fi
-    BRANCH=$(echo "$BRANCH_LIST" | head -1)
-    if [ -n "$BRANCH" ]; then
-      # A branch that outlived its PR (merged without auto-delete, or closed)
-      # has no way to get its new commits to the default branch. Only repair
-      # in place when the branch still has an open PR behind it.
-      OPEN_PR=$(gh pr list --repo "$OWNER/$repo" --head "$BRANCH" --state open --json number --jq '.[0].number // empty' 2>/dev/null)
+    # A branch that outlived its PR (merged without auto-delete, or closed)
+    # has no way to get its new commits to the default branch. Several
+    # matching branches can exist (a stale one left behind, plus a fresh
+    # one) -- check each in turn rather than only the first, or a stale
+    # branch would shadow a later one that actually has an open PR and the
+    # repair would fall through to a duplicate full rollout instead.
+    BRANCH=""
+    while IFS= read -r candidate; do
+      [ -z "$candidate" ] && continue
+      OPEN_PR=$(gh pr list --repo "$OWNER/$repo" --head "$candidate" --state open --json number --jq '.[0].number // empty' 2>/dev/null)
       if [ $? -ne 0 ]; then
         echo "FAIL  $repo  (REPAIR: PR lookup failed)"
         fail_c=$(( fail_c + 1 ))
-        continue
+        continue 2
       fi
-      [ -z "$OPEN_PR" ] && BRANCH=""
-    fi
+      if [ -n "$OPEN_PR" ]; then
+        BRANCH="$candidate"
+        break
+      fi
+    done <<< "$BRANCH_LIST"
     if [ -n "$BRANCH" ]; then
       DEFAULT_BRANCH=$(gh api "repos/$OWNER/$repo" --jq '.default_branch')
       AGENTS_MD=""
