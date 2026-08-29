@@ -56,7 +56,7 @@ def split_camel_lower(s: str) -> list[str]:
         best = None
         for wl in range(min(14, len(s) - i), 0, -1):
             part = s[i : i + wl]
-            if part in KNOWN_WORDS or part in KNOWN_WORDS:
+            if part in KNOWN_WORDS:
                 best = part
                 break
         if best is None:

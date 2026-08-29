@@ -20,7 +20,9 @@ DRY=1; TARGET_REPO=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --apply) DRY=0; shift ;;
-    --repo)  TARGET_REPO="$2"; shift 2 ;;
+    --repo)
+      [ $# -ge 2 ] || { echo "ERROR: --repo requires a value"; exit 1; }
+      TARGET_REPO="$2"; shift 2 ;;
     --help|-h) sed -n '2,12p' "$0"; exit 0 ;;
     *) echo "unknown flag: $1"; exit 1 ;;
   esac
@@ -228,8 +230,13 @@ print(json.dumps(cfg, indent=2))
 
   # ── Dry run ──────────────────────────────────────────────────────────
   if [ "$DRY" -eq 1 ]; then
-    echo "WOULD  $repo  (prefix=$PREFIX)"
-    echo "         create issue, branch ${PREFIX}-N-adopt-pr-standard, 4 files, PR"
+    if [ -n "$REPAIR_MISSING" ]; then
+      echo "WOULD  $repo  (repair: write missing $REPAIR_MISSING to the existing open-PR branch;"
+      echo "         falls back to a full rollout only if no repairable branch is found)"
+    else
+      echo "WOULD  $repo  (prefix=$PREFIX)"
+      echo "         create issue, branch ${PREFIX}-N-adopt-pr-standard, 4 files, PR"
+    fi
     done_c=$(( done_c + 1 ))
     continue
   fi
