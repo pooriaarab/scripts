@@ -88,8 +88,11 @@ if not isinstance(p, str) or not re.fullmatch(r'[a-z]{2,4}', p):
 # 'allowChoreEscape': 'true' is a string, which is truthy, so reading it without
 # a type check would silently open the escape the config meant to keep shut.
 exempt = cfg.get('exemptBranches', [])
-if not isinstance(exempt, list) or not all(isinstance(b, str) and b for b in exempt):
-    print('PR-STANDARDS HOOK: exemptBranches must be a list of non-empty strings', file=sys.stderr)
+# Each entry is handed to bash as its own line below, so an entry containing a
+# newline would split into two lines and exempt a second, unconfigured branch
+# name (e.g. "legacy\nmaster" would also exempt "master").
+if not isinstance(exempt, list) or not all(isinstance(b, str) and b and '\n' not in b for b in exempt):
+    print('PR-STANDARDS HOOK: exemptBranches must be a list of non-empty, single-line strings', file=sys.stderr)
     sys.exit(1)
 chore = cfg.get('allowChoreEscape', False)
 if not isinstance(chore, bool):
@@ -409,7 +412,10 @@ for root in "${ROOTS[@]}"; do
     # if "$hook" exists but is a directory (or other non-regular file), mv -f
     # in write_hook would move the temp file inside it instead of replacing it,
     # silently reporting INSTALL while leaving no executable hook in place.
-    if [ -e "$hook" ]; then
+    # -e alone is not enough: it follows symlinks, so a dangling symlink (its
+    # target missing, as dotfile managers can leave one mid-sync) reads as
+    # absent and would be silently replaced. -L catches it without following.
+    if [ -e "$hook" ] || [ -L "$hook" ]; then
       echo "SKIP    $repo  (a different pre-push hook is installed)"
       skipped=$((skipped+1)); continue
     fi

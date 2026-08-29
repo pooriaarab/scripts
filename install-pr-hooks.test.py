@@ -34,6 +34,7 @@ cases = [
     ("legacy", {**base,"exemptBranches":["legacy"]}, 0, "configured exemption honoured"),
     ("cr-1-ok-slug", {**base,"allowChoreEscape":"true"}, 1, "string bool fails closed"),
     ("cr-1-ok-slug", {**base,"exemptBranches":"legacy"}, 1, "string list fails closed"),
+    ("cr-1-ok-slug", {**base,"exemptBranches":["legacy\nmaster"]}, 1, "embedded newline in exemption fails closed"),
 ]
 bad = 0
 for branch, cfg, want, label in cases:
@@ -71,7 +72,36 @@ def test_symlinked_hook_dir_is_refused():
     return ok
 
 
+def test_dangling_pre_push_symlink_is_refused():
+    """A dangling pre-push symlink must not be silently replaced.
+
+    -e follows symlinks, so one whose target is missing reads as absent and
+    --apply would treat "no hook installed" as license to overwrite it,
+    destroying a symlink someone else's tooling put there.
+    """
+    import shutil, subprocess as sp
+    d = tempfile.mkdtemp()
+    repo = f"{d}/repo"
+    os.makedirs(f"{repo}/.github")
+    env = {**os.environ, "GIT_CONFIG_GLOBAL": "/dev/null"}
+    sp.run(["git", "-C", repo, "init", "-q"], check=True, env=env)
+    sp.run(["git", "-C", repo, "remote", "add", "origin",
+            "https://github.com/pooriaarab/testrepo.git"], check=True, env=env)
+    pathlib.Path(f"{repo}/.github/pr-standards.json").write_text('{"prefix":"tt"}')
+    os.symlink(f"{d}/nonexistent-target", f"{repo}/.git/hooks/pre-push")
+    out = sp.run([str(HERE / "install-pr-hooks"), "--apply", "--root", d],
+                 capture_output=True, text=True, env=env).stdout
+    still_symlink = os.path.islink(f"{repo}/.git/hooks/pre-push")
+    shutil.rmtree(d, ignore_errors=True)
+    ok = "SKIP" in out and still_symlink
+    print(f"  {'OK ' if ok else 'FAIL'} dangling pre-push symlink refused")
+    return ok
+
+
 if not test_symlinked_hook_dir_is_refused():
+    sys.exit(1)
+
+if not test_dangling_pre_push_symlink_is_refused():
     sys.exit(1)
 
 sys.exit(0 if ALL_OK else 1)
