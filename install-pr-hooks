@@ -27,7 +27,7 @@ while [ $# -gt 0 ]; do
     --apply)     APPLY=1; shift ;;
     --uninstall) UNINSTALL=1; shift ;;
     --root)      ROOTS=("$2"); shift 2 ;;
-    -h|--help)   sed -n '2,16p' "$0"; exit 0 ;;
+    -h|--help)   sed -n '2,17p' "$0"; exit 0 ;;
     *) echo "unknown flag: $1" >&2; exit 1 ;;
   esac
 done
@@ -117,7 +117,14 @@ branch_is_exempt() {
     main|release|refactor|gh-pages|HEAD|release/*|dependabot/*|renovate/*) return 0 ;;
   esac
   if [ "$CHORE_OK" = 1 ]; then
-    case "$1" in chore/*) return 0 ;; esac
+    case "$1" in
+      chore/*)
+        local slug="${1#chore/}"
+        if echo "$slug" | grep -qE '^[a-z0-9]+(-[a-z0-9]+)*$'; then
+          [ "${#slug}" -ge 3 ] && [ "${#slug}" -le 48 ] && return 0
+        fi
+        ;;
+    esac
   fi
   [ -n "$CONFIGURED_EXEMPT" ] && printf '%s\n' "$CONFIGURED_EXEMPT" | grep -qxF "$1" && return 0
   return 1
@@ -259,6 +266,8 @@ normalize_path() {
 # Resolve symlinks in whatever prefix of the path already exists on disk,
 # then hand the (possibly nonexistent) remainder to normalize_path so a dry
 # run still works on a hooksPath that has not been created yet.
+# Note: realpath is not on every macOS by default, so we use cd and pwd -P
+# instead for portability.
 resolve_real_path() {
   local existing="$1" suffix=""
   while [ ! -d "$existing" ]; do
