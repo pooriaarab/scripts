@@ -302,8 +302,12 @@ for root in "${ROOTS[@]}"; do
   # it could not read (permission denied, a broken symlink) is surfaced as a
   # failure instead of just being silently under-scanned while still reporting
   # "failed=0", as if the root had been fully covered.
-  find_out=$(mktemp)
-  find_err=$(mktemp)
+  # mktemp can fail (TMPDIR full, unwritable, or missing). Unchecked, the empty
+  # path it leaves behind makes the redirects below no-ops: find never runs,
+  # find_err never fills, and this root reports as cleanly scanned with zero
+  # repos instead of failing.
+  find_out=$(mktemp) || { echo "FAIL    $root (mktemp failed)"; failed=$((failed+1)); continue; }
+  find_err=$(mktemp) || { echo "FAIL    $root (mktemp failed)"; rm -f "$find_out"; failed=$((failed+1)); continue; }
   find "$root" -maxdepth 4 -type d -name .git >"$find_out" 2>"$find_err"
   if [ -s "$find_err" ]; then
     echo "FAIL    $root (find could not fully scan this root: $(head -1 "$find_err"))"
