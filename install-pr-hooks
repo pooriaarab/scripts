@@ -338,27 +338,29 @@ for root in "${ROOTS[@]}"; do
         *)  hook_dir="$repo/$hooks_path" ;;
       esac
 
-      # A repo-local hooksPath is only actually local if the directory it names
-      # is inside the repo. An absolute path, or a relative one that climbs out
-      # with "..", can still name a directory shared with other checkouts --
-      # exactly what the check above exists to rule out. Compare the two paths
-      # resolved rather than as strings, so "$repo/../shared" and a symlink
-      # into a shared directory are both caught.
-      resolved_repo=$(resolve_real_path "$repo") || {
-        echo "FAIL    $repo (cannot resolve repo path)"; failed=$((failed+1)); continue
-      }
-      resolved_hook_dir=$(resolve_real_path "$hook_dir") || {
-        echo "FAIL    $repo (cannot resolve hooksPath: $hooks_path)"; failed=$((failed+1)); continue
-      }
-      case "$resolved_hook_dir" in
-        "$resolved_repo"|"$resolved_repo"/*) ;;
-        *)
-          echo "SKIP    $repo  (core.hooksPath resolves outside the repo: $hooks_path -> $resolved_hook_dir)"
-          echo "        That directory could be shared with other checkouts. Point core.hooksPath inside this repo."
-          skipped=$((skipped+1)); continue
-          ;;
-      esac
     fi
+
+    # Containment is checked for every path to the hook directory, not only for
+    # a configured hooksPath. With hooksPath unset, hook_dir is $gitdir/hooks,
+    # and .git/hooks can itself be a symlink -- stow and chezmoi both do this --
+    # so following it would write the hook into a directory shared with other
+    # checkouts, including work ones. Compare the paths resolved rather than as
+    # strings, so "$repo/../shared" and a symlink into a shared directory are
+    # both caught.
+    resolved_repo=$(resolve_real_path "$repo") || {
+      echo "FAIL    $repo (cannot resolve repo path)"; failed=$((failed+1)); continue
+    }
+    resolved_hook_dir=$(resolve_real_path "$hook_dir") || {
+      echo "FAIL    $repo (cannot resolve hook directory: $hook_dir)"; failed=$((failed+1)); continue
+    }
+    case "$resolved_hook_dir" in
+      "$resolved_repo"|"$resolved_repo"/*) ;;
+      *)
+        echo "SKIP    $repo  (hook directory resolves outside the repo: $hook_dir -> $resolved_hook_dir)"
+        echo "        That directory could be shared with other checkouts, including work ones."
+        skipped=$((skipped+1)); continue
+        ;;
+    esac
 
     hook="$hook_dir/pre-push"
     version_marker="# install-pr-hooks $VERSION"

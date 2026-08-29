@@ -42,4 +42,36 @@ for branch, cfg, want, label in cases:
     bad += 0 if okk else 1
     print(f"  {'OK ' if okk else 'FAIL'} {label:<32} exit={got} want={'reject' if want else 'accept'}")
 print("ALL PASS" if bad == 0 else f"{bad} MISMATCH")
-sys.exit(1 if bad else 0)
+ALL_OK = bad == 0
+
+
+def test_symlinked_hook_dir_is_refused():
+    """A .git/hooks that is a symlink must not be followed.
+
+    stow and chezmoi both symlink it. Following it writes the hook into a
+    directory shared with other checkouts, including work ones. The containment
+    check used to run only when core.hooksPath was set, so this path was open.
+    """
+    import shutil, subprocess as sp
+    d = tempfile.mkdtemp()
+    repo = f"{d}/repo"
+    os.makedirs(f"{repo}/.github"); os.makedirs(f"{d}/shared-hooks")
+    env = {**os.environ, "GIT_CONFIG_GLOBAL": "/dev/null"}
+    sp.run(["git", "-C", repo, "init", "-q"], check=True, env=env)
+    sp.run(["git", "-C", repo, "remote", "add", "origin",
+            "https://github.com/pooriaarab/testrepo.git"], check=True, env=env)
+    pathlib.Path(f"{repo}/.github/pr-standards.json").write_text('{"prefix":"tt"}')
+    shutil.rmtree(f"{repo}/.git/hooks")
+    os.symlink(f"{d}/shared-hooks", f"{repo}/.git/hooks")
+    out = sp.run([str(HERE / "install-pr-hooks"), "--root", d],
+                 capture_output=True, text=True, env=env).stdout
+    shutil.rmtree(d, ignore_errors=True)
+    ok = "SKIP" in out and "resolves outside the repo" in out
+    print(f"  {'OK ' if ok else 'FAIL'} symlinked .git/hooks refused")
+    return ok
+
+
+if not test_symlinked_hook_dir_is_refused():
+    sys.exit(1)
+
+sys.exit(0 if ALL_OK else 1)
