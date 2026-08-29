@@ -325,9 +325,15 @@ for root in "${ROOTS[@]}"; do
   find_out=$(mktemp) || { echo "FAIL    $root (mktemp failed)"; failed=$((failed+1)); continue; }
   find_err=$(mktemp) || { echo "FAIL    $root (mktemp failed)"; rm -f "$find_out"; failed=$((failed+1)); continue; }
   # No -maxdepth: a fixed depth limit would silently skip a repo nested deeper
-  # than it, with the run still reporting success. -prune stops find from
-  # descending into a .git directory once found, so this stays cheap.
-  find "$root" -type d -name .git -prune -print >"$find_out" 2>"$find_err"
+  # than it, with the run still reporting success. Two prunes keep that
+  # affordable. Stopping at a .git directory avoids walking its objects. Skipping
+  # dependency and build trees avoids the rest: without it this took 30 seconds
+  # over a normal Documents tree, almost all of it inside node_modules, and a
+  # tool nobody wants to wait for is a tool nobody runs. A checkout inside
+  # node_modules is a vendored copy, never one of ours.
+  find "$root" \
+    \( -type d \( -name node_modules -o -name .venv -o -name vendor -o -name Library \) -prune \) -o \
+    \( -type d -name .git -prune -print \) >"$find_out" 2>"$find_err"
   if [ -s "$find_err" ]; then
     echo "FAIL    $root (find could not fully scan this root: $(head -1 "$find_err"))"
     failed=$((failed+1))
