@@ -1,0 +1,520 @@
+#!/usr/bin/env bash
+# Install the pr-standards pre-push hook into local pooriaarab checkouts.
+#
+# The hook rejects a branch whose name does not meet the standard before the
+# push reaches GitHub. It is the second of four enforcement layers, and on a
+# GitHub Free account it carries more weight than it otherwise would: rulesets
+# and required status checks need GitHub Pro, so nothing server-side can be
+# made mandatory on a private repo. See pr-standards.md.
+#
+# A repo is eligible when its origin remote is a pooriaarab repo AND it has
+# .github/pr-standards.json. Work and Mozilla checkouts are never touched.
+#
+# Usage:
+#   ./install-pr-hooks                  # dry-run every checkout under the roots
+#   ./install-pr-hooks --apply
+#   ./install-pr-hooks --apply --root ~/Documents/Personal/content-rabbit
+#   ./install-pr-hooks --uninstall --apply
+set -uo pipefail
+
+ROOTS=("$HOME/Documents/Personal")
+APPLY=0
+UNINSTALL=0
+VERSION="v4"
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --apply)     APPLY=1; shift ;;
+    --uninstall) UNINSTALL=1; shift ;;
+    --root)
+      [ $# -ge 2 ] || { echo "--root requires a value" >&2; exit 1; }
+      ROOTS=("$2"); shift 2 ;;
+    -h|--help)   sed -n '2,17p' "$0"; exit 0 ;;
+    *) echo "unknown flag: $1" >&2; exit 1 ;;
+  esac
+done
+
+# Write the hook through a temporary file in the same directory, then rename.
+# Redirecting straight onto $hook truncates it first, so a failed write left a
+# partial file that still carried the version marker and a later run reported OK
+# while the hook body was gone.
+write_hook() {
+  local target="$1" dir="$2" tmp
+  tmp=$(mktemp "$dir/.pre-push.XXXXXX") || return 1
+  if ! printf '%s\n' "$HOOK_BODY" > "$tmp"; then rm -f "$tmp"; return 1; fi
+  if ! chmod +x "$tmp"; then rm -f "$tmp"; return 1; fi
+  if ! mv -f "$tmp" "$target"; then rm -f "$tmp"; return 1; fi
+  return 0
+}
+
+read -r -d '' HOOK_BODY <<'HOOK' || true
+#!/bin/bash
+# Installed by pooriaarab/scripts install-pr-hooks. Do not edit here; edit there.
+# install-pr-hooks v4
+#
+# Hook that rejects pushes whose branch names do not meet the fleet PR standard:
+#   <prefix>-<issue>-<slug>     e.g. cr-142-fix-onboarding-drop-off
+# The prefix comes from .github/pr-standards.json in this repo.
+#
+# A pre-push hook receives the refs being pushed on stdin, one per line:
+#   <local-ref> <local-sha> <remote-ref> <remote-sha>
+# This hook validates <remote-ref> (what the branch will be called on the server)
+# and skips deletions (all-zero <local-sha>).
+set -uo pipefail
+
+CONFIG=".github/pr-standards.json"
+[ -f "$CONFIG" ] || exit 0
+
+# Fail closed: reject when python3 is missing or the config is malformed.
+# Only a genuinely absent config file exits 0.
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "PR-STANDARDS HOOK: python3 not found, cannot parse $CONFIG" >&2
+  exit 1
+fi
+
+CONFIG_LINES=$(python3 -c "
+import json, re, sys
+try:
+    cfg = json.load(open('$CONFIG'))
+except json.JSONDecodeError as e:
+    print(f'PR-STANDARDS HOOK: $CONFIG is not valid JSON: {e}', file=sys.stderr)
+    sys.exit(1)
+p = cfg.get('prefix', '')
+# The value is spliced into a grep pattern below, so a non-string would be
+# printed as its Python repr and ['cr'] would become a character class: a regex
+# that quietly accepts the wrong branch names instead of failing loudly.
+if not isinstance(p, str) or not re.fullmatch(r'[a-z]{2,4}', p):
+    print(f'PR-STANDARDS HOOK: prefix {p!r} must be 2-4 lowercase letters', file=sys.stderr)
+    sys.exit(1)
+# Validate every field this hook honours, not just the prefix. A malformed
+# 'allowChoreEscape': 'true' is a string, which is truthy, so reading it without
+# a type check would silently open the escape the config meant to keep shut.
+exempt = cfg.get('exemptBranches', [])
+# Each entry is handed to bash as its own line below, so an entry containing a
+# newline would split into two lines and exempt a second, unconfigured branch
+# name (e.g. "legacy\nmaster" would also exempt "master").
+if not isinstance(exempt, list) or not all(isinstance(b, str) and b and '\n' not in b for b in exempt):
+    print('PR-STANDARDS HOOK: exemptBranches must be a list of non-empty, single-line strings', file=sys.stderr)
+    sys.exit(1)
+chore = cfg.get('allowChoreEscape', False)
+if not isinstance(chore, bool):
+    print(f'PR-STANDARDS HOOK: allowChoreEscape must be true or false, got {chore!r}', file=sys.stderr)
+    sys.exit(1)
+print(p)
+print('1' if chore else '0')
+for b in exempt:
+    print(b)
+") || exit 1
+PREFIX=$(printf '%s\n' "$CONFIG_LINES" | sed -n 1p)
+CHORE_OK=$(printf '%s\n' "$CONFIG_LINES" | sed -n 2p)
+CONFIGURED_EXEMPT=$(printf '%s\n' "$CONFIG_LINES" | sed -n '3,$p')
+
+# The canonical validator lives in pr-standards.mjs. These two must agree, so the
+# constraints are spelled out here rather than approximated: issue numbers have no
+# leading zero and are never 0, and a slug is 3 to 48 characters.
+BRANCH_RE="^${PREFIX}-[1-9][0-9]*-[a-z0-9]+(-[a-z0-9]+)*$"
+
+branch_is_exempt() {
+  case "$1" in
+    main|release|refactor|gh-pages|HEAD|release/*|dependabot/*|renovate/*) return 0 ;;
+  esac
+  if [ "$CHORE_OK" = 1 ]; then
+    case "$1" in
+      chore/*)
+        local slug="${1#chore/}"
+        if echo "$slug" | grep -qE '^[a-z0-9]+(-[a-z0-9]+)*$'; then
+          [ "${#slug}" -ge 3 ] && [ "${#slug}" -le 48 ] && return 0
+        fi
+        ;;
+    esac
+  fi
+  [ -n "$CONFIGURED_EXEMPT" ] && printf '%s\n' "$CONFIGURED_EXEMPT" | grep -qxF "$1" && return 0
+  return 1
+}
+
+branch_is_valid() {
+  echo "$1" | grep -qE "$BRANCH_RE" || return 1
+  slug="${1#*-}"; slug="${slug#*-}"
+  [ "${#slug}" -ge 3 ] && [ "${#slug}" -le 48 ]
+}
+
+# Read the first line of stdin to see if we are being called by git.
+IFS='' read -r first_line
+
+if [ -z "$first_line" ]; then
+  # Manual invocation -- stdin is empty, fall back to HEAD.
+  BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
+  branch_is_exempt "$BRANCH" && exit 0
+  branch_is_valid "$BRANCH" && exit 0
+
+  cat >&2 <<MSG
+
+  Push refused: the branch name does not meet the PR standard.
+
+    got:      ${BRANCH}
+    expected: ${PREFIX}-<issue>-<slug>
+    example:  ${PREFIX}-142-fix-onboarding-drop-off
+
+  The number is the GitHub issue this work closes. One issue, one PR, one
+  concern. If no issue exists, open one first.
+
+    gh issue create --title "..."
+    git branch -m ${PREFIX}-<issue>-<slug>
+
+  https://github.com/pooriaarab/scripts/blob/main/pr-standards.md
+
+MSG
+  exit 1
+fi
+
+# Process every pushed ref. Collect all violations, then exit 1 once.
+errors=()
+
+while IFS='' read -r line; do
+  read -r local_ref local_sha remote_ref remote_sha <<<"$line"
+
+  # A deletion has an all-zero local-sha. Let deletions through.
+  case "$local_sha" in
+    *[^0]*) ;;
+    *) continue ;;
+  esac
+
+  # Extract the branch name from the remote ref.
+  case "$remote_ref" in
+    refs/heads/*)
+      BRANCH="${remote_ref#refs/heads/}"
+      ;;
+    *)
+      # Not a branch push (tag, etc.) -- let it through.
+      continue
+      ;;
+  esac
+
+  # Exempt branches. master is deliberately absent: it is not in the documented
+  # exemption list, and a branch by that name must meet the standard like any other.
+  branch_is_exempt "$BRANCH" && continue
+  branch_is_valid "$BRANCH" && continue
+
+  errors+=("$BRANCH")
+done < <({ echo "$first_line"; cat; })
+
+if [ ${#errors[@]} -gt 0 ]; then
+  cat >&2 <<MSG
+
+  Push refused: the following branch names do not meet the PR standard.
+
+MSG
+  for b in "${errors[@]}"; do
+    echo "    $b" >&2
+  done
+  cat >&2 <<MSG
+
+  Expected: ${PREFIX}-<issue>-<slug>
+  Example:  ${PREFIX}-142-fix-onboarding-drop-off
+
+  The number is the GitHub issue this work closes. One issue, one PR, one
+  concern. If no issue exists, open one first.
+
+    gh issue create --title "..."
+    git branch -m ${PREFIX}-<issue>-<slug>
+
+  https://github.com/pooriaarab/scripts/blob/main/pr-standards.md
+
+MSG
+  exit 1
+fi
+exit 0
+HOOK
+
+is_personal_github_url() {
+  # Match only real github.com hosts, not lookalikes. The ssh:// form may carry
+  # an explicit port, which git writes as ssh://git@github.com:22/owner/repo.
+  case "$1" in
+    git@github.com:pooriaarab/*|https://github.com/pooriaarab/*|ssh://git@github.com/pooriaarab/*) return 0 ;;
+    ssh://git@github.com:[0-9]*/pooriaarab/*) return 0 ;;
+  esac
+  return 1
+}
+
+is_eligible() {
+  local dir="$1" fetch_url push_urls push_url
+  # Check the cheap file test before spawning git: most scanned repos have not
+  # adopted pr-standards.json, and this skips a process fork for all of them.
+  [ -f "$dir/.github/pr-standards.json" ] || return 1
+
+  # Every push URL must be personal, not just the fetch one. remote.origin.pushurl
+  # can differ, and this hook runs on push: a repo that fetches from a personal
+  # remote while pushing to a work one would otherwise be treated as eligible.
+  # A remote can also carry more than one push URL (git push then pushes to all
+  # of them, e.g. a personal-plus-mirror setup), and "get-url --push" alone
+  # returns only the first; --all is required to see the rest. The rule this
+  # tool exists to respect is that work repos are never touched, so it fails
+  # closed whenever any of them disagree.
+  fetch_url=$(git -C "$dir" remote get-url origin 2>/dev/null) || return 1
+  is_personal_github_url "$fetch_url" || return 1
+  push_urls=$(git -C "$dir" remote get-url --push --all origin 2>/dev/null) || return 1
+  [ -n "$push_urls" ] || return 1
+  while IFS= read -r push_url; do
+    is_personal_github_url "$push_url" || return 1
+  done <<<"$push_urls"
+  return 0
+}
+
+# Lexically collapse "." and ".." segments without touching the filesystem, so
+# it works on a path that does not exist yet (a dry run must not create one).
+# Negative array indices need bash 4.3, so the last element is dropped by
+# index and the array reindexed, not with the shorter "stack[-1]" form.
+normalize_path() {
+  local path="$1" IFS=/ seg last
+  local -a stack=()
+  for seg in $path; do
+    case "$seg" in
+      ''|.) ;;
+      ..)
+        if [ "${#stack[@]}" -gt 0 ]; then
+          last=$((${#stack[@]} - 1))
+          unset "stack[$last]"
+          stack=("${stack[@]}")
+        fi
+        ;;
+      *) stack+=("$seg") ;;
+    esac
+  done
+  (IFS=/; printf '/%s' "${stack[*]}")
+}
+
+# normalize_path is purely lexical, so a repo-local hooksPath that is itself a
+# symlink (common with dotfile managers like stow/chezmoi) would read as
+# inside the repo while actually resolving to a directory shared with other
+# checkouts -- exactly what the containment check below exists to rule out.
+# Resolve symlinks in whatever prefix of the path already exists on disk,
+# then hand the (possibly nonexistent) remainder to normalize_path so a dry
+# run still works on a hooksPath that has not been created yet.
+# Note: realpath is not on every macOS by default, so we use cd and pwd -P
+# instead for portability.
+resolve_real_path() {
+  local existing="$1" suffix=""
+  while [ ! -d "$existing" ]; do
+    suffix="/${existing##*/}$suffix"
+    existing="${existing%/*}"
+    [ -n "$existing" ] || existing="/"
+  done
+  existing="$(cd "$existing" && pwd -P)" || return 1
+  normalize_path "$existing$suffix"
+}
+
+installed=0 already=0 updated=0 removed=0 skipped=0 failed=0
+
+for root in "${ROOTS[@]}"; do
+  # Without this, a missing or mistyped --root makes find fail silently (stderr
+  # is discarded below) and the run reports "installed=0 ... failed=0" as if it
+  # had successfully scanned zero repos, instead of flagging the mistake.
+  # Counting it rather than exiting keeps the remaining roots working and lets
+  # the tally carry the non-zero exit, like every other failure here.
+  if [ ! -d "$root" ]; then
+    echo "FAIL    $root (root not found)"; failed=$((failed+1)); continue
+  fi
+
+  # Resolve to an absolute path before scanning. find/dirname below inherit
+  # whatever form $root was given in, so a relative --root (e.g. ".") would
+  # otherwise produce relative repo paths; normalize_path collapses "." and
+  # ".." lexically without checking the filesystem, so a relative path like
+  # "./foo" and an absolute one like "/foo/hooks" both normalize to strings
+  # starting with "/foo", making the repo-containment check below compare
+  # unrelated paths as if one were inside the other.
+  #
+  # pwd -P (not plain pwd) also resolves symlinks, because find below runs
+  # without -L: if --root is itself a symlink to a directory (a symlinked
+  # ~/Documents/Personal is exactly the stow/chezmoi setup this script
+  # already defends against elsewhere), find's default -P mode treats that
+  # symlink as a leaf and never descends into it, so every repo under it
+  # would silently go unscanned while the run still reports success.
+  orig_root="$root"
+  if ! root="$(cd "$root" && pwd -P)"; then
+    echo "FAIL    $orig_root (cannot resolve to an absolute path)"; failed=$((failed+1)); continue
+  fi
+
+  # A worktree shares its hooks with the main checkout, so only the common git
+  # directory needs the file. Finding .git directories rather than .git files
+  # gets exactly the main checkouts and skips the worktrees for free.
+  #
+  # find's stderr goes to its own temp file rather than /dev/null so a subtree
+  # it could not read (permission denied, a broken symlink) is surfaced as a
+  # failure instead of just being silently under-scanned while still reporting
+  # "failed=0", as if the root had been fully covered.
+  # mktemp can fail (TMPDIR full, unwritable, or missing). Unchecked, the empty
+  # path it leaves behind makes the redirects below no-ops: find never runs,
+  # find_err never fills, and this root reports as cleanly scanned with zero
+  # repos instead of failing.
+  find_out=$(mktemp) || { echo "FAIL    $root (mktemp failed)"; failed=$((failed+1)); continue; }
+  find_err=$(mktemp) || { echo "FAIL    $root (mktemp failed)"; rm -f "$find_out"; failed=$((failed+1)); continue; }
+  # No -maxdepth: a fixed depth limit would silently skip a repo nested deeper
+  # than it, with the run still reporting success. Two prunes keep that
+  # affordable. Stopping at a .git directory avoids walking its objects. Skipping
+  # dependency and build trees avoids the rest: without it this took 30 seconds
+  # over a normal Documents tree, almost all of it inside node_modules, and a
+  # tool nobody wants to wait for is a tool nobody runs. A checkout inside
+  # node_modules is a vendored copy, never one of ours.
+  find "$root" \
+    \( -type d \( -name node_modules -o -name .venv -o -name vendor -o -name Library \) -prune \) -o \
+    \( -type d -name .git -prune -print \) >"$find_out" 2>"$find_err"
+  if [ -s "$find_err" ]; then
+    echo "FAIL    $root (find could not fully scan this root: $(head -1 "$find_err"))"
+    failed=$((failed+1))
+  fi
+
+  while IFS= read -r gitdir; do
+    repo="$(dirname "$gitdir")"
+    if ! is_eligible "$repo"; then skipped=$((skipped+1)); continue; fi
+
+    # Respect core.hooksPath: if set, git ignores .git/hooks entirely.
+    hook_dir="$gitdir/hooks"
+    # --path makes git expand a leading ~ the same way it does when deciding
+    # where to look. Without it, core.hooksPath=~/.githooks wrote the hook to a
+    # literal "~" directory inside the repo and reported success for a file git
+    # would never run.
+    hooks_path=$(git -C "$repo" config --path --get core.hooksPath 2>/dev/null || true)
+    if [ -n "$hooks_path" ]; then
+      # Only a REPO-LOCAL hooksPath is safe to write to. A global or system one
+      # points at a directory every repository on this machine shares, so
+      # installing there would put this hook in front of pushes from work and
+      # employer repositories that this tool must never touch. Refuse instead,
+      # and say what to change. Found the hard way: a test run installed the
+      # hook into a global ~/.git-hooks.
+      local_hooks_path=$(git -C "$repo" config --local --path --get core.hooksPath 2>/dev/null || true)
+      if [ -z "$local_hooks_path" ]; then
+        echo "SKIP    $repo  (core.hooksPath is set outside this repo, at $hooks_path)"
+        echo "        Installing there would hook every repo on this machine, including work ones."
+        echo "        Set core.hooksPath in this repo only, or unset it globally."
+        skipped=$((skipped+1)); continue
+      fi
+      case "$hooks_path" in
+        /*) hook_dir="$hooks_path" ;;
+        ~/*) hook_dir="$HOME/${hooks_path#~/}" ;;
+        *)  hook_dir="$repo/$hooks_path" ;;
+      esac
+
+    fi
+
+    # Containment is checked for every path to the hook directory, not only for
+    # a configured hooksPath. With hooksPath unset, hook_dir is $gitdir/hooks,
+    # and .git/hooks can itself be a symlink -- stow and chezmoi both do this --
+    # so following it would write the hook into a directory shared with other
+    # checkouts, including work ones. Compare the paths resolved rather than as
+    # strings, so "$repo/../shared" and a symlink into a shared directory are
+    # both caught.
+    resolved_repo=$(resolve_real_path "$repo") || {
+      echo "FAIL    $repo (cannot resolve repo path)"; failed=$((failed+1)); continue
+    }
+    resolved_hook_dir=$(resolve_real_path "$hook_dir") || {
+      echo "FAIL    $repo (cannot resolve hook directory: $hook_dir)"; failed=$((failed+1)); continue
+    }
+    case "$resolved_hook_dir" in
+      "$resolved_repo"|"$resolved_repo"/*) ;;
+      *)
+        echo "SKIP    $repo  (hook directory resolves outside the repo: $hook_dir -> $resolved_hook_dir)"
+        echo "        That directory could be shared with other checkouts, including work ones."
+        skipped=$((skipped+1)); continue
+        ;;
+    esac
+
+    hook="$hook_dir/pre-push"
+    version_marker="# install-pr-hooks $VERSION"
+
+    if [ "$UNINSTALL" = 1 ]; then
+      # A file without the exact sentinel line is never ours. Nor is a
+      # symlink: it may point outside the repo, and following it to read the
+      # sentinel would treat someone else's file as ours.
+      if [ -f "$hook" ] && [ ! -L "$hook" ] && grep -qE "^# install-pr-hooks v[0-9]+$" "$hook" 2>/dev/null; then
+        if [ "$APPLY" = 1 ]; then
+          rm -f "$hook" || { echo "FAIL    $repo (remove failed)"; failed=$((failed+1)); continue; }
+        fi
+        echo "REMOVE  $repo"; removed=$((removed+1))
+      fi
+      continue
+    fi
+
+    # An existing hook from this project. Check the version.
+    # A loose substring match could accidentally clobber someone else's
+    # handwritten hook that happens to mention this script, so we require
+    # the exact sentinel line. A file without it is skipped as a foreign hook.
+    # A symlink is skipped the same way even if its target has the sentinel:
+    # -f follows it, and the chmod below would too, flipping the execute bit
+    # on a file that can live anywhere on disk, outside this repo entirely.
+    if [ -f "$hook" ] && [ ! -L "$hook" ] && grep -qE "^# install-pr-hooks v[0-9]+$" "$hook" 2>/dev/null; then
+      if grep -qxF "$version_marker" "$hook" 2>/dev/null; then
+        # The marker line alone is not enough either: it can survive while the
+        # rest of the file does not (hand-edited, truncated by something other
+        # than a failed write). Compare the full body so that case is repaired
+        # instead of reported OK forever.
+        if ! printf '%s\n' "$HOOK_BODY" | cmp -s - "$hook"; then
+          if [ "$APPLY" = 1 ]; then
+            if ! write_hook "$hook" "$hook_dir"; then
+              echo "FAIL    $repo (write failed)"; failed=$((failed+1)); continue
+            fi
+            echo "UPDATE  $repo  (repaired a corrupted hook)"; updated=$((updated+1)); continue
+          fi
+          echo "UPDATE  $repo  (would repair a corrupted hook)"; updated=$((updated+1)); continue
+        fi
+        # Right content is not enough. If a previous chmod failed, git refuses
+        # to run the file and every later run would keep reporting OK.
+        if [ ! -x "$hook" ]; then
+          if [ "$APPLY" = 1 ]; then
+            if chmod +x "$hook" 2>/dev/null; then
+              echo "UPDATE  $repo  (restored the execute bit)"; updated=$((updated+1)); continue
+            fi
+            echo "FAIL    $repo  (hook is present but not executable)"; failed=$((failed+1)); continue
+          fi
+          # Dry run: predict the fix like every other actionable case below,
+          # rather than reporting FAIL for a state --apply would resolve.
+          echo "UPDATE  $repo  (would restore the execute bit)"; updated=$((updated+1)); continue
+        fi
+        echo "OK      $repo"; already=$((already+1)); continue
+      fi
+
+      # Outdated hook -- update it.
+      if [ "$APPLY" = 1 ]; then
+        if ! write_hook "$hook" "$hook_dir"; then
+          echo "FAIL    $repo (write failed)"; failed=$((failed+1)); continue
+        fi
+        echo "UPDATE  $repo"; updated=$((updated+1))
+      else
+        echo "UPDATE  $repo (would replace outdated hook)"; updated=$((updated+1))
+      fi
+      continue
+    fi
+
+    # Never clobber a hook somebody else wrote. Checked with -e rather than -f:
+    # if "$hook" exists but is a directory (or other non-regular file), mv -f
+    # in write_hook would move the temp file inside it instead of replacing it,
+    # silently reporting INSTALL while leaving no executable hook in place.
+    # -e alone is not enough: it follows symlinks, so a dangling symlink (its
+    # target missing, as dotfile managers can leave one mid-sync) reads as
+    # absent and would be silently replaced. -L catches it without following.
+    if [ -e "$hook" ] || [ -L "$hook" ]; then
+      echo "SKIP    $repo  (a different pre-push hook is installed)"
+      skipped=$((skipped+1)); continue
+    fi
+
+    if [ "$APPLY" = 1 ]; then
+      if ! mkdir -p "$hook_dir"; then
+        echo "FAIL    $repo (mkdir failed: $hook_dir)"; failed=$((failed+1)); continue
+      fi
+      if ! write_hook "$hook" "$hook_dir"; then
+        echo "FAIL    $repo (write failed)"; failed=$((failed+1)); continue
+      fi
+    fi
+    echo "INSTALL $repo"; installed=$((installed+1))
+  done < "$find_out"
+  rm -f "$find_out" "$find_err"
+done
+
+echo
+if [ "$APPLY" = 0 ]; then
+  echo "dry-run. Nothing was written. Re-run with --apply."
+fi
+echo "installed=$installed updated=$updated already=$already removed=$removed skipped=$skipped failed=$failed"
+
+if [ "$failed" -gt 0 ]; then
+  exit 1
+fi
