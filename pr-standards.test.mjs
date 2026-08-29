@@ -5,6 +5,7 @@ import {
   DEFAULT_CONFIG,
   checkSize,
   countClosingReferences,
+  validateCommits,
   derivePrefix,
   matchesGlob,
   summarizeFiles,
@@ -208,6 +209,9 @@ test('issues/{n} returning an object with a pull_request field fails', async () 
     if (url.includes('contents/.github/pr-standards.json')) {
       return { ok: true, json: async () => ({ content: Buffer.from(JSON.stringify({ prefix: 'cr' })).toString('base64'), encoding: 'base64' }) };
     }
+    if (url.includes('pulls/12/commits')) {
+      return { ok: true, json: async () => ([{ sha: 'abc1234', commit: { message: 'Fix the thing' } }]) };
+    }
     if (url.includes('pulls/12/files')) {
       return { ok: true, json: async () => ([]) };
     }
@@ -248,6 +252,9 @@ test('config resolution prefers the target repo over the local checkout', async 
   globalThis.fetch = async (url) => {
     if (url.includes('contents/.github/pr-standards.json')) {
       return { ok: true, json: async () => ({ content: Buffer.from(JSON.stringify({ prefix: 'rmt' })).toString('base64'), encoding: 'base64' }) };
+    }
+    if (url.includes('pulls/12/commits')) {
+      return { ok: true, json: async () => ([{ sha: 'abc1234', commit: { message: 'Fix the thing' } }]) };
     }
     if (url.includes('pulls/12/files')) {
       return { ok: true, json: async () => ([]) };
@@ -291,4 +298,46 @@ test('counts every GitHub closing keyword, not only Closes and Fixes', () => {
   // A comment is not a closing reference, and neither is prose about closing.
   assert.deepEqual(countClosingReferences('<!-- Closes #9 -->'), []);
   assert.deepEqual(countClosingReferences('This closes the gap'), []);
+});
+
+test('rejects an AI attribution trailer and spares a human co-author', () => {
+  const config = { ...DEFAULT_CONFIG, prefix: 'cr' };
+  const commit = (message) => [{ sha: 'abc1234', commit: { message: `Fix a thing\n\n${message}` } }];
+
+  for (const banned of [
+    'Co-Authored-By: Claude <noreply@anthropic.com>',
+    'Co-authored-by: Claude',
+    'Co-authored-by: Codex',
+    'Co-authored-by: Gemini',
+    '🤖 Generated with [Claude Code](https://claude.com/claude-code)',
+  ]) {
+    assert.equal(validateCommits(commit(banned), config).ok, false, `missed ${banned}`);
+  }
+
+  // The owner's own review bot is a real author, not a model taking credit.
+  assert.equal(validateCommits(commit('Co-authored-by: vibecodereview'), config).ok, true);
+
+  // A name that merely contains a banned token must not be rejected: `pi`
+  // inside Pia, `GPT` inside Gupta, `Muse` inside Museveni.
+  for (const human of [
+    'Co-authored-by: Pooria Arab <p@example.com>',
+    'Co-authored-by: Pia Gupta <pia@example.com>',
+    'Co-authored-by: Museveni Okello <m@example.com>',
+  ]) {
+    assert.equal(validateCommits(commit(human), config).ok, true, `false positive on ${human}`);
+  }
+});
+
+test('a truncated commit list fails rather than passing on what it saw', () => {
+  const config = { ...DEFAULT_CONFIG, prefix: 'cr' };
+  assert.equal(validateCommits([], config, true).ok, false);
+  assert.equal(validateCommits([], config, false).ok, true);
+});
+
+test('bannedCommitTrailers is configurable', () => {
+  const config = { ...DEFAULT_CONFIG, prefix: 'cr', bannedCommitTrailers: ['Zephyr'] };
+  const commit = (m) => [{ sha: 'abc1234', commit: { message: `Fix\n\n${m}` } }];
+  assert.equal(validateCommits(commit('Co-authored-by: Zephyr'), config).ok, false);
+  // Claude is not in this repo's list, so it is allowed here.
+  assert.equal(validateCommits(commit('Co-authored-by: Claude'), config).ok, true);
 });

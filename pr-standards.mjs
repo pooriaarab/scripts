@@ -6,6 +6,25 @@ import { fileURLToPath } from 'node:url';
 
 const execFileAsync = promisify(execFile);
 
+// Banned AI attribution names in Co-authored-by trailers. These are matched as
+// whole words in the author name field so "Pia" does not match pi and "Gupta"
+// does not match GPT. vibecodereview is explicitly exempt.
+export const DEFAULT_BANNED_COMMIT_TRAILERS = [
+  'Claude',
+  'Codex',
+  'Gemini',
+  'Kimi',
+  'Muse',
+  'pi',
+  'ChatGPT',
+  'GPT',
+  'Copilot',
+  'Cursor',
+  'Devin',
+  'Anthropic',
+  'OpenAI',
+];
+
 export const DEFAULT_EXCLUDE_GLOBS = [
   '**/*.lock',
   'package-lock.json',
@@ -39,8 +58,10 @@ export const DEFAULT_CONFIG = {
   overrideLabel: 'oversized-approved',
   // Beyond the repo owner, who may clear the size caps. Empty means owner only.
   overrideActors: [],
+  bannedCommitTrailers: DEFAULT_BANNED_COMMIT_TRAILERS,
   exemptBranches: ['main', 'release', 'refactor', 'gh-pages'],
   excludeGlobs: DEFAULT_EXCLUDE_GLOBS,
+  bannedCommitTrailers: DEFAULT_BANNED_COMMIT_TRAILERS,
 };
 
 const ALWAYS_EXEMPT_BRANCHES = ['main', 'release', 'refactor', 'gh-pages'];
@@ -56,6 +77,12 @@ const REJECTED_TITLE_OPENERS = [
 ];
 const CONVENTIONAL_TYPES = 'build|chore|ci|docs|feat|fix|perf|refactor|revert|style|test';
 const EMOJI_RE = /[\p{Extended_Pictographic}\p{Regional_Indicator}\uFE0F\u200D]/u;
+
+// Escape a literal string so it is safe in a new RegExp. Used for matching
+// banned trailer names as whole words.
+function escapeRegex(string) {
+  return String(string).replaceAll(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
 
 export class ConfigurationError extends Error {
   constructor(message) {
@@ -544,8 +571,10 @@ function validateConfig(config) {
   }
   if (typeof config.overrideLabel !== 'string' || !config.overrideLabel) throw new ConfigurationError('overrideLabel must be a non-empty string');
   if (!Array.isArray(config.overrideActors) || !config.overrideActors.every((value) => typeof value === 'string')) throw new ConfigurationError('overrideActors must be an array of strings');
+  if (!Array.isArray(config.bannedCommitTrailers) || !config.bannedCommitTrailers.every((value) => typeof value === 'string')) throw new ConfigurationError('bannedCommitTrailers must be an array of strings');
   if (!Array.isArray(config.exemptBranches) || !config.exemptBranches.every((value) => typeof value === 'string')) throw new ConfigurationError('exemptBranches must be an array of strings');
   if (!Array.isArray(config.excludeGlobs) || !config.excludeGlobs.every((value) => typeof value === 'string')) throw new ConfigurationError('excludeGlobs must be an array of strings');
+  if (!Array.isArray(config.bannedCommitTrailers) || !config.bannedCommitTrailers.every((value) => typeof value === 'string')) throw new ConfigurationError('bannedCommitTrailers must be an array of strings');
   return config;
 }
 
@@ -610,6 +639,64 @@ async function apiRequest(endpoint, repo) {
   });
   if (!response.ok) throw new ApiError(`GitHub API returned ${response.status} for ${endpoint}`, response.status);
   return response.json();
+}
+
+// The commit list caps at 250. A check that cannot see every commit must not
+// report a pass, which is how the file list beside this one already behaves.
+async function fetchPullCommits(repo, number) {
+  const commits = [];
+  for (let page = 1; ; page += 1) {
+    const pageCommits = await apiRequest(`pulls/${number}/commits?per_page=100&page=${page}`, repo);
+    if (!Array.isArray(pageCommits)) throw new ApiError(`GitHub returned an invalid commit list for pull request ${number}`);
+    commits.push(...pageCommits);
+    if (pageCommits.length < 100) return commits;
+  }
+}
+
+// Agents append vanity attribution to commit messages. The commits should read
+// as the author's own work, so a trailer naming a model or an agent fails the
+// PR. This is about the COMMIT trailer only: `Assisted-by:` in the pull request
+// body is required by the standard and is a different thing, disclosure rather
+// than credit.
+export function validateCommits(commits, config, truncated = false) {
+  const failures = [];
+  if (truncated) {
+    failures.push(fail(
+      'commit list truncated',
+      'the API returned fewer commits than the pull request reports',
+      'every commit',
+      'GitHub caps the list at 250. A pull request that long cannot be reviewed. Split it.',
+    ));
+  }
+  const banned = config.bannedCommitTrailers || [];
+  // Word boundaries on both sides. Without them `pi` matches inside "Pia" and
+  // `GPT` inside "Gupta", and a human co-author gets their PR failed for having
+  // the wrong name.
+  const named = banned.length
+    ? new RegExp(`^\\s*co-authored-by:\\s*.*\\b(${banned.map((n) => n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})\\b`, 'i')
+    : null;
+  const marketing = /generated with \[?claude code|🤖 generated with/i;
+
+  for (const entry of commits) {
+    const message = entry?.commit?.message || '';
+    const subject = message.split('\n')[0];
+    const sha = (entry?.sha || '').slice(0, 7);
+    for (const line of message.split('\n')) {
+      // The owner's own review bot records what it changed. That is a real
+      // author, not a model taking credit, so it stays.
+      if (/^\s*co-authored-by:\s*vibecodereview\b/i.test(line)) continue;
+      const hit = (named && named.test(line)) || marketing.test(line);
+      if (!hit) continue;
+      failures.push(fail(
+        `AI attribution in ${sha}`,
+        line.trim(),
+        'no model or agent named in a commit trailer',
+        `Reword the commit: git rebase -i, or amend if it is the only one. Keep Assisted-by in the PR body instead.`,
+      ));
+      break;
+    }
+  }
+  return { ok: failures.length === 0, failures };
 }
 
 async function fetchPullFiles(repo, number) {
@@ -935,6 +1022,12 @@ async function runPr(options) {
     failures.push(...bodyResult.failures);
     if (bodyResult.ok) passes.push('PR body');
   }
+
+  const commits = await fetchPullCommits(options.repo, number);
+  const commitsTruncated = typeof pull.commits === 'number' && commits.length < pull.commits;
+  const commitResult = validateCommits(commits, config, commitsTruncated);
+  failures.push(...commitResult.failures);
+  if (commitResult.ok) passes.push(`${commits.length} commit messages`);
 
   const files = await fetchPullFiles(options.repo, number);
   // GitHub's pull-request files endpoint stops at 3000 entries and gives no
