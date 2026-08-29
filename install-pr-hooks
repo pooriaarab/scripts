@@ -65,8 +65,15 @@ except json.JSONDecodeError as e:
     print(f'PR-STANDARDS HOOK: $CONFIG is not valid JSON: {e}', file=sys.stderr)
     sys.exit(1)
 p = cfg.get('prefix', '')
-if not p:
-    print(f'PR-STANDARDS HOOK: $CONFIG has no \"prefix\" key', file=sys.stderr)
+# The value is spliced into a grep pattern below, so a non-string would be
+# printed as its Python repr and ['cr'] would become a character class: a regex
+# that quietly accepts the wrong branch names instead of failing loudly.
+if not isinstance(p, str) or not p:
+    print(f'PR-STANDARDS HOOK: $CONFIG needs a non-empty string \"prefix\"', file=sys.stderr)
+    sys.exit(1)
+import re as _re
+if not _re.fullmatch(r'[a-z]{2,4}', p):
+    print(f'PR-STANDARDS HOOK: prefix {p!r} must be 2-4 lowercase letters', file=sys.stderr)
     sys.exit(1)
 print(p)
 ") || exit 1
@@ -172,7 +179,7 @@ is_eligible() {
   origin=$(git -C "$dir" remote get-url origin 2>/dev/null) || return 1
   # Match only real github.com hosts, not lookalikes.
   case "$origin" in
-    git@github.com:pooriaarab/*|https://github.com/pooriaarab/*) ;;
+    git@github.com:pooriaarab/*|https://github.com/pooriaarab/*|ssh://git@github.com/pooriaarab/*) ;;
     *) return 1 ;;
   esac
   [ -f "$dir/.github/pr-standards.json" ] || return 1
@@ -191,10 +198,15 @@ for root in "${ROOTS[@]}"; do
 
     # Respect core.hooksPath: if set, git ignores .git/hooks entirely.
     hook_dir="$gitdir/hooks"
-    hooks_path=$(git -C "$repo" config --get core.hooksPath 2>/dev/null || true)
+    # --path makes git expand a leading ~ the same way it does when deciding
+    # where to look. Without it, core.hooksPath=~/.githooks wrote the hook to a
+    # literal "~" directory inside the repo and reported success for a file git
+    # would never run.
+    hooks_path=$(git -C "$repo" config --path --get core.hooksPath 2>/dev/null || true)
     if [ -n "$hooks_path" ]; then
       case "$hooks_path" in
         /*) hook_dir="$hooks_path" ;;
+        ~/*) hook_dir="$HOME/${hooks_path#~/}" ;;
         *)  hook_dir="$repo/$hooks_path" ;;
       esac
     fi
@@ -215,6 +227,14 @@ for root in "${ROOTS[@]}"; do
     # An existing hook from this project. Check the version.
     if [ -f "$hook" ] && grep -q "install-pr-hooks" "$hook" 2>/dev/null; then
       if grep -qF "$version_marker" "$hook" 2>/dev/null; then
+        # Right content is not enough. If a previous chmod failed, git refuses
+        # to run the file and every later run would keep reporting OK.
+        if [ ! -x "$hook" ]; then
+          if [ "$APPLY" = 1 ] && chmod +x "$hook" 2>/dev/null; then
+            echo "UPDATE  $repo  (restored the execute bit)"; updated=$((updated+1)); continue
+          fi
+          echo "FAIL    $repo  (hook is present but not executable)"; failed=$((failed+1)); continue
+        fi
         echo "OK      $repo"; already=$((already+1)); continue
       fi
 
