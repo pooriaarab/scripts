@@ -81,11 +81,11 @@ def derive_prefix(name: str) -> str:
         return overrides[name_lower]
 
     # ── Separated names ──
-    for sep in ("-", "_", "."):
-        if sep in name_lower:
-            parts = [p for p in name_lower.split(sep) if p]
-            if not parts:
-                break
+    # Split on every separator in one pass so a mixed name like "foo-bar_baz"
+    # yields one part per word (f, b, b), not just per the first separator found.
+    if re.search(r"[-_.]", name_lower):
+        parts = [p for p in re.split(r"[-_.]+", name_lower) if p]
+        if parts:
             prefix = "".join(p[0] for p in parts[:4])
             # Must be at least 2 chars
             if len(prefix) < 2 and len(parts) > 1:
