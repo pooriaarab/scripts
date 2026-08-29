@@ -61,7 +61,6 @@ export const DEFAULT_CONFIG = {
   bannedCommitTrailers: DEFAULT_BANNED_COMMIT_TRAILERS,
   exemptBranches: ['main', 'release', 'refactor', 'gh-pages'],
   excludeGlobs: DEFAULT_EXCLUDE_GLOBS,
-  bannedCommitTrailers: DEFAULT_BANNED_COMMIT_TRAILERS,
 };
 
 const ALWAYS_EXEMPT_BRANCHES = ['main', 'release', 'refactor', 'gh-pages'];
@@ -562,7 +561,7 @@ function repoRoot() {
   }
 }
 
-function validateConfig(config) {
+export function validateConfig(config) {
   if (!isValidPrefix(config.prefix)) throw new ConfigurationError('prefix must be 2-4 lowercase letters');
   if (typeof config.requireIssue !== 'boolean') throw new ConfigurationError('requireIssue must be true or false');
   if (typeof config.allowChoreEscape !== 'boolean') throw new ConfigurationError('allowChoreEscape must be true or false');
@@ -571,10 +570,9 @@ function validateConfig(config) {
   }
   if (typeof config.overrideLabel !== 'string' || !config.overrideLabel) throw new ConfigurationError('overrideLabel must be a non-empty string');
   if (!Array.isArray(config.overrideActors) || !config.overrideActors.every((value) => typeof value === 'string')) throw new ConfigurationError('overrideActors must be an array of strings');
-  if (!Array.isArray(config.bannedCommitTrailers) || !config.bannedCommitTrailers.every((value) => typeof value === 'string')) throw new ConfigurationError('bannedCommitTrailers must be an array of strings');
+  if (!Array.isArray(config.bannedCommitTrailers) || !config.bannedCommitTrailers.every((value) => typeof value === 'string' && value.trim())) throw new ConfigurationError('bannedCommitTrailers must be an array of non-empty strings');
   if (!Array.isArray(config.exemptBranches) || !config.exemptBranches.every((value) => typeof value === 'string')) throw new ConfigurationError('exemptBranches must be an array of strings');
   if (!Array.isArray(config.excludeGlobs) || !config.excludeGlobs.every((value) => typeof value === 'string')) throw new ConfigurationError('excludeGlobs must be an array of strings');
-  if (!Array.isArray(config.bannedCommitTrailers) || !config.bannedCommitTrailers.every((value) => typeof value === 'string')) throw new ConfigurationError('bannedCommitTrailers must be an array of strings');
   return config;
 }
 
@@ -658,6 +656,11 @@ async function fetchPullCommits(repo, number) {
 // PR. This is about the COMMIT trailer only: `Assisted-by:` in the pull request
 // body is required by the standard and is a different thing, disclosure rather
 // than credit.
+const COAUTHOR_LINE_RE = /^\s*co-authored-by:\s*(.*)$/i;
+// Anchored to the start of the line: this is the Claude Code footer trailer,
+// not any mention of "Claude Code" inside ordinary commit prose.
+const MARKETING_FOOTER_RE = /^\s*(?:🤖\s*)?generated with \[?claude code\]?/i;
+
 export function validateCommits(commits, config, truncated = false) {
   const failures = [];
   if (truncated) {
@@ -673,20 +676,28 @@ export function validateCommits(commits, config, truncated = false) {
   // `GPT` inside "Gupta", and a human co-author gets their PR failed for having
   // the wrong name.
   const named = banned.length
-    ? new RegExp(`^\\s*co-authored-by:\\s*.*\\b(${banned.map((n) => n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})\\b`, 'i')
+    ? new RegExp(`\\b(${banned.map(escapeRegex).join('|')})\\b`, 'i')
     : null;
-  const marketing = /generated with \[?claude code|🤖 generated with/i;
 
   for (const entry of commits) {
     const message = entry?.commit?.message || '';
-    const subject = message.split('\n')[0];
     const sha = (entry?.sha || '').slice(0, 7);
     for (const line of message.split('\n')) {
-      // The owner's own review bot records what it changed. That is a real
-      // author, not a model taking credit, so it stays.
-      if (/^\s*co-authored-by:\s*vibecodereview\b/i.test(line)) continue;
-      const hit = (named && named.test(line)) || marketing.test(line);
-      if (!hit) continue;
+      const coAuthor = COAUTHOR_LINE_RE.exec(line);
+      if (coAuthor) {
+        // Match only the display-name portion, before an optional <email>.
+        // Otherwise a human co-author with an @anthropic.com or @openai.com
+        // address fails the PR for their email domain, not their name.
+        const name = coAuthor[1].split('<')[0].trim();
+        // The owner's own review bot records what it changed. That is a real
+        // author, not a model taking credit, so it stays exempt -- but only
+        // when the name is exactly that bot, not a banned name smuggled in
+        // alongside it (e.g. "vibecodereview Claude").
+        if (/^vibecodereview$/i.test(name)) continue;
+        if (!named || !named.test(name)) continue;
+      } else if (!MARKETING_FOOTER_RE.test(line)) {
+        continue;
+      }
       failures.push(fail(
         `AI attribution in ${sha}`,
         line.trim(),

@@ -2,10 +2,12 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+  ConfigurationError,
   DEFAULT_CONFIG,
   checkSize,
   countClosingReferences,
   validateCommits,
+  validateConfig,
   derivePrefix,
   matchesGlob,
   summarizeFiles,
@@ -340,4 +342,28 @@ test('bannedCommitTrailers is configurable', () => {
   assert.equal(validateCommits(commit('Co-authored-by: Zephyr'), config).ok, false);
   // Claude is not in this repo's list, so it is allowed here.
   assert.equal(validateCommits(commit('Co-authored-by: Claude'), config).ok, true);
+});
+
+test('a banned name cannot be smuggled in alongside the exempt review bot', () => {
+  const config = { ...DEFAULT_CONFIG, prefix: 'cr' };
+  const commit = (m) => [{ sha: 'abc1234', commit: { message: `Fix\n\n${m}` } }];
+  assert.equal(validateCommits(commit('Co-authored-by: vibecodereview Claude <claude@anthropic.com>'), config).ok, false);
+});
+
+test('a human co-author is not failed for an email domain that contains a banned name', () => {
+  const config = { ...DEFAULT_CONFIG, prefix: 'cr' };
+  const commit = (m) => [{ sha: 'abc1234', commit: { message: `Fix\n\n${m}` } }];
+  assert.equal(validateCommits(commit('Co-authored-by: Jane Doe <jane@openai.com>'), config).ok, true);
+  assert.equal(validateCommits(commit('Co-authored-by: Jane Doe <jane@anthropic.com>'), config).ok, true);
+});
+
+test('the marketing footer check does not fire on ordinary prose mentioning it', () => {
+  const config = { ...DEFAULT_CONFIG, prefix: 'cr' };
+  const commit = (m) => [{ sha: 'abc1234', commit: { message: `Fix\n\n${m}` } }];
+  assert.equal(validateCommits(commit('Remove "Generated with Claude Code" from the output'), config).ok, true);
+});
+
+test('bannedCommitTrailers rejects blank entries instead of matching every co-author line', () => {
+  const config = { ...DEFAULT_CONFIG, prefix: 'cr', bannedCommitTrailers: [''] };
+  assert.throws(() => validateConfig(config), ConfigurationError);
 });
