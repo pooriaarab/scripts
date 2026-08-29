@@ -104,7 +104,9 @@ Two deliberate exceptions:
 - `Assisted-by: <agent>:<model>` in the pull request **body** is required, not
   banned. Disclosure of which fleet member produced a change is the thing that
   lets you tell later which one keeps producing defects. Credit in every commit
-  message is not.
+  message is not: an `Assisted-by` trailer in a commit fails the check no
+  matter which agent it names, because the commit is the wrong place for it
+  regardless.
 
 The banned list is `bannedCommitTrailers` in the config, so a repo can add an
 agent without editing the checker.
