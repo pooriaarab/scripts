@@ -217,7 +217,7 @@ print(json.dumps(cfg, indent=2))
     # was deleted (e.g. auto-deleted after the original PR merged), there is
     # nothing to repair in place, so fall through to a full rollout below,
     # which opens a fresh issue/branch/PR and rewrites all four files.
-    BRANCH=$(gh api "repos/$OWNER/$repo/branches" --jq ".[].name | select(startswith(\"${PREFIX}-\") and endswith(\"-adopt-pr-standard\"))" 2>/dev/null | head -1)
+    BRANCH=$(gh api --paginate "repos/$OWNER/$repo/branches?per_page=100" --jq ".[].name | select(startswith(\"${PREFIX}-\") and endswith(\"-adopt-pr-standard\"))" 2>/dev/null | head -1)
     if [ -n "$BRANCH" ]; then
       # A branch that outlived its PR (merged without auto-delete, or closed)
       # has no way to get its new commits to the default branch. Only repair
@@ -246,13 +246,19 @@ print(json.dumps(cfg, indent=2))
           *)             FC="$WORKFLOW_YML" ;;
         esac
         EXISTING_SHA=$(gh api "repos/$OWNER/$repo/contents/$FP?ref=$BRANCH" --jq '.sha' 2>/dev/null || echo "")
-        PAYLOAD_JSON=$(python3 -c "
-import json, base64, sys
+        # BRANCH comes from a GitHub API listing (line ~220), not from our own
+        # trusted inputs -- anyone with push access to this one repo controls
+        # its literal bytes. It must reach Python as data (env var), never
+        # spliced into the source string, or a branch name like
+        # foo'+__import__("os").system("...")+'bar runs on the next --apply.
+        PAYLOAD_JSON=$(BRANCH="$BRANCH" EXISTING_SHA="$EXISTING_SHA" python3 -c "
+import json, base64, os, sys
 content = sys.stdin.read()
 content_b64 = base64.b64encode(content.encode()).decode()
-payload = {'message': '[pr-standards] add missing $FP', 'branch': '$BRANCH', 'content': content_b64}
-if '$EXISTING_SHA':
-    payload['sha'] = '$EXISTING_SHA'
+payload = {'message': '[pr-standards] add missing $FP', 'branch': os.environ['BRANCH'], 'content': content_b64}
+sha = os.environ.get('EXISTING_SHA', '')
+if sha:
+    payload['sha'] = sha
 print(json.dumps(payload))
 " <<< "$FC")
         gh api "repos/$OWNER/$repo/contents/$FP" --method PUT --silent --input - <<< "$PAYLOAD_JSON" 2>/dev/null || {
