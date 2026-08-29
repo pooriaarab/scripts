@@ -80,7 +80,12 @@ export function derivePrefix(repoName) {
   const prefix = parts.length > 1
     ? parts.map((part) => part[0]).join('')
     : cleanName.slice(0, 3);
-  return prefix.toLowerCase().slice(0, 4);
+  const derived = prefix.toLowerCase().slice(0, 4);
+  // A prefix must be 2 to 4 letters. A repo named `x` cannot supply that, and
+  // failing later with "prefix must be 2-4 lowercase letters" would point at
+  // the config rather than at the real cause, which is the name.
+  if (derived.length === 1) return `${derived}${derived}`;
+  return derived;
 }
 
 function isValidPrefix(prefix) {
@@ -543,7 +548,17 @@ export function loadConfig(root = repoRoot(), repoName = repositoryName(root)) {
   return { config, path: filename, usedDefaultPrefix: !Object.prototype.hasOwnProperty.call(overrides, 'prefix') };
 }
 
+// Cached because apiRequest asks on every call, including once per page of a
+// paginated file list. The answer cannot change inside one run.
+const commandExistsCache = new Map();
 function commandExists(command) {
+  if (commandExistsCache.has(command)) return commandExistsCache.get(command);
+  const result = commandExistsUncached(command);
+  commandExistsCache.set(command, result);
+  return result;
+}
+
+function commandExistsUncached(command) {
   try {
     execFileSync(command, ['--version'], { stdio: 'ignore' });
     return true;
@@ -841,10 +856,20 @@ async function runPr(options) {
   // reports is the only way to notice, and a size check that silently measured
   // part of a diff would be worse than one that admits it cannot.
   if (typeof pull.changed_files === 'number' && files.length < pull.changed_files) {
-    warnings.push(`only ${files.length} of ${pull.changed_files} changed files were returned by the API, so the size below is a floor, not a total`);
+    warnings.push(fail(
+      'diff truncated by the API',
+      `${files.length} of ${pull.changed_files} changed files`,
+      'every changed file',
+      'GitHub returns at most 3000 files per pull request. Treat the size below as a floor and split the PR.',
+    ));
   }
   if (files.some((file) => file.filename === '.github/pr-standards.json')) {
-    warnings.push('this PR edits .github/pr-standards.json; it was judged against the base branch config, not its own');
+    warnings.push(fail(
+      'PR edits the standard itself',
+      '.github/pr-standards.json is in this diff',
+      'rules that already survived review',
+      `Judged against ${baseRef || 'the base branch'}, not this PR's copy. Review the config change on its own merits.`,
+    ));
   }
   const summary = summarizeFiles(files, config);
   const labels = (pull.labels || []).map((label) => typeof label === 'string' ? label : label.name).filter(Boolean);
