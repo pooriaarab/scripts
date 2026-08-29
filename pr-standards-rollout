@@ -173,8 +173,11 @@ print(str(d['isFork']).lower(), str(d['isArchived']).lower(), d['diskUsage'])
   fi
 
   # ── Check if already done ────────────────────────────────────────────
-  # All four managed files must be current before we skip a repo. If the
-  # config matches but other files are missing, we repair under --apply.
+  # A repo is "done" once the config prefix matches and the three companion
+  # files exist -- existence only, not content. A companion whose content has
+  # drifted from the current template (e.g. after a template update) is not
+  # detected here and will not be repaired; only a missing companion triggers
+  # REPAIR below.
   REPAIR_MISSING=""
   CONFIG_RESP=$(gh api "repos/$OWNER/$repo/contents/.github/pr-standards.json" 2>&1) && {
     CONFIG_PREFIX=$(echo "$CONFIG_RESP" | python3 -c "
