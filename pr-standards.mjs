@@ -149,7 +149,7 @@ export function validateBranchName(name, config = DEFAULT_CONFIG) {
 }
 
 function subjectFromTitle(title) {
-  const match = /^\[([A-Za-z]{2,4})-([0-9]+)\]\s+(.+)$/.exec(String(title || ''));
+  const match = /^\[([A-Za-z]{2,4})-([1-9][0-9]*)\]\s+(.+)$/.exec(String(title || ''));
   return match ? { tagPrefix: match[1], tagIssue: Number(match[2]), subject: match[3] } : null;
 }
 
@@ -811,11 +811,24 @@ async function resolveOverrideLabels(repo, number, labels, config, warnings) {
     return labels.filter((name) => name !== config.overrideLabel);
   }
   if (applier && allowed.has(applier.toLowerCase())) return labels;
+  // On an organization-owned repo the first path segment is the org slug, not
+  // anyone's login, so the name comparison above can never match and the
+  // documented escape hatch would be dead for every org repo. Ask GitHub who
+  // actually administers the repo instead. Only reached when a label is present
+  // and the cheap check already failed, so it costs one request in a rare case.
+  if (applier) {
+    try {
+      const permission = await apiRequest(`collaborators/${encodeURIComponent(applier)}/permission`, repo);
+      if (permission?.permission === 'admin') return labels;
+    } catch {
+      // Fall through to the refusal below. An escape hatch fails closed.
+    }
+  }
   warnings.push(fail(
     `${config.overrideLabel} ignored`,
     applier ? `applied by ${applier}` : 'no labelling event found',
-    `applied by ${owner}`,
-    'Only the repo owner can clear the size caps. An agent cannot clear its own PR.',
+    `applied by ${owner} or a repo admin`,
+    `Only ${owner} or a repo admin can clear the size caps. An agent cannot clear its own PR. On an organization repo, list the people who may in overrideActors.`,
   ));
   return labels.filter((name) => name !== config.overrideLabel);
 }
