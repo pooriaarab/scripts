@@ -6,6 +6,25 @@ import { fileURLToPath } from 'node:url';
 
 const execFileAsync = promisify(execFile);
 
+// Banned AI attribution names in Co-authored-by trailers. These are matched as
+// whole words in the author name field so "Pia" does not match pi and "Gupta"
+// does not match GPT. vibecodereview is explicitly exempt.
+export const DEFAULT_BANNED_COMMIT_TRAILERS = [
+  'Claude',
+  'Codex',
+  'Gemini',
+  'Kimi',
+  'Muse',
+  'pi',
+  'ChatGPT',
+  'GPT',
+  'Copilot',
+  'Cursor',
+  'Devin',
+  'Anthropic',
+  'OpenAI',
+];
+
 export const DEFAULT_EXCLUDE_GLOBS = [
   '**/*.lock',
   'package-lock.json',
@@ -39,6 +58,7 @@ export const DEFAULT_CONFIG = {
   overrideLabel: 'oversized-approved',
   // Beyond the repo owner, who may clear the size caps. Empty means owner only.
   overrideActors: [],
+  bannedCommitTrailers: DEFAULT_BANNED_COMMIT_TRAILERS,
   exemptBranches: ['main', 'release', 'refactor', 'gh-pages'],
   excludeGlobs: DEFAULT_EXCLUDE_GLOBS,
 };
@@ -56,6 +76,12 @@ const REJECTED_TITLE_OPENERS = [
 ];
 const CONVENTIONAL_TYPES = 'build|chore|ci|docs|feat|fix|perf|refactor|revert|style|test';
 const EMOJI_RE = /[\p{Extended_Pictographic}\p{Regional_Indicator}\uFE0F\u200D]/u;
+
+// Escape a literal string so it is safe in a new RegExp. Used for matching
+// banned trailer names as whole words.
+function escapeRegex(string) {
+  return String(string).replaceAll(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
 
 export class ConfigurationError extends Error {
   constructor(message) {
@@ -535,7 +561,7 @@ function repoRoot() {
   }
 }
 
-function validateConfig(config) {
+export function validateConfig(config) {
   if (!isValidPrefix(config.prefix)) throw new ConfigurationError('prefix must be 2-4 lowercase letters');
   if (typeof config.requireIssue !== 'boolean') throw new ConfigurationError('requireIssue must be true or false');
   if (typeof config.allowChoreEscape !== 'boolean') throw new ConfigurationError('allowChoreEscape must be true or false');
@@ -544,6 +570,7 @@ function validateConfig(config) {
   }
   if (typeof config.overrideLabel !== 'string' || !config.overrideLabel) throw new ConfigurationError('overrideLabel must be a non-empty string');
   if (!Array.isArray(config.overrideActors) || !config.overrideActors.every((value) => typeof value === 'string')) throw new ConfigurationError('overrideActors must be an array of strings');
+  if (!Array.isArray(config.bannedCommitTrailers) || !config.bannedCommitTrailers.every((value) => typeof value === 'string' && value.length > 0 && value === value.trim())) throw new ConfigurationError('bannedCommitTrailers must be an array of non-empty strings with no leading or trailing whitespace');
   if (!Array.isArray(config.exemptBranches) || !config.exemptBranches.every((value) => typeof value === 'string')) throw new ConfigurationError('exemptBranches must be an array of strings');
   if (!Array.isArray(config.excludeGlobs) || !config.excludeGlobs.every((value) => typeof value === 'string')) throw new ConfigurationError('excludeGlobs must be an array of strings');
   return config;
@@ -610,6 +637,129 @@ async function apiRequest(endpoint, repo) {
   });
   if (!response.ok) throw new ApiError(`GitHub API returned ${response.status} for ${endpoint}`, response.status);
   return response.json();
+}
+
+// The commit list caps at 250. A check that cannot see every commit must not
+// report a pass, which is how the file list beside this one already behaves.
+async function fetchPullCommits(repo, number) {
+  const commits = [];
+  for (let page = 1; ; page += 1) {
+    const pageCommits = await apiRequest(`pulls/${number}/commits?per_page=100&page=${page}`, repo);
+    if (!Array.isArray(pageCommits)) throw new ApiError(`GitHub returned an invalid commit list for pull request ${number}`);
+    commits.push(...pageCommits);
+    if (pageCommits.length < 100) return commits;
+  }
+}
+
+// Agents append vanity attribution to commit messages. The commits should read
+// as the author's own work, so a trailer naming a model or an agent fails the
+// PR. This is about the COMMIT trailer only: `Assisted-by:` in the pull request
+// body is required by the standard and is a different thing, disclosure rather
+// than credit.
+const COAUTHOR_LINE_RE = /^\s*co-authored-by:\s*(.*)$/i;
+// `Assisted-by:` is the disclosure trailer the standard requires in the pull
+// request BODY. A commit that carries the same trailer is not disclosure, it
+// is the credit-in-every-commit-message the standard bans, so any occurrence
+// here fails regardless of which agent it names.
+const ASSISTED_BY_LINE_RE = /^\s*assisted-by:\s*(.*)$/i;
+// Anchored to the start of the line: this is an agent's marketing footer
+// trailer, not any mention of "generated with X" inside ordinary commit
+// prose. The agent name itself is checked against bannedCommitTrailers
+// below, so this only recognizes the shape of the line, not a specific
+// agent -- otherwise a repo that added Gemini or Codex to its config would
+// still pass a "Generated with Gemini" footer because this regex only knew
+// about Claude Code.
+// The emoji class includes VS16 (️) and ZWJ (‍) because real emoji
+// footers are multi-codepoint sequences (a pictograph plus a variation
+// selector, or a ZWJ joining several pictographs). `*`, not `?`, so the whole
+// sequence is consumed instead of just its first codepoint.
+// Captures the remainder of the line so the name check below runs only
+// against the disclosed agent, not the whole line -- otherwise a link target
+// such as `Generated with Zephyr (https://cursor.example/docs)` fails
+// because "cursor" appears in the URL, even though Zephyr is not banned.
+const FOOTER_LINE_RE = new RegExp(`^\\s*(?:${EMOJI_RE.source})*\\s*generated (?:with|by)\\b(.*)$`, 'iu');
+
+export function validateCommits(commits, config, truncated = false) {
+  const failures = [];
+  if (truncated) {
+    failures.push(fail(
+      'commit list truncated',
+      'the API returned fewer commits than the pull request reports',
+      'every commit',
+      'GitHub caps the list at 250. A pull request that long cannot be reviewed. Split it.',
+    ));
+  }
+  const banned = config.bannedCommitTrailers || [];
+  // Word boundaries on both sides. Without them `pi` matches inside "Pia" and
+  // `GPT` inside "Gupta", and a human co-author gets their PR failed for having
+  // the wrong name.
+  // `\b` needs a word/non-word transition, so it never matches beside a name
+  // that starts or ends with punctuation: a configured `@cursor` could not fire
+  // against the space before it, and the trailer passed silently. Choose the
+  // boundary per name. Word char at the edge takes `\b`; anything else takes a
+  // "not adjacent to a word char" lookaround, which still blocks it embedding
+  // in a longer word (mycursor) but -- unlike requiring literal whitespace --
+  // also fires beside ordinary punctuation such as the `[` in a markdown
+  // footer link: `[@cursor](url)`. The default list is all alphanumeric, so
+  // this only shows up once someone uses the documented config, which is
+  // exactly when a quiet failure is hardest to notice.
+  const bound = (name) => {
+    const quoted = escapeRegex(name);
+    const left = /^\w/.test(name) ? '\\b' : '(?<!\\w)';
+    const right = /\w$/.test(name) ? '\\b' : '(?!\\w)';
+    return `${left}${quoted}${right}`;
+  };
+  const named = banned.length
+    ? new RegExp(`(?:${banned.map(bound).join('|')})`, 'i')
+    : null;
+
+  for (const entry of commits) {
+    const message = entry?.commit?.message || '';
+    const sha = (entry?.sha || '').slice(0, 7);
+    for (const line of message.split('\n')) {
+      const coAuthor = COAUTHOR_LINE_RE.exec(line);
+      const assistedBy = ASSISTED_BY_LINE_RE.exec(line);
+      const footer = FOOTER_LINE_RE.exec(line);
+      if (coAuthor) {
+        // Strip complete <...> segments rather than truncating at the first `<`.
+        // Matching only the part before it means everything AFTER the email is
+        // discarded too, so `vibecodereview <bot@example.com> Claude` reads as
+        // the exempt bot and the Claude behind it is never seen. Removing the
+        // segments keeps the reason for doing this at all, which is that a human
+        // at an @anthropic.com address must not fail for their email domain.
+        const name = coAuthor[1].replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+        // The owner's own review bot records what it changed. That is a real
+        // author, not a model taking credit, so it stays exempt -- but only
+        // when the name is exactly that bot, not a banned name smuggled in
+        // alongside it (e.g. "vibecodereview Claude").
+        if (/^vibecodereview$/i.test(name)) continue;
+        if (!named || !named.test(name)) continue;
+      } else if (assistedBy) {
+        // No banned-name check: this trailer only exists to disclose an
+        // agent, so its mere presence in a commit is the violation.
+      } else if (footer) {
+        // Strip URL segments before testing so a link target doesn't decide
+        // the outcome: a markdown link's visible text is what was disclosed,
+        // the parenthetical or bare URL beside it is not.
+        const name = footer[1]
+          .replace(/\(https?:\/\/[^)]*\)/gi, ' ')
+          .replace(/https?:\/\/\S+/gi, ' ')
+          .replace(/[[\]]/g, ' ')
+          .trim();
+        if (!named || !named.test(name)) continue;
+      } else {
+        continue;
+      }
+      failures.push(fail(
+        `AI attribution in ${sha}`,
+        line.trim(),
+        'no model or agent named in a commit trailer',
+        `Reword the commit: git rebase -i, or amend if it is the only one. Keep Assisted-by in the PR body instead.`,
+      ));
+      break;
+    }
+  }
+  return { ok: failures.length === 0, failures };
 }
 
 async function fetchPullFiles(repo, number) {
@@ -936,7 +1086,15 @@ async function runPr(options) {
     if (bodyResult.ok) passes.push('PR body');
   }
 
-  const files = await fetchPullFiles(options.repo, number);
+  const [commits, files] = await Promise.all([
+    fetchPullCommits(options.repo, number),
+    fetchPullFiles(options.repo, number),
+  ]);
+  const commitsTruncated = typeof pull.commits === 'number' && commits.length < pull.commits;
+  const commitResult = validateCommits(commits, config, commitsTruncated);
+  failures.push(...commitResult.failures);
+  if (commitResult.ok) passes.push(`${commits.length} commit messages`);
+
   // GitHub's pull-request files endpoint stops at 3000 entries and gives no
   // signal that it did. Comparing against the count the pull request itself
   // reports is the only way to notice, and a size check that silently measured

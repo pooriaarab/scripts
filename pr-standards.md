@@ -89,6 +89,31 @@ Four things, all required:
   Convention puts it last. The check accepts it anywhere in the body rather than
   pretending to enforce a position it does not.
 
+### Commits
+
+No commit carries an AI attribution trailer. Not `Co-Authored-By: Claude`, not
+`Co-authored-by: Codex`, not `Generated with [Claude Code]`, and the same for
+Gemini, Kimi, Muse, pi, Copilot, Cursor and the rest. The commits should read as
+the author's own work, because that is what they are: a person decided what to
+build, reviewed it, and is answerable for it.
+
+Two deliberate exceptions:
+
+- `Co-authored-by: vibecodereview` stays. That is the review bot recording a fix
+  it actually made, which is a real author rather than a model taking credit.
+- `Assisted-by: <agent>:<model>` in the pull request **body** is required, not
+  banned. Disclosure of which fleet member produced a change is the thing that
+  lets you tell later which one keeps producing defects. Credit in every commit
+  message is not: an `Assisted-by` trailer in a commit fails the check no
+  matter which agent it names, because the commit is the wrong place for it
+  regardless.
+
+The banned list is `bannedCommitTrailers` in the config, so a repo can add an
+agent without editing the checker.
+
+This applies to new pull requests. Existing history is left alone: rewriting it
+would change every commit id in eight active repos to remove a cosmetic line.
+
 ### Size and atomicity
 
 | Cap | Limit | On breach |
