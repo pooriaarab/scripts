@@ -298,10 +298,15 @@ print(json.dumps(payload))
   # A run that dies after this point leaves an open issue and a branch. The
   # already-done check only reads the default branch, so it cannot see them, and
   # a retry used to mint a second issue and a second branch for the same repo.
+  # Title alone is not a safe match: any unrelated open issue that happens to
+  # be titled exactly "Adopt the fleet PR standard" would be reused here and
+  # later closed by the rollout PR. Stamp our own issues with a marker and
+  # require it, so only issues this script created are ever reused.
   ISSUE_TITLE="Adopt the fleet PR standard"
+  ISSUE_MARKER="<!-- pr-standards-rollout -->"
   ISSUE_NUM=$(gh issue list --repo "$OWNER/$repo" --state open --limit 50 \
-    --search "$ISSUE_TITLE in:title" --json number,title \
-    --jq "[.[] | select(.title == \"$ISSUE_TITLE\") | .number] | first // empty" 2>/dev/null)
+    --search "$ISSUE_TITLE in:title" --json number,title,body \
+    --jq "[.[] | select(.title == \"$ISSUE_TITLE\" and ((.body // \"\") | contains(\"$ISSUE_MARKER\"))) | .number] | first // empty" 2>/dev/null)
   if [ $? -ne 0 ]; then
     # A transient failure here (auth, rate-limit) must not look like "no
     # issue exists" — that would mint a duplicate issue every retry.
@@ -323,6 +328,8 @@ print(json.dumps(payload))
 
 Branch names: \`$PREFIX-<issue>-<slug>\`
 PR titles: \`[$PREFIX_UPPER-<ISSUE>] description\`
+
+$ISSUE_MARKER
 " 2>/dev/null | grep -oE '[0-9]+$' | head -1)
   fi
   if [ -z "$ISSUE_NUM" ]; then
