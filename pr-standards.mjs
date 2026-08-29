@@ -37,6 +37,8 @@ export const DEFAULT_CONFIG = {
   maxTopLevelDirs: 3,
   minBodyChars: 120,
   overrideLabel: 'oversized-approved',
+  // Beyond the repo owner, who may clear the size caps. Empty means owner only.
+  overrideActors: [],
   exemptBranches: ['main', 'release', 'refactor', 'gh-pages'],
   excludeGlobs: DEFAULT_EXCLUDE_GLOBS,
 };
@@ -304,7 +306,10 @@ function sentenceCount(text) {
 
 function hasCommandAndResult(text) {
   const lines = String(text).split('\n').map((line) => line.trim()).filter(Boolean);
-  const command = lines.some((line) => /^(?:[$>`]|\*\s*)?(?:bun|npm|pnpm|yarn|node|deno|cargo|go|pytest|make|git|gh|npx|\.\/)[^\n]*/i.test(line));
+  // The word boundary goes AFTER the command name, not before it. Without it
+  // `bun` matched inside `Bundle`, so "Bundle was verified" satisfied both the
+  // command and the result check while naming no command at all.
+  const command = lines.some((line) => /^(?:[$>`]\s*|\*\s*)?(?:bun|npm|pnpm|yarn|node|deno|cargo|go|pytest|make|git|gh|npx|\.\/)\b[^\n]*/i.test(line));
   const result = /(?:->|\b(?:pass(?:ed)?|success(?:ful)?|clean|green|ok|verified|complete|no issues|exit(?:ed)?\s+0)\b|\d+\s+(?:tests?|checks?)\s+(?:pass|passed|successful))/i.test(text);
   return command && result;
 }
@@ -463,7 +468,9 @@ export function summarizeFiles(files, config = DEFAULT_CONFIG) {
     }
     countedLines += lines;
     countedFiles += 1;
-    topLevelDirs.add(filename.includes('/') ? filename.split('/')[0] : '.');
+    // Only real directories count. Treating a root file as a directory named
+    // '.' made README.md plus three directories look like four.
+    if (filename.includes('/')) topLevelDirs.add(filename.split('/')[0]);
   }
   return {
     rawLines,
@@ -479,6 +486,9 @@ export function summarizeFiles(files, config = DEFAULT_CONFIG) {
 export function checkSize(summary, config = DEFAULT_CONFIG, labels = []) {
   const failures = [];
   const warnings = [];
+  // `labels` is what the CALLER decided counts. runPr passes the label through
+  // only when the repo owner applied it, because an override anyone can add is
+  // not an override. See resolveOverrideLabels.
   const overridden = labels.includes(config.overrideLabel);
   if (!overridden && summary.countedLines > config.maxLines) {
     failures.push(fail(
@@ -523,6 +533,7 @@ function validateConfig(config) {
     if (!Number.isInteger(config[field]) || config[field] < 0) throw new ConfigurationError(`${field} must be a non-negative integer`);
   }
   if (typeof config.overrideLabel !== 'string' || !config.overrideLabel) throw new ConfigurationError('overrideLabel must be a non-empty string');
+  if (!Array.isArray(config.overrideActors) || !config.overrideActors.every((value) => typeof value === 'string')) throw new ConfigurationError('overrideActors must be an array of strings');
   if (!Array.isArray(config.exemptBranches) || !config.exemptBranches.every((value) => typeof value === 'string')) throw new ConfigurationError('exemptBranches must be an array of strings');
   if (!Array.isArray(config.excludeGlobs) || !config.excludeGlobs.every((value) => typeof value === 'string')) throw new ConfigurationError('excludeGlobs must be an array of strings');
   return config;
@@ -763,6 +774,43 @@ async function runPrecheck(options) {
   return finish({ mode: 'precheck', prefix: config.prefix, provenance, failures, warnings: [], passes }, options.json);
 }
 
+// The size override is the one deliberate escape hatch, and the standard says
+// the repo owner applies it. Nothing enforced that: any collaborator or token
+// with label-write could add the label and clear the cap, which is exactly the
+// actor the rule exists to stop. So find who applied it and honour it only from
+// the owner. If the events cannot be read, drop the override rather than trust
+// it: failing closed on an escape hatch is the safe direction.
+async function resolveOverrideLabels(repo, number, labels, config, warnings) {
+  if (!labels.includes(config.overrideLabel)) return labels;
+  const owner = repo.split('/')[0];
+  const allowed = new Set([owner, ...(config.overrideActors || [])].map((name) => name.toLowerCase()));
+  let applier = null;
+  try {
+    const events = await apiRequest(`issues/${number}/events`, repo);
+    for (const event of events) {
+      if (event.event === 'labeled' && event.label?.name === config.overrideLabel) {
+        applier = event.actor?.login || null;
+      }
+    }
+  } catch {
+    warnings.push(fail(
+      `${config.overrideLabel} ignored`,
+      'the label events could not be read',
+      'a readable audit trail for the override',
+      'The size caps were applied. Re-run when the API is reachable.',
+    ));
+    return labels.filter((name) => name !== config.overrideLabel);
+  }
+  if (applier && allowed.has(applier.toLowerCase())) return labels;
+  warnings.push(fail(
+    `${config.overrideLabel} ignored`,
+    applier ? `applied by ${applier}` : 'no labelling event found',
+    `applied by ${owner}`,
+    'Only the repo owner can clear the size caps. An agent cannot clear its own PR.',
+  ));
+  return labels.filter((name) => name !== config.overrideLabel);
+}
+
 async function fetchRemoteConfig(repo, defaultPrefix, ref) {
   try {
     const query = ref ? `?ref=${encodeURIComponent(ref)}` : '';
@@ -872,7 +920,8 @@ async function runPr(options) {
     ));
   }
   const summary = summarizeFiles(files, config);
-  const labels = (pull.labels || []).map((label) => typeof label === 'string' ? label : label.name).filter(Boolean);
+  const rawLabels = (pull.labels || []).map((label) => typeof label === 'string' ? label : label.name).filter(Boolean);
+  const labels = await resolveOverrideLabels(options.repo, number, rawLabels, config, warnings);
   const sizeResult = checkSize(summary, config, labels);
   failures.push(...sizeResult.failures);
   warnings.push(...sizeResult.warnings);
