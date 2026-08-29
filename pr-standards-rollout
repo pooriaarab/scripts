@@ -252,7 +252,13 @@ print(json.dumps(cfg, indent=2))
     # transient failure (auth, rate-limit) here would look identical to "no
     # matching branch" and fall through to opening a brand-new issue/branch/PR
     # for a repo that already has one in flight.
-    BRANCH_LIST=$(gh api --paginate "repos/$OWNER/$repo/branches?per_page=100" --jq ".[].name | select(startswith(\"${PREFIX}-\") and endswith(\"-adopt-pr-standard\"))" 2>/dev/null)
+    # Require the issue-number segment. startswith/endswith alone matches any
+    # branch shaped like <prefix>-anything-adopt-pr-standard, so a hand-made
+    # cr-cleanup-adopt-pr-standard with an open PR would be adopted by the repair
+    # path -- and the open-PR check that follows only proves a PR exists, not that
+    # this tool created it. The rollout would then write its four managed files
+    # into somebody else's pull request.
+    BRANCH_LIST=$(gh api --paginate "repos/$OWNER/$repo/branches?per_page=100" --jq ".[].name | select(test(\"^${PREFIX}-[0-9]+-adopt-pr-standard$\"))" 2>/dev/null)
     if [ $? -ne 0 ]; then
       echo "FAIL  $repo  (REPAIR: branch listing failed)"
       fail_c=$(( fail_c + 1 ))

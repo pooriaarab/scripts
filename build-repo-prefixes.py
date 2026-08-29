@@ -11,6 +11,7 @@ so the read of the existing registry below would already see an empty file.
 import json
 from pathlib import Path
 import re
+import string
 import subprocess
 import sys
 
@@ -134,6 +135,56 @@ def _derive_prefix_raw(name: str) -> str:
     return prefix[:4]
 
 
+def candidate_prefixes(repo: str):
+    """Prefixes to try for a repo, most meaningful first.
+
+    The old version only sliced the squashed name, so three repos sharing a long
+    stem (vibenotebooks, vibenotepad, vibenoteworthy all squash to vibenote...)
+    produced the same candidate, ran out, and left a duplicate behind. main()
+    then aborted the entire registry build over one unresolvable name.
+
+    This always terminates with a free prefix while any remain, and the order is
+    fixed, so the same repo set always produces the same registry.
+    """
+    seen: set[str] = set()
+
+    def offer(value: str):
+        value = "".join(c for c in value.lower() if c.isalpha())[:4]
+        if 2 <= len(value) <= 4 and value not in seen:
+            seen.add(value)
+            return value
+        return None
+
+    name = repo.lower()
+    squashed = re.sub(r"[^a-z]", "", name)
+    parts = [p for p in re.split(r"[-_.\s]+", name) if p]
+    initials = "".join(p[0] for p in parts)
+
+    # Longest first: a 4-letter prefix carries more of the name than a 2-letter
+    # one, so vibenotebooks should reach for "vibe" before it settles for "vi".
+    ordered = []
+    for length in (4, 3, 2):
+        ordered.append(squashed[:length])
+        ordered.append(initials[:length])
+    # initials plus a growing tail of the last word keeps a compound name readable
+    if len(parts) > 1:
+        for length in range(1, 4):
+            ordered.append(initials[:1] + parts[-1][:length])
+    # deterministic exhaustion, so the resolver never simply gives up
+    stem = (squashed[:3] or initials[:3] or "z")
+    for length in (3, 2, 1):
+        base = stem[:length]
+        for letter in string.ascii_lowercase:
+            ordered.append(base + letter)
+            for second in string.ascii_lowercase:
+                ordered.append(base + letter + second)
+
+    for value in ordered:
+        candidate = offer(value)
+        if candidate:
+            yield candidate
+
+
 def resolve_collisions(prefixes: dict[str, str], fixed: set[str] = frozenset()) -> dict[str, str]:
     """Resolve prefix collisions by extending shorter prefixes.
 
@@ -164,25 +215,19 @@ def resolve_collisions(prefixes: dict[str, str], fixed: set[str] = frozenset()) 
 
         for repo in fresh_sorted:
             current = result[repo]
-            while current in taken:
-                # Try extending by one more character. Strip separators so a
-                # hyphen/underscore/dot never lands inside the prefix (it would
-                # fail the isalpha check below and abort the whole run), and
-                # cap at 4 -- the max length a prefix is allowed to be.
-                name = re.sub(r"[-_.]", "", repo.lower())
-                for pos in range(len(current) + 1, min(len(name), 4) + 1):
-                    candidate = name[:pos]
-                    # Check every prefix in play, not just this collision group.
-                    # A group-local check lets an extended prefix land on one an
-                    # unrelated repo already holds; main() then rejects the whole
-                    # run for a name the generator could have resolved itself.
-                    others = {result[r] for r in result if r != repo}
+            if current in taken or current in {result[r] for r in result if r != repo}:
+                others = {result[r] for r in result if r != repo}
+                for candidate in candidate_prefixes(repo):
                     if candidate not in taken and candidate not in others:
                         current = candidate
                         break
                 else:
-                    # Last resort: couldn't extend further
-                    break
+                    # candidate_prefixes only runs dry when every 2-to-4 letter
+                    # prefix is taken, which needs ~475k repos. Failing loudly
+                    # here beats returning a duplicate that aborts the whole
+                    # registry build with an error naming the wrong cause.
+                    print(f"ERROR: no free prefix for {repo}", file=sys.stderr)
+                    sys.exit(1)
             result[repo] = current
             taken.add(current)
 
