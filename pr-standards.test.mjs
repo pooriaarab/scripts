@@ -2,9 +2,12 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+  ConfigurationError,
   DEFAULT_CONFIG,
   checkSize,
   countClosingReferences,
+  validateCommits,
+  validateConfig,
   derivePrefix,
   matchesGlob,
   summarizeFiles,
@@ -208,6 +211,9 @@ test('issues/{n} returning an object with a pull_request field fails', async () 
     if (url.includes('contents/.github/pr-standards.json')) {
       return { ok: true, json: async () => ({ content: Buffer.from(JSON.stringify({ prefix: 'cr' })).toString('base64'), encoding: 'base64' }) };
     }
+    if (url.includes('pulls/12/commits')) {
+      return { ok: true, json: async () => ([{ sha: 'abc1234', commit: { message: 'Fix the thing' } }]) };
+    }
     if (url.includes('pulls/12/files')) {
       return { ok: true, json: async () => ([]) };
     }
@@ -248,6 +254,9 @@ test('config resolution prefers the target repo over the local checkout', async 
   globalThis.fetch = async (url) => {
     if (url.includes('contents/.github/pr-standards.json')) {
       return { ok: true, json: async () => ({ content: Buffer.from(JSON.stringify({ prefix: 'rmt' })).toString('base64'), encoding: 'base64' }) };
+    }
+    if (url.includes('pulls/12/commits')) {
+      return { ok: true, json: async () => ([{ sha: 'abc1234', commit: { message: 'Fix the thing' } }]) };
     }
     if (url.includes('pulls/12/files')) {
       return { ok: true, json: async () => ([]) };
@@ -291,4 +300,160 @@ test('counts every GitHub closing keyword, not only Closes and Fixes', () => {
   // A comment is not a closing reference, and neither is prose about closing.
   assert.deepEqual(countClosingReferences('<!-- Closes #9 -->'), []);
   assert.deepEqual(countClosingReferences('This closes the gap'), []);
+});
+
+test('rejects an AI attribution trailer and spares a human co-author', () => {
+  const config = { ...DEFAULT_CONFIG, prefix: 'cr' };
+  const commit = (message) => [{ sha: 'abc1234', commit: { message: `Fix a thing\n\n${message}` } }];
+
+  for (const banned of [
+    'Co-Authored-By: Claude <noreply@anthropic.com>',
+    'Co-authored-by: Claude',
+    'Co-authored-by: Codex',
+    'Co-authored-by: Gemini',
+    '🤖 Generated with [Claude Code](https://claude.com/claude-code)',
+  ]) {
+    assert.equal(validateCommits(commit(banned), config).ok, false, `missed ${banned}`);
+  }
+
+  // The owner's own review bot is a real author, not a model taking credit.
+  assert.equal(validateCommits(commit('Co-authored-by: vibecodereview'), config).ok, true);
+
+  // A name that merely contains a banned token must not be rejected: `pi`
+  // inside Pia, `GPT` inside Gupta, `Muse` inside Museveni.
+  for (const human of [
+    'Co-authored-by: Pooria Arab <p@example.com>',
+    'Co-authored-by: Pia Gupta <pia@example.com>',
+    'Co-authored-by: Museveni Okello <m@example.com>',
+  ]) {
+    assert.equal(validateCommits(commit(human), config).ok, true, `false positive on ${human}`);
+  }
+});
+
+test('a truncated commit list fails rather than passing on what it saw', () => {
+  const config = { ...DEFAULT_CONFIG, prefix: 'cr' };
+  assert.equal(validateCommits([], config, true).ok, false);
+  assert.equal(validateCommits([], config, false).ok, true);
+});
+
+test('bannedCommitTrailers is configurable', () => {
+  const config = { ...DEFAULT_CONFIG, prefix: 'cr', bannedCommitTrailers: ['Zephyr'] };
+  const commit = (m) => [{ sha: 'abc1234', commit: { message: `Fix\n\n${m}` } }];
+  assert.equal(validateCommits(commit('Co-authored-by: Zephyr'), config).ok, false);
+  // Claude is not in this repo's list, so it is allowed here.
+  assert.equal(validateCommits(commit('Co-authored-by: Claude'), config).ok, true);
+});
+
+test('a banned name cannot be smuggled in alongside the exempt review bot', () => {
+  const config = { ...DEFAULT_CONFIG, prefix: 'cr' };
+  const commit = (m) => [{ sha: 'abc1234', commit: { message: `Fix\n\n${m}` } }];
+  assert.equal(validateCommits(commit('Co-authored-by: vibecodereview Claude <claude@anthropic.com>'), config).ok, false);
+});
+
+test('a human co-author is not failed for an email domain that contains a banned name', () => {
+  const config = { ...DEFAULT_CONFIG, prefix: 'cr' };
+  const commit = (m) => [{ sha: 'abc1234', commit: { message: `Fix\n\n${m}` } }];
+  assert.equal(validateCommits(commit('Co-authored-by: Jane Doe <jane@openai.com>'), config).ok, true);
+  assert.equal(validateCommits(commit('Co-authored-by: Jane Doe <jane@anthropic.com>'), config).ok, true);
+});
+
+test('the marketing footer check does not fire on ordinary prose mentioning it', () => {
+  const config = { ...DEFAULT_CONFIG, prefix: 'cr' };
+  const commit = (m) => [{ sha: 'abc1234', commit: { message: `Fix\n\n${m}` } }];
+  assert.equal(validateCommits(commit('Remove "Generated with Claude Code" from the output'), config).ok, true);
+});
+
+test('the marketing footer check catches other agents, not only Claude Code', () => {
+  const config = { ...DEFAULT_CONFIG, prefix: 'cr' };
+  const commit = (m) => [{ sha: 'abc1234', commit: { message: `Fix\n\n${m}` } }];
+  for (const footer of [
+    '🤖 Generated with Gemini CLI',
+    'Generated with Codex',
+    'Generated by Copilot',
+  ]) {
+    assert.equal(validateCommits(commit(footer), config).ok, false, `missed ${footer}`);
+  }
+  // A footer-shaped line naming no banned agent is not a violation.
+  assert.equal(validateCommits(commit('Generated with love'), config).ok, true);
+});
+
+test('bannedCommitTrailers rejects blank entries instead of matching every co-author line', () => {
+  const config = { ...DEFAULT_CONFIG, prefix: 'cr', bannedCommitTrailers: [''] };
+  assert.throws(() => validateConfig(config), ConfigurationError);
+});
+
+test('the marketing footer check catches multi-codepoint emoji, not only a bare pictograph', () => {
+  const config = { ...DEFAULT_CONFIG, prefix: 'cr' };
+  const commit = (m) => [{ sha: 'abc1234', commit: { message: `Fix\n\n${m}` } }];
+  for (const footer of [
+    // Robot face plus an explicit variation selector (U+FE0F).
+    '🤖️ Generated with Claude',
+    // "Technologist": woman + ZWJ (U+200D) + computer, three codepoints.
+    '👩‍💻 Generated with Claude',
+  ]) {
+    assert.equal(validateCommits(commit(footer), config).ok, false, `missed ${JSON.stringify(footer)}`);
+  }
+});
+
+test('a banned name with punctuation still matches', () => {
+  // \b needs a word/non-word transition, so it never fires beside a name that
+  // starts with punctuation. Only reachable through the documented config, which
+  // is where a silent pass is hardest to notice.
+  const config = { ...DEFAULT_CONFIG, prefix: 'cr', bannedCommitTrailers: ['@cursor', 'pi'] };
+  const commit = (m) => [{ sha: 'abc1234', commit: { message: `Fix\n\n${m}` } }];
+  assert.equal(validateCommits(commit('Co-authored-by: @cursor <c@example.com>'), config).ok, false);
+  assert.equal(validateCommits(commit('Co-authored-by: pi <p@example.com>'), config).ok, false);
+  assert.equal(validateCommits(commit('Co-authored-by: mycursor <c@example.com>'), config).ok, true);
+  assert.equal(validateCommits(commit('Co-authored-by: Pia Gupta <p@example.com>'), config).ok, true);
+});
+
+test('a punctuation-prefixed banned name still matches inside a markdown footer link', () => {
+  // The boundary for a name starting with punctuation must reject only a
+  // preceding word character, not any preceding non-whitespace: a real footer
+  // wraps the name in a markdown link, e.g. `[@cursor](https://cursor.sh)`,
+  // and the `[` immediately before `@cursor` is not whitespace.
+  const config = { ...DEFAULT_CONFIG, prefix: 'cr', bannedCommitTrailers: ['@cursor'] };
+  const commit = (m) => [{ sha: 'abc1234', commit: { message: `Fix\n\n${m}` } }];
+  assert.equal(validateCommits(commit('Generated with [@cursor](https://cursor.sh)'), config).ok, false);
+});
+
+test('a banned name after the email delimiter is not discarded', () => {
+  // Truncating at the first `<` threw away everything after the email too, so
+  // `vibecodereview <bot@example.com> Claude` read as the exempt bot alone.
+  const config = { ...DEFAULT_CONFIG, prefix: 'cr' };
+  const commit = (m) => [{ sha: 'abc1234', commit: { message: `Fix\n\n${m}` } }];
+  assert.equal(validateCommits(commit('Co-authored-by: vibecodereview <bot@example.com> Claude'), config).ok, false);
+  assert.equal(validateCommits(commit('Co-authored-by: vibecodereview <bot@example.com>'), config).ok, true);
+  // The reason the email is stripped at all: a human must not fail for a domain.
+  assert.equal(validateCommits(commit('Co-authored-by: Jane Doe <jane@anthropic.com>'), config).ok, true);
+});
+
+test('an Assisted-by trailer is the required PR-body disclosure only, not a commit trailer', () => {
+  // The standard names one exception for Assisted-by: the pull request body.
+  // The same trailer in a commit message is the credit-in-every-commit the
+  // rule bans, so it fails regardless of which agent it names.
+  const config = { ...DEFAULT_CONFIG, prefix: 'cr' };
+  const commit = (m) => [{ sha: 'abc1234', commit: { message: `Fix\n\n${m}` } }];
+  assert.equal(validateCommits(commit('Assisted-by: claude-personal:claude-opus-5'), config).ok, false);
+  // Unconditional: it fails even when the named agent is not on the banned list.
+  assert.equal(validateCommits(commit('Assisted-by: some-repo-local:some-model'), config).ok, false);
+});
+
+test('a marketing footer link target does not decide the outcome, only the disclosed name does', () => {
+  // The footer check used to test the banned-name regex against the whole
+  // line, so a URL coincidentally containing a banned word (here "cursor")
+  // failed a PR whose actual, unbanned, agent was Zephyr.
+  const config = { ...DEFAULT_CONFIG, prefix: 'cr' };
+  const commit = (m) => [{ sha: 'abc1234', commit: { message: `Fix\n\n${m}` } }];
+  assert.equal(validateCommits(commit('Generated with Zephyr (https://cursor.example/docs)'), config).ok, true);
+  assert.equal(validateCommits(commit('Generated with Zephyr, see https://cursor.example/docs'), config).ok, true);
+  // A banned agent must still be caught when named alongside an unrelated URL.
+  assert.equal(validateCommits(commit('Generated with Claude (https://claude.com/claude-code)'), config).ok, false);
+});
+
+test('bannedCommitTrailers rejects a padded entry instead of configuring a name that can never match', () => {
+  // `\bClaude\b` never matches " Claude " with its own leading/trailing
+  // spaces folded into the literal, which silently disabled that ban.
+  const config = { ...DEFAULT_CONFIG, prefix: 'cr', bannedCommitTrailers: [' Claude '] };
+  assert.throws(() => validateConfig(config), ConfigurationError);
 });
