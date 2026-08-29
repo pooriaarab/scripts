@@ -61,6 +61,15 @@ export const DEFAULT_CONFIG = {
   bannedCommitTrailers: DEFAULT_BANNED_COMMIT_TRAILERS,
   exemptBranches: ['main', 'release', 'refactor', 'gh-pages'],
   excludeGlobs: DEFAULT_EXCLUDE_GLOBS,
+  requireProof: true,
+  proofOverrideLabel: 'proof-not-applicable',
+  uiGlobs: [
+    '**/*.tsx', '**/*.jsx', '**/*.vue', '**/*.svelte', '**/*.css', '**/*.scss',
+    '**/*.html', '**/components/**', '**/app/**/page.*', '**/pages/**',
+  ],
+  uiExcludeGlobs: [
+    '**/*.test.*', '**/*.spec.*', '**/__tests__/**', '**/*.stories.*',
+  ],
 };
 
 const ALWAYS_EXEMPT_BRANCHES = ['main', 'release', 'refactor', 'gh-pages'];
@@ -350,6 +359,115 @@ function hasCommandAndResult(text) {
   return command && result;
 }
 
+// Proof helpers — an agent can type "tested locally" for free; a screenshot
+// or a real command output costs work, so proof is the part worth checking.
+// A user-attachments URL is the only proof that does not bloat the repo.
+function countUserAttachments(body) {
+  const visible = String(body || '').replace(/<!--[\s\S]*?-->/g, '');
+  const matches = visible.match(/https:\/\/github\.com\/user-attachments\/assets\/[^\s"'\)\]]+/g);
+  return matches ? matches.length : 0;
+}
+
+function hasValidProofNa(body) {
+  const visible = String(body || '').replace(/<!--[\s\S]*?-->/g, '');
+  const lines = visible.split('\n');
+  for (const line of lines) {
+    const match = /^\s*Proof:\s*n\/a\s*[—–-]\s*(.+)\s*$/i.exec(line);
+    if (match && match[1].trim().length >= 20) return true;
+  }
+  return false;
+}
+
+export function isUiFile(filename, config = DEFAULT_CONFIG) {
+  const uiGlobs = config.uiGlobs || [];
+  const uiExcludeGlobs = config.uiExcludeGlobs || [];
+  const matchesUi = uiGlobs.some((pattern) => matchesGlob(filename, pattern));
+  if (!matchesUi) return false;
+  const excluded = uiExcludeGlobs.some((pattern) => matchesGlob(filename, pattern));
+  return !excluded;
+}
+
+export function hasUiDiff(files, config = DEFAULT_CONFIG) {
+  if (!Array.isArray(files) || files.length === 0) return false;
+  return files.some((file) => isUiFile(String(file.filename || file || ''), config));
+}
+
+const PROOF_MEDIA_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'mp4', 'mov', 'webm']);
+const PROOF_MEDIA_GLOBS = [
+  'screenshot*/**',
+  '**/screenshots/**',
+  'proof*/**',
+  '**/*before*',
+  '**/*after*',
+  '**/*demo-recording*',
+];
+
+function isProofMediaPath(filename) {
+  const normalized = String(filename).replaceAll('\\', '/').replace(/^\.\//, '');
+  if (!normalized.includes('/')) return true;
+  return PROOF_MEDIA_GLOBS.some((pattern) => matchesGlob(normalized, pattern));
+}
+
+export function isCommittedProofMedia(file) {
+  const filename = String(file.filename || '');
+  if (!filename) return false;
+  // Only files ADDED by the diff are proof media committed by mistake. A
+  // modified or renamed media file could be a real product asset. When the
+  // caller does not provide a status (unit tests without GitHub payloads),
+  // treat it as added so the glob and extension rules remain testable.
+  if (Object.prototype.hasOwnProperty.call(file, 'status') && file.status !== 'added') return false;
+  const lower = filename.toLowerCase();
+  const dot = lower.lastIndexOf('.');
+  if (dot === -1) return false;
+  const ext = lower.slice(dot + 1);
+  if (!PROOF_MEDIA_EXTENSIONS.has(ext)) return false;
+  return isProofMediaPath(filename);
+}
+
+// Proof is one question — does this pull request show the work it did — so it
+// is one check, even though its evidence comes from three places: the body, the
+// files, and the labels. Splitting it across validateBody and checkSize made
+// each caller responsible for suppressing the other's half.
+export function checkProof(body, files, labels = [], config = DEFAULT_CONFIG) {
+  const failures = [];
+  const warnings = [];
+  if (config.requireProof === false) return { failures, warnings, overridden: false };
+  if (labels.includes(config.proofOverrideLabel)) return { failures, warnings, overridden: true };
+
+  for (const file of files || []) {
+    if (!isCommittedProofMedia(file)) continue;
+    failures.push(fail(
+      'committed proof media',
+      String(file.filename || ''),
+      'proof media uploaded to GitHub user-attachments, not committed',
+      'Remove it from the commit and upload it to https://uploads.github.com/user-attachments/assets instead. A screenshot lives in the repo history forever; a link does not.',
+    ));
+  }
+
+  // A visual change reviewed only as code is reviewed only half. The escape
+  // hatch is a stated reason, which the review council judges — the checker
+  // cannot tell a real one from "n/a".
+  if (hasUiDiff(files || [], config) && !hasValidProofNa(body)) {
+    const count = countUserAttachments(body);
+    if (count === 0) {
+      failures.push(fail(
+        'proof of a visible change',
+        'no user-attachments URL in the body',
+        'before and after media, or `Proof: n/a — <reason>`',
+        'Capture the screen before and after, upload both to GitHub user-attachments, and embed them under "How I verified".',
+      ));
+    } else if (count === 1) {
+      warnings.push(fail(
+        'proof of a visible change',
+        'one user-attachments URL',
+        'before and after',
+        'One image shows the result, not the change. Add the other side.',
+      ));
+    }
+  }
+  return { failures, warnings, overridden: false };
+}
+
 export function validateBody(body, issueNumber, config = DEFAULT_CONFIG) {
   const source = String(body || '');
   const visibleSource = source.replace(/<!--[\s\S]*?-->/g, '');
@@ -550,6 +668,7 @@ export function checkSize(summary, config = DEFAULT_CONFIG, labels = []) {
       'Split unrelated directories into separate pull requests.',
     ));
   }
+
   return { failures, warnings, overridden };
 }
 
@@ -573,6 +692,10 @@ export function validateConfig(config) {
   if (!Array.isArray(config.bannedCommitTrailers) || !config.bannedCommitTrailers.every((value) => typeof value === 'string' && value.length > 0 && value === value.trim())) throw new ConfigurationError('bannedCommitTrailers must be an array of non-empty strings with no leading or trailing whitespace');
   if (!Array.isArray(config.exemptBranches) || !config.exemptBranches.every((value) => typeof value === 'string')) throw new ConfigurationError('exemptBranches must be an array of strings');
   if (!Array.isArray(config.excludeGlobs) || !config.excludeGlobs.every((value) => typeof value === 'string')) throw new ConfigurationError('excludeGlobs must be an array of strings');
+  if (typeof config.requireProof !== 'boolean') throw new ConfigurationError('requireProof must be true or false');
+  if (typeof config.proofOverrideLabel !== 'string' || !config.proofOverrideLabel) throw new ConfigurationError('proofOverrideLabel must be a non-empty string');
+  if (!Array.isArray(config.uiGlobs) || !config.uiGlobs.every((value) => typeof value === 'string')) throw new ConfigurationError('uiGlobs must be an array of strings');
+  if (!Array.isArray(config.uiExcludeGlobs) || !config.uiExcludeGlobs.every((value) => typeof value === 'string')) throw new ConfigurationError('uiExcludeGlobs must be an array of strings');
   return config;
 }
 
@@ -940,8 +1063,8 @@ async function runPrecheck(options) {
 // actor the rule exists to stop. So find who applied it and honour it only from
 // the owner. If the events cannot be read, drop the override rather than trust
 // it: failing closed on an escape hatch is the safe direction.
-async function resolveOverrideLabels(repo, number, labels, config, warnings) {
-  if (!labels.includes(config.overrideLabel)) return labels;
+export async function resolveSingleLabel(repo, number, labels, labelName, config, warnings) {
+  if (!labels.includes(labelName)) return labels;
   const owner = repo.split('/')[0];
   const allowed = new Set([owner, ...(config.overrideActors || [])].map((name) => name.toLowerCase()));
   let applier = null;
@@ -955,7 +1078,7 @@ async function resolveOverrideLabels(repo, number, labels, config, warnings) {
       const events = await apiRequest(`issues/${number}/events?per_page=100&page=${page}`, repo);
       if (!Array.isArray(events)) break;
       for (const event of events) {
-        if (event.event === 'labeled' && event.label?.name === config.overrideLabel) {
+        if (event.event === 'labeled' && event.label?.name === labelName) {
           applier = event.actor?.login || null;
         }
       }
@@ -963,12 +1086,14 @@ async function resolveOverrideLabels(repo, number, labels, config, warnings) {
     }
   } catch {
     warnings.push(fail(
-      `${config.overrideLabel} ignored`,
+      `${labelName} ignored`,
       'the label events could not be read',
       'a readable audit trail for the override',
-      'The size caps were applied. Re-run when the API is reachable.',
+      labelName === config.overrideLabel
+        ? 'The size caps were applied. Re-run when the API is reachable.'
+        : 'The proof checks were applied. Re-run when the API is reachable.',
     ));
-    return labels.filter((name) => name !== config.overrideLabel);
+    return labels.filter((name) => name !== labelName);
   }
   if (applier && allowed.has(applier.toLowerCase())) return labels;
   // On an organization-owned repo the first path segment is the org slug, not
@@ -984,13 +1109,26 @@ async function resolveOverrideLabels(repo, number, labels, config, warnings) {
       // Fall through to the refusal below. An escape hatch fails closed.
     }
   }
+  const expected = `applied by ${owner} or a repo admin`;
+  const fix = labelName === config.overrideLabel
+    ? `Only ${owner} or a repo admin can clear the size caps. An agent cannot clear its own PR. On an organization repo, list the people who may in overrideActors.`
+    : `Only ${owner} or a repo admin can clear the proof requirement. An agent cannot clear its own PR.`;
   warnings.push(fail(
-    `${config.overrideLabel} ignored`,
+    `${labelName} ignored`,
     applier ? `applied by ${applier}` : 'no labelling event found',
-    `applied by ${owner} or a repo admin`,
-    `Only ${owner} or a repo admin can clear the size caps. An agent cannot clear its own PR. On an organization repo, list the people who may in overrideActors.`,
+    expected,
+    fix,
   ));
-  return labels.filter((name) => name !== config.overrideLabel);
+  return labels.filter((name) => name !== labelName);
+}
+
+export async function resolveOverrideLabels(repo, number, labels, config, warnings) {
+  // Both the size and the proof escape hatches share the same ownership
+  // check: the repo owner (or an admin) must have applied the label. An
+  // agent cannot clear its own requirement.
+  let result = await resolveSingleLabel(repo, number, labels, config.overrideLabel, config, warnings);
+  result = await resolveSingleLabel(repo, number, result, config.proofOverrideLabel, config, warnings);
+  return result;
 }
 
 async function fetchRemoteConfig(repo, defaultPrefix, ref) {
@@ -1077,15 +1215,8 @@ async function runPr(options) {
       }
     }
   }
-  if (!branchResult.exempt) {
-    const titleResult = validateTitle(pull.title || '', config.prefix, branchResult.issueNumber);
-    failures.push(...titleResult.failures);
-    if (titleResult.ok) passes.push('PR title');
-    const bodyResult = validateBody(pull.body || '', branchResult.issueNumber, config);
-    failures.push(...bodyResult.failures);
-    if (bodyResult.ok) passes.push('PR body');
-  }
-
+  // Files and labels are needed before the body check so proof can be
+  // verified against the actual diff and the resolved proof override label.
   const [commits, files] = await Promise.all([
     fetchPullCommits(options.repo, number),
     fetchPullFiles(options.repo, number),
@@ -1094,7 +1225,6 @@ async function runPr(options) {
   const commitResult = validateCommits(commits, config, commitsTruncated);
   failures.push(...commitResult.failures);
   if (commitResult.ok) passes.push(`${commits.length} commit messages`);
-
   // GitHub's pull-request files endpoint stops at 3000 entries and gives no
   // signal that it did. Comparing against the count the pull request itself
   // reports is the only way to notice, and a size check that silently measured
@@ -1122,6 +1252,19 @@ async function runPr(options) {
   const summary = summarizeFiles(files, config);
   const rawLabels = (pull.labels || []).map((label) => typeof label === 'string' ? label : label.name).filter(Boolean);
   const labels = await resolveOverrideLabels(options.repo, number, rawLabels, config, warnings);
+  if (!branchResult.exempt) {
+    const titleResult = validateTitle(pull.title || '', config.prefix, branchResult.issueNumber);
+    failures.push(...titleResult.failures);
+    if (titleResult.ok) passes.push('PR title');
+    const bodyResult = validateBody(pull.body || '', branchResult.issueNumber, config);
+    failures.push(...bodyResult.failures);
+    if (bodyResult.ok) passes.push('PR body');
+  }
+  const proofResult = checkProof(pull.body || '', files, labels, config);
+  failures.push(...proofResult.failures);
+  warnings.push(...proofResult.warnings);
+  if (proofResult.overridden) passes.push(`proof waived by ${config.proofOverrideLabel}`);
+  else if (proofResult.failures.length === 0) passes.push('proof of work');
   const sizeResult = checkSize(summary, config, labels);
   failures.push(...sizeResult.failures);
   warnings.push(...sizeResult.warnings);
