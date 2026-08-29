@@ -6,6 +6,7 @@ Run:  python3 _build-prefixes.py > repo-prefixes.json
 
 import json
 from pathlib import Path
+import re
 import subprocess
 import sys
 
@@ -137,11 +138,12 @@ def resolve_collisions(prefixes: dict[str, str], fixed: set[str] = frozenset()) 
         for repo in fresh_sorted:
             current = result[repo]
             while current in taken:
-                # Try extending by one more character
-                name = repo.lower()
-                # For separated names, we already have first letters.
-                # Extend by taking more from the name.
-                for pos in range(len(current) + 1, min(len(name), 5) + 1):
+                # Try extending by one more character. Strip separators so a
+                # hyphen/underscore/dot never lands inside the prefix (it would
+                # fail the isalpha check below and abort the whole run), and
+                # cap at 4 -- the max length a prefix is allowed to be.
+                name = re.sub(r"[-_.]", "", repo.lower())
+                for pos in range(len(current) + 1, min(len(name), 4) + 1):
                     candidate = name[:pos]
                     # Check every prefix in play, not just this collision group.
                     # A group-local check lets an extended prefix land on one an
