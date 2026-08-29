@@ -145,85 +145,109 @@ function subjectFromTitle(title) {
 }
 
 export function validateTitle(title, prefix, issueNumber) {
-  const parsed = subjectFromTitle(title);
+  let subject;
   const failures = [];
-  if (!parsed) {
-    return {
-      ok: false,
-      failures: [fail(
-        'PR title format',
-        String(title || '(empty)'),
-        `[${prefix.toUpperCase()}-${issueNumber}] Imperative subject`,
-        `gh pr edit --title "[${prefix.toUpperCase()}-${issueNumber}] Fix the described issue"`,
-      )],
-    };
+
+  if (issueNumber === null) {
+    subject = String(title || '');
+  } else {
+    const parsed = subjectFromTitle(title);
+    if (!parsed) {
+      return {
+        ok: false,
+        failures: [fail(
+          'PR title format',
+          String(title || '(empty)'),
+          `[${prefix.toUpperCase()}-${issueNumber}] Imperative subject`,
+          `gh pr edit --title "[${prefix.toUpperCase()}-${issueNumber}] Fix the described issue"`,
+        )],
+      };
+    }
+
+    if (parsed.tagPrefix !== prefix.toUpperCase()) {
+      failures.push(fail(
+        'PR title tag',
+        `[${parsed.tagPrefix}-${parsed.tagIssue}]`,
+        `[${prefix.toUpperCase()}-${issueNumber}]`,
+        `gh pr edit --title "[${prefix.toUpperCase()}-${issueNumber}] ${parsed.subject}"`,
+      ));
+    }
+    if (parsed.tagIssue !== issueNumber) {
+      failures.push(fail(
+        'PR title issue',
+        String(parsed.tagIssue),
+        String(issueNumber),
+        `gh pr edit --title "[${prefix.toUpperCase()}-${issueNumber}] ${parsed.subject}"`,
+      ));
+    }
+    subject = parsed.subject;
   }
 
-  if (parsed.tagPrefix !== prefix.toUpperCase()) {
-    failures.push(fail(
-      'PR title tag',
-      `[${parsed.tagPrefix}-${parsed.tagIssue}]`,
-      `[${prefix.toUpperCase()}-${issueNumber}]`,
-      `gh pr edit --title "[${prefix.toUpperCase()}-${issueNumber}] ${parsed.subject}"`,
-    ));
-  }
-  if (parsed.tagIssue !== issueNumber) {
-    failures.push(fail(
-      'PR title issue',
-      String(parsed.tagIssue),
-      String(issueNumber),
-      `gh pr edit --title "[${prefix.toUpperCase()}-${issueNumber}] ${parsed.subject}"`,
-    ));
-  }
-
-  const subject = parsed.subject;
   if (subject.length < 10 || subject.length > 50) {
+    const editCommand = issueNumber === null
+      ? `gh pr edit --title "Describe the change"`
+      : `gh pr edit --title "[${prefix.toUpperCase()}-${issueNumber}] Describe the change"`;
     failures.push(fail(
       'PR title subject length',
       `${subject.length} characters`,
       '10-50 characters',
-      `gh pr edit --title "[${prefix.toUpperCase()}-${issueNumber}] Describe the change"`,
+      editCommand,
     ));
   }
   if (!/^\p{Lu}/u.test(subject)) {
+    const editCommand = issueNumber === null
+      ? `gh pr edit --title "Fix the described issue"`
+      : `gh pr edit --title "[${prefix.toUpperCase()}-${issueNumber}] Fix the described issue"`;
     failures.push(fail(
       'PR title capitalization',
       subject,
       'a subject that starts with a capital letter',
-      `gh pr edit --title "[${prefix.toUpperCase()}-${issueNumber}] Fix the described issue"`,
+      editCommand,
     ));
   }
   if (/\.$/.test(subject)) {
+    const editCommand = issueNumber === null
+      ? `gh pr edit --title "Fix the described issue"`
+      : `gh pr edit --title "[${prefix.toUpperCase()}-${issueNumber}] Fix the described issue"`;
     failures.push(fail(
       'PR title punctuation',
       subject,
       'no trailing period',
-      `gh pr edit --title "[${prefix.toUpperCase()}-${issueNumber}] Fix the described issue"`,
+      editCommand,
     ));
   }
   if (REJECTED_TITLE_OPENERS.some((word) => new RegExp(`^${word}\\b`, 'i').test(subject))
     || /^[A-Za-z][A-Za-z'-]*ing\b/i.test(subject)) {
+    const editCommand = issueNumber === null
+      ? `gh pr edit --title "Fix the described issue"`
+      : `gh pr edit --title "[${prefix.toUpperCase()}-${issueNumber}] Fix the described issue"`;
     failures.push(fail(
       'PR title mood',
       subject,
       'an imperative subject, not a past-tense or -ing opener',
-      `gh pr edit --title "[${prefix.toUpperCase()}-${issueNumber}] Fix the described issue"`,
+      editCommand,
     ));
   }
   if (EMOJI_RE.test(String(title))) {
+    const editCommand = issueNumber === null
+      ? `gh pr edit --title "Fix the described issue"`
+      : `gh pr edit --title "[${prefix.toUpperCase()}-${issueNumber}] Fix the described issue"`;
     failures.push(fail(
       'PR title emoji',
       String(title),
       'no emoji',
-      `gh pr edit --title "[${prefix.toUpperCase()}-${issueNumber}] Fix the described issue"`,
+      editCommand,
     ));
   }
   if (new RegExp(`^(?:${CONVENTIONAL_TYPES})(?:\\([^)]*\\))?!?:\\s+`, 'i').test(subject)) {
+    const editCommand = issueNumber === null
+      ? `gh pr edit --title "Fix the described issue"`
+      : `gh pr edit --title "[${prefix.toUpperCase()}-${issueNumber}] Fix the described issue"`;
     failures.push(fail(
       'PR title prefix',
       subject,
       'no conventional-commit prefix',
-      `gh pr edit --title "[${prefix.toUpperCase()}-${issueNumber}] Fix the described issue"`,
+      editCommand,
     ));
   }
 
@@ -232,7 +256,10 @@ export function validateTitle(title, prefix, issueNumber) {
 
 export function countClosingReferences(body) {
   const references = [];
-  const pattern = /\b(?:Closes|Fixes)\s+#([0-9]+)\b/gi;
+  // GitHub closes an issue on any of nine keywords, not just these two. Counting
+  // only Closes and Fixes waves through `Closes #1` plus `Resolves #2`, which is
+  // two concerns in one pull request wearing one coat.
+  const pattern = /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#([0-9]+)\b/gi;
   const visibleBody = String(body || '').replace(/<!--[\s\S]*?-->/g, '');
   for (const match of visibleBody.matchAll(pattern)) {
     references.push(Number(match[1]));
@@ -277,20 +304,31 @@ export function validateBody(body, issueNumber, config = DEFAULT_CONFIG) {
   }
 
   const references = countClosingReferences(visibleSource);
-  if (references.length !== 1) {
-    failures.push(fail(
-      'closing issue references',
-      `${references.length} references`,
-      `exactly one Closes #${issueNumber} or Fixes #${issueNumber}`,
-      `Keep only: Closes #${issueNumber}`,
-    ));
-  } else if (references[0] !== issueNumber) {
-    failures.push(fail(
-      'closing issue reference',
-      `#${references[0]}`,
-      `#${issueNumber}`,
-      `Replace it with: Closes #${issueNumber}`,
-    ));
+  if (issueNumber === null) {
+    if (references.length !== 0) {
+      failures.push(fail(
+        'closing issue references',
+        `${references.length} references`,
+        'no Closes #N or Fixes #N for a chore PR',
+        'Remove the Closes reference, or use a numbered branch instead of a chore branch.',
+      ));
+    }
+  } else {
+    if (references.length !== 1) {
+      failures.push(fail(
+        'closing issue references',
+        `${references.length} references`,
+        `exactly one Closes #${issueNumber} or Fixes #${issueNumber}`,
+        `Keep only: Closes #${issueNumber}`,
+      ));
+    } else if (references[0] !== issueNumber) {
+      failures.push(fail(
+        'closing issue reference',
+        `#${references[0]}`,
+        `#${issueNumber}`,
+        `Replace it with: Closes #${issueNumber}`,
+      ));
+    }
   }
 
   const what = sectionBody(visibleSource, 'What');
@@ -314,10 +352,10 @@ export function validateBody(body, issueNumber, config = DEFAULT_CONFIG) {
   }
   if (!/^Assisted-by:\s*[^\s:]+:[^\s]+\s*$/im.test(visibleSource)) {
     failures.push(fail(
-      'Assisted-by trailer',
+      'Assisted-by line',
       'missing',
       'Assisted-by: <agent>:<model>',
-      'Add Assisted-by: <agent>:<model> on the final body line.',
+      'Add Assisted-by: <agent>:<model> in the body.',
     ));
   }
 
@@ -568,7 +606,10 @@ function humanFailure(item, prefix = '      ') {
 }
 
 function outputHuman(result) {
-  const lines = [`Using prefix: ${result.prefix}`];
+  const prefixLine = result.provenance
+    ? `Using prefix: ${result.prefix} (${result.provenance})`
+    : `Using prefix: ${result.prefix}`;
+  const lines = [prefixLine];
   for (const pass of result.passes || []) lines.push(`PASS  ${pass}`);
   for (const item of result.failures || []) lines.push(`FAIL  ${item.check}\n${humanFailure(item)}`);
   for (const item of result.warnings || []) lines.push(`WARN  ${item.check}\n${humanFailure(item)}`);
@@ -652,15 +693,46 @@ async function runPrecheck(options) {
   const failures = [...branchResult.failures];
   const passes = branchResult.ok ? [`branch name: ${options.branch}`] : [];
   if (options.title) {
-    if (branchResult.issueNumber !== null) {
-      const titleResult = validateTitle(options.title, config.prefix, branchResult.issueNumber);
-      failures.push(...titleResult.failures);
-      if (titleResult.ok) passes.push('PR title');
-    } else if (!branchResult.choreEscape && !branchResult.exempt) {
-      failures.push(fail('PR title', options.title, 'a valid branch issue number before checking the title', 'Fix the branch name first.'));
+    if (!branchResult.exempt) {
+      if (branchResult.issueNumber !== null || branchResult.choreEscape) {
+        const titleResult = validateTitle(options.title, config.prefix, branchResult.issueNumber);
+        failures.push(...titleResult.failures);
+        if (titleResult.ok) passes.push('PR title');
+      } else {
+        failures.push(fail('PR title', options.title, 'a valid branch issue number before checking the title', 'Fix the branch name first.'));
+      }
     }
   }
   return finish({ mode: 'precheck', prefix: config.prefix, failures, warnings: [], passes }, options.json);
+}
+
+async function fetchRemoteConfig(repo, defaultPrefix) {
+  try {
+    const response = await apiRequest('contents/.github/pr-standards.json', repo);
+    if (response.content && response.encoding === 'base64') {
+      const content = Buffer.from(response.content, 'base64').toString('utf8');
+      const overrides = JSON.parse(content);
+      if (!overrides || Array.isArray(overrides) || typeof overrides !== 'object') {
+        throw new ConfigurationError(`${repo} .github/pr-standards.json must contain a JSON object`);
+      }
+      const config = { ...DEFAULT_CONFIG, ...overrides };
+      if (!Object.prototype.hasOwnProperty.call(overrides, 'prefix')) config.prefix = defaultPrefix;
+      if (!config.prefix) config.prefix = defaultPrefix;
+      validateConfig(config);
+      return { config, provenance: `from ${repo} .github/pr-standards.json` };
+    }
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 404) {
+      // Fallback to default
+    } else if (error instanceof SyntaxError) {
+      throw new ConfigurationError(`${repo} .github/pr-standards.json contains invalid JSON: ${error.message}`);
+    } else {
+      throw error;
+    }
+  }
+  const config = { ...DEFAULT_CONFIG, prefix: defaultPrefix };
+  validateConfig(config);
+  return { config, provenance: `derived; ${repo} has no config` };
 }
 
 async function runPr(options) {
@@ -668,8 +740,21 @@ async function runPr(options) {
   if (!options.repo || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(options.repo)) throw new ConfigurationError('pr requires --repo owner/name');
   if (!options.number || !/^[0-9]+$/.test(options.number) || Number(options.number) < 1) throw new ConfigurationError('pr requires a positive --number');
   const repoName = options.repo.split('/').pop();
-  const root = repoRoot();
-  const { config } = loadConfig(root, repoName);
+  let config;
+  let provenance;
+  
+  // In CI, GITHUB_REPOSITORY is the local checkout which is the target repo, so we can use loadConfig
+  if (process.env.GITHUB_REPOSITORY === options.repo) {
+    const root = repoRoot();
+    const result = loadConfig(root, repoName);
+    config = result.config;
+    provenance = `from ${options.repo} .github/pr-standards.json`; // Approximate for CI local checkout
+  } else {
+    const result = await fetchRemoteConfig(options.repo, derivePrefix(repoName));
+    config = result.config;
+    provenance = result.provenance;
+  }
+  
   const number = Number(options.number);
   const pull = await apiRequest(`pulls/${number}`, options.repo);
   const branch = pull.head?.ref || '';
@@ -682,7 +767,9 @@ async function runPr(options) {
   if (branchResult.issueNumber !== null && config.requireIssue) {
     try {
       const issue = await apiRequest(`issues/${branchResult.issueNumber}`, options.repo);
-      if (issue.state !== 'open') {
+      if (issue.pull_request) {
+        failures.push(fail('branch issue', `#${branchResult.issueNumber} is a pull request`, 'an existing open issue', `Create or select an open issue, then rename the branch.`));
+      } else if (issue.state !== 'open') {
         failures.push(fail('branch issue', `#${branchResult.issueNumber} is ${issue.state}`, 'an existing open issue', `Reopen #${branchResult.issueNumber}, or create a new branch for an open issue.`));
       } else {
         passes.push(`issue #${branchResult.issueNumber} is open`);
@@ -695,7 +782,7 @@ async function runPr(options) {
       }
     }
   }
-  if (branchResult.issueNumber !== null) {
+  if (!branchResult.exempt) {
     const titleResult = validateTitle(pull.title || '', config.prefix, branchResult.issueNumber);
     failures.push(...titleResult.failures);
     if (titleResult.ok) passes.push('PR title');
@@ -717,6 +804,7 @@ async function runPr(options) {
     repo: options.repo,
     number,
     prefix: config.prefix,
+    provenance,
     branch,
     issue: branchResult.issueNumber,
     failures,
