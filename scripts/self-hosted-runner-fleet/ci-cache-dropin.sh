@@ -24,7 +24,11 @@ set -euo pipefail
 CI_CACHE_ROOT="${CI_CACHE_ROOT:-/opt/ci-cache}"
 RUNNER_USER="${RUNNER_USER:-actions}"
 DRY_RUN=false
-[[ "${1:-}" == "--dry-run" ]] && DRY_RUN=true
+case "${1:-}" in
+  "") ;;
+  --dry-run) DRY_RUN=true ;;
+  *) echo "Usage: $0 [--dry-run]" >&2; exit 2 ;;
+esac
 
 run() {
   if $DRY_RUN; then
@@ -39,11 +43,14 @@ if [[ $EUID -ne 0 ]] && ! $DRY_RUN; then
   exit 1
 fi
 
+run mkdir -p "$CI_CACHE_ROOT"
+run chown "$RUNNER_USER:$RUNNER_USER" "$CI_CACHE_ROOT"
+run chmod 2775 "$CI_CACHE_ROOT"
 for dir in bun npm turbo playwright; do
   run mkdir -p "$CI_CACHE_ROOT/$dir"
+  run chown "$RUNNER_USER:$RUNNER_USER" "$CI_CACHE_ROOT/$dir"
+  run chmod 2775 "$CI_CACHE_ROOT/$dir"
 done
-run chown -R "$RUNNER_USER:$RUNNER_USER" "$CI_CACHE_ROOT"
-run chmod -R 2775 "$CI_CACHE_ROOT"
 
 written=0
 for unit in /etc/systemd/system/actions.runner.*.service; do
@@ -61,10 +68,10 @@ for unit in /etc/systemd/system/actions.runner.*.service; do
   else
     cat > "$dropin_dir/20-ci-cache.conf" <<EOF
 [Service]
-Environment=BUN_INSTALL_CACHE_DIR=$CI_CACHE_ROOT/bun
-Environment=npm_config_cache=$CI_CACHE_ROOT/npm
-Environment=TURBO_CACHE_DIR=$CI_CACHE_ROOT/turbo/$repo
-Environment=PLAYWRIGHT_BROWSERS_PATH=$CI_CACHE_ROOT/playwright
+Environment="BUN_INSTALL_CACHE_DIR=$CI_CACHE_ROOT/bun"
+Environment="npm_config_cache=$CI_CACHE_ROOT/npm"
+Environment="TURBO_CACHE_DIR=$CI_CACHE_ROOT/turbo/$repo"
+Environment="PLAYWRIGHT_BROWSERS_PATH=$CI_CACHE_ROOT/playwright"
 EOF
   fi
   written=$((written + 1))
