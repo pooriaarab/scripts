@@ -591,17 +591,28 @@ function currentBranch() {
 // CI environment first, then the remote. The basename is the last resort.
 // Split on both `/` and `:` so an SSH remote (git@github.com:owner/repo.git)
 // resolves the same as an HTTPS one.
-export function repositoryName(root) {
-  if (process.env.GITHUB_REPOSITORY) return process.env.GITHUB_REPOSITORY.split('/').pop();
+export function repositoryNameWithSource(root) {
+  if (process.env.GITHUB_REPOSITORY) {
+    return { name: process.env.GITHUB_REPOSITORY.split('/').pop(), source: 'GITHUB_REPOSITORY' };
+  }
   try {
     const remote = execFileSync('git', ['-C', root, 'remote', 'get-url', 'origin'], {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
     }).trim();
-    return remote.replace(/\.git$/, '').split(/[/:]/).pop() || path.basename(root);
+    const name = remote.replace(/\.git$/, '').split(/[/:]/).pop();
+    if (name) return { name, source: 'origin remote' };
   } catch {
-    return path.basename(root);
+    // No remote, or not a git repo. Fall through to the directory name.
   }
+  // Last resort, and the weakest: a worktree lives in a directory the author
+  // named, so this can disagree with the real repo. Callers surface the source
+  // so a prefix derived this way is visible rather than assumed.
+  return { name: path.basename(root), source: 'directory name' };
+}
+
+export function repositoryName(root) {
+  return repositoryNameWithSource(root).name;
 }
 
 function formatNumber(value) {
@@ -677,7 +688,14 @@ Add --json to any command for machine-readable output.`;
 
 async function runBranch(options) {
   const root = repoRoot();
-  const { config } = loadConfig(root, repositoryName(root));
+  const named = repositoryNameWithSource(root);
+  const { config, path: configPath } = loadConfig(root, named.name);
+  // Say where the prefix came from. A prefix guessed from a directory name is
+  // the one most likely to be wrong, so it must not look identical to one read
+  // from the repo's own config.
+  const provenance = fs.existsSync(configPath)
+    ? 'from .github/pr-standards.json'
+    : `derived from ${named.source}`;
   if (options.branch || options.title || options.repo || options.number) throw new ConfigurationError('branch accepts only one optional branch name');
   const branch = options.positional[0] || currentBranch();
   if (options.positional.length > 1) throw new ConfigurationError('branch accepts one optional name');
@@ -685,6 +703,7 @@ async function runBranch(options) {
   return finish({
     mode: 'branch',
     prefix: config.prefix,
+    provenance,
     failures: branchResult.failures,
     warnings: [],
     passes: branchResult.ok ? [`branch name: ${branch}${branchResult.exempt ? ' (exempt)' : ''}`] : [],
@@ -693,7 +712,14 @@ async function runBranch(options) {
 
 async function runPrecheck(options) {
   const root = repoRoot();
-  const { config } = loadConfig(root, repositoryName(root));
+  const named = repositoryNameWithSource(root);
+  const { config, path: configPath } = loadConfig(root, named.name);
+  // Say where the prefix came from. A prefix guessed from a directory name is
+  // the one most likely to be wrong, so it must not look identical to one read
+  // from the repo's own config.
+  const provenance = fs.existsSync(configPath)
+    ? 'from .github/pr-standards.json'
+    : `derived from ${named.source}`;
   if (!options.branch) throw new ConfigurationError('precheck requires --branch');
   if (options.positional.length > 0 || options.repo || options.number) throw new ConfigurationError('precheck accepts --branch and optional --title only');
   const branchResult = validateBranchName(options.branch, config);
@@ -710,7 +736,7 @@ async function runPrecheck(options) {
       }
     }
   }
-  return finish({ mode: 'precheck', prefix: config.prefix, failures, warnings: [], passes }, options.json);
+  return finish({ mode: 'precheck', prefix: config.prefix, provenance, failures, warnings: [], passes }, options.json);
 }
 
 async function fetchRemoteConfig(repo, defaultPrefix) {
