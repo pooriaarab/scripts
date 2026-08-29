@@ -443,6 +443,19 @@ for root in "${ROOTS[@]}"; do
     # on a file that can live anywhere on disk, outside this repo entirely.
     if [ -f "$hook" ] && [ ! -L "$hook" ] && grep -qE "^# install-pr-hooks v[0-9]+$" "$hook" 2>/dev/null; then
       if grep -qxF "$version_marker" "$hook" 2>/dev/null; then
+        # The marker line alone is not enough either: it can survive while the
+        # rest of the file does not (hand-edited, truncated by something other
+        # than a failed write). Compare the full body so that case is repaired
+        # instead of reported OK forever.
+        if ! printf '%s\n' "$HOOK_BODY" | cmp -s - "$hook"; then
+          if [ "$APPLY" = 1 ]; then
+            if ! write_hook "$hook" "$hook_dir"; then
+              echo "FAIL    $repo (write failed)"; failed=$((failed+1)); continue
+            fi
+            echo "UPDATE  $repo  (repaired a corrupted hook)"; updated=$((updated+1)); continue
+          fi
+          echo "UPDATE  $repo  (would repair a corrupted hook)"; updated=$((updated+1)); continue
+        fi
         # Right content is not enough. If a previous chmod failed, git refuses
         # to run the file and every later run would keep reporting OK.
         if [ ! -x "$hook" ]; then
