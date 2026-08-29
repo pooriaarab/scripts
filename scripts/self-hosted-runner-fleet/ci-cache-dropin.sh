@@ -66,14 +66,18 @@ for unit in /etc/systemd/system/actions.runner.*.service; do
   name="$(basename "$unit" .service)"
   # The owner-repo segment of the unit name is ambiguous when either contains a
   # hyphen (actions.runner.my-org-app... could be owner "my-org" or "my"). The
-  # runner's WorkingDirectory is not: add-repo.sh in this same directory names
-  # it after the repo alone ($install_root/<repo>, or <repo>-<instance>).
+  # runner's WorkingDirectory is not ambiguous, but add-repo.sh names it after
+  # the repo alone ($install_root/<repo>, or <repo>-<instance>), dropping the
+  # owner. Two different owners' repos that share a name (or two install
+  # roots) would collide on basename(workdir) and defeat the per-repo
+  # isolation below, so namespace on the full path instead: it is unique by
+  # construction.
   workdir="$(sed -n 's/^WorkingDirectory=//p' "$unit" | head -1)"
   if [[ -z "$workdir" ]]; then
     echo "skip $name: unit has no WorkingDirectory" >&2
     continue
   fi
-  repo="$(basename "$workdir")"
+  repo="$(sed 's#^/##; s#/#-#g' <<<"$workdir")"
   dropin_dir="$unit.d"
   run mkdir -p "$dropin_dir"
   run mkdir -p "$CI_CACHE_ROOT/turbo/$repo" "$CI_CACHE_ROOT/playwright/$repo"
