@@ -87,6 +87,21 @@ class RegistryTest(unittest.TestCase):
         for name in newcomers:
             self.assertTrue(VALID(out[name]), out[name])
 
+    def test_many_repos_sharing_a_stem_still_all_resolve(self):
+        # Three colliding names can be resolved by the name-derived candidates
+        # alone, so they never reach the alphabetic fallback and cannot show
+        # whether it works. Enough of them exhausts the meaningful candidates and
+        # forces it, which is the only way a mutation to either is visible.
+        registry = self.registry()
+        newcomers = [f"vibenote{suffix}" for suffix in
+                     ("books", "pad", "worthy", "s", "d", "ing", "able", "ery", "ish")]
+        out, err = self.run_main(list(registry) + newcomers, registry)
+        self.assertIsNotNone(out, f"build aborted: {err.strip()}")
+        values = list(out.values())
+        self.assertEqual(len(values), len(set(values)), "duplicate prefixes")
+        for name in newcomers:
+            self.assertTrue(VALID(out[name]), f"{name} -> {out.get(name)!r}")
+
     def test_a_registered_prefix_is_never_reassigned(self):
         registry = self.registry()
         out, _ = self.run_main(list(registry) + ["vibenotebooks"], registry)
