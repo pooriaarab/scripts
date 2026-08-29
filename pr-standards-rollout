@@ -130,9 +130,21 @@ print(prefixes.get('$repo', ''))
   }
 
   # ── Check eligibility ────────────────────────────────────────────────
+  # A repo can stay in repo-prefixes.json after it is deleted or renamed --
+  # prefixes are permanent by design (see build-repo-prefixes.py), so the
+  # registry is never pruned. A full fleet run walks every registry entry, so
+  # without this check a single deleted/renamed repo would FAIL forever and
+  # `exit 1` at the bottom would never go away. Tell that apart from a real
+  # lookup failure (auth, rate-limit) the same way the config/PR lookups do.
   INFO=$(gh repo view "$OWNER/$repo" --json isFork,isArchived,diskUsage 2>/dev/null) || {
-    echo "FAIL  $repo  (can't view)"
-    fail_c=$(( fail_c + 1 ))
+    VIEW_ERR=$(gh repo view "$OWNER/$repo" --json isFork,isArchived,diskUsage 2>&1 >/dev/null)
+    if echo "$VIEW_ERR" | grep -qi 'could not resolve\|not found'; then
+      echo "SKIP  $repo  (no longer exists)"
+      skipped_c=$(( skipped_c + 1 ))
+    else
+      echo "FAIL  $repo  (can't view)"
+      fail_c=$(( fail_c + 1 ))
+    fi
     continue
   }
   # One python3 call emits all three values with booleans lowercased so bash
@@ -233,7 +245,7 @@ print(json.dumps(cfg, indent=2))
           build_agents_md "$repo" "$BRANCH" || {
             echo "FAIL  $repo  (REPAIR: cannot read AGENTS.md)"
             fail_c=$(( fail_c + 1 ))
-            continue 2
+            continue
           }
           ;;
       esac
