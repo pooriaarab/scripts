@@ -406,3 +406,13 @@ test('a banned name with punctuation still matches', () => {
   assert.equal(validateCommits(commit('Co-authored-by: mycursor <c@example.com>'), config).ok, true);
   assert.equal(validateCommits(commit('Co-authored-by: Pia Gupta <p@example.com>'), config).ok, true);
 });
+
+test('a punctuation-prefixed banned name still matches inside a markdown footer link', () => {
+  // The boundary for a name starting with punctuation must reject only a
+  // preceding word character, not any preceding non-whitespace: a real footer
+  // wraps the name in a markdown link, e.g. `[@cursor](https://cursor.sh)`,
+  // and the `[` immediately before `@cursor` is not whitespace.
+  const config = { ...DEFAULT_CONFIG, prefix: 'cr', bannedCommitTrailers: ['@cursor'] };
+  const commit = (m) => [{ sha: 'abc1234', commit: { message: `Fix\n\n${m}` } }];
+  assert.equal(validateCommits(commit('Generated with [@cursor](https://cursor.sh)'), config).ok, false);
+});

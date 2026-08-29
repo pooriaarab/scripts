@@ -688,13 +688,16 @@ export function validateCommits(commits, config, truncated = false) {
   // that starts or ends with punctuation: a configured `@cursor` could not fire
   // against the space before it, and the trailer passed silently. Choose the
   // boundary per name. Word char at the edge takes `\b`; anything else takes a
-  // whitespace boundary instead. The default list is all alphanumeric, so this
-  // only shows up once someone uses the documented config, which is exactly
-  // when a quiet failure is hardest to notice.
+  // "not adjacent to a word char" lookaround, which still blocks it embedding
+  // in a longer word (mycursor) but -- unlike requiring literal whitespace --
+  // also fires beside ordinary punctuation such as the `[` in a markdown
+  // footer link: `[@cursor](url)`. The default list is all alphanumeric, so
+  // this only shows up once someone uses the documented config, which is
+  // exactly when a quiet failure is hardest to notice.
   const bound = (name) => {
     const quoted = escapeRegex(name);
-    const left = /^\w/.test(name) ? '\\b' : '(?<!\\S)';
-    const right = /\w$/.test(name) ? '\\b' : '(?!\\S)';
+    const left = /^\w/.test(name) ? '\\b' : '(?<!\\w)';
+    const right = /\w$/.test(name) ? '\\b' : '(?!\\w)';
     return `${left}${quoted}${right}`;
   };
   const named = banned.length
