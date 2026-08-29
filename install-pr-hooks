@@ -189,6 +189,13 @@ is_eligible() {
 installed=0 already=0 updated=0 removed=0 skipped=0 failed=0
 
 for root in "${ROOTS[@]}"; do
+  # Without this, a missing/mistyped --root makes find fail silently (stderr
+  # is discarded below) and the run reports "installed=0 ... failed=0" as if
+  # it had successfully scanned zero repos, instead of flagging the mistake.
+  if [ ! -d "$root" ]; then
+    echo "FAIL    $root (root not found)"; failed=$((failed+1)); continue
+  fi
+
   # A worktree shares its hooks with the main checkout, so only the common git
   # directory needs the file. Finding .git directories rather than .git files
   # gets exactly the main checkouts and skips the worktrees for free.
