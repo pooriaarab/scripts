@@ -249,6 +249,24 @@ normalize_path() {
   (IFS=/; printf '/%s' "${stack[*]}")
 }
 
+# normalize_path is purely lexical, so a repo-local hooksPath that is itself a
+# symlink (common with dotfile managers like stow/chezmoi) would read as
+# inside the repo while actually resolving to a directory shared with other
+# checkouts -- exactly what the containment check below exists to rule out.
+# Resolve symlinks in whatever prefix of the path already exists on disk,
+# then hand the (possibly nonexistent) remainder to normalize_path so a dry
+# run still works on a hooksPath that has not been created yet.
+resolve_real_path() {
+  local existing="$1" suffix=""
+  while [ ! -d "$existing" ]; do
+    suffix="/${existing##*/}$suffix"
+    existing="${existing%/*}"
+    [ -n "$existing" ] || existing="/"
+  done
+  existing="$(cd "$existing" && pwd -P)" || return 1
+  normalize_path "$existing$suffix"
+}
+
 installed=0 already=0 updated=0 removed=0 skipped=0 failed=0
 
 for root in "${ROOTS[@]}"; do
@@ -324,9 +342,14 @@ for root in "${ROOTS[@]}"; do
       # is inside the repo. An absolute path, or a relative one that climbs out
       # with "..", can still name a directory shared with other checkouts --
       # exactly what the check above exists to rule out. Compare the two paths
-      # normalized rather than as strings, so "$repo/../shared" is caught too.
-      resolved_repo=$(normalize_path "$repo")
-      resolved_hook_dir=$(normalize_path "$hook_dir")
+      # resolved rather than as strings, so "$repo/../shared" and a symlink
+      # into a shared directory are both caught.
+      resolved_repo=$(resolve_real_path "$repo") || {
+        echo "FAIL    $repo (cannot resolve repo path)"; failed=$((failed+1)); continue
+      }
+      resolved_hook_dir=$(resolve_real_path "$hook_dir") || {
+        echo "FAIL    $repo (cannot resolve hooksPath: $hooks_path)"; failed=$((failed+1)); continue
+      }
       case "$resolved_hook_dir" in
         "$resolved_repo"|"$resolved_repo"/*) ;;
         *)
