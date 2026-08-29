@@ -324,7 +324,10 @@ for root in "${ROOTS[@]}"; do
   # repos instead of failing.
   find_out=$(mktemp) || { echo "FAIL    $root (mktemp failed)"; failed=$((failed+1)); continue; }
   find_err=$(mktemp) || { echo "FAIL    $root (mktemp failed)"; rm -f "$find_out"; failed=$((failed+1)); continue; }
-  find "$root" -maxdepth 4 -type d -name .git >"$find_out" 2>"$find_err"
+  # No -maxdepth: a fixed depth limit would silently skip a repo nested deeper
+  # than it, with the run still reporting success. -prune stops find from
+  # descending into a .git directory once found, so this stays cheap.
+  find "$root" -type d -name .git -prune -print >"$find_out" 2>"$find_err"
   if [ -s "$find_err" ]; then
     echo "FAIL    $root (find could not fully scan this root: $(head -1 "$find_err"))"
     failed=$((failed+1))

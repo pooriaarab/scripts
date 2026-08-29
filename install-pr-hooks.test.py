@@ -126,6 +126,29 @@ def test_symlinked_root_is_scanned():
     return ok
 
 
+def test_deeply_nested_repo_is_scanned():
+    """A repo nested deeper than the old fixed find depth must still be scanned.
+
+    A prior version capped the scan with -maxdepth 4, so a repo any deeper
+    than that went silently unscanned while the run still reported success.
+    """
+    import shutil, subprocess as sp
+    d = tempfile.mkdtemp()
+    repo = f"{d}/a/b/c/d/e/repo"
+    os.makedirs(f"{repo}/.github")
+    env = {**os.environ, "GIT_CONFIG_GLOBAL": "/dev/null"}
+    sp.run(["git", "-C", repo, "init", "-q"], check=True, env=env)
+    sp.run(["git", "-C", repo, "remote", "add", "origin",
+            "https://github.com/pooriaarab/testrepo.git"], check=True, env=env)
+    pathlib.Path(f"{repo}/.github/pr-standards.json").write_text('{"prefix":"tt"}')
+    out = sp.run([str(HERE / "install-pr-hooks"), "--root", d],
+                 capture_output=True, text=True, env=env).stdout
+    shutil.rmtree(d, ignore_errors=True)
+    ok = "INSTALL" in out and repo in out
+    print(f"  {'OK ' if ok else 'FAIL'} deeply nested repo is scanned")
+    return ok
+
+
 if not test_symlinked_hook_dir_is_refused():
     sys.exit(1)
 
@@ -133,6 +156,9 @@ if not test_dangling_pre_push_symlink_is_refused():
     sys.exit(1)
 
 if not test_symlinked_root_is_scanned():
+    sys.exit(1)
+
+if not test_deeply_nested_repo_is_scanned():
     sys.exit(1)
 
 sys.exit(0 if ALL_OK else 1)
