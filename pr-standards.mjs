@@ -146,6 +146,15 @@ function subjectFromTitle(title) {
   return match ? { tagPrefix: match[1], tagIssue: Number(match[2]), subject: match[3] } : null;
 }
 
+// A PR title is whatever its author typed, and this output is read by agents
+// that act on it and humans who paste it into a shell. Interpolating the title
+// into a double-quoted command made `$(...)` and backticks live. Single-quote
+// it, escaping embedded single quotes, so the text stays inert.
+function shellFix(prefix, issueNumber, subject) {
+  const safe = String(subject).replace(/'/g, "'\\''");
+  return `gh pr edit --title '[${prefix.toUpperCase()}-${issueNumber}] ${safe}'`;
+}
+
 export function validateTitle(title, prefix, issueNumber) {
   let subject;
   const failures = [];
@@ -171,7 +180,7 @@ export function validateTitle(title, prefix, issueNumber) {
         'PR title tag',
         `[${parsed.tagPrefix}-${parsed.tagIssue}]`,
         `[${prefix.toUpperCase()}-${issueNumber}]`,
-        `gh pr edit --title "[${prefix.toUpperCase()}-${issueNumber}] ${parsed.subject}"`,
+        shellFix(prefix, issueNumber, parsed.subject),
       ));
     }
     if (parsed.tagIssue !== issueNumber) {
@@ -179,7 +188,7 @@ export function validateTitle(title, prefix, issueNumber) {
         'PR title issue',
         String(parsed.tagIssue),
         String(issueNumber),
-        `gh pr edit --title "[${prefix.toUpperCase()}-${issueNumber}] ${parsed.subject}"`,
+        shellFix(prefix, issueNumber, parsed.subject),
       ));
     }
     subject = parsed.subject;
@@ -739,9 +748,10 @@ async function runPrecheck(options) {
   return finish({ mode: 'precheck', prefix: config.prefix, provenance, failures, warnings: [], passes }, options.json);
 }
 
-async function fetchRemoteConfig(repo, defaultPrefix) {
+async function fetchRemoteConfig(repo, defaultPrefix, ref) {
   try {
-    const response = await apiRequest('contents/.github/pr-standards.json', repo);
+    const query = ref ? `?ref=${encodeURIComponent(ref)}` : '';
+    const response = await apiRequest(`contents/.github/pr-standards.json${query}`, repo);
     if (response.content && response.encoding === 'base64') {
       const content = Buffer.from(response.content, 'base64').toString('utf8');
       const overrides = JSON.parse(content);
@@ -752,7 +762,7 @@ async function fetchRemoteConfig(repo, defaultPrefix) {
       if (!Object.prototype.hasOwnProperty.call(overrides, 'prefix')) config.prefix = defaultPrefix;
       if (!config.prefix) config.prefix = defaultPrefix;
       validateConfig(config);
-      return { config, provenance: `from ${repo} .github/pr-standards.json` };
+      return { config, provenance: `from ${repo} .github/pr-standards.json${ref ? ` @ ${ref}` : ''}` };
     }
   } catch (error) {
     if (error instanceof ApiError && error.status === 404) {
@@ -777,19 +787,20 @@ async function runPr(options) {
   let provenance;
   
   // In CI, GITHUB_REPOSITORY is the local checkout which is the target repo, so we can use loadConfig
-  if (process.env.GITHUB_REPOSITORY === options.repo) {
-    const root = repoRoot();
-    const result = loadConfig(root, repoName);
-    config = result.config;
-    provenance = `from ${options.repo} .github/pr-standards.json`; // Approximate for CI local checkout
-  } else {
-    const result = await fetchRemoteConfig(options.repo, derivePrefix(repoName));
-    config = result.config;
-    provenance = result.provenance;
-  }
-  
   const number = Number(options.number);
   const pull = await apiRequest(`pulls/${number}`, options.repo);
+
+  // Read the config from the BASE branch, never from the checkout. In CI the
+  // checkout is the pull request's own head, so a PR that edits
+  // .github/pr-standards.json would be judged by the rules it just wrote: set
+  // excludeGlobs to ["**"], or maxLines to a million, and the check that exists
+  // to catch exactly that change waves it through. The base branch holds the
+  // last rules that survived review, so it is the only honest thing to judge
+  // against.
+  const baseRef = pull.base?.ref;
+  const loaded = await fetchRemoteConfig(options.repo, derivePrefix(repoName), baseRef);
+  config = loaded.config;
+  provenance = loaded.provenance;
   const branch = pull.head?.ref || '';
   const branchResult = validateBranchName(branch, config);
   const failures = [...branchResult.failures];
@@ -825,6 +836,16 @@ async function runPr(options) {
   }
 
   const files = await fetchPullFiles(options.repo, number);
+  // GitHub's pull-request files endpoint stops at 3000 entries and gives no
+  // signal that it did. Comparing against the count the pull request itself
+  // reports is the only way to notice, and a size check that silently measured
+  // part of a diff would be worse than one that admits it cannot.
+  if (typeof pull.changed_files === 'number' && files.length < pull.changed_files) {
+    warnings.push(`only ${files.length} of ${pull.changed_files} changed files were returned by the API, so the size below is a floor, not a total`);
+  }
+  if (files.some((file) => file.filename === '.github/pr-standards.json')) {
+    warnings.push('this PR edits .github/pr-standards.json; it was judged against the base branch config, not its own');
+  }
   const summary = summarizeFiles(files, config);
   const labels = (pull.labels || []).map((label) => typeof label === 'string' ? label : label.name).filter(Boolean);
   const sizeResult = checkSize(summary, config, labels);
