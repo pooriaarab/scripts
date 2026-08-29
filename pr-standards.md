@@ -89,6 +89,72 @@ Four things, all required:
   Convention puts it last. The check accepts it anywhere in the body rather than
   pretending to enforce a position it does not.
 
+#### Proof of work
+
+`## How I verified` must also carry proof that the change worked, not just the
+name of a command. An agent can write "tested locally" for free; a screenshot
+or a real command output costs work, so it is the part worth checking.
+
+| Work class | Proof |
+|---|---|
+| UI (a user can see it) | before and after screenshots, or a short video of the flow |
+| Backend, API, CLI | the command and its real output |
+| Bug fix | the test failing before, passing after |
+| Performance | the numbers before and after |
+| Infrastructure, CI | a link to the green run |
+| Copy, docs, marketing | a screenshot of the rendered page, or the preview URL |
+
+Media goes to GitHub user-attachments. Media never goes into a commit. A commit
+carries the change; the pull request carries the evidence.
+
+The checker enforces only what it can cheaply and mechanically:
+
+- **UI diff needs an attachment.** If any changed file matches `uiGlobs` and is not
+  excluded by `uiExcludeGlobs`, the body must contain at least one
+  `https://github.com/user-attachments/assets/<id>` URL. Zero attachments and no
+  `Proof: n/a` line fails; exactly one attachment warns ("a visual change wants
+  before and after"); two or more passes. For a diff with no UI files, the
+  existing command-and-result rule already stands and no attachments are required.
+- **Committed proof media fails.** A file added by the diff whose extension is
+  `png`, `jpg`, `jpeg`, `gif`, `webp`, `mp4`, `mov`, or `webm` and whose path
+  matches `screenshot*/**`, `**/screenshots/**`, `proof*/**`, `**/*before*`,
+  `**/*after*`, `**/*demo-recording*`, or sits in the repo root is rejected: it
+  belongs in user-attachments. A screenshot committed to a repo stays in its
+  history forever, for a picture nobody opens twice. Media anywhere else (`public/**`, `**/assets/**`, and every other path) is a real
+  asset and is not flagged.
+- **Owner label clears it.** `proof-not-applicable`, resolved through the same
+  ownership check as `oversized-approved`, skips both the UI attachment and the
+  committed media checks. A label the author applies to its own PR does not count.
+- `requireProof: false` turns off both proof checks for a repo with no
+  user-facing surface.
+
+Escape hatch, when proof truly does not apply:
+
+    Proof: n/a — <reason, at least 20 characters>
+
+The checker accepts it; the review council judges whether the reason holds. An
+agent cannot clear its own proof requirement with "not applicable".
+
+How an agent captures and uploads proof:
+
+```bash
+curl -sS -X POST \
+  "https://uploads.github.com/user-attachments/assets?name=<file>&content_type=<mime>&repository_id=$(gh api repos/<owner>/<repo> --jq .id)" \
+  -H "Authorization: Bearer $GITHUB_ATTACHMENTS_TOKEN" \
+  -H "Accept: application/json" \
+  -H "Content-Type: <mime>" \
+  --data-binary @<file>
+```
+
+- If `GITHUB_ATTACHMENTS_TOKEN` is unset, skip the upload and say so in the body.
+  Do not commit the file as a fallback.
+- Images embed as `![alt](url)`. A video goes on its own line as a bare URL.
+- Supported types: `image/png`, `image/jpeg`, `image/gif`, `image/webp`, `video/mp4`.
+  Convert first when needed: `ffmpeg -i in.webm -c:v libx264 -pix_fmt yuv420p out.mp4`
+- Capture during reproduction and again during verification, so before and after
+  come from the same run.
+- When a later push changes the UI on screen, recapture and replace the embed.
+  Keep every embed that is still accurate; never drop one while rewriting a body.
 ### Commits
 
 No commit carries an AI attribution trailer. Not `Co-Authored-By: Claude`, not

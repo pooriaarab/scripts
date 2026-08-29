@@ -9,11 +9,15 @@ import { fileURLToPath } from 'node:url';
 import {
   ConfigurationError,
   DEFAULT_CONFIG,
+  checkProof,
   checkSize,
   countClosingReferences,
   validateCommits,
   validateConfig,
   derivePrefix,
+  hasUiDiff,
+  isCommittedProofMedia,
+  isUiFile,
   loadConfig,
   matchesGlob,
   summarizeFiles,
@@ -595,4 +599,75 @@ test('a lockfile is excluded wherever a workspace keeps it', () => {
   }
   // Still counts a real source file that merely lives near one.
   assert.equal(DEFAULT_CONFIG.excludeGlobs.some((glob) => matchesGlob('apps/website/src/lock-screen.ts', glob)), false);
+});
+
+test('proof: a visible change needs before and after attachments', () => {
+  const uiFiles = [{ filename: 'src/components/Button.tsx', status: 'modified' }];
+  const withUrls = (n) => `${validBody}\n` + Array.from({ length: n }, (_, i) =>
+    `![shot](https://github.com/user-attachments/assets/abc${i})`).join('\n');
+  const proofNa = `${validBody}\nProof: n/a — a type-level refactor with no runtime path`;
+  const proofNaShort = `${validBody}\nProof: n/a — no ui`;
+
+  const failed = (r) => r.failures.some((f) => f.check === 'proof of a visible change');
+  const warned = (r) => r.warnings.some((w) => w.check === 'proof of a visible change');
+
+  assert.equal(failed(checkProof(validBody, uiFiles, [], config)), true);
+  assert.equal(warned(checkProof(withUrls(1), uiFiles, [], config)), true);
+  assert.equal(failed(checkProof(withUrls(1), uiFiles, [], config)), false);
+  assert.equal(failed(checkProof(withUrls(2), uiFiles, [], config)), false);
+  assert.equal(warned(checkProof(withUrls(2), uiFiles, [], config)), false);
+
+  // A stated reason clears it; "n/a" on its own does not, or the escape hatch
+  // becomes the default and the rule stops meaning anything.
+  assert.equal(failed(checkProof(proofNa, uiFiles, [], config)), false);
+  assert.equal(failed(checkProof(proofNaShort, uiFiles, [], config)), true);
+
+  // Nothing visible changed, so nothing has to be shown.
+  assert.equal(failed(checkProof(validBody, [{ filename: 'src/server/api.ts', status: 'modified' }], [], config)), false);
+  assert.equal(failed(checkProof(validBody, [{ filename: 'src/components/Button.test.tsx', status: 'modified' }], [], config)), false);
+
+  assert.equal(isUiFile('src/components/Button.tsx', config), true);
+  assert.equal(isUiFile('src/components/Button.test.tsx', config), false);
+  assert.equal(hasUiDiff(uiFiles, config), true);
+  assert.equal(hasUiDiff([{ filename: 'src/server/api.ts' }], config), false);
+});
+
+test('proof: media belongs in user-attachments, not in the commit', () => {
+  const flagged = [
+    'screenshots/home.png', 'screenshot-123/demo.png', 'a/b/screenshots/x.jpg',
+    'proof/demo.mp4', 'proof-v2/clip.webm', 'src/before.png',
+    'src/component-after.jpg', 'docs/demo-recording.mov',
+    'image.png', 'photo.jpeg', 'clip.gif', 'screen.webp',
+  ].map((filename) => ({ filename, status: 'added' }));
+  for (const file of flagged) {
+    assert.equal(isCommittedProofMedia(file), true, `should flag ${file.filename}`);
+    const r = checkProof(validBody, [file], [], config);
+    assert.equal(r.failures.some((f) => f.check === 'committed proof media'), true, `checkProof should flag ${file.filename}`);
+  }
+
+  // Everything else is a product asset. A repo full of real images must not
+  // start failing because one of them is a png.
+  for (const filename of ['public/logo.png', 'public/assets/bg.jpg', 'src/assets/icon.png', 'assets/image.png', 'src/app/logo.png']) {
+    const file = { filename, status: 'added' };
+    assert.equal(isCommittedProofMedia(file), false, `should not flag ${filename}`);
+    const r = checkProof(validBody, [file], [], config);
+    assert.equal(r.failures.length + r.warnings.length, 0);
+  }
+
+  // Only an added file is suspicious: editing a media file already in the repo
+  // is maintenance of a real asset.
+  assert.equal(isCommittedProofMedia({ filename: 'screenshots/home.png', status: 'modified' }), false);
+  assert.equal(isCommittedProofMedia({ filename: 'screenshots/readme.txt', status: 'added' }), false);
+});
+
+test('proof: the owner label and requireProof clear the checks', () => {
+  const uiFiles = [{ filename: 'src/components/Button.tsx', status: 'modified' }];
+  const media = [{ filename: 'screenshots/home.png', status: 'added' }];
+
+  const waived = checkProof(validBody, [...uiFiles, ...media], ['proof-not-applicable'], config);
+  assert.equal(waived.failures.length, 0);
+  assert.equal(waived.overridden, true);
+
+  const off = { ...config, requireProof: false };
+  assert.equal(checkProof(validBody, [...uiFiles, ...media], [], off).failures.length, 0);
 });
