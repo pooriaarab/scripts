@@ -166,6 +166,16 @@ print(p)
     else
       echo "NOTE  $repo  (prefix changed from '$CONFIG_PREFIX' to '$PREFIX')"
     fi
+  } || {
+    # A missing config is a real 404 and means "not installed yet" -- fall
+    # through to the rollout below. Anything else (auth, rate-limit, 5xx) must
+    # not be mistaken for that, or a transient hiccup would re-roll out a repo
+    # that is already fully configured.
+    if ! echo "$CONFIG_RESP" | grep -q '"Not Found"'; then
+      echo "FAIL  $repo  (config lookup failed)"
+      (( fail_c++ ))
+      continue
+    fi
   }
 
   # ── Build files for this repo ────────────────────────────────────────
@@ -194,6 +204,13 @@ print(json.dumps(cfg, indent=2))
     # nothing to repair in place, so fall through to a full rollout below,
     # which opens a fresh issue/branch/PR and rewrites all four files.
     BRANCH=$(gh api "repos/$OWNER/$repo/branches" --jq ".[].name | select(startswith(\"${PREFIX}-\") and endswith(\"-adopt-pr-standard\"))" 2>/dev/null | head -1)
+    if [ -n "$BRANCH" ]; then
+      # A branch that outlived its PR (merged without auto-delete, or closed)
+      # has no way to get its new commits to the default branch. Only repair
+      # in place when the branch still has an open PR behind it.
+      OPEN_PR=$(gh pr list --repo "$OWNER/$repo" --head "$BRANCH" --state open --json number --jq '.[0].number' 2>/dev/null)
+      [ -z "$OPEN_PR" ] && BRANCH=""
+    fi
     if [ -n "$BRANCH" ]; then
       DEFAULT_BRANCH=$(gh api "repos/$OWNER/$repo" --jq '.default_branch')
       AGENTS_MD=""
@@ -238,7 +255,7 @@ print(json.dumps(payload))
       (( repaired_c++ ))
       continue
     fi
-    echo "NOTE  $repo  (REPAIR: no existing branch, falling back to full rollout)"
+    echo "NOTE  $repo  (REPAIR: no repairable branch, falling back to full rollout)"
   fi
 
   # Step A: create the issue, or reuse the one a failed run left behind.
@@ -361,7 +378,16 @@ print(json.dumps(payload))
     continue
   fi
 
-  # Step E: open PR
+  # Step E: open PR, or reuse one a prior run already opened for this branch
+  # (issue and branch reuse above mean a retry reaches this same head branch,
+  # and `gh pr create` always fails when a PR for it is already open).
+  EXISTING_PR=$(gh pr list --repo "$OWNER/$repo" --head "$BRANCH" --state open --json number --jq '.[0].number' 2>/dev/null)
+  if [ -n "$EXISTING_PR" ]; then
+    echo "DONE  $repo  (#$ISSUE_NUM -> $BRANCH -> reusing PR #$EXISTING_PR)"
+    (( done_c++ ))
+    continue
+  fi
+
   gh pr create \
     --repo "$OWNER/$repo" \
     --base "$DEFAULT_BRANCH" \

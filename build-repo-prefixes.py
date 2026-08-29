@@ -82,7 +82,9 @@ def derive_prefix(name: str) -> str:
     # ── Separated names ──
     for sep in ("-", "_", "."):
         if sep in name_lower:
-            parts = name_lower.split(sep)
+            parts = [p for p in name_lower.split(sep) if p]
+            if not parts:
+                break
             prefix = "".join(p[0] for p in parts[:4])
             # Must be at least 2 chars
             if len(prefix) < 2 and len(parts) > 1:
@@ -177,13 +179,14 @@ def main():
     if registry_path.exists():
         existing = json.loads(registry_path.read_text())
 
-    prefixes: dict[str, str] = {}
+    # Keep every already-registered entry, even for a repo that fell out of
+    # `eligible` (archived, renamed, deleted). Dropping it here would free its
+    # prefix for reassignment, breaking the permanence guarantee above.
+    prefixes: dict[str, str] = dict(existing)
     fresh: dict[str, str] = {}
     for repo in sorted(eligible, key=lambda r: r["name"]):
         name = repo["name"]
-        if name in existing:
-            prefixes[name] = existing[name]
-        else:
+        if name not in existing:
             fresh[name] = derive_prefix(name)
 
     # Resolve collisions among the new names only, against everything already held.
