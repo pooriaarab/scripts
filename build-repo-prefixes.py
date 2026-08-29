@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """Generate repo-prefixes.json: unique 2-4 char prefix per pooriaarab repo.
 
-Run:  python3 build-repo-prefixes.py > repo-prefixes.json
+Run:  python3 build-repo-prefixes.py
+
+Writes repo-prefixes.json itself (read-then-atomic-write). Do not redirect
+stdout into that file: a shell `>` truncates it before this script starts,
+so the read of the existing registry below would already see an empty file.
 """
 
 import json
@@ -235,13 +239,9 @@ def main():
             print(f"ERROR: invalid prefix '{pref}' for repo '{name}'", file=sys.stderr)
             sys.exit(1)
 
-    # Output sorted JSON
-    sorted_map = dict(sorted(prefixes.items()))
-    json.dump(sorted_map, sys.stdout, indent=2, ensure_ascii=False)
-    print()
-
     # Self-test: edge-case names that the derivation must handle.
-    # These test the one-character-prefix fix and non-alpha names.
+    # These test the one-character-prefix fix and non-alpha names. Run before
+    # writing anything, so a broken derivation never overwrites the registry.
     edge_cases = {".github": "gith", "foo-": "foo", "123": "zz", "x": "xx",
                   "---": "zz", "a.b": "ab"}
     for ec_name, ec_expected in edge_cases.items():
@@ -249,6 +249,16 @@ def main():
         if ec_result != ec_expected:
             print(f"ERROR: edge-case '{ec_name}' -> '{ec_result}', expected '{ec_expected}'", file=sys.stderr)
             sys.exit(1)
+
+    # Write the registry ourselves, atomically. The old `> repo-prefixes.json`
+    # usage truncated the file before this process even started, so the read
+    # of `existing` above always saw an empty file. Writing to a temp file in
+    # the same directory and renaming it into place means a crash mid-write
+    # never leaves a half-written or empty registry behind.
+    sorted_map = dict(sorted(prefixes.items()))
+    tmp_path = registry_path.with_suffix(".json.tmp")
+    tmp_path.write_text(json.dumps(sorted_map, indent=2, ensure_ascii=False) + "\n")
+    tmp_path.replace(registry_path)
 
 
 if __name__ == "__main__":
