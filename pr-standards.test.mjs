@@ -145,3 +145,124 @@ test('override label short-circuits size failures', () => {
   assert.equal(result.failures.length, 0);
   assert.equal(result.warnings.length, 1);
 });
+
+test('enforces rules for chore branches (null issue)', () => {
+  assert.equal(validateTitle('Added something', 'cr', null).ok, false);
+  assert.equal(validateBody(validBody.replace('bun test -> 214 passed', 'TODO').replace('Closes #142\n\n', ''), null, config).ok, false);
+});
+
+test('fails a chore branch with a Closes reference', () => {
+  assert.equal(validateBody(validBody, null, config).ok, false);
+});
+
+import { main } from './pr-standards.mjs';
+
+test('an exempt branch still skips title and body entirely', async () => {
+  const originalWrite = process.stdout.write;
+  let output = '';
+  process.stdout.write = (chunk) => { output += chunk; return true; };
+  try {
+    const exitCode = await main(['precheck', '--branch', 'main', '--title', 'bad past tense title without tag', '--json']);
+    assert.equal(exitCode, 0);
+    const result = JSON.parse(output);
+    assert.equal(result.failures.length, 0);
+  } finally {
+    process.stdout.write = originalWrite;
+  }
+});
+
+test('issues/{n} returning an object with a pull_request field fails', async () => {
+  const originalWrite = process.stdout.write;
+  const originalPath = process.env.PATH;
+  const originalToken = process.env.GITHUB_TOKEN;
+  const originalFetch = globalThis.fetch;
+  let output = '';
+  process.stdout.write = (chunk) => { output += chunk; return true; };
+  process.env.PATH = ''; // disable gh
+  process.env.GITHUB_TOKEN = 'test-token';
+  process.env.GITHUB_REPOSITORY = 'other/repo'; // Ensure we don't hit the CI check
+
+  globalThis.fetch = async (url) => {
+    if (url.includes('contents/.github/pr-standards.json')) {
+      return { ok: true, json: async () => ({ content: Buffer.from(JSON.stringify({ prefix: 'cr' })).toString('base64'), encoding: 'base64' }) };
+    }
+    if (url.includes('pulls/12/files')) {
+      return { ok: true, json: async () => ([]) };
+    }
+    if (url.includes('pulls/12')) {
+      return { ok: true, json: async () => ({ head: { ref: 'cr-12-test' }, title: '[CR-12] Test PR', body: validBody.replace('142', '12').replace('142', '12').replace('142', '12') }) };
+    }
+    if (url.includes('issues/12')) {
+      return { ok: true, json: async () => ({ state: 'open', pull_request: {} }) };
+    }
+    throw new Error(`Unexpected fetch URL: ${url}`);
+  };
+
+  try {
+    const exitCode = await main(['pr', '--repo', 'test/repo', '--number', '12', '--json']);
+    assert.equal(exitCode, 1);
+    const result = JSON.parse(output);
+    assert.equal(result.failures.some(f => f.check === 'branch issue' && f.got === '#12 is a pull request'), true);
+  } finally {
+    process.stdout.write = originalWrite;
+    process.env.PATH = originalPath;
+    process.env.GITHUB_TOKEN = originalToken;
+    globalThis.fetch = originalFetch;
+    delete process.env.GITHUB_REPOSITORY;
+  }
+});
+
+test('config resolution prefers the target repo over the local checkout', async () => {
+  const originalWrite = process.stdout.write;
+  const originalPath = process.env.PATH;
+  const originalToken = process.env.GITHUB_TOKEN;
+  const originalFetch = globalThis.fetch;
+  let output = '';
+  process.stdout.write = (chunk) => { output += chunk; return true; };
+  process.env.PATH = ''; // disable gh
+  process.env.GITHUB_TOKEN = 'test-token';
+  process.env.GITHUB_REPOSITORY = 'other/repo'; // Ensure we don't hit the CI check
+
+  globalThis.fetch = async (url) => {
+    if (url.includes('contents/.github/pr-standards.json')) {
+      return { ok: true, json: async () => ({ content: Buffer.from(JSON.stringify({ prefix: 'rmt' })).toString('base64'), encoding: 'base64' }) };
+    }
+    if (url.includes('pulls/12/files')) {
+      return { ok: true, json: async () => ([]) };
+    }
+    if (url.includes('pulls/12')) {
+      return { ok: true, json: async () => ({ head: { ref: 'rmt-12-test' }, title: '[RMT-12] Test PR that works', body: validBody.replace('142', '12').replace('142', '12').replace('142', '12') }) };
+    }
+    if (url.includes('issues/12')) {
+      return { ok: true, json: async () => ({ state: 'open' }) };
+    }
+    throw new Error(`Unexpected fetch URL: ${url}`);
+  };
+
+  try {
+    const exitCode = await main(['pr', '--repo', 'test/repo', '--number', '12', '--json']);
+    assert.equal(exitCode, 0);
+    const result = JSON.parse(output);
+    assert.equal(result.prefix, 'rmt');
+    assert.equal(result.provenance, 'from test/repo .github/pr-standards.json');
+  } finally {
+    process.stdout.write = originalWrite;
+    process.env.PATH = originalPath;
+    process.env.GITHUB_TOKEN = originalToken;
+    globalThis.fetch = originalFetch;
+    delete process.env.GITHUB_REPOSITORY;
+  }
+});
+
+test('counts every GitHub closing keyword, not only Closes and Fixes', () => {
+  // GitHub honours nine keywords. A checker that knows two of them lets a PR
+  // close two issues while reporting one.
+  for (const keyword of ['Close', 'Closes', 'Closed', 'Fix', 'Fixes', 'Fixed', 'Resolve', 'Resolves', 'Resolved']) {
+    assert.deepEqual(countClosingReferences(`${keyword} #7`), [7], `missed ${keyword}`);
+  }
+  assert.deepEqual(countClosingReferences('Closes #1\n\nResolves #2'), [1, 2]);
+  assert.deepEqual(countClosingReferences('closes #3'), [3]);
+  // A comment is not a closing reference, and neither is prose about closing.
+  assert.deepEqual(countClosingReferences('<!-- Closes #9 -->'), []);
+  assert.deepEqual(countClosingReferences('This closes the gap'), []);
+});

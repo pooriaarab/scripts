@@ -2,7 +2,7 @@
 
 Agents generate pull requests faster than anyone reviews them. Generation costs
 almost nothing now; review costs exactly what it always did. That gap is why a
-fleet drifts — an agent opens a 20,000-line PR against no agreed scope, and the
+fleet drifts, an agent opens a 20,000-line PR against no agreed scope, and the
 only thing standing between it and `main` is your attention.
 
 This document is the standard. `pr-standards` is the program that enforces it.
@@ -46,7 +46,7 @@ only the source of the number changes.
   starts with a capital letter.
 - Rejected openers, because they are not imperative: `Added`, `Fixed`, `Updated`,
   `Removed`, `Changed`, `Refactored`, `Implemented`, and any `-ing` first word.
-- No emoji. No conventional-commit prefix — the tag already carries the scope.
+- No emoji. No conventional-commit prefix, the tag already carries the scope.
 
 ### PR description
 
@@ -67,26 +67,37 @@ Four things, all required:
 
     Assisted-by: claude-personal:claude-opus-5
 
-- **Exactly one** `Closes #N` / `Fixes #N`, matching the branch issue. Two closing
+- **Exactly one** closing reference, matching the branch issue. Two closing
   references means two concerns, which means two PRs.
+
+  Count all nine keywords GitHub honours, not just the one in the example:
+  `close`, `closes`, `closed`, `fix`, `fixes`, `fixed`, `resolve`, `resolves`,
+  `resolved`. A checker that knows only `Closes` lets `Closes #1` plus
+  `Resolves #2` through, which is two concerns wearing one coat. A reference
+  inside an HTML comment does not count, so an unedited template cannot trip it.
 - `## How I verified` must name a command and its result. `N/A`, `TODO`, `tested
   locally`, and an unedited template comment all fail.
 - Body under 120 characters fails. A description that only restates the diff is
   not a description.
-- `Assisted-by: <agent>:<model>` discloses which fleet member wrote it. The Linux
-  kernel uses this trailer for the same reason: so you can tell, later, which
-  agent produced which class of defect.
+- The body must contain an `Assisted-by: <agent>:<model>` line. It discloses which
+  fleet member wrote the change. The Linux kernel uses this convention for the same
+  reason: so you can tell, later, which agent produced which class of defect.
+  Convention puts it last. The check accepts it anywhere in the body rather than
+  pretending to enforce a position it does not.
 
 ### Size and atomicity
 
 | Cap | Limit | On breach |
 |---|---|---|
-| Net counted lines (`+` and `-`) | **500** | fail |
-| Counted files changed | **40** | fail |
-| Closing issue references | **1** | fail |
-| Top-level directories touched | 3 | warn |
+| Net counted lines (`+` and `-`) | more than **500** | fail |
+| Counted files changed | more than **40** | fail |
+| Closing issue references | not exactly **1** | fail |
+| Top-level directories touched | more than 3 | warn |
 
-Not counted — an agent should never be penalised for a lockfile it did not write:
+The boundaries are inclusive: 500 counted lines passes, 501 fails. "Under 500" in
+prose and a bare `500` in a table are not the same rule, so the table is the rule.
+
+Not counted, an agent should never be penalised for a lockfile it did not write:
 
     **/*.lock  package-lock.json  bun.lockb  pnpm-lock.yaml  yarn.lock  Cargo.lock
     dist/**  build/**  .next/**  out/**  vendor/**  **/generated/**
@@ -97,13 +108,13 @@ Not counted — an agent should never be penalised for a lockfile it did not wri
 **500 is a design constraint, not a nuisance.** It is roughly one reviewable
 sitting. An agent that must stay under it decomposes the work before it writes,
 which is the behaviour we actually want. If a change genuinely cannot be split,
-that is a fact worth stating out loud — so the only way past the cap is the
+that is a fact worth stating out loud, so the only way past the cap is the
 `oversized-approved` label, applied by the repo owner. An agent cannot clear its
 own PR.
 
 **Atomic means one concern.** The mechanical proxies above catch the obvious
 cases. Whether a PR really does one thing is a judgement, and that judgement
-belongs to the review council — see the scope lens in `vibecodereview`.
+belongs to the review council, see the scope lens in `vibecodereview`.
 
 ## Configuration
 
@@ -120,14 +131,22 @@ reads it; nothing fetches a central registry at check time.
   "maxTopLevelDirs": 3,
   "minBodyChars": 120,
   "overrideLabel": "oversized-approved",
-  "exemptBranches": ["main", "release", "refactor", "gh-pages"],
+  "exemptBranches": ["main", "master", "release", "refactor", "gh-pages"],
   "excludeGlobs": ["..."]
 }
 ```
 
 `allowChoreEscape` is off. Turn it on and a `chore/<slug>` branch skips the issue
-requirement — useful if dependency bumps and CI fixes start costing more in issue
-bookkeeping than they save. It is a knob so that the decision stays visible.
+requirement, which helps if dependency bumps and CI fixes start costing more in
+issue bookkeeping than they save. It is a knob so the decision stays visible.
+
+**It skips the issue requirement and nothing else.** A chore branch still has to
+satisfy every title and body rule: imperative subject, the three sections, the
+minimum length, the `Assisted-by` line. It must also carry no closing reference,
+because a change that closes an issue is not a chore and belongs on a numbered
+branch. The obvious implementation gets this wrong. Written as "there is no issue
+number, so skip the checks that need one", the knob quietly disables the title and
+body rules too, and becomes a way to opt out of the whole standard.
 
 ## The four layers
 
@@ -141,7 +160,7 @@ Local layers exist for speed. CI is the authority. Neither replaces the other.
 | `vibecodereview` scope lens | on every PR | non-atomic and off-scope work | by ignoring the review |
 
 There is no fifth layer today. GitHub rulesets and required status checks need
-GitHub Pro, and this account is on Free — so on a private repo, no check can be
+GitHub Pro, and this account is on Free, so on a private repo, no check can be
 made mandatory. Until that changes, red CI is a signal, not a gate, and the two
 local layers carry more weight than they otherwise would.
 
