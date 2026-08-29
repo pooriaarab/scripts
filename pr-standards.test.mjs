@@ -393,6 +393,8 @@ test('the marketing footer check catches multi-codepoint emoji, not only a bare 
   ]) {
     assert.equal(validateCommits(commit(footer), config).ok, false, `missed ${JSON.stringify(footer)}`);
   }
+});
+
 test('a banned name with punctuation still matches', () => {
   // \b needs a word/non-word transition, so it never fires beside a name that
   // starts with punctuation. Only reachable through the documented config, which
