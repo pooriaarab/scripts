@@ -77,15 +77,22 @@ function fail(check, got, expected, fix) {
 }
 
 export function derivePrefix(repoName) {
-  const cleanName = String(repoName).split('/').filter(Boolean).pop() || '';
+  const rawName = String(repoName).split('/').filter(Boolean).pop() || '';
+  // Strip anything that is not a letter before deriving. A prefix must be 2 to
+  // 4 lowercase letters, so a name like `3d-tools` derived `3t` and then failed
+  // validation on every single invocation, with a message about the config
+  // rather than about the name that caused it.
+  const cleanName = rawName.replace(/[^A-Za-z-_\s]/g, '');
   const parts = cleanName.split(/[-_\s]+/).filter(Boolean);
   const prefix = parts.length > 1
     ? parts.map((part) => part[0]).join('')
     : cleanName.slice(0, 3);
   const derived = prefix.toLowerCase().slice(0, 4);
-  // A prefix must be 2 to 4 letters. A repo named `x` cannot supply that, and
-  // failing later with "prefix must be 2-4 lowercase letters" would point at
-  // the config rather than at the real cause, which is the name.
+  // A prefix must be 2 to 4 letters. A repo named `x`, or one made entirely of
+  // digits, cannot supply that. Failing later with "prefix must be 2-4
+  // lowercase letters" would point at the config rather than at the real cause,
+  // which is the name, so give a usable answer and let the repo override it.
+  if (derived.length === 0) return 'zz';
   if (derived.length === 1) return `${derived}${derived}`;
   return derived;
 }
