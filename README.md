@@ -58,7 +58,7 @@ CI run it again on the PR.
 ./pr-standards branch cr-142-fix-onboard # a specific name
 ./pr-standards precheck --branch X --title Y   # pattern only, no network
 ./pr-standards pr --repo pooriaarab/content-rabbit --number 88
-./pr-standards pr --json                 # machine-readable
+./pr-standards pr --repo pooriaarab/content-rabbit --number 88 --json   # machine-readable
 ./pr-standards --selfcheck               # run the test suite
 ```
 
