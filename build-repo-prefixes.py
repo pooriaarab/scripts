@@ -5,6 +5,7 @@ Run:  python3 _build-prefixes.py > repo-prefixes.json
 """
 
 import json
+from pathlib import Path
 import subprocess
 import sys
 
@@ -135,7 +136,12 @@ def resolve_collisions(prefixes: dict[str, str]) -> dict[str, str]:
                 # Extend by taking more from the name.
                 for pos in range(len(current) + 1, min(len(name), 5) + 1):
                     candidate = name[:pos]
-                    if candidate not in taken and candidate not in {result[r] for r in repos_sorted if r != repo}:
+                    # Check every prefix in play, not just this collision group.
+                    # A group-local check lets an extended prefix land on one an
+                    # unrelated repo already holds; main() then rejects the whole
+                    # run for a name the generator could have resolved itself.
+                    others = {result[r] for r in result if r != repo}
+                    if candidate not in taken and candidate not in others:
                         current = candidate
                         break
                 else:
@@ -158,13 +164,30 @@ def main():
         if not r["isArchived"] and not r["isFork"] and r["diskUsage"] >= 10
     ]
 
-    prefixes: dict[str, str] = {}
-    for repo in sorted(eligible, key=lambda r: r["name"]):
-        pref = derive_prefix(repo["name"])
-        prefixes[repo["name"]] = pref
+    # A prefix is permanent. Once a repo has one, branch names, PR titles and
+    # merged commits carry it, so regenerating must never reassign it. Load what
+    # is already registered and derive only for repos that have none.
+    registry_path = Path(__file__).with_name("repo-prefixes.json")
+    existing: dict[str, str] = {}
+    if registry_path.exists():
+        existing = json.loads(registry_path.read_text())
 
-    # Resolve collisions
-    prefixes = resolve_collisions(prefixes)
+    prefixes: dict[str, str] = {}
+    fresh: dict[str, str] = {}
+    for repo in sorted(eligible, key=lambda r: r["name"]):
+        name = repo["name"]
+        if name in existing:
+            prefixes[name] = existing[name]
+        else:
+            fresh[name] = derive_prefix(name)
+
+    # Resolve collisions among the new names only, against everything already held.
+    if fresh:
+        merged = dict(prefixes)
+        merged.update(fresh)
+        resolved = resolve_collisions(merged)
+        for name in fresh:
+            prefixes[name] = resolved[name]
 
     # Validate
     values = list(prefixes.values())

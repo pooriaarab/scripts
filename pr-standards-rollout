@@ -42,6 +42,12 @@ WORKFLOW_YML=$(cat "$TEMPLATES_DIR/pr-standards.yml")
 AGENTS_BLOCK_TPL=$(cat "$TEMPLATES_DIR/agents-block.md")
 
 # ── List target repos ───────────────────────────────────────────────────
+# Repo names are interpolated into python source below. GitHub will not mint a
+# name outside this set, but a typo or a pasted argument should fail here rather
+# than become python.
+if [ -n "$TARGET_REPO" ] && ! printf '%s' "$TARGET_REPO" | grep -qE '^[A-Za-z0-9._-]+$'; then
+  echo "ERROR: --repo must match ^[A-Za-z0-9._-]+$ (got: $TARGET_REPO)"; exit 1
+fi
 if [ -n "$TARGET_REPO" ]; then
   REPOS_LIST="$TARGET_REPO"
 else
@@ -57,6 +63,43 @@ echo "=== PR Standards Rollout (dry-run=$DRY) ==="
 echo ""
 
 done_c=0 already_c=0 repaired_c=0 skipped_c=0 fail_c=0
+
+# Build the merged AGENTS.md for a repo/branch into AGENTS_MD.
+# Both the repair path and the full apply path need this. It used to live only in
+# the apply path, so the repair path referenced $AGENTS_MD before it existed and,
+# under `set -u`, took the whole fleet run down instead of one repo.
+# Returns 1 when the existing file cannot be read, so the caller can skip the repo
+# rather than overwrite content it could not see.
+build_agents_md() {
+  local repo="$1" branch="$2" resp existing=""
+  AGENTS_BLOCK=$(echo "$AGENTS_BLOCK_TPL" | sed "s|__PREFIX_UPPER__|$PREFIX_UPPER|g; s|__PREFIX__|$PREFIX|g")
+  resp=$(gh api "repos/$OWNER/$repo/contents/AGENTS.md?ref=$branch" 2>/dev/null) || {
+    if echo "$resp" | grep -q '"Not Found"'; then
+      resp="__NOT_FOUND__"
+    else
+      return 1
+    fi
+  }
+  if [ "$resp" != "__NOT_FOUND__" ]; then
+    existing=$(echo "$resp" | python3 -c "
+import json, base64, sys
+d = json.load(sys.stdin)
+print(base64.b64decode(d['content']).decode())" 2>/dev/null) || return 1
+  fi
+  AGENTS_MD=$(EXISTING="$existing" BLOCK="$AGENTS_BLOCK" python3 -c "
+import os, re
+existing = os.environ.get('EXISTING', '')
+block = os.environ.get('BLOCK', '')
+start, end = '<!-- pr-standards:start -->', '<!-- pr-standards:end -->'
+if start in existing and end in existing:
+    out = re.sub(re.escape(start) + '.*?' + re.escape(end), lambda _: block, existing, flags=re.S)
+elif existing.strip():
+    out = existing.rstrip() + '\n\n' + block + '\n'
+else:
+    out = '# AGENTS.md\n\n' + block + '\n'
+print(out, end='')
+")
+}
 
 while IFS= read -r repo; do
   [ -z "$repo" ] && continue
@@ -154,6 +197,17 @@ print(json.dumps(cfg, indent=2))
       continue
     fi
     DEFAULT_BRANCH=$(gh api "repos/$OWNER/$repo" --jq '.default_branch')
+    AGENTS_MD=""
+    case "$REPAIR_MISSING" in
+      *AGENTS.md*)
+        build_agents_md "$repo" "$BRANCH" || {
+          echo "FAIL  $repo  (REPAIR: cannot read AGENTS.md)"
+          (( fail_c++ ))
+          continue 2
+        }
+        ;;
+    esac
+    REPAIR_FAIL=0
     for FP in $REPAIR_MISSING; do
       case "$FP" in
         *.json)        FC="$CONFIG_JSON" ;;
@@ -167,20 +221,36 @@ import json, base64, sys
 content = sys.stdin.read()
 content_b64 = base64.b64encode(content.encode()).decode()
 payload = {'message': '[pr-standards] add missing $FP', 'branch': '$BRANCH', 'content': content_b64}
-if '\$EXISTING_SHA':
-    payload['sha'] = '\$EXISTING_SHA'
+if '$EXISTING_SHA':
+    payload['sha'] = '$EXISTING_SHA'
 print(json.dumps(payload))
 " <<< "$FC")
       gh api "repos/$OWNER/$repo/contents/$FP" --method PUT --silent --input - <<< "$PAYLOAD_JSON" 2>/dev/null || {
         echo "WARN  $repo  (REPAIR: $FP failed)"
+        REPAIR_FAIL=1
       }
     done
+    if [ "$REPAIR_FAIL" -ne 0 ]; then
+      echo "FAIL  $repo  (REPAIR: one or more writes failed)"
+      (( fail_c++ ))
+      continue
+    fi
     echo "REPAIR $repo  (wrote missing: $REPAIR_MISSING)"
     (( repaired_c++ ))
     continue
   fi
 
-  # Step A: create issue
+  # Step A: create the issue, or reuse the one a failed run left behind.
+  # A run that dies after this point leaves an open issue and a branch. The
+  # already-done check only reads the default branch, so it cannot see them, and
+  # a retry used to mint a second issue and a second branch for the same repo.
+  ISSUE_TITLE="Adopt the fleet PR standard"
+  ISSUE_NUM=$(gh issue list --repo "$OWNER/$repo" --state open --limit 50 \
+    --search "$ISSUE_TITLE in:title" --json number,title \
+    --jq "[.[] | select(.title == \"$ISSUE_TITLE\") | .number] | first // empty" 2>/dev/null)
+  if [ -n "$ISSUE_NUM" ]; then
+    echo "      $repo  (reusing open issue #$ISSUE_NUM from an earlier run)"
+  else
   ISSUE_NUM=$(gh issue create \
     --repo "$OWNER/$repo" \
     --title "Adopt the fleet PR standard" \
@@ -193,6 +263,7 @@ print(json.dumps(payload))
 Branch names: \`$PREFIX-<issue>-<slug>\`
 PR titles: \`[$PREFIX_UPPER-<ISSUE>] description\`
 " 2>/dev/null | grep -oE '[0-9]+$' | head -1)
+  fi
   if [ -z "$ISSUE_NUM" ]; then
     echo "FAIL  $repo  (issue create returned no number)"
     (( fail_c++ ))
@@ -219,46 +290,14 @@ PR titles: \`[$PREFIX_UPPER-<ISSUE>] description\`
 
   # Step C: write three files via contents API
   # AGENTS.md is how codex, pi, kimi, muse and gemini learn the standard;
-  # CLAUDE.md covers the Claude accounts from ~/Documents/Personal. Merge the
-  # block between its markers so a second run updates it instead of appending
-  # a second copy, and keep whatever else the file already says.
-  AGENTS_BLOCK=$(echo "$AGENTS_BLOCK_TPL" | sed "s|__PREFIX_UPPER__|$PREFIX_UPPER|g; s|__PREFIX__|$PREFIX|g")
-  # Read existing AGENTS.md on the branch. A 404 is a new file and is fine.
-  # Any other error is a real problem: abort rather than guess and risk
-  # overwriting content we cannot read back.
-  EXISTING_AGENTS=""
-  AGENTS_RESP=$(gh api "repos/$OWNER/$repo/contents/AGENTS.md?ref=$BRANCH" 2>/dev/null) || {
-    if echo "$AGENTS_RESP" | grep -q '"Not Found"'; then
-      AGENTS_RESP="__NOT_FOUND__"
-    else
-      echo "FAIL  $repo  (cannot read AGENTS.md)"
-      (( fail_c++ ))
-      continue
-    fi
+  # CLAUDE.md covers the Claude accounts from ~/Documents/Personal. The builder
+  # merges the block between its markers so a second run updates it instead of
+  # appending a second copy, and keeps whatever else the file already says.
+  build_agents_md "$repo" "$BRANCH" || {
+    echo "FAIL  $repo  (cannot read AGENTS.md)"
+    (( fail_c++ ))
+    continue
   }
-  if [ "$AGENTS_RESP" != "__NOT_FOUND__" ]; then
-    EXISTING_AGENTS=$(echo "$AGENTS_RESP" | python3 -c "
-import json, base64, sys
-d = json.load(sys.stdin)
-print(base64.b64decode(d['content']).decode())" 2>/dev/null) || {
-      echo "FAIL  $repo  (cannot decode AGENTS.md)"
-      (( fail_c++ ))
-      continue
-    }
-  fi
-  AGENTS_MD=$(EXISTING="$EXISTING_AGENTS" BLOCK="$AGENTS_BLOCK" python3 -c "
-import os, re
-existing = os.environ.get('EXISTING', '')
-block = os.environ.get('BLOCK', '')
-start, end = '<!-- pr-standards:start -->', '<!-- pr-standards:end -->'
-if start in existing and end in existing:
-    out = re.sub(re.escape(start) + '.*?' + re.escape(end), lambda _: block, existing, flags=re.S)
-elif existing.strip():
-    out = existing.rstrip() + '\n\n' + block + '\n'
-else:
-    out = '# AGENTS.md\n\n' + block + '\n'
-print(out, end='')
-")
 
   WRITE_FAIL=0; WRITE_FAIL_FILE=""
   for item in ".github/pr-standards.json" ".github/pull_request_template.md" ".github/workflows/pr-standards.yml" "AGENTS.md"; do
