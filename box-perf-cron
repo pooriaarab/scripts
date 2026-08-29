@@ -27,6 +27,12 @@ fail=0
     echo "--- $repo"
     "$CHECK" "$repo" 2>&1 || fail=1
   done
+  # Environment drift: a repo's default branch can change under a pinned
+  # environment, and then the Box clones a branch that no longer exists. That
+  # looks fine until a build fails, so check it on the same weekly cadence.
+  echo "--- environment branch drift"
+  "$HOME/Documents/Personal/scripts/box-env-provision" --verify 2>&1 || fail=1
+
   # Never leave a Box running just because a check started one.
   "$HOME/.local/bin/box-work" --stop-all 2>&1 || true
   echo "----- exit=$fail"

@@ -762,6 +762,36 @@ Two Boxes had been started with `--no-auto-stop`, so `archiveAfter` was null and
 no TTL would ever fire. Both were idle at load 0.00. Before the fix this exited
 0 and nobody would have known.
 
+## Environments drift, so check them
+
+Three of the 61 environments were cloning a branch that was wrong or gone:
+
+```text
+replytosocial   clones 'production'                                   default is 'main'
+supportsheep    clones 'feature/migration-to-supportsheep'            default is 'main'
+DishRadar       clones 'pooriaarab/pooria-arab/help-us-identify-...'  default is 'main'
+```
+
+`production` no longer exists at all, so that Box cloned nothing and looked
+fine until a build failed.
+
+**Root cause was mine.** The provisioner read the default branch from
+`git symbolic-ref refs/remotes/origin/HEAD`, which is whatever the local clone
+recorded when it was made. It goes stale when a default branch changes, and on
+DishRadar it produced that mangled multi-segment value. It asks GitHub now
+(`gh repo view --json defaultBranchRef`) and rejects anything containing a
+slash.
+
+Drift will happen again — default branches change. So:
+
+```sh
+box-env-provision --verify   # report environments cloning the wrong branch
+```
+
+runs weekly from `box-perf-cron`, alongside the timing check. Same principle as
+`box-guard`: assume the config rots and check it, rather than assuming
+provisioning stays correct.
+
 ## Still open
 
 - **Content Rabbit has no warm snapshot yet.** Its repo is not connected to the

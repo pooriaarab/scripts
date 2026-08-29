@@ -22,9 +22,10 @@
 set -uo pipefail
 export PATH="$HOME/.ascii/bin:$PATH"
 
-DRY=0; ALL=0; PRIVATE_ONLY=0; WITH_AGENTS=0; TARGETS=()
+DRY=0; ALL=0; PRIVATE_ONLY=0; WITH_AGENTS=0; VERIFY=0; TARGETS=()
 while (( $# )); do
   case "$1" in
+    --verify) VERIFY=1; shift ;;
     --dry-run) DRY=1; shift ;;
     --all) ALL=1; shift ;;
     --private-only) PRIVATE_ONLY=1; shift ;;
@@ -47,6 +48,38 @@ if (( PRIVATE_ONLY )); then
   echo "private repos on the account: $(printf '%s' "$PRIVATE_LIST" | wc -w | tr -d ' ')"
 fi
 
+# Default branches change. An environment pinned to a branch that no longer
+# exists clones nothing, and the Box looks fine until a build fails. Check for
+# that drift rather than assuming provisioning stays correct.
+verify_all() {
+  local bad=0 tmp
+  tmp="$(mktemp)"
+  box env list --json 2>/dev/null > "$tmp" || { echo "cannot list environments" >&2; rm -f "$tmp"; return 1; }
+  while IFS=$'\t' read -r env full branch; do
+    [[ -z "$env" ]] && continue
+    local real
+    real="$(gh repo view "$full" --json defaultBranchRef --jq .defaultBranchRef.name 2>/dev/null)"
+    [[ -z "$real" ]] && continue
+    if [[ "$real" != "$branch" ]]; then
+      echo "  DRIFT $env: clones '$branch', default is '$real'"
+      bad=$((bad+1))
+    fi
+  done < <(python3 -c '
+import json,sys
+d=json.load(open(sys.argv[1]))
+for e in d["environments"]:
+    for r in e.get("selectedRepositories",[]):
+        print("%s\t%s\t%s" % (e["name"], r["fullName"], r.get("baseBranch")))
+' "$tmp")
+  rm -f "$tmp"
+  if (( bad )); then
+    echo "box-env-provision: $bad environment(s) clone the wrong branch. Re-run without --verify to fix."
+    return 1
+  fi
+  echo "box-env-provision: every environment clones its repo's default branch."
+  return 0
+}
+
 provision() {
   local d="$1"
   local remote; remote="$(git -C "$d" remote get-url origin 2>/dev/null || true)"
@@ -68,7 +101,16 @@ provision() {
 
   echo "  $name"
   run box env new "$name"
-  run box env add-repo "$name" "pooriaarab/$name" --branch "$(git -C "$d" symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|^origin/||' || echo main)"
+  # Ask GitHub for the default branch, not the local cache. `git symbolic-ref
+  # refs/remotes/origin/HEAD` is whatever this clone happened to record when it
+  # was made: it goes stale when the default branch changes, and on one repo it
+  # produced the mangled value "pooriaarab/pooria-arab/help-us-identify-what-to-build".
+  # A wrong branch here means the Box clones something that may not even exist.
+  local branch
+  branch="$(gh repo view "pooriaarab/$name" --json defaultBranchRef --jq .defaultBranchRef.name 2>/dev/null)"
+  case "$branch" in ""|*/*) branch="$(git -C "$d" symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|^origin/||')" ;; esac
+  case "$branch" in ""|*/*) branch=main ;; esac
+  run box env add-repo "$name" "pooriaarab/$name" --branch "$branch"
 
   # Build-cache credentials, read from the repo's own root .env.local so the
   # value stays in one place.
@@ -146,6 +188,8 @@ if (( ALL )); then
     done | sort -u
   )
 fi
+
+if (( VERIFY )); then verify_all; exit $?; fi
 
 (( ${#TARGETS[@]} )) || { echo "nothing to do; pass repo dirs or --all" >&2; exit 2; }
 
