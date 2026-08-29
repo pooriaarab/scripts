@@ -20,7 +20,7 @@ set -uo pipefail
 ROOTS=("$HOME/Documents/Personal")
 APPLY=0
 UNINSTALL=0
-VERSION="v3"
+VERSION="v4"
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -32,10 +32,23 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+# Write the hook through a temporary file in the same directory, then rename.
+# Redirecting straight onto $hook truncates it first, so a failed write left a
+# partial file that still carried the version marker and a later run reported OK
+# while the hook body was gone.
+write_hook() {
+  local target="$1" dir="$2" tmp
+  tmp=$(mktemp "$dir/.pre-push.XXXXXX") || return 1
+  if ! printf '%s\n' "$HOOK_BODY" > "$tmp"; then rm -f "$tmp"; return 1; fi
+  if ! chmod +x "$tmp"; then rm -f "$tmp"; return 1; fi
+  if ! mv -f "$tmp" "$target"; then rm -f "$tmp"; return 1; fi
+  return 0
+}
+
 read -r -d '' HOOK_BODY <<'HOOK' || true
 #!/bin/bash
 # Installed by pooriaarab/scripts install-pr-hooks. Do not edit here; edit there.
-# install-pr-hooks v3
+# install-pr-hooks v4
 #
 # Hook that rejects pushes whose branch names do not meet the fleet PR standard:
 #   <prefix>-<issue>-<slug>     e.g. cr-142-fix-onboarding-drop-off
@@ -57,8 +70,8 @@ if ! command -v python3 >/dev/null 2>&1; then
   exit 1
 fi
 
-PREFIX=$(python3 -c "
-import json, sys
+CONFIG_LINES=$(python3 -c "
+import json, re, sys
 try:
     cfg = json.load(open('$CONFIG'))
 except json.JSONDecodeError as e:
@@ -68,15 +81,50 @@ p = cfg.get('prefix', '')
 # The value is spliced into a grep pattern below, so a non-string would be
 # printed as its Python repr and ['cr'] would become a character class: a regex
 # that quietly accepts the wrong branch names instead of failing loudly.
-if not isinstance(p, str) or not p:
-    print(f'PR-STANDARDS HOOK: $CONFIG needs a non-empty string \"prefix\"', file=sys.stderr)
-    sys.exit(1)
-import re as _re
-if not _re.fullmatch(r'[a-z]{2,4}', p):
+if not isinstance(p, str) or not re.fullmatch(r'[a-z]{2,4}', p):
     print(f'PR-STANDARDS HOOK: prefix {p!r} must be 2-4 lowercase letters', file=sys.stderr)
     sys.exit(1)
+# Validate every field this hook honours, not just the prefix. A malformed
+# 'allowChoreEscape': 'true' is a string, which is truthy, so reading it without
+# a type check would silently open the escape the config meant to keep shut.
+exempt = cfg.get('exemptBranches', [])
+if not isinstance(exempt, list) or not all(isinstance(b, str) and b for b in exempt):
+    print('PR-STANDARDS HOOK: exemptBranches must be a list of non-empty strings', file=sys.stderr)
+    sys.exit(1)
+chore = cfg.get('allowChoreEscape', False)
+if not isinstance(chore, bool):
+    print(f'PR-STANDARDS HOOK: allowChoreEscape must be true or false, got {chore!r}', file=sys.stderr)
+    sys.exit(1)
 print(p)
+print('1' if chore else '0')
+for b in exempt:
+    print(b)
 ") || exit 1
+PREFIX=$(printf '%s\n' "$CONFIG_LINES" | sed -n 1p)
+CHORE_OK=$(printf '%s\n' "$CONFIG_LINES" | sed -n 2p)
+CONFIGURED_EXEMPT=$(printf '%s\n' "$CONFIG_LINES" | sed -n '3,$p')
+
+# The canonical validator lives in pr-standards.mjs. These two must agree, so the
+# constraints are spelled out here rather than approximated: issue numbers have no
+# leading zero and are never 0, and a slug is 3 to 48 characters.
+BRANCH_RE="^${PREFIX}-[1-9][0-9]*-[a-z0-9]+(-[a-z0-9]+)*$"
+
+branch_is_exempt() {
+  case "$1" in
+    main|release|refactor|gh-pages|HEAD|release/*|dependabot/*|renovate/*) return 0 ;;
+  esac
+  if [ "$CHORE_OK" = 1 ]; then
+    case "$1" in chore/*) return 0 ;; esac
+  fi
+  [ -n "$CONFIGURED_EXEMPT" ] && printf '%s\n' "$CONFIGURED_EXEMPT" | grep -qxF "$1" && return 0
+  return 1
+}
+
+branch_is_valid() {
+  echo "$1" | grep -qE "$BRANCH_RE" || return 1
+  slug="${1#*-}"; slug="${slug#*-}"
+  [ "${#slug}" -ge 3 ] && [ "${#slug}" -le 48 ]
+}
 
 # Read the first line of stdin to see if we are being called by git.
 IFS='' read -r first_line
@@ -84,13 +132,8 @@ IFS='' read -r first_line
 if [ -z "$first_line" ]; then
   # Manual invocation -- stdin is empty, fall back to HEAD.
   BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
-  case "$BRANCH" in
-    main|master|release|refactor|gh-pages|HEAD|release/*|dependabot/*|renovate/*) exit 0 ;;
-  esac
-
-  if echo "$BRANCH" | grep -qE "^${PREFIX}-[0-9]+-[a-z0-9]+(-[a-z0-9]+)*$"; then
-    exit 0
-  fi
+  branch_is_exempt "$BRANCH" && exit 0
+  branch_is_valid "$BRANCH" && exit 0
 
   cat >&2 <<MSG
 
@@ -135,14 +178,10 @@ while IFS='' read -r line; do
       ;;
   esac
 
-  # Exempt branches.
-  case "$BRANCH" in
-    main|master|release|refactor|gh-pages|HEAD|release/*|dependabot/*|renovate/*) continue ;;
-  esac
-
-  if echo "$BRANCH" | grep -qE "^${PREFIX}-[0-9]+-[a-z0-9]+(-[a-z0-9]+)*$"; then
-    continue
-  fi
+  # Exempt branches. master is deliberately absent: it is not in the documented
+  # exemption list, and a branch by that name must meet the standard like any other.
+  branch_is_exempt "$BRANCH" && continue
+  branch_is_valid "$BRANCH" && continue
 
   errors+=("$BRANCH")
 done < <({ echo "$first_line"; cat; })
@@ -267,10 +306,9 @@ for root in "${ROOTS[@]}"; do
 
       # Outdated hook -- update it.
       if [ "$APPLY" = 1 ]; then
-        if ! printf '%s\n' "$HOOK_BODY" > "$hook"; then
+        if ! write_hook "$hook" "$hook_dir"; then
           echo "FAIL    $repo (write failed)"; failed=$((failed+1)); continue
         fi
-        chmod +x "$hook" || { echo "FAIL    $repo (chmod failed)"; failed=$((failed+1)); continue; }
         echo "UPDATE  $repo"; updated=$((updated+1))
       else
         echo "UPDATE  $repo (would replace outdated hook)"; updated=$((updated+1))
@@ -288,10 +326,9 @@ for root in "${ROOTS[@]}"; do
       if ! mkdir -p "$hook_dir"; then
         echo "FAIL    $repo (mkdir failed: $hook_dir)"; failed=$((failed+1)); continue
       fi
-      if ! printf '%s\n' "$HOOK_BODY" > "$hook"; then
+      if ! write_hook "$hook" "$hook_dir"; then
         echo "FAIL    $repo (write failed)"; failed=$((failed+1)); continue
       fi
-      chmod +x "$hook" || { echo "FAIL    $repo (chmod failed)"; failed=$((failed+1)); continue; }
     fi
     echo "INSTALL $repo"; installed=$((installed+1))
   done < <(find "$root" -maxdepth 4 -type d -name .git 2>/dev/null)
