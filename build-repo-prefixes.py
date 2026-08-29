@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Generate repo-prefixes.json: unique 2-4 char prefix per pooriaarab repo.
 
-Run:  python3 _build-prefixes.py > repo-prefixes.json
+Run:  python3 build-repo-prefixes.py > repo-prefixes.json
 """
 
 import json
