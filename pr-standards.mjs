@@ -710,10 +710,13 @@ export function validateCommits(commits, config, truncated = false) {
     for (const line of message.split('\n')) {
       const coAuthor = COAUTHOR_LINE_RE.exec(line);
       if (coAuthor) {
-        // Match only the display-name portion, before an optional <email>.
-        // Otherwise a human co-author with an @anthropic.com or @openai.com
-        // address fails the PR for their email domain, not their name.
-        const name = coAuthor[1].split('<')[0].trim();
+        // Strip complete <...> segments rather than truncating at the first `<`.
+        // Matching only the part before it means everything AFTER the email is
+        // discarded too, so `vibecodereview <bot@example.com> Claude` reads as
+        // the exempt bot and the Claude behind it is never seen. Removing the
+        // segments keeps the reason for doing this at all, which is that a human
+        // at an @anthropic.com address must not fail for their email domain.
+        const name = coAuthor[1].replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
         // The owner's own review bot records what it changed. That is a real
         // author, not a model taking credit, so it stays exempt -- but only
         // when the name is exactly that bot, not a banned name smuggled in

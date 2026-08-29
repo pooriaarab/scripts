@@ -416,3 +416,14 @@ test('a punctuation-prefixed banned name still matches inside a markdown footer 
   const commit = (m) => [{ sha: 'abc1234', commit: { message: `Fix\n\n${m}` } }];
   assert.equal(validateCommits(commit('Generated with [@cursor](https://cursor.sh)'), config).ok, false);
 });
+
+test('a banned name after the email delimiter is not discarded', () => {
+  // Truncating at the first `<` threw away everything after the email too, so
+  // `vibecodereview <bot@example.com> Claude` read as the exempt bot alone.
+  const config = { ...DEFAULT_CONFIG, prefix: 'cr' };
+  const commit = (m) => [{ sha: 'abc1234', commit: { message: `Fix\n\n${m}` } }];
+  assert.equal(validateCommits(commit('Co-authored-by: vibecodereview <bot@example.com> Claude'), config).ok, false);
+  assert.equal(validateCommits(commit('Co-authored-by: vibecodereview <bot@example.com>'), config).ok, true);
+  // The reason the email is stripped at all: a human must not fail for a domain.
+  assert.equal(validateCommits(commit('Co-authored-by: Jane Doe <jane@anthropic.com>'), config).ok, true);
+});
