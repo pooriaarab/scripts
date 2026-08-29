@@ -226,6 +226,29 @@ is_eligible() {
   return 0
 }
 
+# Lexically collapse "." and ".." segments without touching the filesystem, so
+# it works on a path that does not exist yet (a dry run must not create one).
+# Negative array indices need bash 4.3, so the last element is dropped by
+# index and the array reindexed, not with the shorter "stack[-1]" form.
+normalize_path() {
+  local path="$1" IFS=/ seg last
+  local -a stack=()
+  for seg in $path; do
+    case "$seg" in
+      ''|.) ;;
+      ..)
+        if [ "${#stack[@]}" -gt 0 ]; then
+          last=$((${#stack[@]} - 1))
+          unset "stack[$last]"
+          stack=("${stack[@]}")
+        fi
+        ;;
+      *) stack+=("$seg") ;;
+    esac
+  done
+  (IFS=/; printf '/%s' "${stack[*]}")
+}
+
 installed=0 already=0 updated=0 removed=0 skipped=0 failed=0
 
 for root in "${ROOTS[@]}"; do
@@ -241,6 +264,19 @@ for root in "${ROOTS[@]}"; do
   # A worktree shares its hooks with the main checkout, so only the common git
   # directory needs the file. Finding .git directories rather than .git files
   # gets exactly the main checkouts and skips the worktrees for free.
+  #
+  # find's stderr goes to its own temp file rather than /dev/null so a subtree
+  # it could not read (permission denied, a broken symlink) is surfaced as a
+  # failure instead of just being silently under-scanned while still reporting
+  # "failed=0", as if the root had been fully covered.
+  find_out=$(mktemp)
+  find_err=$(mktemp)
+  find "$root" -maxdepth 4 -type d -name .git >"$find_out" 2>"$find_err"
+  if [ -s "$find_err" ]; then
+    echo "FAIL    $root (find could not fully scan this root: $(head -1 "$find_err"))"
+    failed=$((failed+1))
+  fi
+
   while IFS= read -r gitdir; do
     repo="$(dirname "$gitdir")"
     if ! is_eligible "$repo"; then skipped=$((skipped+1)); continue; fi
@@ -271,6 +307,22 @@ for root in "${ROOTS[@]}"; do
         ~/*) hook_dir="$HOME/${hooks_path#~/}" ;;
         *)  hook_dir="$repo/$hooks_path" ;;
       esac
+
+      # A repo-local hooksPath is only actually local if the directory it names
+      # is inside the repo. An absolute path, or a relative one that climbs out
+      # with "..", can still name a directory shared with other checkouts --
+      # exactly what the check above exists to rule out. Compare the two paths
+      # normalized rather than as strings, so "$repo/../shared" is caught too.
+      resolved_repo=$(normalize_path "$repo")
+      resolved_hook_dir=$(normalize_path "$hook_dir")
+      case "$resolved_hook_dir" in
+        "$resolved_repo"|"$resolved_repo"/*) ;;
+        *)
+          echo "SKIP    $repo  (core.hooksPath resolves outside the repo: $hooks_path -> $resolved_hook_dir)"
+          echo "        That directory could be shared with other checkouts. Point core.hooksPath inside this repo."
+          skipped=$((skipped+1)); continue
+          ;;
+      esac
     fi
 
     hook="$hook_dir/pre-push"
@@ -292,7 +344,7 @@ for root in "${ROOTS[@]}"; do
     # handwritten hook that happens to mention this script, so we require
     # the exact sentinel line. A file without it is skipped as a foreign hook.
     if [ -f "$hook" ] && grep -qE "^# install-pr-hooks v[0-9]+$" "$hook" 2>/dev/null; then
-      if grep -qF "$version_marker" "$hook" 2>/dev/null; then
+      if grep -qxF "$version_marker" "$hook" 2>/dev/null; then
         # Right content is not enough. If a previous chmod failed, git refuses
         # to run the file and every later run would keep reporting OK.
         if [ ! -x "$hook" ]; then
@@ -331,7 +383,8 @@ for root in "${ROOTS[@]}"; do
       fi
     fi
     echo "INSTALL $repo"; installed=$((installed+1))
-  done < <(find "$root" -maxdepth 4 -type d -name .git 2>/dev/null)
+  done < "$find_out"
+  rm -f "$find_out" "$find_err"
 done
 
 echo
