@@ -25,7 +25,7 @@ Everything below is that sentence, made checkable.
 | Part | Rule |
 |---|---|
 | `prefix` | 2–4 lowercase letters. One per repo, fixed. Read from `.github/pr-standards.json`. |
-| `issue` | A GitHub issue number that **exists and is open**. No issue, no branch. |
+| `issue` | A GitHub issue number that **exists and is open**. No issue, no branch. No `0`, and no leading zeros, so one issue has exactly one branch name. |
 | `slug` | `[a-z0-9]+(-[a-z0-9]+)*`, 3–48 characters. Describes the change, not the file. |
 
 Full pattern: `^[a-z]{2,4}-[0-9]+-[a-z0-9]+(-[a-z0-9]+)*$`
@@ -72,9 +72,13 @@ Four things, all required:
 
   Count all nine keywords GitHub honours, not just the one in the example:
   `close`, `closes`, `closed`, `fix`, `fixes`, `fixed`, `resolve`, `resolves`,
-  `resolved`. A checker that knows only `Closes` lets `Closes #1` plus
-  `Resolves #2` through, which is two concerns wearing one coat. A reference
-  inside an HTML comment does not count, so an unedited template cannot trip it.
+  `resolved`. Each of them also works with a colon (`Closes: #10`) and in the
+  cross-repo `owner/name#100` form. A checker that knows only `Closes #N` lets
+  `Closes #1` plus `Fixes: #2` through, which is two concerns wearing one coat.
+  A cross-repo reference counts toward the one-reference rule, because it is
+  still a second thing the PR closes, but it can never satisfy the branch issue.
+  A reference inside an HTML comment does not count, so an unedited template
+  cannot trip it.
 - `## How I verified` must name a command and its result. `N/A`, `TODO`, `tested
   locally`, and an unedited template comment all fail.
 - Body under 120 characters fails. A description that only restates the diff is
@@ -131,7 +135,7 @@ reads it; nothing fetches a central registry at check time.
   "maxTopLevelDirs": 3,
   "minBodyChars": 120,
   "overrideLabel": "oversized-approved",
-  "exemptBranches": ["main", "master", "release", "refactor", "gh-pages"],
+  "exemptBranches": ["main", "release", "refactor", "gh-pages"],
   "excludeGlobs": ["..."]
 }
 ```
@@ -159,10 +163,27 @@ Local layers exist for speed. CI is the authority. Neither replaces the other.
 | `pr-standards.yml` in CI | on every PR | everything, including size and body | only by ignoring red |
 | `vibecodereview` scope lens | on every PR | non-atomic and off-scope work | by ignoring the review |
 
-There is no fifth layer today. GitHub rulesets and required status checks need
-GitHub Pro, and this account is on Free, so on a private repo, no check can be
-made mandatory. Until that changes, red CI is a signal, not a gate, and the two
-local layers carry more weight than they otherwise would.
+The table describes what each layer catches once installed. A layer not rolled
+out to a repo catches nothing there, so read it as the design rather than as the
+state of any particular repo.
+
+There is a fifth layer, and whether you can have it depends on plan AND
+visibility, not plan alone:
+
+| Repo | Rulesets and required checks on GitHub Free |
+|---|---|
+| Public | Available |
+| Private, personal account | Needs GitHub Pro |
+| Private, organization | Needs GitHub Team or Enterprise |
+
+So on this account the public repos can be gated and the private ones cannot.
+Where nothing can be required, red CI is a signal rather than a gate, and the
+local layers carry more weight, though `--no-verify` still skips the git hook.
+They are early feedback, not a boundary.
+
+Caution: do not add `pr-standards` as a required status check on a repo before
+the workflow is installed there. Requiring a check the repo never runs blocks
+every pull request in that repo, permanently.
 
 ## Usage
 
