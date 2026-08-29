@@ -1,0 +1,272 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+
+import {
+  DEFAULT_CONFIG,
+  checkSize,
+  countClosingReferences,
+  derivePrefix,
+  matchesGlob,
+  summarizeFiles,
+  validateBody,
+  validateBranchName,
+  validateTitle,
+} from './pr-standards.mjs';
+
+const config = {
+  ...DEFAULT_CONFIG,
+  prefix: 'cr',
+  minBodyChars: 120,
+};
+
+test('validates branch names and exempts protected branches', () => {
+  assert.equal(validateBranchName('cr-142-fix-onboarding', config).ok, true);
+  assert.equal(validateBranchName('cr-142-fix-onboarding-drop-off', config).ok, true);
+  assert.equal(validateBranchName('main', config).exempt, true);
+  assert.equal(validateBranchName('release/2026-08', config).exempt, true);
+  assert.equal(validateBranchName('feature/nope', config).ok, false);
+  assert.equal(validateBranchName('CR-142-fix-onboarding', config).ok, false);
+  assert.equal(validateBranchName('cr-142-a', config).ok, false);
+  assert.equal(validateBranchName(`cr-142-${'a'.repeat(49)}`, config).ok, false);
+});
+
+test('allows chore branches only when the config enables the escape', () => {
+  assert.equal(validateBranchName('chore/update-deps', config).ok, false);
+  assert.equal(
+    validateBranchName('chore/update-deps', { ...config, allowChoreEscape: true }).choreEscape,
+    true,
+  );
+});
+
+test('derives prefixes from repository names', () => {
+  assert.equal(derivePrefix('content-rabbit'), 'cr');
+  assert.equal(derivePrefix('popcornteam'), 'pop');
+  assert.equal(derivePrefix('imecore'), 'ime');
+  assert.equal(derivePrefix('one-two-three-four-five'), 'ottf');
+});
+
+test('accepts a correctly formatted imperative title', () => {
+  assert.equal(validateTitle('[CR-142] Fix onboarding drop-off', 'cr', 142).ok, true);
+});
+
+test('checks every title rule', () => {
+  const cases = [
+    ['[PT-142] Fix onboarding drop-off', 'the prefix must match the configured prefix'],
+    ['[CR-143] Fix onboarding drop-off', 'the issue number must match the branch'],
+    ['CR-142 Fix onboarding drop-off', 'the title tag is required'],
+    ['[CR-142] fix onboarding drop-off', 'the subject must start with a capital'],
+    ['[CR-142] Fix it', 'the subject is too short'],
+    [`[CR-142] ${'Fix '.repeat(13)}`, 'the subject is too long'],
+    ['[CR-142] Fix onboarding drop-off.', 'the subject cannot end with a period'],
+    ['[CR-142] Added onboarding drop-off', 'Added is not imperative'],
+    ['[CR-142] Fixed onboarding drop-off', 'Fixed is not imperative'],
+    ['[CR-142] Updated onboarding drop-off', 'Updated is not imperative'],
+    ['[CR-142] Removed onboarding drop-off', 'Removed is not imperative'],
+    ['[CR-142] Changed onboarding drop-off', 'Changed is not imperative'],
+    ['[CR-142] Refactored onboarding drop-off', 'Refactored is not imperative'],
+    ['[CR-142] Implemented onboarding drop-off', 'Implemented is not imperative'],
+    ['[CR-142] Fixing onboarding drop-off', '-ing openers are not imperative'],
+    ['[CR-142] Fix onboarding 🚀 drop-off', 'emoji is not allowed'],
+    ['[CR-142] fix: onboarding drop-off', 'conventional commit prefixes are not allowed'],
+  ];
+
+  for (const [title, reason] of cases) {
+    assert.equal(validateTitle(title, 'cr', 142).ok, false, reason);
+  }
+});
+
+const validBody = `Closes #142
+
+## What
+Fixes the onboarding drop-off after step three.
+
+## Why
+Issue #142 reports that users lose their progress at this step. This change keeps the progress state.
+
+## How I verified
+bun test -> 214 passed
+
+Assisted-by: claude-personal:claude-opus-5`;
+
+test('requires one matching closing reference and the required body sections', () => {
+  assert.equal(countClosingReferences(validBody).length, 1);
+  assert.equal(validateBody(validBody, 142, config).ok, true);
+  assert.equal(validateBody(validBody.replace('Closes #142', 'Closes #142\nFixes #142'), 142, config).ok, false);
+  assert.equal(validateBody(validBody.replace('Closes #142', 'Closes #7'), 142, config).ok, false);
+  assert.equal(validateBody(validBody.replace('## Why', '## Missing'), 142, config).ok, false);
+  assert.equal(validateBody(validBody.replace('bun test -> 214 passed', 'TODO'), 142, config).ok, false);
+  assert.equal(validateBody(validBody.replace('Assisted-by: claude-personal:claude-opus-5', ''), 142, config).ok, false);
+  assert.equal(validateBody('<!-- template -->', 142, config).ok, false);
+});
+
+test('matches the supported exclusion glob forms', () => {
+  assert.equal(matchesGlob('app.lock', '**/*.lock'), true);
+  assert.equal(matchesGlob('packages/app.lock', '**/*.lock'), true);
+  assert.equal(matchesGlob('dist/bundle.js', 'dist/**'), true);
+  assert.equal(matchesGlob('packages/foo/generated/data.ts', '**/generated/**'), true);
+  assert.equal(matchesGlob('logo.svg', '**/*.{svg,png}'), true);
+  assert.equal(matchesGlob('images/logo.png', '**/*.{svg,png}'), true);
+  assert.equal(matchesGlob('src/logo.gif', '**/*.{svg,png}'), false);
+  assert.equal(matchesGlob('src/a/b.js', 'src/*.js'), false);
+});
+
+test('counts changed lines after exclusions and reports raw totals', () => {
+  const summary = summarizeFiles([
+    { filename: 'src/app.js', additions: 200, deletions: 100 },
+    { filename: 'dist/app.js', additions: 700, deletions: 100 },
+    { filename: 'src/logo.svg', additions: 5, deletions: 5 },
+  ], config);
+
+  assert.deepEqual(summary, {
+    rawLines: 1110,
+    countedLines: 300,
+    excludedLines: 810,
+    rawFiles: 3,
+    countedFiles: 1,
+    excludedFiles: 2,
+    topLevelDirs: ['src'],
+  });
+  assert.equal(checkSize(summary, { ...config, maxLines: 250 }).failures.length, 1);
+});
+
+test('override label short-circuits size failures', () => {
+  const summary = {
+    rawLines: 900,
+    countedLines: 700,
+    excludedLines: 200,
+    rawFiles: 45,
+    countedFiles: 45,
+    excludedFiles: 0,
+    topLevelDirs: ['a', 'b', 'c', 'd'],
+  };
+  const result = checkSize(summary, { ...config, maxLines: 500, maxFiles: 40 }, ['oversized-approved']);
+
+  assert.equal(result.overridden, true);
+  assert.equal(result.failures.length, 0);
+  assert.equal(result.warnings.length, 1);
+});
+
+test('enforces rules for chore branches (null issue)', () => {
+  assert.equal(validateTitle('Added something', 'cr', null).ok, false);
+  assert.equal(validateBody(validBody.replace('bun test -> 214 passed', 'TODO').replace('Closes #142\n\n', ''), null, config).ok, false);
+});
+
+test('fails a chore branch with a Closes reference', () => {
+  assert.equal(validateBody(validBody, null, config).ok, false);
+});
+
+import { main } from './pr-standards.mjs';
+
+test('an exempt branch still skips title and body entirely', async () => {
+  const originalWrite = process.stdout.write;
+  let output = '';
+  process.stdout.write = (chunk) => { output += chunk; return true; };
+  try {
+    const exitCode = await main(['precheck', '--branch', 'main', '--title', 'bad past tense title without tag', '--json']);
+    assert.equal(exitCode, 0);
+    const result = JSON.parse(output);
+    assert.equal(result.failures.length, 0);
+  } finally {
+    process.stdout.write = originalWrite;
+  }
+});
+
+test('issues/{n} returning an object with a pull_request field fails', async () => {
+  const originalWrite = process.stdout.write;
+  const originalPath = process.env.PATH;
+  const originalToken = process.env.GITHUB_TOKEN;
+  const originalFetch = globalThis.fetch;
+  let output = '';
+  process.stdout.write = (chunk) => { output += chunk; return true; };
+  process.env.PATH = ''; // disable gh
+  process.env.GITHUB_TOKEN = 'test-token';
+  process.env.GITHUB_REPOSITORY = 'other/repo'; // Ensure we don't hit the CI check
+
+  globalThis.fetch = async (url) => {
+    if (url.includes('contents/.github/pr-standards.json')) {
+      return { ok: true, json: async () => ({ content: Buffer.from(JSON.stringify({ prefix: 'cr' })).toString('base64'), encoding: 'base64' }) };
+    }
+    if (url.includes('pulls/12/files')) {
+      return { ok: true, json: async () => ([]) };
+    }
+    if (url.includes('pulls/12')) {
+      return { ok: true, json: async () => ({ head: { ref: 'cr-12-test' }, title: '[CR-12] Test PR', body: validBody.replace('142', '12').replace('142', '12').replace('142', '12') }) };
+    }
+    if (url.includes('issues/12')) {
+      return { ok: true, json: async () => ({ state: 'open', pull_request: {} }) };
+    }
+    throw new Error(`Unexpected fetch URL: ${url}`);
+  };
+
+  try {
+    const exitCode = await main(['pr', '--repo', 'test/repo', '--number', '12', '--json']);
+    assert.equal(exitCode, 1);
+    const result = JSON.parse(output);
+    assert.equal(result.failures.some(f => f.check === 'branch issue' && f.got === '#12 is a pull request'), true);
+  } finally {
+    process.stdout.write = originalWrite;
+    process.env.PATH = originalPath;
+    process.env.GITHUB_TOKEN = originalToken;
+    globalThis.fetch = originalFetch;
+    delete process.env.GITHUB_REPOSITORY;
+  }
+});
+
+test('config resolution prefers the target repo over the local checkout', async () => {
+  const originalWrite = process.stdout.write;
+  const originalPath = process.env.PATH;
+  const originalToken = process.env.GITHUB_TOKEN;
+  const originalFetch = globalThis.fetch;
+  let output = '';
+  process.stdout.write = (chunk) => { output += chunk; return true; };
+  process.env.PATH = ''; // disable gh
+  process.env.GITHUB_TOKEN = 'test-token';
+  process.env.GITHUB_REPOSITORY = 'other/repo'; // Ensure we don't hit the CI check
+
+  globalThis.fetch = async (url) => {
+    if (url.includes('contents/.github/pr-standards.json')) {
+      return { ok: true, json: async () => ({ content: Buffer.from(JSON.stringify({ prefix: 'rmt' })).toString('base64'), encoding: 'base64' }) };
+    }
+    if (url.includes('pulls/12/files')) {
+      return { ok: true, json: async () => ([]) };
+    }
+    if (url.includes('pulls/12')) {
+      return { ok: true, json: async () => ({ head: { ref: 'rmt-12-test' }, title: '[RMT-12] Test PR that works', body: validBody.replace('142', '12').replace('142', '12').replace('142', '12') }) };
+    }
+    if (url.includes('issues/12')) {
+      return { ok: true, json: async () => ({ state: 'open' }) };
+    }
+    throw new Error(`Unexpected fetch URL: ${url}`);
+  };
+
+  try {
+    const exitCode = await main(['pr', '--repo', 'test/repo', '--number', '12', '--json']);
+    assert.equal(exitCode, 0);
+    const result = JSON.parse(output);
+    assert.equal(result.prefix, 'rmt');
+    assert.equal(result.provenance, 'from test/repo .github/pr-standards.json');
+  } finally {
+    process.stdout.write = originalWrite;
+    process.env.PATH = originalPath;
+    process.env.GITHUB_TOKEN = originalToken;
+    globalThis.fetch = originalFetch;
+    delete process.env.GITHUB_REPOSITORY;
+  }
+});
+
+test('counts every GitHub closing keyword, not only Closes and Fixes', () => {
+  // GitHub honours nine keywords. A checker that knows two of them lets a PR
+  // close two issues while reporting one.
+  for (const keyword of ['Close', 'Closes', 'Closed', 'Fix', 'Fixes', 'Fixed', 'Resolve', 'Resolves', 'Resolved']) {
+    assert.deepEqual(countClosingReferences(`${keyword} #7`), [{ repo: null, number: 7 }], `missed ${keyword}`);
+  }
+  assert.deepEqual(countClosingReferences('Closes #1\n\nResolves #2'), [{ repo: null, number: 1 }, { repo: null, number: 2 }]);
+  // GitHub accepts a colon after the keyword and a cross-repo reference.
+  assert.deepEqual(countClosingReferences('Closes: #4'), [{ repo: null, number: 4 }]);
+  assert.deepEqual(countClosingReferences('Fixes octo-org/octo-repo#100'), [{ repo: 'octo-org/octo-repo', number: 100 }]);
+  assert.equal(countClosingReferences('Closes #1\nFixes: #2').length, 2);
+  assert.deepEqual(countClosingReferences('closes #3'), [{ repo: null, number: 3 }]);
+  // A comment is not a closing reference, and neither is prose about closing.
+  assert.deepEqual(countClosingReferences('<!-- Closes #9 -->'), []);
+  assert.deepEqual(countClosingReferences('This closes the gap'), []);
+});

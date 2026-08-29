@@ -47,6 +47,33 @@ Not part of the diagnosis order above.
 |---|---|
 | `claude-token-rotate` | Rotate a Claude OAuth token into every repo that runs the review action. Reads the token from a hidden prompt, never an argument, because an argument lands in shell history and the process list. |
 
+## pr-standards
+
+Checks a branch or a pull request against the [PR standard](pr-standards.md): one
+issue, one PR, one concern, under 500 counted lines. Run it before you push, and let
+CI run it again on the PR.
+
+```bash
+./pr-standards branch                    # the current branch name
+./pr-standards branch cr-142-fix-onboard # a specific name
+./pr-standards precheck --branch X --title Y   # pattern only, no network
+./pr-standards pr --repo pooriaarab/content-rabbit --number 88
+./pr-standards pr --repo pooriaarab/content-rabbit --number 88 --json   # machine-readable
+./pr-standards --selfcheck               # run the test suite
+```
+
+Exit 0 clean, 1 on a failure, 2 on a configuration problem. Warnings never change
+the exit code.
+
+Settings come from `.github/pr-standards.json` in the repo being checked. With no
+config file, the prefix is derived from the repo name, which it reads from
+`GITHUB_REPOSITORY` or the origin remote rather than the directory name. A worktree
+is checked out to a directory you named, so the basename is only the last resort.
+
+Two files, not one. `pr-standards` is a launcher and `pr-standards.mjs` holds the
+engine, which is also what the test suite imports. Anything fetching this checker
+needs both.
+
 
 ## Other scripts
 
