@@ -261,6 +261,18 @@ for root in "${ROOTS[@]}"; do
     echo "FAIL    $root (root not found)"; failed=$((failed+1)); continue
   fi
 
+  # Resolve to an absolute path before scanning. find/dirname below inherit
+  # whatever form $root was given in, so a relative --root (e.g. ".") would
+  # otherwise produce relative repo paths; normalize_path collapses "." and
+  # ".." lexically without checking the filesystem, so a relative path like
+  # "./foo" and an absolute one like "/foo/hooks" both normalize to strings
+  # starting with "/foo", making the repo-containment check below compare
+  # unrelated paths as if one were inside the other.
+  orig_root="$root"
+  if ! root="$(cd "$root" && pwd)"; then
+    echo "FAIL    $orig_root (cannot resolve to an absolute path)"; failed=$((failed+1)); continue
+  fi
+
   # A worktree shares its hooks with the main checkout, so only the common git
   # directory needs the file. Finding .git directories rather than .git files
   # gets exactly the main checkouts and skips the worktrees for free.
@@ -368,8 +380,11 @@ for root in "${ROOTS[@]}"; do
       continue
     fi
 
-    # Never clobber a hook somebody else wrote.
-    if [ -f "$hook" ]; then
+    # Never clobber a hook somebody else wrote. Checked with -e rather than -f:
+    # if "$hook" exists but is a directory (or other non-regular file), mv -f
+    # in write_hook would move the temp file inside it instead of replacing it,
+    # silently reporting INSTALL while leaving no executable hook in place.
+    if [ -e "$hook" ]; then
       echo "SKIP    $repo  (a different pre-push hook is installed)"
       skipped=$((skipped+1)); continue
     fi
