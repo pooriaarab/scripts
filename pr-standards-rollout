@@ -245,7 +245,23 @@ print(json.dumps(cfg, indent=2))
           AGENTS.md)     FC="$AGENTS_MD" ;;
           *)             FC="$WORKFLOW_YML" ;;
         esac
-        EXISTING_SHA=$(gh api "repos/$OWNER/$repo/contents/$FP?ref=$BRANCH" --jq '.sha' 2>/dev/null || echo "")
+        # A 404 means the file is new and no sha belongs in the payload. Any
+        # other failure means we could not read a file that may well exist, and
+        # sending no sha then overwrites it. Tell the two apart rather than
+        # treating every error as "not there", the same way the config read does.
+        SHA_RESP=$(gh api "repos/$OWNER/$repo/contents/$FP?ref=$BRANCH" 2>/dev/null) || {
+          if ! echo "$SHA_RESP" | grep -q '"Not Found"'; then
+            echo "WARN  $repo  (REPAIR: cannot read $FP)"
+            REPAIR_FAIL=1
+            continue
+          fi
+          SHA_RESP=""
+        }
+        EXISTING_SHA=$(echo "$SHA_RESP" | python3 -c "
+import json, sys
+raw = sys.stdin.read().strip()
+print(json.loads(raw).get('sha', '') if raw else '')
+" 2>/dev/null || echo "")
         # BRANCH comes from a GitHub API listing (line ~220), not from our own
         # trusted inputs -- anyone with push access to this one repo controls
         # its literal bytes. It must reach Python as data (env var), never

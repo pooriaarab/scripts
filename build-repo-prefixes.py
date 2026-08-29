@@ -64,6 +64,23 @@ def split_camel_lower(s: str) -> list[str]:
 
 
 def derive_prefix(name: str) -> str:
+    """Always return 2-4 lowercase letters.
+
+    The heuristics below have several return paths, and three of them could hand
+    back something main() then rejects the whole run over: "---" and "_" for a
+    name made only of separators, "3t" for 3d-tools. Validating once here beats
+    guarding every branch, and it matches what pr-standards.mjs does for the same
+    rule -- two implementations of one rule is already one too many.
+    """
+    letters = "".join(c for c in _derive_prefix_raw(name).lower() if c.isalpha())[:4]
+    if not letters:
+        return "zz"
+    if len(letters) == 1:
+        return letters * 2
+    return letters
+
+
+def _derive_prefix_raw(name: str) -> str:
     """Derive a 2-4 lowercase prefix for a repo name.
 
     Rules applied in order:
@@ -87,10 +104,16 @@ def derive_prefix(name: str) -> str:
         parts = [p for p in re.split(r"[-_.]+", name_lower) if p]
         if parts:
             prefix = "".join(p[0] for p in parts[:4])
-            # Must be at least 2 chars
-            if len(prefix) < 2 and len(parts) > 1:
-                # Take more from second part
-                prefix = prefix[:1] + parts[1][:3]
+            # Must be at least 2 chars. With one part there is no second part to
+            # borrow from, so take more of that part rather than returning a
+            # one-character prefix that main() then rejects the whole run over.
+            if len(prefix) < 2:
+                source = parts[1] if len(parts) > 1 else parts[0][1:]
+                prefix = (prefix[:1] + source[:3]) or prefix
+            # A one-letter name has nothing left to borrow. Double it rather than
+            # return a length main() rejects the whole run over.
+            if len(prefix) == 1:
+                prefix = prefix * 2
             return prefix[:4]
 
     # ── Single-word name ──
