@@ -1,0 +1,136 @@
+#!/usr/bin/env bash
+# Install the pr-standards pre-push hook into local pooriaarab checkouts.
+#
+# The hook rejects a branch whose name does not meet the standard before the
+# push reaches GitHub. It is the second of four enforcement layers, and on a
+# GitHub Free account it carries more weight than it otherwise would: rulesets
+# and required status checks need GitHub Pro, so nothing server-side can be
+# made mandatory on a private repo. See pr-standards.md.
+#
+# A repo is eligible when its origin remote is a pooriaarab repo AND it has
+# .github/pr-standards.json. Work and Mozilla checkouts are never touched.
+#
+# Usage:
+#   ./install-pr-hooks                  # dry-run every checkout under the roots
+#   ./install-pr-hooks --apply
+#   ./install-pr-hooks --apply --root ~/Documents/Personal/content-rabbit
+#   ./install-pr-hooks --uninstall --apply
+set -uo pipefail
+
+ROOTS=("$HOME/Documents/Personal")
+APPLY=0
+UNINSTALL=0
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --apply)     APPLY=1; shift ;;
+    --uninstall) UNINSTALL=1; shift ;;
+    --root)      ROOTS=("$2"); shift 2 ;;
+    -h|--help)   sed -n '2,16p' "$0"; exit 0 ;;
+    *) echo "unknown flag: $1" >&2; exit 1 ;;
+  esac
+done
+
+read -r -d '' HOOK_BODY <<'HOOK' || true
+#!/bin/bash
+# Installed by pooriaarab/scripts install-pr-hooks. Do not edit here; edit there.
+#
+# Rejects a branch name that does not meet the fleet PR standard:
+#   <prefix>-<issue>-<slug>     e.g. cr-142-fix-onboarding-drop-off
+# The prefix comes from .github/pr-standards.json in this repo.
+set -uo pipefail
+
+CONFIG=".github/pr-standards.json"
+[ -f "$CONFIG" ] || exit 0
+
+PREFIX=$(python3 -c "
+import json
+try:    print(json.load(open('$CONFIG')).get('prefix',''))
+except Exception: print('')
+" 2>/dev/null)
+[ -n "$PREFIX" ] || exit 0
+
+BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
+case "$BRANCH" in
+  main|master|release|refactor|gh-pages|HEAD|release/*|dependabot/*|renovate/*) exit 0 ;;
+esac
+
+if echo "$BRANCH" | grep -qE "^${PREFIX}-[0-9]+-[a-z0-9]+(-[a-z0-9]+)*$"; then
+  exit 0
+fi
+
+cat >&2 <<MSG
+
+  Push refused: the branch name does not meet the PR standard.
+
+    got:      ${BRANCH}
+    expected: ${PREFIX}-<issue>-<slug>
+    example:  ${PREFIX}-142-fix-onboarding-drop-off
+
+  The number is the GitHub issue this work closes. One issue, one PR, one
+  concern. If no issue exists, open one first.
+
+    gh issue create --title "..."
+    git branch -m ${PREFIX}-<issue>-<slug>
+
+  https://github.com/pooriaarab/scripts/blob/main/pr-standards.md
+
+MSG
+exit 1
+HOOK
+
+is_eligible() {
+  local dir="$1" origin
+  origin=$(git -C "$dir" remote get-url origin 2>/dev/null) || return 1
+  case "$origin" in
+    *github.com[:/]pooriaarab/*) ;;
+    *) return 1 ;;
+  esac
+  [ -f "$dir/.github/pr-standards.json" ] || return 1
+  return 0
+}
+
+installed=0 skipped=0 already=0 removed=0
+
+for root in "${ROOTS[@]}"; do
+  # A worktree shares its hooks with the main checkout, so only the common git
+  # directory needs the file. Finding .git directories rather than .git files
+  # gets exactly the main checkouts and skips the worktrees for free.
+  while IFS= read -r gitdir; do
+    repo="$(dirname "$gitdir")"
+    if ! is_eligible "$repo"; then skipped=$((skipped+1)); continue; fi
+
+    hook="$gitdir/hooks/pre-push"
+
+    if [ "$UNINSTALL" = 1 ]; then
+      if [ -f "$hook" ] && grep -q "install-pr-hooks" "$hook" 2>/dev/null; then
+        [ "$APPLY" = 1 ] && rm -f "$hook"
+        echo "REMOVE  $repo"; removed=$((removed+1))
+      fi
+      continue
+    fi
+
+    if [ -f "$hook" ] && grep -q "install-pr-hooks" "$hook" 2>/dev/null; then
+      echo "OK      $repo"; already=$((already+1)); continue
+    fi
+
+    # Never clobber a hook somebody else wrote.
+    if [ -f "$hook" ]; then
+      echo "SKIP    $repo  (a different pre-push hook is installed)"
+      skipped=$((skipped+1)); continue
+    fi
+
+    if [ "$APPLY" = 1 ]; then
+      mkdir -p "$gitdir/hooks"
+      printf '%s\n' "$HOOK_BODY" > "$hook"
+      chmod +x "$hook"
+    fi
+    echo "INSTALL $repo"; installed=$((installed+1))
+  done < <(find "$root" -maxdepth 4 -type d -name .git 2>/dev/null)
+done
+
+echo
+if [ "$APPLY" = 0 ]; then
+  echo "dry-run. Nothing was written. Re-run with --apply."
+fi
+echo "installed=$installed already=$already removed=$removed skipped=$skipped"
