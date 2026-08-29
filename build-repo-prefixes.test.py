@@ -102,6 +102,16 @@ class RegistryTest(unittest.TestCase):
         for name in newcomers:
             self.assertTrue(VALID(out[name]), f"{name} -> {out.get(name)!r}")
 
+    def test_a_collision_prefers_a_name_derived_prefix_over_the_fallback(self):
+        # Without this the candidate ordering is untestable: every assertion above
+        # only checks validity and uniqueness, which the alphabetic fallback also
+        # satisfies. A prefix a human has to read should come from the name.
+        registry = self.registry()
+        out, _ = self.run_main(list(registry) + ["vibenotebooks"], registry)
+        self.assertIsNotNone(out)
+        self.assertIn(out["vibenotebooks"], {"vibe", "vnot", "vib", "vi"},
+                      f"fell through to the fallback: {out['vibenotebooks']!r}")
+
     def test_a_registered_prefix_is_never_reassigned(self):
         registry = self.registry()
         out, _ = self.run_main(list(registry) + ["vibenotebooks"], registry)
