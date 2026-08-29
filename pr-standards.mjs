@@ -87,14 +87,17 @@ export function derivePrefix(repoName) {
   const prefix = parts.length > 1
     ? parts.map((part) => part[0]).join('')
     : cleanName.slice(0, 3);
-  const derived = prefix.toLowerCase().slice(0, 4);
-  // A prefix must be 2 to 4 letters. A repo named `x`, or one made entirely of
-  // digits, cannot supply that. Failing later with "prefix must be 2-4
-  // lowercase letters" would point at the config rather than at the real cause,
-  // which is the name, so give a usable answer and let the repo override it.
-  if (derived.length === 0) return 'zz';
-  if (derived.length === 1) return `${derived}${derived}`;
-  return derived;
+  // A prefix must be 2 to 4 letters. A repo named `x`, one made entirely of
+  // digits, or one that is all separators cannot supply that. Failing later with
+  // "prefix must be 2-4 lowercase letters" would point at the config rather than
+  // at the real cause, which is the name, so give a usable answer and let the
+  // repo override it. Keep only letters here: `a-` and `---` are the right
+  // length by accident and would otherwise sail past both fallbacks and be
+  // rejected downstream by exactly the message this is meant to avoid.
+  const letters = prefix.toLowerCase().replace(/[^a-z]/g, '').slice(0, 4);
+  if (letters.length === 0) return 'zz';
+  const derived = letters.length === 1 ? `${letters}${letters}` : letters;
+  return isValidPrefix(derived) ? derived : 'zz';
 }
 
 function isValidPrefix(prefix) {

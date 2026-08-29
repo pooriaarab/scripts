@@ -28,7 +28,7 @@ Everything below is that sentence, made checkable.
 | `issue` | A GitHub issue number that **exists and is open**. No issue, no branch. No `0`, and no leading zeros, so one issue has exactly one branch name. |
 | `slug` | `[a-z0-9]+(-[a-z0-9]+)*`, 3–48 characters. Describes the change, not the file. |
 
-Full pattern: `^[a-z]{2,4}-[0-9]+-[a-z0-9]+(-[a-z0-9]+)*$`
+Full pattern: `^[a-z]{2,4}-[1-9][0-9]*-[a-z0-9]+(-[a-z0-9]+)*$`
 
 Exempt, never checked: `main`, `release`, `refactor`, `release/*`, `gh-pages`,
 `dependabot/*`, `renovate/*`.

@@ -45,6 +45,28 @@ test('derives prefixes from repository names', () => {
   assert.equal(derivePrefix('one-two-three-four-five'), 'ottf');
 });
 
+test('always derives a prefix the config will accept', () => {
+  // `a-` and `---` are 2 and 3 characters, so they sailed past both length
+  // fallbacks and were rejected later by loadConfig with a message about the
+  // config rather than about the name. That is the exact failure derivePrefix
+  // exists to prevent, so the guard belongs here rather than downstream.
+  const valid = /^[a-z]{2,4}$/;
+  for (const name of ['a-', '---', '-', '__', 'a', 'x1', '123', '9', '3d-tools']) {
+    assert.match(derivePrefix(name), valid, `derivePrefix(${JSON.stringify(name)})`);
+  }
+  assert.equal(derivePrefix('a-'), 'aa');
+  assert.equal(derivePrefix('---'), 'zz');
+});
+
+test('rejects issue number zero and leading zeros in a branch name', () => {
+  // The prose documented [0-9]+ while the validator used [1-9][0-9]*. One issue
+  // must have exactly one branch name, so `cr-0-x` and `cr-007-x` are not valid.
+  const config = { ...DEFAULT_CONFIG, prefix: 'cr' };
+  assert.equal(validateBranchName('cr-0-fix-the-thing', config).ok, false);
+  assert.equal(validateBranchName('cr-007-fix-the-thing', config).ok, false);
+  assert.equal(validateBranchName('cr-7-fix-the-thing', config).ok, true);
+});
+
 test('accepts a correctly formatted imperative title', () => {
   assert.equal(validateTitle('[CR-142] Fix onboarding drop-off', 'cr', 142).ok, true);
 });
