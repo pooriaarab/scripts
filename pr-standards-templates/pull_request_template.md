@@ -13,7 +13,7 @@ Closes #
 <!-- Name the commands you ran and what they returned. "Tested locally" and "N/A"
      both fail the check, because neither tells a reviewer anything. Delete this comment. -->
 
-```
+```text
 bun test      ->
 bun run build ->
 ```

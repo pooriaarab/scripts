@@ -112,7 +112,7 @@ must be unique across the account.
 |---|---|
 | `repo-prefixes.json` | Prefix registry. One entry per eligible repo. All unique. |
 | `pr-standards-rollout` | Fan the standard out. Dry-run by default. `--apply` to write. |
-| `pr-standards-templates/` | The three files each repo gets: config, PR template, workflow. |
+| `pr-standards-templates/` | The four artifacts each repo gets: config, PR template, workflow, and the managed `AGENTS.md` block. |
 
 ```bash
 ./pr-standards-rollout                   # dry-run all repos

@@ -6,7 +6,7 @@ One issue. One PR. One concern. Under 500 counted lines.
 Open the issue first. No issue, no branch. The issue number ties the branch, the
 title, the body and the merged commit to one agreed piece of work.
 
-```
+```text
 branch:  __PREFIX__-<issue>-<slug>          __PREFIX__-142-fix-onboarding-drop-off
 title:   [__PREFIX_UPPER__-<issue>] <Subject>   [__PREFIX_UPPER__-142] Fix onboarding drop-off
 body:    Closes #142

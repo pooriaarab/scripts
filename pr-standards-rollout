@@ -125,14 +125,14 @@ print(prefixes.get('$repo', ''))
 ")
   [ -z "$PREFIX" ] && {
     echo "SKIP  $repo  (no prefix)"
-    (( skipped_c++ ))
+    skipped_c=$(( skipped_c + 1 ))
     continue
   }
 
   # ── Check eligibility ────────────────────────────────────────────────
   INFO=$(gh repo view "$OWNER/$repo" --json isFork,isArchived,diskUsage 2>/dev/null) || {
     echo "FAIL  $repo  (can't view)"
-    (( fail_c++ ))
+    fail_c=$(( fail_c + 1 ))
     continue
   }
   # One python3 call emits all three values with booleans lowercased so bash
@@ -145,13 +145,13 @@ print(str(d['isFork']).lower(), str(d['isArchived']).lower(), d['diskUsage'])
 ")"
 
   if [ "$IS_ARCHIVED" = "true" ]; then
-    echo "SKIP  $repo  (archived)"; (( skipped_c++ )); continue
+    echo "SKIP  $repo  (archived)"; skipped_c=$(( skipped_c + 1 )); continue
   fi
   if [ "$IS_FORK" = "true" ]; then
-    echo "SKIP  $repo  (fork)"; (( skipped_c++ )); continue
+    echo "SKIP  $repo  (fork)"; skipped_c=$(( skipped_c + 1 )); continue
   fi
   if [ "$DISK" -lt 10 ]; then
-    echo "SKIP  $repo  (under 10KB)"; (( skipped_c++ )); continue
+    echo "SKIP  $repo  (under 10KB)"; skipped_c=$(( skipped_c + 1 )); continue
   fi
 
   # ── Check if already done ────────────────────────────────────────────
@@ -172,7 +172,7 @@ print(p)
       done
       if [ -z "$REPAIR_MISSING" ]; then
         echo "OK    $repo  (already has prefix '$PREFIX')"
-        (( already_c++ ))
+        already_c=$(( already_c + 1 ))
         continue
       fi
       REPAIR_MISSING="${REPAIR_MISSING% }"
@@ -187,7 +187,7 @@ print(p)
     # that is already fully configured.
     if ! echo "$CONFIG_RESP" | grep -q '"Not Found"'; then
       echo "FAIL  $repo  (config lookup failed)"
-      (( fail_c++ ))
+      fail_c=$(( fail_c + 1 ))
       continue
     fi
   }
@@ -206,7 +206,7 @@ print(json.dumps(cfg, indent=2))
   if [ "$DRY" -eq 1 ]; then
     echo "WOULD  $repo  (prefix=$PREFIX)"
     echo "         create issue, branch ${PREFIX}-N-adopt-pr-standard, 4 files, PR"
-    (( done_c++ ))
+    done_c=$(( done_c + 1 ))
     continue
   fi
 
@@ -232,7 +232,7 @@ print(json.dumps(cfg, indent=2))
         *AGENTS.md*)
           build_agents_md "$repo" "$BRANCH" || {
             echo "FAIL  $repo  (REPAIR: cannot read AGENTS.md)"
-            (( fail_c++ ))
+            fail_c=$(( fail_c + 1 ))
             continue 2
           }
           ;;
@@ -262,11 +262,11 @@ print(json.dumps(payload))
       done
       if [ "$REPAIR_FAIL" -ne 0 ]; then
         echo "FAIL  $repo  (REPAIR: one or more writes failed)"
-        (( fail_c++ ))
+        fail_c=$(( fail_c + 1 ))
         continue
       fi
       echo "REPAIR $repo  (wrote missing: $REPAIR_MISSING)"
-      (( repaired_c++ ))
+      repaired_c=$(( repaired_c + 1 ))
       continue
     fi
     echo "NOTE  $repo  (REPAIR: no repairable branch, falling back to full rollout)"
@@ -284,7 +284,7 @@ print(json.dumps(payload))
     # A transient failure here (auth, rate-limit) must not look like "no
     # issue exists" — that would mint a duplicate issue every retry.
     echo "FAIL  $repo  (issue lookup failed)"
-    (( fail_c++ ))
+    fail_c=$(( fail_c + 1 ))
     continue
   fi
   if [ -n "$ISSUE_NUM" ]; then
@@ -305,7 +305,7 @@ PR titles: \`[$PREFIX_UPPER-<ISSUE>] description\`
   fi
   if [ -z "$ISSUE_NUM" ]; then
     echo "FAIL  $repo  (issue create returned no number)"
-    (( fail_c++ ))
+    fail_c=$(( fail_c + 1 ))
     continue
   fi
 
@@ -313,7 +313,7 @@ PR titles: \`[$PREFIX_UPPER-<ISSUE>] description\`
   DEFAULT_BRANCH=$(gh api "repos/$OWNER/$repo" --jq '.default_branch' 2>/dev/null)
   SHA=$(gh api "repos/$OWNER/$repo/git/refs/heads/$DEFAULT_BRANCH" --jq '.object.sha' 2>/dev/null) || {
     echo "FAIL  $repo  (SHA)"
-    (( fail_c++ ))
+    fail_c=$(( fail_c + 1 ))
     continue
   }
 
@@ -326,7 +326,7 @@ PR titles: \`[$PREFIX_UPPER-<ISSUE>] description\`
       -f ref="refs/heads/$BRANCH" \
       -f sha="$SHA" 2>/dev/null || {
       echo "FAIL  $repo  (branch)"
-      (( fail_c++ ))
+      fail_c=$(( fail_c + 1 ))
       continue
     }
   fi
@@ -338,7 +338,7 @@ PR titles: \`[$PREFIX_UPPER-<ISSUE>] description\`
   # appending a second copy, and keeps whatever else the file already says.
   build_agents_md "$repo" "$BRANCH" || {
     echo "FAIL  $repo  (cannot read AGENTS.md)"
-    (( fail_c++ ))
+    fail_c=$(( fail_c + 1 ))
     continue
   }
 
@@ -388,7 +388,7 @@ print(json.dumps(payload))
   # Step D: abort if any write failed — leave the branch for a re-run
   if [ "$WRITE_FAIL" -eq 1 ]; then
     echo "FAIL  $repo  (partial write: $WRITE_FAIL_FILE, left branch $BRANCH for re-run)"
-    (( fail_c++ ))
+    fail_c=$(( fail_c + 1 ))
     continue
   fi
 
@@ -398,7 +398,7 @@ print(json.dumps(payload))
   EXISTING_PR=$(gh pr list --repo "$OWNER/$repo" --head "$BRANCH" --state open --json number --jq '.[0].number' 2>/dev/null)
   if [ -n "$EXISTING_PR" ]; then
     echo "DONE  $repo  (#$ISSUE_NUM -> $BRANCH -> reusing PR #$EXISTING_PR)"
-    (( done_c++ ))
+    done_c=$(( done_c + 1 ))
     continue
   fi
 
@@ -432,10 +432,14 @@ check requires, so the check running on this PR is the test.
 Assisted-by: pooriaarab/scripts:pr-standards-rollout" \
     2>/dev/null && {
       echo "DONE  $repo  (#$ISSUE_NUM -> $BRANCH -> PR)"
-      (( done_c++ ))
+      # An assignment, not (( done_c++ )). Post-increment returns the value
+      # before incrementing, so on the first success it returns 0, the group
+      # exits 1, the || branch also runs, and one repo is reported both DONE
+      # and FAIL while fail_c climbs.
+      done_c=$(( done_c + 1 ))
     } || {
       echo "FAIL  $repo  (PR)"
-      (( fail_c++ ))
+      fail_c=$(( fail_c + 1 ))
     }
 
 done <<< "$REPOS_LIST"
