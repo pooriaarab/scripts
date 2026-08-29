@@ -664,7 +664,11 @@ const COAUTHOR_LINE_RE = /^\s*co-authored-by:\s*(.*)$/i;
 // agent -- otherwise a repo that added Gemini or Codex to its config would
 // still pass a "Generated with Gemini" footer because this regex only knew
 // about Claude Code.
-const FOOTER_LINE_RE = new RegExp(`^\\s*(?:${EMOJI_RE.source}\\s*)?generated (?:with|by)\\b`, 'iu');
+// The emoji class includes VS16 (️) and ZWJ (‍) because real emoji
+// footers are multi-codepoint sequences (a pictograph plus a variation
+// selector, or a ZWJ joining several pictographs). `*`, not `?`, so the whole
+// sequence is consumed instead of just its first codepoint.
+const FOOTER_LINE_RE = new RegExp(`^\\s*(?:${EMOJI_RE.source})*\\s*generated (?:with|by)\\b`, 'iu');
 
 export function validateCommits(commits, config, truncated = false) {
   const failures = [];

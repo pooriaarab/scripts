@@ -381,3 +381,16 @@ test('bannedCommitTrailers rejects blank entries instead of matching every co-au
   const config = { ...DEFAULT_CONFIG, prefix: 'cr', bannedCommitTrailers: [''] };
   assert.throws(() => validateConfig(config), ConfigurationError);
 });
+
+test('the marketing footer check catches multi-codepoint emoji, not only a bare pictograph', () => {
+  const config = { ...DEFAULT_CONFIG, prefix: 'cr' };
+  const commit = (m) => [{ sha: 'abc1234', commit: { message: `Fix\n\n${m}` } }];
+  for (const footer of [
+    // Robot face plus an explicit variation selector (U+FE0F).
+    '🤖️ Generated with Claude',
+    // "Technologist": woman + ZWJ (U+200D) + computer, three codepoints.
+    '👩‍💻 Generated with Claude',
+  ]) {
+    assert.equal(validateCommits(commit(footer), config).ok, false, `missed ${JSON.stringify(footer)}`);
+  }
+});
