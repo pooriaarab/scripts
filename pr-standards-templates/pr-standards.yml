@@ -42,12 +42,20 @@ jobs:
       # Two files, not one: `pr-standards` is a thin launcher and the engine
       # lives in `pr-standards.mjs` beside it. Fetching only the launcher gets
       # you a job that fails on a missing import.
+      #
+      # Resolve the tag to one commit SHA before fetching either file. Two
+      # bare `curl`s against the tag name would each re-resolve it, so a tag
+      # moved between the two requests could hand this job a launcher and an
+      # engine from different revisions.
       - name: Fetch the checker
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           mkdir -p /tmp/prs
+          SHA=$(gh api repos/pooriaarab/scripts/git/ref/tags/pr-standards-v1 --jq .object.sha)
           for f in pr-standards pr-standards.mjs; do
             curl -fsSL -o "/tmp/prs/$f" \
-              "https://raw.githubusercontent.com/pooriaarab/scripts/pr-standards-v1/$f"
+              "https://raw.githubusercontent.com/pooriaarab/scripts/$SHA/$f"
           done
           chmod +x /tmp/prs/pr-standards
 

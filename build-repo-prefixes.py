@@ -17,14 +17,29 @@ import sys
 
 # ── helpers ──────────────────────────────────────────────────────────────
 
+GH_LIST_LIMIT = 300
+
+
 def gh_list():
     """Fetch all pooriaarab repos via gh CLI."""
     r = subprocess.run(
-        ["gh", "repo", "list", "pooriaarab", "--limit", "300",
+        ["gh", "repo", "list", "pooriaarab", "--limit", str(GH_LIST_LIMIT),
          "--json", "name,diskUsage,isArchived,isFork"],
         capture_output=True, text=True, check=True,
     )
-    return json.loads(r.stdout)
+    repos = json.loads(r.stdout)
+    # `--limit` is also the page size cap gh applies, so a result that fills it
+    # exactly is indistinguishable from one `gh` silently truncated. Fail loudly
+    # rather than let the registry quietly miss whichever repos sorted last.
+    if len(repos) >= GH_LIST_LIMIT:
+        print(
+            f"ERROR: gh returned {len(repos)} repos, at the --limit {GH_LIST_LIMIT} "
+            "ceiling -- raise GH_LIST_LIMIT, the account may have more repos than "
+            "this fetched.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    return repos
 
 
 # Small dictionary of known English words for word-boundary detection
