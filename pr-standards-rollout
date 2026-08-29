@@ -188,35 +188,34 @@ print(json.dumps(cfg, indent=2))
 
   # ── APPLY ─────────────────────────────────────────────────────────────
   if [ -n "$REPAIR_MISSING" ]; then
-    # REPAIR: branch exists from a prior rollout. Write only the missing
-    # files to it. Skip issue creation and PR.
+    # REPAIR: if the branch from the original rollout still exists, write
+    # only the missing files to it and skip issue creation and PR. If it
+    # was deleted (e.g. auto-deleted after the original PR merged), there is
+    # nothing to repair in place, so fall through to a full rollout below,
+    # which opens a fresh issue/branch/PR and rewrites all four files.
     BRANCH=$(gh api "repos/$OWNER/$repo/branches" --jq ".[].name | select(startswith(\"${PREFIX}-\") and endswith(\"-adopt-pr-standard\"))" 2>/dev/null | head -1)
-    if [ -z "$BRANCH" ]; then
-      echo "FAIL  $repo  (REPAIR: no existing branch)"
-      (( fail_c++ ))
-      continue
-    fi
-    DEFAULT_BRANCH=$(gh api "repos/$OWNER/$repo" --jq '.default_branch')
-    AGENTS_MD=""
-    case "$REPAIR_MISSING" in
-      *AGENTS.md*)
-        build_agents_md "$repo" "$BRANCH" || {
-          echo "FAIL  $repo  (REPAIR: cannot read AGENTS.md)"
-          (( fail_c++ ))
-          continue 2
-        }
-        ;;
-    esac
-    REPAIR_FAIL=0
-    for FP in $REPAIR_MISSING; do
-      case "$FP" in
-        *.json)        FC="$CONFIG_JSON" ;;
-        *_template.md) FC="$PR_BODY" ;;
-        AGENTS.md)     FC="$AGENTS_MD" ;;
-        *)             FC="$WORKFLOW_YML" ;;
+    if [ -n "$BRANCH" ]; then
+      DEFAULT_BRANCH=$(gh api "repos/$OWNER/$repo" --jq '.default_branch')
+      AGENTS_MD=""
+      case "$REPAIR_MISSING" in
+        *AGENTS.md*)
+          build_agents_md "$repo" "$BRANCH" || {
+            echo "FAIL  $repo  (REPAIR: cannot read AGENTS.md)"
+            (( fail_c++ ))
+            continue 2
+          }
+          ;;
       esac
-      EXISTING_SHA=$(gh api "repos/$OWNER/$repo/contents/$FP?ref=$BRANCH" --jq '.sha' 2>/dev/null || echo "")
-      PAYLOAD_JSON=$(python3 -c "
+      REPAIR_FAIL=0
+      for FP in $REPAIR_MISSING; do
+        case "$FP" in
+          *.json)        FC="$CONFIG_JSON" ;;
+          *_template.md) FC="$PR_BODY" ;;
+          AGENTS.md)     FC="$AGENTS_MD" ;;
+          *)             FC="$WORKFLOW_YML" ;;
+        esac
+        EXISTING_SHA=$(gh api "repos/$OWNER/$repo/contents/$FP?ref=$BRANCH" --jq '.sha' 2>/dev/null || echo "")
+        PAYLOAD_JSON=$(python3 -c "
 import json, base64, sys
 content = sys.stdin.read()
 content_b64 = base64.b64encode(content.encode()).decode()
@@ -225,19 +224,21 @@ if '$EXISTING_SHA':
     payload['sha'] = '$EXISTING_SHA'
 print(json.dumps(payload))
 " <<< "$FC")
-      gh api "repos/$OWNER/$repo/contents/$FP" --method PUT --silent --input - <<< "$PAYLOAD_JSON" 2>/dev/null || {
-        echo "WARN  $repo  (REPAIR: $FP failed)"
-        REPAIR_FAIL=1
-      }
-    done
-    if [ "$REPAIR_FAIL" -ne 0 ]; then
-      echo "FAIL  $repo  (REPAIR: one or more writes failed)"
-      (( fail_c++ ))
+        gh api "repos/$OWNER/$repo/contents/$FP" --method PUT --silent --input - <<< "$PAYLOAD_JSON" 2>/dev/null || {
+          echo "WARN  $repo  (REPAIR: $FP failed)"
+          REPAIR_FAIL=1
+        }
+      done
+      if [ "$REPAIR_FAIL" -ne 0 ]; then
+        echo "FAIL  $repo  (REPAIR: one or more writes failed)"
+        (( fail_c++ ))
+        continue
+      fi
+      echo "REPAIR $repo  (wrote missing: $REPAIR_MISSING)"
+      (( repaired_c++ ))
       continue
     fi
-    echo "REPAIR $repo  (wrote missing: $REPAIR_MISSING)"
-    (( repaired_c++ ))
-    continue
+    echo "NOTE  $repo  (REPAIR: no existing branch, falling back to full rollout)"
   fi
 
   # Step A: create the issue, or reuse the one a failed run left behind.
@@ -248,6 +249,13 @@ print(json.dumps(payload))
   ISSUE_NUM=$(gh issue list --repo "$OWNER/$repo" --state open --limit 50 \
     --search "$ISSUE_TITLE in:title" --json number,title \
     --jq "[.[] | select(.title == \"$ISSUE_TITLE\") | .number] | first // empty" 2>/dev/null)
+  if [ $? -ne 0 ]; then
+    # A transient failure here (auth, rate-limit) must not look like "no
+    # issue exists" — that would mint a duplicate issue every retry.
+    echo "FAIL  $repo  (issue lookup failed)"
+    (( fail_c++ ))
+    continue
+  fi
   if [ -n "$ISSUE_NUM" ]; then
     echo "      $repo  (reusing open issue #$ISSUE_NUM from an earlier run)"
   else
@@ -278,15 +286,19 @@ PR titles: \`[$PREFIX_UPPER-<ISSUE>] description\`
     continue
   }
 
-  # Step B: create branch
-  gh api "repos/$OWNER/$repo/git/refs" \
-    --method POST --silent \
-    -f ref="refs/heads/$BRANCH" \
-    -f sha="$SHA" 2>/dev/null || {
-    echo "FAIL  $repo  (branch)"
-    (( fail_c++ ))
-    continue
-  }
+  # Step B: create branch, or reuse it if a prior run already made one but
+  # died before the PR (the issue reuse above means a retry hits this same
+  # branch name, and creating a ref that already exists always fails).
+  if ! gh api "repos/$OWNER/$repo/git/refs/heads/$BRANCH" &>/dev/null; then
+    gh api "repos/$OWNER/$repo/git/refs" \
+      --method POST --silent \
+      -f ref="refs/heads/$BRANCH" \
+      -f sha="$SHA" 2>/dev/null || {
+      echo "FAIL  $repo  (branch)"
+      (( fail_c++ ))
+      continue
+    }
+  fi
 
   # Step C: write three files via contents API
   # AGENTS.md is how codex, pi, kimi, muse and gemini learn the standard;

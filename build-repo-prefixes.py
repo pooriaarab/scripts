@@ -104,11 +104,12 @@ def derive_prefix(name: str) -> str:
     return prefix[:4]
 
 
-def resolve_collisions(prefixes: dict[str, str]) -> dict[str, str]:
+def resolve_collisions(prefixes: dict[str, str], fixed: set[str] = frozenset()) -> dict[str, str]:
     """Resolve prefix collisions by extending shorter prefixes.
 
-    For each collision group, sort by name and extend each prefix
-    left-to-right until unique within the group, up to 4 chars max.
+    `fixed` names are already-registered prefixes and must never be
+    reassigned. For each collision group, only the non-fixed (fresh)
+    names extend, left-to-right, until unique, up to 4 chars max.
     """
     # Build reverse map: prefix → [repo names]
     by_prefix: dict[str, list[str]] = {}
@@ -121,15 +122,19 @@ def resolve_collisions(prefixes: dict[str, str]) -> dict[str, str]:
         if len(repos) == 1:
             continue
 
-        # Sort repos alphabetically for deterministic extension
-        repos_sorted = sorted(repos)
+        has_fixed = any(repo in fixed for repo in repos)
+        # Sort the fresh repos alphabetically for deterministic extension.
+        # Fixed (registered) repos never move, so they aren't in this list.
+        fresh_sorted = sorted(repo for repo in repos if repo not in fixed)
 
-        # Hold extended prefixes as we assign them
-        taken: set[str] = set()
+        # A fixed repo already holds `pref`, so every fresh repo in this
+        # group must move. Otherwise the first fresh repo (alphabetically)
+        # keeps `pref`, matching the old all-fresh behavior.
+        taken: set[str] = {pref} if has_fixed else set()
 
-        for repo in repos_sorted:
+        for repo in fresh_sorted:
             current = result[repo]
-            while current in taken or (result[repo] != pref and len(repos) == 2):
+            while current in taken:
                 # Try extending by one more character
                 name = repo.lower()
                 # For separated names, we already have first letters.
@@ -184,8 +189,9 @@ def main():
     # Resolve collisions among the new names only, against everything already held.
     if fresh:
         merged = dict(prefixes)
+        fixed = set(prefixes.keys())
         merged.update(fresh)
-        resolved = resolve_collisions(merged)
+        resolved = resolve_collisions(merged, fixed=fixed)
         for name in fresh:
             prefixes[name] = resolved[name]
 
