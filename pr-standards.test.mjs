@@ -427,3 +427,33 @@ test('a banned name after the email delimiter is not discarded', () => {
   // The reason the email is stripped at all: a human must not fail for a domain.
   assert.equal(validateCommits(commit('Co-authored-by: Jane Doe <jane@anthropic.com>'), config).ok, true);
 });
+
+test('an Assisted-by trailer is the required PR-body disclosure only, not a commit trailer', () => {
+  // The standard names one exception for Assisted-by: the pull request body.
+  // The same trailer in a commit message is the credit-in-every-commit the
+  // rule bans, so it fails regardless of which agent it names.
+  const config = { ...DEFAULT_CONFIG, prefix: 'cr' };
+  const commit = (m) => [{ sha: 'abc1234', commit: { message: `Fix\n\n${m}` } }];
+  assert.equal(validateCommits(commit('Assisted-by: claude-personal:claude-opus-5'), config).ok, false);
+  // Unconditional: it fails even when the named agent is not on the banned list.
+  assert.equal(validateCommits(commit('Assisted-by: some-repo-local:some-model'), config).ok, false);
+});
+
+test('a marketing footer link target does not decide the outcome, only the disclosed name does', () => {
+  // The footer check used to test the banned-name regex against the whole
+  // line, so a URL coincidentally containing a banned word (here "cursor")
+  // failed a PR whose actual, unbanned, agent was Zephyr.
+  const config = { ...DEFAULT_CONFIG, prefix: 'cr' };
+  const commit = (m) => [{ sha: 'abc1234', commit: { message: `Fix\n\n${m}` } }];
+  assert.equal(validateCommits(commit('Generated with Zephyr (https://cursor.example/docs)'), config).ok, true);
+  assert.equal(validateCommits(commit('Generated with Zephyr, see https://cursor.example/docs'), config).ok, true);
+  // A banned agent must still be caught when named alongside an unrelated URL.
+  assert.equal(validateCommits(commit('Generated with Claude (https://claude.com/claude-code)'), config).ok, false);
+});
+
+test('bannedCommitTrailers rejects a padded entry instead of configuring a name that can never match', () => {
+  // `\bClaude\b` never matches " Claude " with its own leading/trailing
+  // spaces folded into the literal, which silently disabled that ban.
+  const config = { ...DEFAULT_CONFIG, prefix: 'cr', bannedCommitTrailers: [' Claude '] };
+  assert.throws(() => validateConfig(config), ConfigurationError);
+});

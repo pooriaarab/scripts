@@ -570,7 +570,7 @@ export function validateConfig(config) {
   }
   if (typeof config.overrideLabel !== 'string' || !config.overrideLabel) throw new ConfigurationError('overrideLabel must be a non-empty string');
   if (!Array.isArray(config.overrideActors) || !config.overrideActors.every((value) => typeof value === 'string')) throw new ConfigurationError('overrideActors must be an array of strings');
-  if (!Array.isArray(config.bannedCommitTrailers) || !config.bannedCommitTrailers.every((value) => typeof value === 'string' && value.trim())) throw new ConfigurationError('bannedCommitTrailers must be an array of non-empty strings');
+  if (!Array.isArray(config.bannedCommitTrailers) || !config.bannedCommitTrailers.every((value) => typeof value === 'string' && value.length > 0 && value === value.trim())) throw new ConfigurationError('bannedCommitTrailers must be an array of non-empty strings with no leading or trailing whitespace');
   if (!Array.isArray(config.exemptBranches) || !config.exemptBranches.every((value) => typeof value === 'string')) throw new ConfigurationError('exemptBranches must be an array of strings');
   if (!Array.isArray(config.excludeGlobs) || !config.excludeGlobs.every((value) => typeof value === 'string')) throw new ConfigurationError('excludeGlobs must be an array of strings');
   return config;
@@ -657,6 +657,11 @@ async function fetchPullCommits(repo, number) {
 // body is required by the standard and is a different thing, disclosure rather
 // than credit.
 const COAUTHOR_LINE_RE = /^\s*co-authored-by:\s*(.*)$/i;
+// `Assisted-by:` is the disclosure trailer the standard requires in the pull
+// request BODY. A commit that carries the same trailer is not disclosure, it
+// is the credit-in-every-commit-message the standard bans, so any occurrence
+// here fails regardless of which agent it names.
+const ASSISTED_BY_LINE_RE = /^\s*assisted-by:\s*(.*)$/i;
 // Anchored to the start of the line: this is an agent's marketing footer
 // trailer, not any mention of "generated with X" inside ordinary commit
 // prose. The agent name itself is checked against bannedCommitTrailers
@@ -668,7 +673,11 @@ const COAUTHOR_LINE_RE = /^\s*co-authored-by:\s*(.*)$/i;
 // footers are multi-codepoint sequences (a pictograph plus a variation
 // selector, or a ZWJ joining several pictographs). `*`, not `?`, so the whole
 // sequence is consumed instead of just its first codepoint.
-const FOOTER_LINE_RE = new RegExp(`^\\s*(?:${EMOJI_RE.source})*\\s*generated (?:with|by)\\b`, 'iu');
+// Captures the remainder of the line so the name check below runs only
+// against the disclosed agent, not the whole line -- otherwise a link target
+// such as `Generated with Zephyr (https://cursor.example/docs)` fails
+// because "cursor" appears in the URL, even though Zephyr is not banned.
+const FOOTER_LINE_RE = new RegExp(`^\\s*(?:${EMOJI_RE.source})*\\s*generated (?:with|by)\\b(.*)$`, 'iu');
 
 export function validateCommits(commits, config, truncated = false) {
   const failures = [];
@@ -709,6 +718,8 @@ export function validateCommits(commits, config, truncated = false) {
     const sha = (entry?.sha || '').slice(0, 7);
     for (const line of message.split('\n')) {
       const coAuthor = COAUTHOR_LINE_RE.exec(line);
+      const assistedBy = ASSISTED_BY_LINE_RE.exec(line);
+      const footer = FOOTER_LINE_RE.exec(line);
       if (coAuthor) {
         // Strip complete <...> segments rather than truncating at the first `<`.
         // Matching only the part before it means everything AFTER the email is
@@ -723,7 +734,20 @@ export function validateCommits(commits, config, truncated = false) {
         // alongside it (e.g. "vibecodereview Claude").
         if (/^vibecodereview$/i.test(name)) continue;
         if (!named || !named.test(name)) continue;
-      } else if (!named || !FOOTER_LINE_RE.test(line) || !named.test(line)) {
+      } else if (assistedBy) {
+        // No banned-name check: this trailer only exists to disclose an
+        // agent, so its mere presence in a commit is the violation.
+      } else if (footer) {
+        // Strip URL segments before testing so a link target doesn't decide
+        // the outcome: a markdown link's visible text is what was disclosed,
+        // the parenthetical or bare URL beside it is not.
+        const name = footer[1]
+          .replace(/\(https?:\/\/[^)]*\)/gi, ' ')
+          .replace(/https?:\/\/\S+/gi, ' ')
+          .replace(/[[\]]/g, ' ')
+          .trim();
+        if (!named || !named.test(name)) continue;
+      } else {
         continue;
       }
       failures.push(fail(
@@ -1062,13 +1086,15 @@ async function runPr(options) {
     if (bodyResult.ok) passes.push('PR body');
   }
 
-  const commits = await fetchPullCommits(options.repo, number);
+  const [commits, files] = await Promise.all([
+    fetchPullCommits(options.repo, number),
+    fetchPullFiles(options.repo, number),
+  ]);
   const commitsTruncated = typeof pull.commits === 'number' && commits.length < pull.commits;
   const commitResult = validateCommits(commits, config, commitsTruncated);
   failures.push(...commitResult.failures);
   if (commitResult.ok) passes.push(`${commits.length} commit messages`);
 
-  const files = await fetchPullFiles(options.repo, number);
   // GitHub's pull-request files endpoint stops at 3000 entries and gives no
   // signal that it did. Comparing against the count the pull request itself
   // reports is the only way to notice, and a size check that silently measured
