@@ -657,9 +657,14 @@ async function fetchPullCommits(repo, number) {
 // body is required by the standard and is a different thing, disclosure rather
 // than credit.
 const COAUTHOR_LINE_RE = /^\s*co-authored-by:\s*(.*)$/i;
-// Anchored to the start of the line: this is the Claude Code footer trailer,
-// not any mention of "Claude Code" inside ordinary commit prose.
-const MARKETING_FOOTER_RE = /^\s*(?:🤖\s*)?generated with \[?claude code\]?/i;
+// Anchored to the start of the line: this is an agent's marketing footer
+// trailer, not any mention of "generated with X" inside ordinary commit
+// prose. The agent name itself is checked against bannedCommitTrailers
+// below, so this only recognizes the shape of the line, not a specific
+// agent -- otherwise a repo that added Gemini or Codex to its config would
+// still pass a "Generated with Gemini" footer because this regex only knew
+// about Claude Code.
+const FOOTER_LINE_RE = new RegExp(`^\\s*(?:${EMOJI_RE.source}\\s*)?generated (?:with|by)\\b`, 'iu');
 
 export function validateCommits(commits, config, truncated = false) {
   const failures = [];
@@ -695,7 +700,7 @@ export function validateCommits(commits, config, truncated = false) {
         // alongside it (e.g. "vibecodereview Claude").
         if (/^vibecodereview$/i.test(name)) continue;
         if (!named || !named.test(name)) continue;
-      } else if (!MARKETING_FOOTER_RE.test(line)) {
+      } else if (!named || !FOOTER_LINE_RE.test(line) || !named.test(line)) {
         continue;
       }
       failures.push(fail(
