@@ -401,10 +401,15 @@ for root in "${ROOTS[@]}"; do
         # Right content is not enough. If a previous chmod failed, git refuses
         # to run the file and every later run would keep reporting OK.
         if [ ! -x "$hook" ]; then
-          if [ "$APPLY" = 1 ] && chmod +x "$hook" 2>/dev/null; then
-            echo "UPDATE  $repo  (restored the execute bit)"; updated=$((updated+1)); continue
+          if [ "$APPLY" = 1 ]; then
+            if chmod +x "$hook" 2>/dev/null; then
+              echo "UPDATE  $repo  (restored the execute bit)"; updated=$((updated+1)); continue
+            fi
+            echo "FAIL    $repo  (hook is present but not executable)"; failed=$((failed+1)); continue
           fi
-          echo "FAIL    $repo  (hook is present but not executable)"; failed=$((failed+1)); continue
+          # Dry run: predict the fix like every other actionable case below,
+          # rather than reporting FAIL for a state --apply would resolve.
+          echo "UPDATE  $repo  (would restore the execute bit)"; updated=$((updated+1)); continue
         fi
         echo "OK      $repo"; already=$((already+1)); continue
       fi
