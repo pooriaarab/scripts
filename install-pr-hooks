@@ -235,20 +235,26 @@ is_personal_github_url() {
 }
 
 is_eligible() {
-  local dir="$1" fetch_url push_url
+  local dir="$1" fetch_url push_urls push_url
   # Check the cheap file test before spawning git: most scanned repos have not
   # adopted pr-standards.json, and this skips a process fork for all of them.
   [ -f "$dir/.github/pr-standards.json" ] || return 1
 
-  # Both URLs must be personal, not just the fetch one. remote.origin.pushurl can
-  # differ, and this hook runs on push: a repo that fetches from a personal remote
-  # while pushing to a work one would otherwise be treated as eligible. The rule
-  # this tool exists to respect is that work repos are never touched, so it fails
-  # closed whenever the two disagree.
+  # Every push URL must be personal, not just the fetch one. remote.origin.pushurl
+  # can differ, and this hook runs on push: a repo that fetches from a personal
+  # remote while pushing to a work one would otherwise be treated as eligible.
+  # A remote can also carry more than one push URL (git push then pushes to all
+  # of them, e.g. a personal-plus-mirror setup), and "get-url --push" alone
+  # returns only the first; --all is required to see the rest. The rule this
+  # tool exists to respect is that work repos are never touched, so it fails
+  # closed whenever any of them disagree.
   fetch_url=$(git -C "$dir" remote get-url origin 2>/dev/null) || return 1
   is_personal_github_url "$fetch_url" || return 1
-  push_url=$(git -C "$dir" remote get-url --push origin 2>/dev/null) || return 1
-  is_personal_github_url "$push_url" || return 1
+  push_urls=$(git -C "$dir" remote get-url --push --all origin 2>/dev/null) || return 1
+  [ -n "$push_urls" ] || return 1
+  while IFS= read -r push_url; do
+    is_personal_github_url "$push_url" || return 1
+  done <<<"$push_urls"
   return 0
 }
 

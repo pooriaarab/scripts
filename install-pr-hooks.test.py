@@ -205,7 +205,9 @@ def test_eligibility_checks_the_push_url_too():
 
     This hook runs on push. remote.origin.pushurl can differ from the fetch URL,
     so checking only the fetch URL would install into a repo that pushes to a
-    work remote -- the one thing this tool must never do.
+    work remote -- the one thing this tool must never do. A remote can also carry
+    more than one push URL, and git pushes to all of them, so every one of them
+    has to be checked, not just the first.
     """
     import shutil, subprocess as sp
     results = []
@@ -214,6 +216,10 @@ def test_eligibility_checks_the_push_url_too():
         ("personal pushurl", "git@github.com:pooriaarab/other.git", True),
         ("work pushurl", "git@github.com:some-employer/thing.git", False),
         ("explicit-port ssh", "ssh://git@github.com:22/pooriaarab/other.git", True),
+        ("second pushurl is work", [
+            "git@github.com:pooriaarab/other.git",
+            "git@github.com:some-employer/thing.git",
+        ], False),
     ]:
         d = tempfile.mkdtemp(); repo = f"{d}/repo"
         os.makedirs(f"{repo}/.github")
@@ -222,8 +228,12 @@ def test_eligibility_checks_the_push_url_too():
         sp.run(["git", "-C", repo, "remote", "add", "origin",
                 "https://github.com/pooriaarab/testrepo.git"], check=True, env=env)
         if pushurl:
-            sp.run(["git", "-C", repo, "remote", "set-url", "--push", "origin", pushurl],
+            urls = pushurl if isinstance(pushurl, list) else [pushurl]
+            sp.run(["git", "-C", repo, "remote", "set-url", "--push", "origin", urls[0]],
                    check=True, env=env)
+            for extra in urls[1:]:
+                sp.run(["git", "-C", repo, "remote", "set-url", "--push", "--add", "origin", extra],
+                       check=True, env=env)
         pathlib.Path(f"{repo}/.github/pr-standards.json").write_text('{"prefix":"tt"}')
         out = sp.run([str(HERE / "install-pr-hooks"), "--root", d],
                      capture_output=True, text=True, env=env).stdout
