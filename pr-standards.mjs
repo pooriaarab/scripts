@@ -786,11 +786,20 @@ async function resolveOverrideLabels(repo, number, labels, config, warnings) {
   const allowed = new Set([owner, ...(config.overrideActors || [])].map((name) => name.toLowerCase()));
   let applier = null;
   try {
-    const events = await apiRequest(`issues/${number}/events`, repo);
-    for (const event of events) {
-      if (event.event === 'labeled' && event.label?.name === config.overrideLabel) {
-        applier = event.actor?.login || null;
+    // Paginate. This endpoint defaults to 30 items, and label changes, reopens
+    // and `referenced` events from every commit that mentions the issue all
+    // land here, so on a real PR the labelling event is often not on page one.
+    // Missing it stripped a legitimate override and failed a PR that should
+    // have passed.
+    for (let page = 1; ; page += 1) {
+      const events = await apiRequest(`issues/${number}/events?per_page=100&page=${page}`, repo);
+      if (!Array.isArray(events)) break;
+      for (const event of events) {
+        if (event.event === 'labeled' && event.label?.name === config.overrideLabel) {
+          applier = event.actor?.login || null;
+        }
       }
+      if (events.length < 100) break;
     }
   } catch {
     warnings.push(fail(
@@ -815,8 +824,14 @@ async function fetchRemoteConfig(repo, defaultPrefix, ref) {
   try {
     const query = ref ? `?ref=${encodeURIComponent(ref)}` : '';
     const response = await apiRequest(`contents/.github/pr-standards.json${query}`, repo);
-    if (response.content && response.encoding === 'base64') {
+    if (response.encoding === 'base64' && typeof response.content === 'string') {
       const content = Buffer.from(response.content, 'base64').toString('utf8');
+      // An empty file is a broken config, not an absent one. The local path
+      // already errors on it; the remote path used to fall through to defaults,
+      // so the same mistake produced different rules depending on the caller.
+      if (!content.trim()) {
+        throw new ConfigurationError(`${repo} .github/pr-standards.json is empty`);
+      }
       const overrides = JSON.parse(content);
       if (!overrides || Array.isArray(overrides) || typeof overrides !== 'object') {
         throw new ConfigurationError(`${repo} .github/pr-standards.json must contain a JSON object`);
@@ -903,12 +918,16 @@ async function runPr(options) {
   // signal that it did. Comparing against the count the pull request itself
   // reports is the only way to notice, and a size check that silently measured
   // part of a diff would be worse than one that admits it cannot.
-  if (typeof pull.changed_files === 'number' && files.length < pull.changed_files) {
-    warnings.push(fail(
-      'diff truncated by the API',
-      `${files.length} of ${pull.changed_files} changed files`,
-      'every changed file',
-      'GitHub returns at most 3000 files per pull request. Treat the size below as a floor and split the PR.',
+  // A size gate that cannot see the whole diff must not report a pass. Passing
+  // on a partial list is the one outcome that is actively wrong: the unseen
+  // remainder is exactly where the size-triggering change would be.
+  const truncated = typeof pull.changed_files === 'number' && files.length < pull.changed_files;
+  if (truncated) {
+    failures.push(fail(
+      'diff too large to measure',
+      `the API returned ${files.length} of ${pull.changed_files} changed files`,
+      'a diff small enough to read in full',
+      'GitHub caps the file list at 3000. A pull request this size cannot be reviewed or measured. Split it.',
     ));
   }
   if (files.some((file) => file.filename === '.github/pr-standards.json')) {
