@@ -94,6 +94,35 @@ needs both.
 | `box-fast-attach` | Attach a worktree to a running Box in ~2s over `box host`, instead of ~84s through crabbox |
 | `box-unpack.sh` | Runs inside a Box: unpacks the delta `box-fast-attach` sends and installs only when the lockfile moved |
 
+## pr-standards-rollout
+
+Enforce a standard branch name and PR title format across the account.
+Every PR branch looks like `<prefix>-<issue>-<slug>`, and every PR title
+starts with `[<PREFIX>-<ISSUE>]`. The prefix is 2-4 lowercase letters
+mapped from the repo name in `repo-prefixes.json`.
+
+Derivation rules: hyphen/underscore/dot separated names take the first
+letter of each part (up to 4). Single-word names take the first 3 letters.
+Names that are already an initialism are hand-picked. When two repos
+collide on the same prefix, extend the shorter one until they differ.
+Collision resolution is the whole point of the registry: every prefix
+must be unique across the account.
+
+| Script | What |
+|---|---|
+| `repo-prefixes.json` | Prefix registry. One entry per eligible repo. All unique. |
+| `pr-standards-rollout` | Fan the standard out. Dry-run by default. `--apply` to write. |
+| `pr-standards-templates/` | The three files each repo gets: config, PR template, workflow. |
+
+```bash
+./pr-standards-rollout                   # dry-run all repos
+./pr-standards-rollout --repo <name>      # dry-run one repo
+./pr-standards-rollout --repo <name> --apply  # write + PR
+```
+
+The rollout creates a GitHub issue per repo, then a branch and a PR.
+The branch and PR title conform to the new standard on first use.
+
 ## Notes
 
 | Doc | What |

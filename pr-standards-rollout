@@ -1,0 +1,272 @@
+#!/usr/bin/env bash
+# Fan out the PR standard to pooriaarab repos.
+#
+# Every repo gets .github/pr-standards.json (with its prefix),
+# .github/pull_request_template.md, and .github/workflows/pr-standards.yml.
+#
+# Dry-run is the default.  Use --apply to write anything.
+#
+# Usage:
+#   ./pr-standards-rollout                     # dry-run all eligible repos
+#   ./pr-standards-rollout --repo content-rabbit  # dry-run one repo
+#   ./pr-standards-rollout --repo content-rabbit --apply  # PR everything
+#
+set -u
+PREFIXES_FILE="$(dirname "$0")/repo-prefixes.json"
+TEMPLATES_DIR="$(dirname "$0")/pr-standards-templates"
+OWNER="pooriaarab"
+
+DRY=1; TARGET_REPO=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --apply) DRY=0; shift ;;
+    --repo)  TARGET_REPO="$2"; shift 2 ;;
+    --help|-h) sed -n '2,12p' "$0"; exit 0 ;;
+    *) echo "unknown flag: $1"; exit 1 ;;
+  esac
+done
+
+# All base64 encoding is done via Python -- no macOS -w0 needed
+
+# ── Load prefixes as base64 to avoid shell quoting issues ──────────────
+PREFIXES_B64=$(python3 -c "
+import json, base64, sys
+d = json.load(open('$PREFIXES_FILE'))
+sys.stdout.buffer.write(base64.b64encode(json.dumps(d).encode()))
+" 2>/dev/null) || { echo "ERROR: can't read $PREFIXES_FILE"; exit 1; }
+
+# Read template files once
+PR_CONFIG_TPL=$(cat "$TEMPLATES_DIR/pr-standards.json")
+PR_TEMPLATE_MD=$(cat "$TEMPLATES_DIR/pull_request_template.md")
+WORKFLOW_YML=$(cat "$TEMPLATES_DIR/pr-standards.yml")
+AGENTS_BLOCK_TPL=$(cat "$TEMPLATES_DIR/agents-block.md")
+
+# ── List target repos ───────────────────────────────────────────────────
+if [ -n "$TARGET_REPO" ]; then
+  REPOS_LIST="$TARGET_REPO"
+else
+  REPOS_LIST=$(python3 -c "
+import json, base64
+prefixes = json.loads(base64.b64decode('$PREFIXES_B64').decode())
+for r in sorted(prefixes):
+    print(r)
+")
+fi
+
+echo "=== PR Standards Rollout (dry-run=$DRY) ==="
+echo ""
+
+done_c=0 already_c=0 skipped_c=0 fail_c=0
+
+while IFS= read -r repo; do
+  [ -z "$repo" ] && continue
+
+  PREFIX=$(python3 -c "
+import json, base64
+prefixes = json.loads(base64.b64decode('$PREFIXES_B64').decode())
+print(prefixes.get('$repo', ''))
+")
+  [ -z "$PREFIX" ] && {
+    echo "SKIP  $repo  (no prefix)"
+    (( skipped_c++ ))
+    continue
+  }
+
+  # ── Check eligibility ────────────────────────────────────────────────
+  INFO=$(gh repo view "$OWNER/$repo" --json isFork,isArchived,diskUsage 2>/dev/null) || {
+    echo "FAIL  $repo  (can't view)"
+    (( fail_c++ ))
+    continue
+  }
+  IS_FORK=$(echo "$INFO" | python3 -c "import json,sys; print(json.load(sys.stdin)['isFork'])")
+  IS_ARCHIVED=$(echo "$INFO" | python3 -c "import json,sys; print(json.load(sys.stdin)['isArchived'])")
+  DISK=$(echo "$INFO" | python3 -c "import json,sys; print(json.load(sys.stdin)['diskUsage'])")
+
+  if [ "$IS_ARCHIVED" = "true" ]; then
+    echo "SKIP  $repo  (archived)"; (( skipped_c++ )); continue
+  fi
+  if [ "$IS_FORK" = "true" ]; then
+    echo "SKIP  $repo  (fork)"; (( skipped_c++ )); continue
+  fi
+  if [ "$DISK" -lt 10 ]; then
+    echo "SKIP  $repo  (under 10KB)"; (( skipped_c++ )); continue
+  fi
+
+  # ── Check if already done ────────────────────────────────────────────
+  EXISTING_RESP=$(gh api "repos/$OWNER/$repo/contents/.github/pr-standards.json" 2>/dev/null) && {
+    EXISTING_PREFIX=$(echo "$EXISTING_RESP" | python3 -c "
+import json, base64, sys
+d = json.load(sys.stdin)
+c = base64.b64decode(d['content']).decode()
+p = json.loads(c).get('prefix', '')
+print(p)
+" 2>/dev/null)
+    if [ "$EXISTING_PREFIX" = "$PREFIX" ]; then
+      echo "OK    $repo  (already has prefix '$PREFIX')"
+      (( already_c++ ))
+      continue
+    fi
+    echo "NOTE  $repo  (prefix changed from '$EXISTING_PREFIX' to '$PREFIX')"
+  }
+
+  # ── Build files for this repo ────────────────────────────────────────
+  CONFIG_JSON=$(echo "$PR_CONFIG_TPL" | python3 -c "
+import json, sys
+cfg = json.load(sys.stdin)
+cfg['prefix'] = '$PREFIX'
+print(json.dumps(cfg, indent=2))
+")
+  PREFIX_UPPER=$(echo "$PREFIX" | tr '[:lower:]' '[:upper:]')
+  PR_BODY=$(echo "$PR_TEMPLATE_MD" | sed "s|<prefix>|$PREFIX|g; s|<PREFIX>|$PREFIX_UPPER|g")
+
+  # ── Dry run ──────────────────────────────────────────────────────────
+  if [ "$DRY" -eq 1 ]; then
+    echo "WOULD  $repo  (prefix=$PREFIX)"
+    echo "         create issue, branch ${PREFIX}-N-adopt-pr-standard, 4 files, PR"
+    (( done_c++ ))
+    continue
+  fi
+
+  # ── APPLY ─────────────────────────────────────────────────────────────
+  # Step A: create issue
+  ISSUE_NUM=$(gh issue create \
+    --repo "$OWNER/$repo" \
+    --title "Adopt the fleet PR standard" \
+    --body "Set up branch naming, PR title enforcement, and size checks.
+
+- \`.github/pr-standards.json\` — prefix \`$PREFIX\`
+- \`pull_request_template.md\` — checklist template
+- \`.github/workflows/pr-standards.yml\` — enforcement workflow
+
+Branch names: \`$PREFIX-<issue>-<slug>\`
+PR titles: \`[$PREFIX_UPPER-<ISSUE>] description\`
+" 2>/dev/null | grep -oE '[0-9]+$' | head -1)
+  if [ -z "$ISSUE_NUM" ]; then
+    echo "FAIL  $repo  (issue create returned no number)"
+    (( fail_c++ ))
+    continue
+  fi
+
+  BRANCH="${PREFIX}-${ISSUE_NUM}-adopt-pr-standard"
+  DEFAULT_BRANCH=$(gh api "repos/$OWNER/$repo" --jq '.default_branch' 2>/dev/null)
+  SHA=$(gh api "repos/$OWNER/$repo/git/refs/heads/$DEFAULT_BRANCH" --jq '.object.sha' 2>/dev/null) || {
+    echo "FAIL  $repo  (SHA)"
+    (( fail_c++ ))
+    continue
+  }
+
+  # Step B: create branch
+  gh api "repos/$OWNER/$repo/git/refs" \
+    --method POST --silent \
+    -f ref="refs/heads/$BRANCH" \
+    -f sha="$SHA" 2>/dev/null || {
+    echo "FAIL  $repo  (branch)"
+    (( fail_c++ ))
+    continue
+  }
+
+  # Step C: write three files via contents API
+  # AGENTS.md is how codex, pi, kimi, muse and gemini learn the standard;
+  # CLAUDE.md covers the Claude accounts from ~/Documents/Personal. Merge the
+  # block between its markers so a second run updates it instead of appending
+  # a second copy, and keep whatever else the file already says.
+  AGENTS_BLOCK=$(echo "$AGENTS_BLOCK_TPL" | sed "s|__PREFIX_UPPER__|$PREFIX_UPPER|g; s|__PREFIX__|$PREFIX|g")
+  EXISTING_AGENTS=$(gh api "repos/$OWNER/$repo/contents/AGENTS.md?ref=$BRANCH" \
+    --jq '.content' 2>/dev/null | base64 -d 2>/dev/null || echo "")
+  AGENTS_MD=$(EXISTING="$EXISTING_AGENTS" BLOCK="$AGENTS_BLOCK" python3 -c "
+import os, re
+existing = os.environ.get('EXISTING', '')
+block = os.environ.get('BLOCK', '')
+start, end = '<!-- pr-standards:start -->', '<!-- pr-standards:end -->'
+if start in existing and end in existing:
+    out = re.sub(re.escape(start) + '.*?' + re.escape(end), lambda _: block, existing, flags=re.S)
+elif existing.strip():
+    out = existing.rstrip() + '\n\n' + block + '\n'
+else:
+    out = '# AGENTS.md\n\n' + block + '\n'
+print(out, end='')
+")
+
+  WRITE_FAIL=0
+  for item in ".github/pr-standards.json" ".github/pull_request_template.md" ".github/workflows/pr-standards.yml" "AGENTS.md"; do
+    FP="$item"
+
+    # Pick correct content for each file
+    case "$FP" in
+      *.json)        FC="$CONFIG_JSON" ;;
+      *_template.md) FC="$PR_BODY" ;;
+      AGENTS.md)     FC="$AGENTS_MD" ;;
+      *)             FC="$WORKFLOW_YML" ;;
+    esac
+
+    EXISTING_SHA=$(gh api "repos/$OWNER/$repo/contents/$FP?ref=$BRANCH" \
+      --jq '.sha' 2>/dev/null || echo "")
+
+    # Build payload with base64-encoded content
+    PAYLOAD_JSON=$(python3 -c "
+import json, base64
+import sys
+
+# Read content from stdin (reliable for multi-line)
+content = sys.stdin.read()
+content_b64 = base64.b64encode(content.encode()).decode()
+
+payload = {
+    'message': '[$PREFIX_UPPER-$ISSUE_NUM] Add pr-standards config',
+    'branch': '$BRANCH',
+    'content': content_b64,
+}
+if '$EXISTING_SHA':
+    payload['sha'] = '$EXISTING_SHA'
+print(json.dumps(payload))
+" <<< "$FC")
+
+    gh api "repos/$OWNER/$repo/contents/$FP" \
+      --method PUT --silent \
+      --input - <<< "$PAYLOAD_JSON" 2>/dev/null || {
+      echo "WARN  $repo  (failed $FP — may need workflow scope)"
+      WRITE_FAIL=1
+    }
+  done
+
+  # Step D: open PR
+  gh pr create \
+    --repo "$OWNER/$repo" \
+    --base "$DEFAULT_BRANCH" \
+    --head "$BRANCH" \
+    --title "[$PREFIX_UPPER-$ISSUE_NUM] Adopt the fleet PR standard" \
+    --body "Closes #$ISSUE_NUM
+
+## What
+
+Adopts the fleet PR standard in this repo. Adds \`.github/pr-standards.json\`
+(prefix \`$PREFIX\`), a pull request template, the \`pr-standards\` CI check, and
+the standard block in \`AGENTS.md\`.
+
+## Why
+
+Agents open pull requests faster than anyone reviews them. This repo gets the
+same rule as the rest of the fleet: one issue, one PR, one concern, under 500
+counted lines. From here on, branches are \`$PREFIX-<issue>-<slug>\` and titles
+are \`[$PREFIX_UPPER-<issue>] Subject\`.
+
+The standard: https://github.com/pooriaarab/scripts/blob/main/pr-standards.md
+
+## How I verified
+
+This PR obeys the rule it installs. Its branch, title and body are what the new
+check requires, so the check running on this PR is the test.
+
+Assisted-by: pooriaarab/scripts:pr-standards-rollout" \
+    2>/dev/null && {
+      echo "DONE  $repo  (#$ISSUE_NUM -> $BRANCH -> PR)"
+      (( done_c++ ))
+    } || {
+      echo "FAIL  $repo  (PR)"
+      (( fail_c++ ))
+    }
+
+done <<< "$REPOS_LIST"
+
+echo ""
+echo "=== tally: done=$done_c  already=$already_c  skipped=$skipped_c  failed=$fail_c ==="

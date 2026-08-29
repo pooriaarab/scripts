@@ -1,0 +1,46 @@
+name: pr-standards
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened, labeled, unlabeled]
+
+concurrency:
+  group: pr-standards-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+# This job waits on the GitHub API and does no compute, so it takes the
+# smallest runner. Private pooriaarab repos run every job on Ubicloud; the
+# self-hosted fleet is retired and `ubuntu-latest` is not the house default.
+jobs:
+  pr-standards:
+    name: PR standards
+    runs-on: ubicloud-standard-2
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: read
+    steps:
+      - uses: actions/checkout@v4
+
+      # The check lives in pooriaarab/scripts, not here. One engine, one set of
+      # rules, and a fix to the engine reaches every repo on the next PR without
+      # a second rollout. The cost of that choice is that this workflow tracks
+      # `main` of a public repo you own; pin the ref below to a commit SHA if a
+      # repo needs the rules frozen.
+      # Two files, not one: `pr-standards` is a thin launcher and the engine
+      # lives in `pr-standards.mjs` beside it. Fetching only the launcher gets
+      # you a job that fails on a missing import.
+      - name: Fetch the checker
+        run: |
+          mkdir -p /tmp/prs
+          for f in pr-standards pr-standards.mjs; do
+            curl -fsSL -o "/tmp/prs/$f" \
+              "https://raw.githubusercontent.com/pooriaarab/scripts/main/$f"
+          done
+          chmod +x /tmp/prs/pr-standards
+
+      - name: Check branch, title, description, and size
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node /tmp/prs/pr-standards pr --repo "$GITHUB_REPOSITORY" --number "${{ github.event.pull_request.number }}"
