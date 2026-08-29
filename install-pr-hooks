@@ -20,6 +20,7 @@ set -uo pipefail
 ROOTS=("$HOME/Documents/Personal")
 APPLY=0
 UNINSTALL=0
+VERSION="v3"
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -34,32 +35,57 @@ done
 read -r -d '' HOOK_BODY <<'HOOK' || true
 #!/bin/bash
 # Installed by pooriaarab/scripts install-pr-hooks. Do not edit here; edit there.
+# install-pr-hooks v3
 #
-# Rejects a branch name that does not meet the fleet PR standard:
+# Hook that rejects pushes whose branch names do not meet the fleet PR standard:
 #   <prefix>-<issue>-<slug>     e.g. cr-142-fix-onboarding-drop-off
 # The prefix comes from .github/pr-standards.json in this repo.
+#
+# A pre-push hook receives the refs being pushed on stdin, one per line:
+#   <local-ref> <local-sha> <remote-ref> <remote-sha>
+# This hook validates <remote-ref> (what the branch will be called on the server)
+# and skips deletions (all-zero <local-sha>).
 set -uo pipefail
 
 CONFIG=".github/pr-standards.json"
 [ -f "$CONFIG" ] || exit 0
 
-PREFIX=$(python3 -c "
-import json
-try:    print(json.load(open('$CONFIG')).get('prefix',''))
-except Exception: print('')
-" 2>/dev/null)
-[ -n "$PREFIX" ] || exit 0
-
-BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
-case "$BRANCH" in
-  main|master|release|refactor|gh-pages|HEAD|release/*|dependabot/*|renovate/*) exit 0 ;;
-esac
-
-if echo "$BRANCH" | grep -qE "^${PREFIX}-[0-9]+-[a-z0-9]+(-[a-z0-9]+)*$"; then
-  exit 0
+# Fail closed: reject when python3 is missing or the config is malformed.
+# Only a genuinely absent config file exits 0.
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "PR-STANDARDS HOOK: python3 not found, cannot parse $CONFIG" >&2
+  exit 1
 fi
 
-cat >&2 <<MSG
+PREFIX=$(python3 -c "
+import json, sys
+try:
+    cfg = json.load(open('$CONFIG'))
+except json.JSONDecodeError as e:
+    print(f'PR-STANDARDS HOOK: $CONFIG is not valid JSON: {e}', file=sys.stderr)
+    sys.exit(1)
+p = cfg.get('prefix', '')
+if not p:
+    print(f'PR-STANDARDS HOOK: $CONFIG has no \"prefix\" key', file=sys.stderr)
+    sys.exit(1)
+print(p)
+") || exit 1
+
+# Read the first line of stdin to see if we are being called by git.
+IFS='' read -r first_line
+
+if [ -z "$first_line" ]; then
+  # Manual invocation -- stdin is empty, fall back to HEAD.
+  BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
+  case "$BRANCH" in
+    main|master|release|refactor|gh-pages|HEAD|release/*|dependabot/*|renovate/*) exit 0 ;;
+  esac
+
+  if echo "$BRANCH" | grep -qE "^${PREFIX}-[0-9]+-[a-z0-9]+(-[a-z0-9]+)*$"; then
+    exit 0
+  fi
+
+  cat >&2 <<MSG
 
   Push refused: the branch name does not meet the PR standard.
 
@@ -76,21 +102,84 @@ cat >&2 <<MSG
   https://github.com/pooriaarab/scripts/blob/main/pr-standards.md
 
 MSG
-exit 1
+  exit 1
+fi
+
+# Process every pushed ref. Collect all violations, then exit 1 once.
+errors=()
+
+while IFS='' read -r line; do
+  read -r local_ref local_sha remote_ref remote_sha <<<"$line"
+
+  # A deletion has an all-zero local-sha. Let deletions through.
+  if [ "$local_sha" = "0000000000000000000000000000000000000000" ]; then
+    continue
+  fi
+
+  # Extract the branch name from the remote ref.
+  case "$remote_ref" in
+    refs/heads/*)
+      BRANCH="${remote_ref#refs/heads/}"
+      ;;
+    *)
+      # Not a branch push (tag, etc.) -- let it through.
+      continue
+      ;;
+  esac
+
+  # Exempt branches.
+  case "$BRANCH" in
+    main|master|release|refactor|gh-pages|HEAD|release/*|dependabot/*|renovate/*) continue ;;
+  esac
+
+  if echo "$BRANCH" | grep -qE "^${PREFIX}-[0-9]+-[a-z0-9]+(-[a-z0-9]+)*$"; then
+    continue
+  fi
+
+  errors+=("$BRANCH")
+done < <({ echo "$first_line"; cat; })
+
+if [ ${#errors[@]} -gt 0 ]; then
+  cat >&2 <<MSG
+
+  Push refused: the following branch names do not meet the PR standard.
+
+MSG
+  for b in "${errors[@]}"; do
+    echo "    $b" >&2
+  done
+  cat >&2 <<MSG
+
+  Expected: ${PREFIX}-<issue>-<slug>
+  Example:  ${PREFIX}-142-fix-onboarding-drop-off
+
+  The number is the GitHub issue this work closes. One issue, one PR, one
+  concern. If no issue exists, open one first.
+
+    gh issue create --title "..."
+    git branch -m ${PREFIX}-<issue>-<slug>
+
+  https://github.com/pooriaarab/scripts/blob/main/pr-standards.md
+
+MSG
+  exit 1
+fi
+exit 0
 HOOK
 
 is_eligible() {
   local dir="$1" origin
   origin=$(git -C "$dir" remote get-url origin 2>/dev/null) || return 1
+  # Match only real github.com hosts, not lookalikes.
   case "$origin" in
-    *github.com[:/]pooriaarab/*) ;;
+    git@github.com:pooriaarab/*|https://github.com/pooriaarab/*) ;;
     *) return 1 ;;
   esac
   [ -f "$dir/.github/pr-standards.json" ] || return 1
   return 0
 }
 
-installed=0 skipped=0 already=0 removed=0
+installed=0 already=0 updated=0 removed=0 skipped=0 failed=0
 
 for root in "${ROOTS[@]}"; do
   # A worktree shares its hooks with the main checkout, so only the common git
@@ -100,18 +189,46 @@ for root in "${ROOTS[@]}"; do
     repo="$(dirname "$gitdir")"
     if ! is_eligible "$repo"; then skipped=$((skipped+1)); continue; fi
 
-    hook="$gitdir/hooks/pre-push"
+    # Respect core.hooksPath: if set, git ignores .git/hooks entirely.
+    hook_dir="$gitdir/hooks"
+    hooks_path=$(git -C "$repo" config --get core.hooksPath 2>/dev/null || true)
+    if [ -n "$hooks_path" ]; then
+      case "$hooks_path" in
+        /*) hook_dir="$hooks_path" ;;
+        *)  hook_dir="$repo/$hooks_path" ;;
+      esac
+    fi
+
+    hook="$hook_dir/pre-push"
+    version_marker="# install-pr-hooks $VERSION"
 
     if [ "$UNINSTALL" = 1 ]; then
       if [ -f "$hook" ] && grep -q "install-pr-hooks" "$hook" 2>/dev/null; then
-        [ "$APPLY" = 1 ] && rm -f "$hook"
+        if [ "$APPLY" = 1 ]; then
+          rm -f "$hook" || { echo "FAIL    $repo (remove failed)"; failed=$((failed+1)); continue; }
+        fi
         echo "REMOVE  $repo"; removed=$((removed+1))
       fi
       continue
     fi
 
+    # An existing hook from this project. Check the version.
     if [ -f "$hook" ] && grep -q "install-pr-hooks" "$hook" 2>/dev/null; then
-      echo "OK      $repo"; already=$((already+1)); continue
+      if grep -qF "$version_marker" "$hook" 2>/dev/null; then
+        echo "OK      $repo"; already=$((already+1)); continue
+      fi
+
+      # Outdated hook -- update it.
+      if [ "$APPLY" = 1 ]; then
+        if ! printf '%s\n' "$HOOK_BODY" > "$hook"; then
+          echo "FAIL    $repo (write failed)"; failed=$((failed+1)); continue
+        fi
+        chmod +x "$hook" || { echo "FAIL    $repo (chmod failed)"; failed=$((failed+1)); continue; }
+        echo "UPDATE  $repo"; updated=$((updated+1))
+      else
+        echo "UPDATE  $repo (would replace outdated hook)"; updated=$((updated+1))
+      fi
+      continue
     fi
 
     # Never clobber a hook somebody else wrote.
@@ -121,9 +238,13 @@ for root in "${ROOTS[@]}"; do
     fi
 
     if [ "$APPLY" = 1 ]; then
-      mkdir -p "$gitdir/hooks"
-      printf '%s\n' "$HOOK_BODY" > "$hook"
-      chmod +x "$hook"
+      if ! mkdir -p "$hook_dir"; then
+        echo "FAIL    $repo (mkdir failed: $hook_dir)"; failed=$((failed+1)); continue
+      fi
+      if ! printf '%s\n' "$HOOK_BODY" > "$hook"; then
+        echo "FAIL    $repo (write failed)"; failed=$((failed+1)); continue
+      fi
+      chmod +x "$hook" || { echo "FAIL    $repo (chmod failed)"; failed=$((failed+1)); continue; }
     fi
     echo "INSTALL $repo"; installed=$((installed+1))
   done < <(find "$root" -maxdepth 4 -type d -name .git 2>/dev/null)
@@ -133,4 +254,8 @@ echo
 if [ "$APPLY" = 0 ]; then
   echo "dry-run. Nothing was written. Re-run with --apply."
 fi
-echo "installed=$installed already=$already removed=$removed skipped=$skipped"
+echo "installed=$installed updated=$updated already=$already removed=$removed skipped=$skipped failed=$failed"
+
+if [ "$failed" -gt 0 ]; then
+  exit 1
+fi
