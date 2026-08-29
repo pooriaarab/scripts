@@ -98,6 +98,41 @@ def test_dangling_pre_push_symlink_is_refused():
     return ok
 
 
+def test_symlinked_pre_push_is_refused_not_chmod_through():
+    """A pre-push symlink must not be chmod'd through to its target.
+
+    -f follows a symlink, so one pointing at an external file that happens to
+    carry the exact version sentinel (e.g. a hook installed elsewhere by this
+    same tool) would be read as "ours, but not executable" and chmod +x'd.
+    chmod always follows a symlink to its target, so that would flip the
+    execute bit on a file that can live anywhere on disk, outside this repo.
+    """
+    import shutil, subprocess as sp
+    d = tempfile.mkdtemp()
+    repo = f"{d}/repo"
+    os.makedirs(f"{repo}/.github")
+    target = f"{d}/external-hook"
+    pathlib.Path(target).write_text(
+        "#!/bin/bash\n"
+        "# Installed by pooriaarab/scripts install-pr-hooks. Do not edit here; edit there.\n"
+        "# install-pr-hooks v4\n"
+    )
+    os.chmod(target, 0o644)
+    env = {**os.environ, "GIT_CONFIG_GLOBAL": "/dev/null"}
+    sp.run(["git", "-C", repo, "init", "-q"], check=True, env=env)
+    sp.run(["git", "-C", repo, "remote", "add", "origin",
+            "https://github.com/pooriaarab/testrepo.git"], check=True, env=env)
+    pathlib.Path(f"{repo}/.github/pr-standards.json").write_text('{"prefix":"tt"}')
+    os.symlink(target, f"{repo}/.git/hooks/pre-push")
+    out = sp.run([str(HERE / "install-pr-hooks"), "--apply", "--root", d],
+                 capture_output=True, text=True, env=env).stdout
+    target_untouched = (os.stat(target).st_mode & 0o111) == 0
+    shutil.rmtree(d, ignore_errors=True)
+    ok = "SKIP" in out and target_untouched
+    print(f"  {'OK ' if ok else 'FAIL'} symlinked pre-push refused, not chmod'd through")
+    return ok
+
+
 def test_symlinked_root_is_scanned():
     """A --root that is itself a symlink to a directory must still be scanned.
 
@@ -153,6 +188,9 @@ if not test_symlinked_hook_dir_is_refused():
     sys.exit(1)
 
 if not test_dangling_pre_push_symlink_is_refused():
+    sys.exit(1)
+
+if not test_symlinked_pre_push_is_refused_not_chmod_through():
     sys.exit(1)
 
 if not test_symlinked_root_is_scanned():

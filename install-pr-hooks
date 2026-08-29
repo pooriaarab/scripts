@@ -226,13 +226,15 @@ HOOK
 
 is_eligible() {
   local dir="$1" origin
+  # Check the cheap file test before spawning git: most scanned repos have not
+  # adopted pr-standards.json, and this skips a process fork for all of them.
+  [ -f "$dir/.github/pr-standards.json" ] || return 1
   origin=$(git -C "$dir" remote get-url origin 2>/dev/null) || return 1
   # Match only real github.com hosts, not lookalikes.
   case "$origin" in
     git@github.com:pooriaarab/*|https://github.com/pooriaarab/*|ssh://git@github.com/pooriaarab/*) ;;
     *) return 1 ;;
   esac
-  [ -f "$dir/.github/pr-standards.json" ] || return 1
   return 0
 }
 
@@ -398,8 +400,10 @@ for root in "${ROOTS[@]}"; do
     version_marker="# install-pr-hooks $VERSION"
 
     if [ "$UNINSTALL" = 1 ]; then
-      # A file without the exact sentinel line is never ours.
-      if [ -f "$hook" ] && grep -qE "^# install-pr-hooks v[0-9]+$" "$hook" 2>/dev/null; then
+      # A file without the exact sentinel line is never ours. Nor is a
+      # symlink: it may point outside the repo, and following it to read the
+      # sentinel would treat someone else's file as ours.
+      if [ -f "$hook" ] && [ ! -L "$hook" ] && grep -qE "^# install-pr-hooks v[0-9]+$" "$hook" 2>/dev/null; then
         if [ "$APPLY" = 1 ]; then
           rm -f "$hook" || { echo "FAIL    $repo (remove failed)"; failed=$((failed+1)); continue; }
         fi
@@ -412,7 +416,10 @@ for root in "${ROOTS[@]}"; do
     # A loose substring match could accidentally clobber someone else's
     # handwritten hook that happens to mention this script, so we require
     # the exact sentinel line. A file without it is skipped as a foreign hook.
-    if [ -f "$hook" ] && grep -qE "^# install-pr-hooks v[0-9]+$" "$hook" 2>/dev/null; then
+    # A symlink is skipped the same way even if its target has the sentinel:
+    # -f follows it, and the chmod below would too, flipping the execute bit
+    # on a file that can live anywhere on disk, outside this repo entirely.
+    if [ -f "$hook" ] && [ ! -L "$hook" ] && grep -qE "^# install-pr-hooks v[0-9]+$" "$hook" 2>/dev/null; then
       if grep -qxF "$version_marker" "$hook" 2>/dev/null; then
         # Right content is not enough. If a previous chmod failed, git refuses
         # to run the file and every later run would keep reporting OK.
