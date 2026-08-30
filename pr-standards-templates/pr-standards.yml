@@ -57,6 +57,10 @@ jobs:
       #     quota, so the check went red for a reason with nothing to do with
       #     the pull request, and the reason it gave was misleading.
       #   - pooriaarab/scripts is public, so the archive needs no token.
+      #     That is a dependency, not a detail: making scripts private takes CI
+      #     down on every repo that installed this workflow, all at once, and
+      #     codeload answers a permissions decision with what reads as a network
+      #     error. Turn the repo private only together with an auth header here.
       #
       # --retry-all-errors is what makes the retry cover an HTTP error rather
       # than only a connection failure.
