@@ -86,7 +86,7 @@ case "$status" in
   0|3) echo "box-reap agent healthy (last exit $status; 3 is box-reap's credit warning)" ;;
   126|127) echo "FAILED: exit $status — launchd cannot execute the reaper. Check TCC and that ~/.local/bin/box-reap-cron exists." >&2; exit 1 ;;
   "") echo "FAILED: agent is not registered." >&2; exit 1 ;;
-  *) echo "box-reap agent registered, last exit $status — check ~/.local/state/box-reap/reap.log" ;;
+  *) echo "FAILED: box-reap agent exited $status — check ~/.local/state/box-reap/reap.log" >&2; exit 1 ;;
 esac
 
 echo

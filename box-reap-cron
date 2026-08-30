@@ -125,8 +125,12 @@ if [[ ${#orphan_args[@]} -gt 0 ]]; then
     echo "===== $(date -u +%FT%TZ) orphan sweep: $(( ${#orphan_args[@]} / 2 )) unclaimed Box(es), age $ORPHAN_AGE"
     echo "claimed:${claimed:- none}"
     "$REAP" --stop-idle-older-than "$ORPHAN_AGE" --execute "${orphan_args[@]}" 2>&1
-    echo "----- orphan exit=$?"
+    orphan_rc=$?
+    echo "----- orphan exit=$orphan_rc"
   } >> "$LOG" 2>&1
+  # Don't let a failed orphan sweep hide behind a successful initial reap: launchd
+  # only sees this script's final exit code, and that is what a green cron means.
+  [[ $rc -eq 0 ]] && rc=$orphan_rc
 fi
 
 # Keep the log from growing without bound.
