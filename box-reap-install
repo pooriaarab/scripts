@@ -76,7 +76,10 @@ PLIST
 }
 
 write_agent com.pooriaarab.box-reap box-reap-cron "$interval"
-[[ -x "$bin_dir/box-perf-cron" ]] && write_agent com.pooriaarab.box-perf box-perf-cron 86400
+# box-perf-cron is a weekly sweep (its own header: "take one every week") that starts and
+# stops Boxes to time them -- scheduling it daily would run it 7x more often than intended
+# and burn Box-starts for no reason, exactly what this installer exists to prevent.
+[[ -x "$bin_dir/box-perf-cron" ]] && write_agent com.pooriaarab.box-perf box-perf-cron 604800
 
 # Verify rather than trust: `launchctl load` reports success for an agent that then dies.
 # `launchctl list` reports "-" for the exit-status column while the job is still running

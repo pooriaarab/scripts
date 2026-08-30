@@ -41,10 +41,20 @@ esac
 NAME="$(basename -s .git "$REMOTE")"
 LOCK="$STATE/$NAME.warming.lock"
 SESSIONS="$STATE/$NAME.sessions"
-# One key per live session. CLAUDE_CODE_SESSION_ID is stable across this session's start
-# and end hooks; the worktree path is the fallback, which is right in practice because a
-# session works in one worktree.
-SESSION_KEY="$(printf '%s' "${CLAUDE_CODE_SESSION_ID:-$ROOT}" | tr -c 'A-Za-z0-9._-' '_')"
+# One key per live session. There is no CLAUDE_CODE_SESSION_ID env var -- Claude Code
+# hooks pass the session id only via a `session_id` field in JSON piped to stdin. Read it
+# non-blocking: a manual `box-session status` run from a terminal has no piped stdin, and
+# reading from a tty here would hang forever waiting for input that never comes. The
+# worktree path is the fallback for a manual invocation with no hook payload, which is
+# right in practice because a session works in one worktree.
+HOOK_SESSION_ID=""
+if [[ ! -t 0 ]]; then
+  HOOK_SESSION_ID="$(python3 -c '
+import sys, json
+try: print(json.load(sys.stdin).get("session_id", ""))
+except Exception: print("")' 2>/dev/null)"
+fi
+SESSION_KEY="$(printf '%s' "${HOOK_SESSION_ID:-$ROOT}" | tr -c 'A-Za-z0-9._-' '_')"
 # Two locks, because they guard different lengths of time. WARM_LOCK ($LOCK) is held for the
 # ~100s of a detached warm so only one Box is created. LIFECYCLE_LOCK is held for
 # milliseconds around "register a session" and around "count sessions, then stop" — without
@@ -121,9 +131,14 @@ except Exception: print("")')"
     exit 0 ;;
   end)
     # The deregister, the count and the stop are one critical section: a start landing
-    # between the count and the stop would lose its Box immediately.
-    # Same ownership guard as `start`: only trap the release if the lock is actually ours.
-    lifecycle_acquire && trap lifecycle_release EXIT
+    # between the count and the stop would lose its Box immediately. If the lock can't be
+    # had, don't run any of this unlocked -- that recreates exactly the race the lock
+    # exists to close. Leave the Box running; the next `end` or the reaper cleans it up.
+    if ! lifecycle_acquire; then
+      echo "[box-session] could not get lifecycle lock for $NAME; leaving Box as-is" >&2
+      exit 0
+    fi
+    trap lifecycle_release EXIT
     rm -f "$SESSIONS/$SESSION_KEY"
     [[ -f "$STATE/$NAME.id" ]] || exit 0
     # Last one out stops the Box. Any other session still registered for this repo is
