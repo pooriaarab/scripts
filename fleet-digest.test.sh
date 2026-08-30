@@ -78,6 +78,7 @@ if [[ "$ARGS" =~ repos/[^/]+/[^/?\ ]+$ ]] || [[ "$ARGS" =~ repos/[^/]+/[^/?\ ]+\
 fi
 # pulls?state=open
 if [[ "$ARGS" == *"pulls?state=open"* ]]; then
+  if [[ -f "$DATA_DIR/fail_open_prs" ]]; then exit 1; fi
   page1="[]"
   if [[ -f "$DATA_DIR/open_prs.json" ]]; then page1=$(cat "$DATA_DIR/open_prs.json"); fi
   if [[ "$ARGS" == *"--slurp"* ]]; then
@@ -108,12 +109,20 @@ fi
 # commits/<sha>/check-runs
 if [[ "$ARGS" == *"check-runs"* ]]; then
   sha=$(echo "$ARGS" | python3 -c 'import re,sys; m=re.search(r"commits/([^/]+)/check", sys.stdin.read()); print(m.group(1) if m else "")' 2>/dev/null || echo "")
+  page1='{"check_runs":[]}'
   if [[ -n "$sha" && -f "$DATA_DIR/checks_${sha}.json" ]]; then
-    cat "$DATA_DIR/checks_${sha}.json"
+    page1=$(cat "$DATA_DIR/checks_${sha}.json")
   elif [[ -f "$DATA_DIR/checks.json" ]]; then
-    cat "$DATA_DIR/checks.json"
+    page1=$(cat "$DATA_DIR/checks.json")
+  fi
+  if [[ "$ARGS" == *"--slurp"* ]]; then
+    if [[ -n "$sha" && -f "$DATA_DIR/checks_${sha}_page2.json" ]]; then
+      printf '[%s,%s]' "$page1" "$(cat "$DATA_DIR/checks_${sha}_page2.json")"
+    else
+      printf '[%s]' "$page1"
+    fi
   else
-    echo '{"check_runs":[]}'
+    printf '%s' "$page1"
   fi
   exit 0
 fi
@@ -581,6 +590,61 @@ JSON
   rm -rf "$td"
 }
 
+# A commit with more than one page of check runs must have every page's
+# runs considered: a failing run stuck on the second page must still keep
+# the PR out of the ready list, not just whatever ran completed() on page 1.
+test_paginated_check_runs_are_merged() {
+  local td bindir datadir out rc
+  td=$(mktemp -d); bindir="$td/bin"; datadir="$td/data"
+  make_fake_gh "$bindir" "$datadir"
+  cat > "$datadir/open_prs.json" <<'JSON'
+[
+  {
+    "number": 70,
+    "title": "Looks green on page one",
+    "body": "Closes #70",
+    "html_url": "https://github.com/pooriaarab/repo-a/pull/70",
+    "labels": [],
+    "created_at": "2026-08-28T10:00:00Z",
+    "updated_at": "2026-08-28T10:00:00Z",
+    "draft": false,
+    "head": {"sha": "pgchk70"}
+  }
+]
+JSON
+  echo "[]" > "$datadir/reviews_70.json"
+  echo '{"check_runs":[{"name":"lint","status":"completed","conclusion":"success"}]}' > "$datadir/checks_pgchk70.json"
+  echo '{"check_runs":[{"name":"slow-matrix-job","status":"completed","conclusion":"failure"}]}' > "$datadir/checks_pgchk70_page2.json"
+  echo '{"state":"success"}' > "$datadir/status.json"
+  echo '{"workflow_runs":[]}' > "$datadir/latest_run.json"
+  out=$(FAKE_DATA_DIR="$datadir" PATH="$bindir:$PATH" "$SCRIPT" --repos pooriaarab/repo-a 2>&1); rc=$?
+  if echo "$out" | grep -q "Nothing needs you."; then
+    pass "a failing check run on a second page keeps a PR out of the ready list"
+  else
+    fail "a failing check run on a second page keeps a PR out of the ready list" "rc=$rc out=$out"
+  fi
+  rm -rf "$td"
+}
+
+# A gh api call that fails outright (bad auth, network error) must not be
+# indistinguishable from a repo that genuinely has nothing to report: it
+# should surface as a non-zero exit and a warning, not "Nothing needs you.".
+test_gh_api_failure_is_not_silent() {
+  local td bindir datadir out err rc
+  td=$(mktemp -d); bindir="$td/bin"; datadir="$td/data"
+  make_fake_gh "$bindir" "$datadir"
+  echo '{"workflow_runs":[]}' > "$datadir/latest_run.json"
+  touch "$datadir/fail_open_prs"
+  out=$(FAKE_DATA_DIR="$datadir" PATH="$bindir:$PATH" "$SCRIPT" --repos pooriaarab/repo-a 2>"$td/stderr"); rc=$?
+  err=$(cat "$td/stderr")
+  if (( rc != 0 )) && echo "$err" | grep -qi "warning"; then
+    pass "a failed gh api call is reported, not treated as an empty fleet"
+  else
+    fail "a failed gh api call is reported, not treated as an empty fleet" "rc=$rc out=$out err=$err"
+  fi
+  rm -rf "$td"
+}
+
 test_help
 test_empty
 test_label_missing
@@ -595,6 +659,8 @@ test_no_checks_is_not_green
 test_one_line_per_pr
 test_paginated_prs_are_merged
 test_changes_requested_not_ready
+test_paginated_check_runs_are_merged
+test_gh_api_failure_is_not_silent
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"

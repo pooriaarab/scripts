@@ -72,7 +72,7 @@ while (( $# )); do
       STALE_DAYS=$((10#$STALE_DAYS))
       (( STALE_DAYS > 0 )) || { echo "error: --stale-days needs a positive integer" >&2; exit 2; }
       shift 2 ;;
-    --stale-days=*) STALE_DAYS="${1#--stale-days=}"; [[ "$STALE_DAYS" =~ ^[0-9]+$ ]] || { echo "error: --stale-days needs a positive integer" >&2; exit 2; }; STALE_DAYS=$((10#$STALE_DAYS)); shift ;;
+    --stale-days=*) STALE_DAYS="${1#--stale-days=}"; [[ "$STALE_DAYS" =~ ^[0-9]+$ ]] || { echo "error: --stale-days needs a positive integer" >&2; exit 2; }; STALE_DAYS=$((10#$STALE_DAYS)); (( STALE_DAYS > 0 )) || { echo "error: --stale-days needs a positive integer" >&2; exit 2; }; shift ;;
     --json) JSON=1; shift ;;
     --markdown) MARKDOWN=1; shift ;;
     --help|-h) usage; exit 0 ;;
@@ -88,12 +88,27 @@ fi
 command -v gh >/dev/null 2>&1 || { echo "error: gh CLI not found" >&2; exit 3; }
 command -v python3 >/dev/null 2>&1 || { echo "error: python3 not found" >&2; exit 3; }
 
+# tmpdir is created up front (not just for the per-repo scratch files below)
+# because gh_api needs it from the very first call, including the repo
+# discovery calls that run before the main loop.
+tmpdir=$(mktemp -d)
+trap 'rm -rf "$tmpdir"' EXIT
+
 # Every network call goes through one of the functions below. Tests stub gh
 # with a fake on PATH, so each function is one gh invocation to keep the stub
 # simple. Parse JSON with python3 -c; never grep JSON.
 
 gh_api() {
-  gh api "$@" 2>/dev/null
+  # A failed call here is a real signal, not "no results": every caller falls
+  # back to an empty default on failure, and an unnoticed 401/403/network
+  # error would otherwise look identical to a fleet with nothing to report.
+  # Record it so the digest can say so instead of silently going quiet.
+  local rc=0
+  gh api "$@" 2>/dev/null || rc=$?
+  if (( rc != 0 )); then
+    echo 1 >> "$tmpdir/gh_failures" 2>/dev/null || true
+  fi
+  return "$rc"
 }
 
 gh_api_silent() {
@@ -142,9 +157,11 @@ repo_has_standards() {
   if gh_api_silent "repos/${owner_repo}/contents/.github/pr-standards.json" --silent >/dev/null 2>&1; then
     return 0
   fi
-  # Fallback: gh may not support --silent in stub; try full fetch and check for name field
+  # Fallback: gh may not support --silent in stub; try full fetch and check for
+  # name field. A 404 here just means the repo has no pr-standards.json, the
+  # common case — use gh_api_silent so it is not recorded as an API failure.
   local out
-  out=$(gh_api "repos/${owner_repo}/contents/.github/pr-standards.json" 2>/dev/null || true)
+  out=$(gh_api_silent "repos/${owner_repo}/contents/.github/pr-standards.json" 2>/dev/null || true)
   if echo "$out" | python3 -c 'import sys,json; d=json.load(sys.stdin); assert "name" in d or "sha" in d or "content" in d' 2>/dev/null; then
     return 0
   fi
@@ -164,12 +181,39 @@ fetch_open_prs() {
 
 fetch_reviews() {
   local owner_repo="$1" number="$2"
-  gh_api "repos/${owner_repo}/pulls/${number}/reviews?per_page=100" 2>/dev/null || echo "[]"
+  # --paginate --slurp so a PR with more than 100 reviews is not silently
+  # truncated to the first page.
+  gh api --paginate --slurp "repos/${owner_repo}/pulls/${number}/reviews?per_page=100" 2>/dev/null | flatten_pages || gh_api "repos/${owner_repo}/pulls/${number}/reviews?per_page=100" 2>/dev/null || echo "[]"
+}
+
+# The check-runs endpoint wraps its array in a `check_runs` field instead of
+# returning a bare array, so a flattened page-of-pages needs its `check_runs`
+# lists concatenated rather than the pages themselves.
+flatten_check_runs_pages() {
+  python3 -c '
+import json, sys
+try:
+    data = json.loads(sys.stdin.read() or "[]")
+except Exception:
+    data = []
+if isinstance(data, list) and data and all(isinstance(x, dict) for x in data):
+    merged = []
+    for page in data:
+        merged.extend(page.get("check_runs") or [])
+    print(json.dumps({"check_runs": merged}))
+elif isinstance(data, dict):
+    print(json.dumps(data))
+else:
+    print(json.dumps({"check_runs": []}))
+'
 }
 
 fetch_check_runs() {
   local owner_repo="$1" sha="$2"
-  gh_api "repos/${owner_repo}/commits/${sha}/check-runs?per_page=100" 2>/dev/null || echo '{"check_runs":[]}'
+  # --paginate --slurp so a commit with more than 100 check runs (common with
+  # matrix builds) is not silently truncated to the first page, which could
+  # hide a failing or still-queued run and report the PR green.
+  gh api --paginate --slurp "repos/${owner_repo}/commits/${sha}/check-runs?per_page=100" 2>/dev/null | flatten_check_runs_pages || gh_api "repos/${owner_repo}/commits/${sha}/check-runs?per_page=100" 2>/dev/null || echo '{"check_runs":[]}'
 }
 
 fetch_status() {
@@ -233,10 +277,6 @@ for r in data:
     REPOS=("${filtered[@]}")
   fi
 fi
-
-# Prepare temp files
-tmpdir=$(mktemp -d)
-trap 'rm -rf "$tmpdir"' EXIT
 
 # Collect items per repo using python3 for JSON handling
 # Each repo produces a json file in tmpdir
@@ -387,21 +427,22 @@ for repo in repos:
         updated_at = parse_gh_date(pr.get("updated_at"))
         draft = pr.get("draft", False)
         head_sha = (pr.get("head") or {}).get("sha") or pr.get("sha") or ""
-        # 1. Label requests
+        # 1. Label requests. A PR whose body asks for both owner-only labels
+        # while carrying neither still gets one line: list every missing
+        # label on it instead of one line per label.
         body_lower = body.lower()
-        for needed in ("oversized-approved", "proof-not-applicable"):
-            if needed in body_lower and needed not in label_names:
-                label_requests.append({
-                    "repo": repo,
-                    "number": number,
-                    "title": title,
-                    "html_url": html_url,
-                    "needed_label": needed,
-                })
-                # Only one entry per PR even if both labels requested? Report each needed label separately?
-                # Spec says body requests oversized-approved or proof-not-applicable and label is absent.
-                # If both are requested and both absent, that is two items but we collapse to one per needed label.
-                # Keep both so each missing label is actionable.
+        missing_labels = [
+            needed for needed in ("oversized-approved", "proof-not-applicable")
+            if needed in body_lower and needed not in label_names
+        ]
+        if missing_labels:
+            label_requests.append({
+                "repo": repo,
+                "number": number,
+                "title": title,
+                "html_url": html_url,
+                "needed_labels": missing_labels,
+            })
         # 3. Stale PRs: open longer than stale_days with no push and no review in that time
         # No push = updated_at older than stale_days; no review = latest review older than stale_days or no reviews
         if created_at:
@@ -562,22 +603,35 @@ total=len(flat.get("failing_ci",[]))+len(flat.get("label_requests",[]))+len(flat
 print("yes" if total>0 else "no")
 ')
 
+# A gh_api call that failed and fell back to an empty default looks exactly
+# like "nothing to report" unless we say otherwise: exit nonzero and warn so
+# an API outage is never mistaken for a clean fleet.
+gh_failures=0
+if [[ -s "$tmpdir/gh_failures" ]]; then
+  gh_failures=$(wc -l < "$tmpdir/gh_failures" | tr -d ' ')
+fi
+exit_code=0
+if (( gh_failures > 0 )); then
+  exit_code=1
+  echo "warning: ${gh_failures} GitHub API call(s) failed; this report may be missing data" >&2
+fi
+
 if [[ "$has_items" == "no" ]]; then
   if (( JSON )); then
     cat "$flat_json"
-    exit 0
+    exit "$exit_code"
   fi
   if (( MARKDOWN )); then
     echo "Nothing needs you."
-    exit 0
+    exit "$exit_code"
   fi
   echo "Nothing needs you."
-  exit 0
+  exit "$exit_code"
 fi
 
 if (( JSON )); then
   cat "$flat_json"
-  exit 0
+  exit "$exit_code"
 fi
 
 if (( MARKDOWN )); then
@@ -596,7 +650,8 @@ for r in grouped["repos"]:
         fc=r["failing_ci"]
         items.append(f"- [ ] `{repo}` — default branch `{fc['branch']}` CI failed ({fc['conclusion']}) — {fc['html_url']}")
     for lr in r["label_requests"]:
-        items.append(f"- [ ] `{repo}` — PR #{lr['number']} needs owner: add `{lr['needed_label']}` — {lr['html_url']} — {lr['title']}")
+        needed = ", ".join(f"`{l}`" for l in lr["needed_labels"])
+        items.append(f"- [ ] `{repo}` — PR #{lr['number']} needs owner: add {needed} — {lr['html_url']} — {lr['title']}")
     for sp in r["stale_prs"]:
         items.append(f"- [ ] `{repo}` — PR #{sp['number']} is stale (no push or review for {grouped['stale_days']}d) — {sp['html_url']} — {sp['title']}")
     for rp in r["ready_prs"]:
@@ -607,7 +662,7 @@ for r in grouped["repos"]:
             print(it)
         print("")
 PY
-  exit 0
+  exit "$exit_code"
 fi
 
 # Default human text output grouped by repo
@@ -622,7 +677,8 @@ for r in grouped["repos"]:
         fc=r["failing_ci"]
         lines.append(f"  CI failed on {fc['branch']} ({fc['conclusion']}) — {fc['html_url']}  — needs you to fix the build")
     for lr in r["label_requests"]:
-        lines.append(f"  PR #{lr['number']} needs owner: add `{lr['needed_label']}` — {lr['html_url']} — {lr['title']}")
+        needed = ", ".join(f"`{l}`" for l in lr["needed_labels"])
+        lines.append(f"  PR #{lr['number']} needs owner: add {needed} — {lr['html_url']} — {lr['title']}")
     for sp in r["stale_prs"]:
         lines.append(f"  PR #{sp['number']} is stale (no activity for {grouped['stale_days']}d) — {sp['html_url']} — {sp['title']}")
     for rp in r["ready_prs"]:
@@ -632,3 +688,4 @@ for r in grouped["repos"]:
         for l in lines:
             print(l)
 PY
+exit "$exit_code"
