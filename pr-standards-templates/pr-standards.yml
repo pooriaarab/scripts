@@ -1,0 +1,65 @@
+name: pr-standards
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened, labeled, unlabeled]
+
+concurrency:
+  group: pr-standards-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+# This job waits on the GitHub API and does no compute, so it takes the
+# smallest runner. Private pooriaarab repos run every job on Ubicloud; the
+# self-hosted fleet is retired and `ubuntu-latest` is not the house default.
+jobs:
+  pr-standards:
+    name: PR standards
+    runs-on: ubicloud-standard-2
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      # The check lives in pooriaarab/scripts, not here. One engine, one set of
+      # rules, and a fix reaches every repo without editing sixty workflows.
+      #
+      # It is fetched from the moving tag `pr-standards-v1`, not from `main` and
+      # not from a bare SHA. Three options, and this is the least bad:
+      #
+      #   main       churns on every merge, so every repo runs whatever was
+      #              pushed minutes ago. Rejected.
+      #   a SHA      immutable, but shipping one engine fix then means opening
+      #              sixty pull requests to bump sixty URLs. Rejected.
+      #   a tag      the fleet updates when the tag is deliberately moved, which
+      #              makes releasing an act rather than a side effect of merging.
+      #
+      # `pr-standards-v1.0.0` and friends stay immutable, so pin one of those in
+      # place of the tag below where a repo needs the rules frozen.
+      #
+      # Two files, not one: `pr-standards` is a thin launcher and the engine
+      # lives in `pr-standards.mjs` beside it. Fetching only the launcher gets
+      # you a job that fails on a missing import.
+      #
+      # Resolve the tag to one commit SHA before fetching either file. Two
+      # bare `curl`s against the tag name would each re-resolve it, so a tag
+      # moved between the two requests could hand this job a launcher and an
+      # engine from different revisions.
+      - name: Fetch the checker
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p /tmp/prs
+          SHA=$(gh api repos/pooriaarab/scripts/git/ref/tags/pr-standards-v1 --jq .object.sha)
+          for f in pr-standards pr-standards.mjs; do
+            curl -fsSL -o "/tmp/prs/$f" \
+              "https://raw.githubusercontent.com/pooriaarab/scripts/$SHA/$f"
+          done
+          chmod +x /tmp/prs/pr-standards
+
+      - name: Check branch, title, description, and size
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node /tmp/prs/pr-standards pr --repo "$GITHUB_REPOSITORY" --number "${{ github.event.pull_request.number }}"
