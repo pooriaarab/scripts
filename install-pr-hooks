@@ -243,14 +243,15 @@ is_personal_github_url() {
 # below, and the run would report INSTALL for a guard that never runs. The
 # delegation target is a literal path any delegator has to name, so requiring
 # it in the file is the cheapest signal that is not a guess.
-# Comment lines are excluded from that search: a pre-push that only mentions
-# "hooks/pre-push" in a remark explaining why it does NOT delegate (a real
-# shape for a policy hook to take) would otherwise match, and the run would
-# report INSTALL for a guard that still never runs.
+# Comments are stripped (not just whole-comment lines) before that search: a
+# pre-push that only mentions "hooks/pre-push" in a trailing remark explaining
+# why it does NOT delegate (e.g. "exit 0  # do not call hooks/pre-push", a
+# real shape for a policy hook to take) would otherwise match on that mention
+# alone, and the run would report INSTALL for a guard that still never runs.
 hooks_path_delegates() {
   local dir="$1"
   [ -x "$dir/pre-push" ] || return 1
-  grep -vE '^[[:space:]]*#' "$dir/pre-push" 2>/dev/null | grep -q 'hooks/pre-push'
+  sed -E 's/#.*$//' "$dir/pre-push" 2>/dev/null | grep -q 'hooks/pre-push'
 }
 
 is_eligible() {
@@ -399,6 +400,17 @@ for root in "${ROOTS[@]}"; do
       # employer repositories that this tool must never touch. Found the hard
       # way: a test run installed the hook into a global ~/.git-hooks.
       local_hooks_path=$(git -C "$repo" config --local --path --get core.hooksPath 2>/dev/null || true)
+      # git resolves a relative hooksPath against the repo's own working tree,
+      # not against wherever this script happens to be running from (see
+      # githooks(5)). A relative --path value (e.g. a global hooksPath of
+      # ".githooks", set so every repo supplies its own) must be resolved the
+      # same way here, or the delegation check below reads a directory that
+      # has nothing to do with what git actually consults for this repo.
+      case "$hooks_path" in
+        /*) resolved_hooks_path="$hooks_path" ;;
+        ~/*) resolved_hooks_path="$HOME/${hooks_path#~/}" ;;
+        *)  resolved_hooks_path="$repo/$hooks_path" ;;
+      esac
       if [ -z "$local_hooks_path" ]; then
         # Refusing outright was too blunt. git looks only in the shared
         # directory, but the pre-push there can chain to the repo's own hook,
@@ -410,7 +422,7 @@ for root in "${ROOTS[@]}"; do
         # Without this branch the git-hook layer of the standard cannot exist on
         # any machine with a global hooksPath, which is the common setup and the
         # one it was written for: a rollout here reported 71 skips, 0 installs.
-        if hooks_path_delegates "$hooks_path"; then
+        if hooks_path_delegates "$resolved_hooks_path"; then
           if [ "$delegation_noted" = 0 ]; then
             echo "note: core.hooksPath is $hooks_path and its pre-push delegates to"
             echo "      each repo's own hook, so hooks install into .git/hooks as usual."
@@ -425,11 +437,7 @@ for root in "${ROOTS[@]}"; do
           skipped=$((skipped+1)); continue
         fi
       else
-        case "$hooks_path" in
-          /*) hook_dir="$hooks_path" ;;
-          ~/*) hook_dir="$HOME/${hooks_path#~/}" ;;
-          *)  hook_dir="$repo/$hooks_path" ;;
-        esac
+        hook_dir="$resolved_hooks_path"
       fi
     fi
 

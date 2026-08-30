@@ -276,12 +276,20 @@ def test_global_hooks_path_shapes():
         '# This hook does not delegate to hooks/pre-push; it enforces its own policy.\n'
         'exit 0\n'
     )
+    # Same trap, but the mention trails on the same line as real code -- a
+    # plain "strip lines starting with #" pass leaves this line alone and
+    # still matches on the trailing remark.
+    trailing_comment_mention = (
+        '#!/bin/bash\n'
+        'exit 0  # do not call hooks/pre-push\n'
+    )
     results = []
     for label, global_hook, want_install in [
         ("no hooksPath", None, True),
         ("hooksPath with a delegator", delegator, True),
         ("hooksPath without a delegator", own_policy, False),
         ("hooksPath mentioning delegation only in a comment", commented_mention, False),
+        ("hooksPath mentioning delegation only in a trailing comment", trailing_comment_mention, False),
     ]:
         d = tempfile.mkdtemp(); repo = f"{d}/repo"
         os.makedirs(f"{repo}/.github")
@@ -313,6 +321,46 @@ def test_global_hooks_path_shapes():
 
 
 if not test_global_hooks_path_shapes():
+    ALL_OK = False
+
+
+def test_relative_global_hooks_path_resolves_against_repo():
+    """A relative global core.hooksPath is resolved per-repo, like git does.
+
+    git resolves a relative core.hooksPath against the repo's own working
+    tree (githooks(5)), not against wherever install-pr-hooks happens to be
+    invoked from. A global hooksPath of ".githooks" is how a shared
+    delegating policy is normally paired with a per-repo delegate target, so
+    the delegation check has to look in the repo, not in this script's own
+    cwd (which has no ".githooks" of its own).
+    """
+    import shutil, subprocess as sp
+    d = tempfile.mkdtemp(); repo = f"{d}/repo"
+    os.makedirs(f"{repo}/.github")
+    os.makedirs(f"{repo}/.githooks")
+    delegate = f"{repo}/.githooks/pre-push"
+    pathlib.Path(delegate).write_text(
+        '#!/bin/bash\n'
+        'exec "$(git rev-parse --git-common-dir)/hooks/pre-push" "$@"\n'
+    )
+    os.chmod(delegate, 0o755)
+    cfg = f"{d}/gitconfig"
+    pathlib.Path(cfg).write_text("[core]\n\thooksPath = .githooks\n")
+    env = {**os.environ, "GIT_CONFIG_GLOBAL": cfg}
+    sp.run(["git", "-C", repo, "init", "-q"], check=True, env=env)
+    sp.run(["git", "-C", repo, "remote", "add", "origin",
+            "https://github.com/pooriaarab/testrepo.git"], check=True, env=env)
+    pathlib.Path(f"{repo}/.github/pr-standards.json").write_text('{"prefix":"tt"}')
+    sp.run([str(HERE / "install-pr-hooks"), "--apply", "--root", d],
+           capture_output=True, text=True, env=env, cwd=str(HERE))
+    installed = os.path.isfile(f"{repo}/.git/hooks/pre-push")
+    shutil.rmtree(d, ignore_errors=True)
+    ok = installed
+    print(f"  {'OK ' if ok else 'FAIL'} relative global hooksPath delegates to its own repo   installed={installed} want=True")
+    return ok
+
+
+if not test_relative_global_hooks_path_resolves_against_repo():
     ALL_OK = False
 
 sys.exit(0 if ALL_OK else 1)
