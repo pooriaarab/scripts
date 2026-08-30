@@ -534,11 +534,50 @@ print(json.dumps(payload))
     continue
   fi
 
+  # The PR that installs the standard has to obey it, so run the check against
+  # the branch and title about to be opened and paste the real output. Prose
+  # about obeying the rule reads the same whether or not anyone ran anything,
+  # which is the whole reason the rule asks for a command and a result.
+  # GITHUB_REPOSITORY names the target repo; the prefix itself comes from the
+  # seeded config below, not from guessing at this name.
+  PR_TITLE="[$PREFIX_UPPER-$ISSUE_NUM] Adopt the fleet PR standard"
+  # Two lines, with the command itself first on its own. The checker looks for a
+  # command at the START of a line, so folding the env assignment onto the front
+  # of it hides the command and the evidence reads as prose again.
+  PRECHECK_CMD="export GITHUB_REPOSITORY=$OWNER/$repo
+\$ ./pr-standards precheck --branch $BRANCH --title '$PR_TITLE'"
+  # Run from a scratch directory with no git ancestry of its own, seeded with
+  # the exact .github/pr-standards.json this rollout is about to write to the
+  # target repo. "scripts" -- this checkout -- is itself a rollout target (see
+  # repo-prefixes.json), so a scratch dir with no config at all would make
+  # loadConfig fall back to derivePrefix(repoName) -- and repo-prefixes.json
+  # exists precisely because that guess collides for most repos (every
+  # single-word "vibe*" repo derives "vib" and needs the registry to tell them
+  # apart). Without the seeded config, precheck would validate the real branch
+  # and title against the wrong, guessed prefix and reject them every time.
+  PRECHECK_SCRATCH=$(mktemp -d)
+  mkdir -p "$PRECHECK_SCRATCH/.github"
+  printf '%s' "$CONFIG_JSON" > "$PRECHECK_SCRATCH/.github/pr-standards.json"
+  PR_STANDARDS_BIN="$(cd "$(dirname "$0")" && pwd)/pr-standards"
+  PRECHECK_OUT=$(cd "$PRECHECK_SCRATCH" && GITHUB_REPOSITORY="$OWNER/$repo" "$PR_STANDARDS_BIN" \
+    precheck --branch "$BRANCH" --title "$PR_TITLE" 2>&1)
+  PRECHECK_STATUS=$?
+  rm -rf "$PRECHECK_SCRATCH"
+  # A failing precheck means the branch or title this script just built does not
+  # meet the standard. Opening the PR anyway ships a red check and hides the
+  # bug in the generator, so stop and say which repo.
+  if [ "$PRECHECK_STATUS" -ne 0 ]; then
+    echo "FAIL  $repo  (precheck rejected the branch or title this rollout built)"
+    printf '%s\n' "$PRECHECK_OUT" | sed 's/^/        /'
+    fail_c=$(( fail_c + 1 ))
+    continue
+  fi
+
   gh pr create \
     --repo "$OWNER/$repo" \
     --base "$DEFAULT_BRANCH" \
     --head "$BRANCH" \
-    --title "[$PREFIX_UPPER-$ISSUE_NUM] Adopt the fleet PR standard" \
+    --title "$PR_TITLE" \
     --body "Closes #$ISSUE_NUM
 
 ## What
@@ -558,8 +597,15 @@ The standard: https://github.com/pooriaarab/scripts/blob/main/pr-standards.md
 
 ## How I verified
 
-This PR obeys the rule it installs. Its branch, title and body are what the new
-check requires, so the check running on this PR is the test.
+The check this PR installs, run against the branch and title this PR opens:
+
+\`\`\`text
+\$ $PRECHECK_CMD
+$PRECHECK_OUT
+\`\`\`
+
+The remaining rules -- the body's shape, the size caps, the commit trailers --
+are judged by the same checker when it runs on this PR.
 
 Assisted-by: pooriaarab/scripts:pr-standards-rollout" \
     2>/dev/null && {
