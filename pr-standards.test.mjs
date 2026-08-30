@@ -669,3 +669,40 @@ test('proof: a second council pass loopholes stay closed', () => {
   assert.equal(failed(checkProof(commentEatsCloser, uiFiles, [], config)), false);
   assert.equal(warned(checkProof(commentEatsCloser, uiFiles, [], config)), false);
 });
+
+test('proof: a third council pass loopholes stay closed', () => {
+  const uiFiles = [{ filename: 'src/components/Button.tsx', status: 'modified' }];
+  const url = (id) => `https://github.com/user-attachments/assets/${id}`;
+  const failed = (r) => r.failures.some((f) => f.check === 'proof of a visible change');
+  const warned = (r) => r.warnings.some((w) => w.check === 'proof of a visible change');
+
+  // Four spaces of indent renders as an indented code block on GitHub — the
+  // same syntax this convention's own docs use to show the escape hatch. A
+  // body that quotes that example must not be read as invoking it.
+  const indentedProofNa = `${validBody}\n\n    Proof: n/a — quoting the documented escape hatch verbatim`;
+  assert.equal(failed(checkProof(indentedProofNa, uiFiles, [], config)), true);
+
+  // A fence marker sitting inside an HTML comment is raw comment text, not a
+  // real opener — it must not swallow real proof written after the comment
+  // closes.
+  const fenceInsideComment = [
+    '## What', 'x', '## Why', 'y', '## How I verified',
+    'ran it -> pass',
+    '<!-- example:', '```', '-->',
+    `![before](${url('aaa')})`, `![after](${url('bbb')})`,
+    'Assisted-by: agent:model',
+  ].join('\n');
+  assert.equal(failed(checkProof(fenceInsideComment, uiFiles, [], config)), false);
+  assert.equal(warned(checkProof(fenceInsideComment, uiFiles, [], config)), false);
+
+  // A real fence containing something that looks like a comment marker must
+  // still hide its contents — the comment-open check must never run inside
+  // an already-open fence.
+  const commentInsideFence = [
+    '## What', 'x', '## Why', 'y', '## How I verified',
+    'ran it -> pass',
+    '```', `<!-- ![quoted](${url('aaa')}) -->`, '```',
+    'Assisted-by: agent:model',
+  ].join('\n');
+  assert.equal(failed(checkProof(commentInsideFence, uiFiles, [], config)), true);
+});
