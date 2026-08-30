@@ -177,6 +177,35 @@ branch. The obvious implementation gets this wrong. Written as "there is no issu
 number, so skip the checks that need one", the knob quietly disables the title and
 body rules too, and becomes a way to opt out of the whole standard.
 
+## Generated file drift
+
+A hand-edit to a generated file is a defect, not a shortcut. The edit reads
+correctly in review, and from then on the file disagrees with its generator: the
+next regeneration either reverts the change or keeps it and drifts further.
+Reading the diff cannot catch this. Running the generator can.
+
+The `generated-drift` workflow runs each command in `generators` on every pull
+request, then fails when `git status --porcelain` reports anything. The log
+carries the offending paths and `git diff --stat`, and the job leaves one comment
+naming the drifted files. It updates that comment on re-runs rather than posting
+a second one.
+
+Two keys in `.github/pr-standards.json` configure it:
+
+- `generators` — shell commands, in order, for example
+  `["bun run db:generate", "bun run build:types"]`. Absent or empty means the job
+  skips and passes, so a repo with no generators stays green.
+- `generatorSetup` — one optional command that runs first, for example
+  `bun install --frozen-lockfile`.
+
+`pr-standards-templates/generated-drift.test.sh` runs the embedded check against a
+throwaway git repo. It exists because the first version read its config through an
+unexported shell variable: every lookup raised, every raise was swallowed, and the
+job passed on every repo without running a generator. A check that silently never
+runs is worse than no check, because its green tick is a lie.
+
+Install it with `pr-standards-rollout --with-generated-drift`.
+
 ## The four layers
 
 Local layers exist for speed. CI is the authority. Neither replaces the other.
