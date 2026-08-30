@@ -91,5 +91,5 @@ esac
 
 echo
 echo "Reaping every ${interval}s. Claimed Boxes idle past \$BOX_REAP_AGE (default 45m) and"
-echo "unclaimed ones past \$BOX_REAP_ORPHAN_AGE (default 20m) are stopped, and only after"
+echo "unclaimed ones past \$BOX_REAP_ORPHAN_AGE (default 15m) are stopped, and only after"
 echo "box-reap's probe proves them quiet. Log: ~/.local/state/box-reap/reap.log"

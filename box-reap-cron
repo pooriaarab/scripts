@@ -70,7 +70,7 @@ echo "----- exit=$rc" >> "$LOG"
 # Orphans get a shorter age than claimed Boxes, and nothing else changes: the same
 # box-reap probe still runs, so a busy Box is still never stopped. The age is the only
 # knob, because "unclaimed" is evidence about intent, not about activity.
-ORPHAN_AGE="${BOX_REAP_ORPHAN_AGE:-20m}"
+ORPHAN_AGE="${BOX_REAP_ORPHAN_AGE:-15m}"
 STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/box-work"
 
 # A claim file only means something while its session lives. A session killed before

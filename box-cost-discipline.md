@@ -133,7 +133,7 @@ credit check projected a **$287 overrun** inside a 15-day window. One sweep took
 Boxes and roughly a third of the burn.
 
 So `box-reap-cron` sweeps unclaimed Boxes at a shorter age (`BOX_REAP_ORPHAN_AGE`, default
-20m) than claimed ones (`BOX_REAP_AGE`, default 45m). Age is the only thing that changes:
+15m) than claimed ones (`BOX_REAP_AGE`, default 45m). Age is the only thing that changes:
 being unclaimed never stops a Box by itself, the probe still has to find it quiet. That is
 a weaker guarantee than it sounds — an I/O-bound job uses little CPU, so anything that
 matters must touch the heartbeat file (see the section above). Unclaimed is evidence about

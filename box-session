@@ -39,10 +39,39 @@ case "$REMOTE" in
   *) exit 0 ;;
 esac
 NAME="$(basename -s .git "$REMOTE")"
+LOCK="$STATE/$NAME.warming.lock"
+SESSIONS="$STATE/$NAME.sessions"
+# One key per live session. CLAUDE_CODE_SESSION_ID is stable across this session's start
+# and end hooks; the worktree path is the fallback, which is right in practice because a
+# session works in one worktree.
+SESSION_KEY="$(printf '%s' "${CLAUDE_CODE_SESSION_ID:-$ROOT}" | tr -c 'A-Za-z0-9._-' '_')"
 
 case "${1:-status}" in
   start)
     [[ -f "$MAIN/.crabbox-default-on" || -f "$ROOT/.crabbox-default-on" ]] || exit 0
+    # Register this session BEFORE warming, so `end` can tell whether it is the last one
+    # out. Sessions on this machine run a dozen deep; without this, the first session to
+    # end stopped the Box the others were using.
+    mkdir -p "$SESSIONS"
+    : > "$SESSIONS/$SESSION_KEY"
+    # Only one warm per repo at a time. mkdir is atomic, so it serialises concurrent
+    # SessionStart hooks. Without it, two sessions starting inside the ~100s warm window
+    # both saw no id, both created a Box, and the second overwrote the first's id file —
+    # orphaning a Box that nothing would ever stop. Measured 2026-08-30: nine orphans for
+    # one repo in minutes, on track for a $287 credit overrun.
+    if ! mkdir "$LOCK" 2>/dev/null; then
+      if [[ -n "$(find "$LOCK" -maxdepth 0 -mmin +5 2>/dev/null)" ]]; then
+        rmdir "$LOCK" 2>/dev/null || true   # a start that died mid-warm
+        mkdir "$LOCK" 2>/dev/null || { echo "[box-session] another start is warming $NAME"; exit 0; }
+      else
+        echo "[box-session] another start is already warming $NAME"
+        exit 0
+      fi
+    fi
+    # NO trap to release the lock: `start` returns in milliseconds while the warm runs
+    # detached for ~100s, so releasing on exit would leave the window unguarded — which is
+    # the whole bug. The lock is cleared by `box-work` writing the id (a later start then
+    # short-circuits on the id), by `end`, or by the 5-minute staleness check above.
     # Already have a live one? Say so and stop.
     if [[ -f "$STATE/$NAME.id" ]]; then
       id="$(tr -d '[:space:]' < "$STATE/$NAME.id")"
@@ -58,10 +87,20 @@ except Exception: print("")')"
     disown 2>/dev/null || true
     exit 0 ;;
   end)
+    rm -f "$SESSIONS/$SESSION_KEY"
     [[ -f "$STATE/$NAME.id" ]] || exit 0
+    # Last one out stops the Box. Any other session still registered for this repo is
+    # using it, and stopping it under them costs them a resume for no reason.
+    others="$(find "$SESSIONS" -type f 2>/dev/null | wc -l | tr -d ' ')"
+    if [[ "${others:-0}" -gt 0 ]]; then
+      echo "[box-session] $others other session(s) still on $NAME; leaving Box up"
+      exit 0
+    fi
     id="$(tr -d '[:space:]' < "$STATE/$NAME.id")"
     box stop "$id" >/dev/null 2>&1 && echo "[box-session] stopped $NAME Box $id"
     rm -f "$STATE/$NAME.id"
+    rmdir "$SESSIONS" 2>/dev/null || true
+    rmdir "$LOCK" 2>/dev/null || true
     exit 0 ;;
   status)
     if [[ -f "$STATE/$NAME.id" ]]; then
