@@ -554,4 +554,21 @@ test('proof: the loopholes the council found in the first pass stay closed', () 
   const renamedOut = [{ filename: 'src/lib/Button.ts', previous_filename: 'src/components/Button.tsx', status: 'renamed' }];
   assert.equal(hasUiDiff(renamedOut, config), true);
   assert.equal(hasUiDiff([{ filename: 'src/lib/util.ts', status: 'modified' }], config), false);
+
+  // An opening fence with no closing one runs to the end of the document on
+  // GitHub too — the "Proof: n/a" line inside it must not count as plain text.
+  const unclosed = `${validBody}\n\n\`\`\`\nProof: n/a — the documented escape hatch, unclosed`;
+  assert.equal(failed(checkProof(unclosed, uiFiles, [], config)), true);
+
+  // A bare URL followed by sentence punctuation is still the same asset as
+  // the same id embedded as a markdown image.
+  const sentence = `${validBody}\n${url('abc')}\nSee https://github.com/user-attachments/assets/abc.`;
+  assert.equal(warned(checkProof(sentence, uiFiles, [], config)), true);
+  assert.equal(failed(checkProof(sentence, uiFiles, [], config)), false);
+
+  // Evidence has to live in "How I verified" — an attachment or a "Proof: n/a"
+  // line stashed under a different heading is not proof of anything.
+  const bodyWithHeading = (extra) => `Closes #142\n\n## What\nFixes it.\n\n## Why\nBecause.\n\n## Notes\n${extra}\n\n## How I verified\nbun test -> 214 passed`;
+  assert.equal(failed(checkProof(bodyWithHeading(url('abc')), uiFiles, [], config)), true);
+  assert.equal(failed(checkProof(bodyWithHeading('Proof: n/a — a reason placed under the wrong heading'), uiFiles, [], config)), true);
 });
