@@ -248,4 +248,62 @@ def test_eligibility_checks_the_push_url_too():
 if not test_eligibility_checks_the_push_url_too():
     ALL_OK = False
 
+
+
+def test_global_hooks_path_shapes():
+    """A global core.hooksPath must not turn every repo into a skip.
+
+    core.hooksPath replaces git's search path, so .git/hooks is dead -- unless
+    the pre-push in the shared directory chains back to it, which is what
+    ~/.git-hooks/pre-push on this machine does. Before this, the installer
+    refused all three shapes alike and reported 71 skips and 0 installs on the
+    machine the standard was written for, so the git-hook layer existed nowhere.
+
+    The shared directory itself is still never written to: that would put the
+    hook in front of pushes from work repos.
+    """
+    import shutil, subprocess as sp
+    delegator = (
+        '#!/bin/bash\n'
+        'exec "$(git rev-parse --git-common-dir)/hooks/pre-push" "$@"\n'
+    )
+    own_policy = '#!/bin/bash\nexit 0\n'
+    results = []
+    for label, global_hook, want_install in [
+        ("no hooksPath", None, True),
+        ("hooksPath with a delegator", delegator, True),
+        ("hooksPath without a delegator", own_policy, False),
+    ]:
+        d = tempfile.mkdtemp(); repo = f"{d}/repo"
+        os.makedirs(f"{repo}/.github")
+        cfg = f"{d}/gitconfig"; pathlib.Path(cfg).write_text("")
+        shared = f"{d}/global-hooks"
+        if global_hook is not None:
+            os.makedirs(shared)
+            gh = f"{shared}/pre-push"
+            pathlib.Path(gh).write_text(global_hook)
+            os.chmod(gh, 0o755)
+            pathlib.Path(cfg).write_text(f"[core]\n\thooksPath = {shared}\n")
+        env = {**os.environ, "GIT_CONFIG_GLOBAL": cfg}
+        sp.run(["git", "-C", repo, "init", "-q"], check=True, env=env)
+        sp.run(["git", "-C", repo, "remote", "add", "origin",
+                "https://github.com/pooriaarab/testrepo.git"], check=True, env=env)
+        pathlib.Path(f"{repo}/.github/pr-standards.json").write_text('{"prefix":"tt"}')
+        out = sp.run([str(HERE / "install-pr-hooks"), "--apply", "--root", d],
+                     capture_output=True, text=True, env=env).stdout
+        # The hook has to land in the repo, not merely be announced.
+        installed = os.path.isfile(f"{repo}/.git/hooks/pre-push")
+        # The shared directory must come out of an --apply run unchanged.
+        shared_intact = global_hook is None or \
+            pathlib.Path(f"{shared}/pre-push").read_text() == global_hook
+        shutil.rmtree(d, ignore_errors=True)
+        ok = installed == want_install and shared_intact
+        results.append(ok)
+        print(f"  {'OK ' if ok else 'FAIL'} {label:<32} installed={installed} want={want_install}")
+    return all(results)
+
+
+if not test_global_hooks_path_shapes():
+    ALL_OK = False
+
 sys.exit(0 if ALL_OK else 1)

@@ -236,6 +236,19 @@ is_personal_github_url() {
   return 1
 }
 
+# A global or system core.hooksPath replaces git's search path outright, so
+# .git/hooks is dead unless the pre-push in that directory chains back to it.
+# An executable file alone does not prove that it does: a global pre-push that
+# enforces its own policy and never chains would swallow the hook installed
+# below, and the run would report INSTALL for a guard that never runs. The
+# delegation target is a literal path any delegator has to name, so requiring
+# it in the file is the cheapest signal that is not a guess.
+hooks_path_delegates() {
+  local dir="$1"
+  [ -x "$dir/pre-push" ] || return 1
+  grep -q 'hooks/pre-push' "$dir/pre-push" 2>/dev/null
+}
+
 is_eligible() {
   local dir="$1" fetch_url push_urls push_url
   # Check the cheap file test before spawning git: most scanned repos have not
@@ -304,6 +317,7 @@ resolve_real_path() {
 }
 
 installed=0 already=0 updated=0 removed=0 skipped=0 failed=0
+delegation_noted=0
 
 for root in "${ROOTS[@]}"; do
   # Without this, a missing or mistyped --root makes find fail silently (stderr
@@ -378,22 +392,41 @@ for root in "${ROOTS[@]}"; do
       # Only a REPO-LOCAL hooksPath is safe to write to. A global or system one
       # points at a directory every repository on this machine shares, so
       # installing there would put this hook in front of pushes from work and
-      # employer repositories that this tool must never touch. Refuse instead,
-      # and say what to change. Found the hard way: a test run installed the
-      # hook into a global ~/.git-hooks.
+      # employer repositories that this tool must never touch. Found the hard
+      # way: a test run installed the hook into a global ~/.git-hooks.
       local_hooks_path=$(git -C "$repo" config --local --path --get core.hooksPath 2>/dev/null || true)
       if [ -z "$local_hooks_path" ]; then
-        echo "SKIP    $repo  (core.hooksPath is set outside this repo, at $hooks_path)"
-        echo "        Installing there would hook every repo on this machine, including work ones."
-        echo "        Set core.hooksPath in this repo only, or unset it globally."
-        skipped=$((skipped+1)); continue
+        # Refusing outright was too blunt. git looks only in the shared
+        # directory, but the pre-push there can chain to the repo's own hook,
+        # which is what ~/.git-hooks/pre-push on this machine does and what the
+        # post-checkout beside it has always done for its own event. When it
+        # does, $gitdir/hooks is once again the right place to install, and the
+        # containment check below still applies to it.
+        #
+        # Without this branch the git-hook layer of the standard cannot exist on
+        # any machine with a global hooksPath, which is the common setup and the
+        # one it was written for: a rollout here reported 71 skips, 0 installs.
+        if hooks_path_delegates "$hooks_path"; then
+          if [ "$delegation_noted" = 0 ]; then
+            echo "note: core.hooksPath is $hooks_path and its pre-push delegates to"
+            echo "      each repo's own hook, so hooks install into .git/hooks as usual."
+            delegation_noted=1
+          fi
+        else
+          echo "SKIP    $repo  (core.hooksPath is set outside this repo, at $hooks_path)"
+          echo "        Installing there would hook every repo on this machine, including work ones."
+          echo "        Give $hooks_path a pre-push that delegates to the repo hook at"
+          echo "        \$(git rev-parse --git-common-dir)/hooks/pre-push, or set core.hooksPath"
+          echo "        in this repo only, or unset it globally."
+          skipped=$((skipped+1)); continue
+        fi
+      else
+        case "$hooks_path" in
+          /*) hook_dir="$hooks_path" ;;
+          ~/*) hook_dir="$HOME/${hooks_path#~/}" ;;
+          *)  hook_dir="$repo/$hooks_path" ;;
+        esac
       fi
-      case "$hooks_path" in
-        /*) hook_dir="$hooks_path" ;;
-        ~/*) hook_dir="$HOME/${hooks_path#~/}" ;;
-        *)  hook_dir="$repo/$hooks_path" ;;
-      esac
-
     fi
 
     # Containment is checked for every path to the hook directory, not only for
