@@ -1,0 +1,581 @@
+#!/usr/bin/env bash
+# Fan out the PR standard to pooriaarab repos.
+#
+# Every repo gets .github/pr-standards.json (with its prefix),
+# .github/pull_request_template.md, and .github/workflows/pr-standards.yml.
+#
+# Dry-run is the default.  Use --apply to write anything.
+#
+# Usage:
+#   ./pr-standards-rollout                     # dry-run all eligible repos
+#   ./pr-standards-rollout --repo content-rabbit  # dry-run one repo
+#   ./pr-standards-rollout --repo content-rabbit --apply  # PR everything
+#
+set -u
+PREFIXES_FILE="$(dirname "$0")/repo-prefixes.json"
+TEMPLATES_DIR="$(dirname "$0")/pr-standards-templates"
+OWNER="pooriaarab"
+
+DRY=1; TARGET_REPO=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --apply) DRY=0; shift ;;
+    --repo)
+      [ $# -ge 2 ] || { echo "ERROR: --repo requires a value"; exit 1; }
+      TARGET_REPO="$2"; shift 2 ;;
+    --help|-h) sed -n '2,12p' "$0"; exit 0 ;;
+    *) echo "unknown flag: $1"; exit 1 ;;
+  esac
+done
+
+# All base64 encoding is done via Python -- no macOS -w0 needed
+
+# ── Load prefixes as base64 to avoid shell quoting issues ──────────────
+PREFIXES_B64=$(python3 -c "
+import json, base64, sys
+d = json.load(open('$PREFIXES_FILE'))
+sys.stdout.buffer.write(base64.b64encode(json.dumps(d).encode()))
+" 2>/dev/null) || { echo "ERROR: can't read $PREFIXES_FILE"; exit 1; }
+
+# Read the templates once, and refuse to start if any of them is missing or
+# empty. set -u does not catch a failed cat, so an unreadable template would
+# have sailed past here and --apply would have written an empty config, an empty
+# workflow or an empty managed block into every target repo. Better to stop
+# before the first remote write than to repair sixty repos afterwards.
+# read_template RETURNS rather than exits, and every caller checks. An `exit`
+# inside $( ) only ends the subshell, so the parent would carry on with an empty
+# variable, which is the exact failure this guard exists to prevent.
+read_template() {
+  local path="$TEMPLATES_DIR/$1" content
+  content=$(cat "$path" 2>/dev/null) || { echo "ERROR: cannot read $path" >&2; return 1; }
+  [ -n "$content" ] || { echo "ERROR: $path is empty" >&2; return 1; }
+  printf '%s' "$content"
+}
+
+PR_CONFIG_TPL=$(read_template pr-standards.json) || exit 1
+PR_TEMPLATE_MD=$(read_template pull_request_template.md) || exit 1
+WORKFLOW_YML=$(read_template pr-standards.yml) || exit 1
+AGENTS_BLOCK_TPL=$(read_template agents-block.md) || exit 1
+
+# ── List target repos ───────────────────────────────────────────────────
+# Repo names are interpolated into python source below. GitHub will not mint a
+# name outside this set, but a typo or a pasted argument should fail here rather
+# than become python.
+if [ -n "$TARGET_REPO" ] && ! printf '%s' "$TARGET_REPO" | grep -qE '^[A-Za-z0-9._-]+$'; then
+  echo "ERROR: --repo must match ^[A-Za-z0-9._-]+$ (got: $TARGET_REPO)"; exit 1
+fi
+if [ -n "$TARGET_REPO" ]; then
+  REPOS_LIST="$TARGET_REPO"
+else
+  REPOS_LIST=$(python3 -c "
+import json, base64
+prefixes = json.loads(base64.b64decode('$PREFIXES_B64').decode())
+for r in sorted(prefixes):
+    print(r)
+")
+fi
+
+echo "=== PR Standards Rollout (dry-run=$DRY) ==="
+echo ""
+
+done_c=0 already_c=0 repaired_c=0 skipped_c=0 fail_c=0
+
+# Build the merged AGENTS.md for a repo/branch into AGENTS_MD.
+# Both the repair path and the full apply path need this. It used to live only in
+# the apply path, so the repair path referenced $AGENTS_MD before it existed and,
+# under `set -u`, took the whole fleet run down instead of one repo.
+# Returns 1 when the existing file cannot be read, so the caller can skip the repo
+# rather than overwrite content it could not see.
+build_agents_md() {
+  local repo="$1" branch="$2" resp existing=""
+  AGENTS_BLOCK=$(echo "$AGENTS_BLOCK_TPL" | sed "s|__PREFIX_UPPER__|$PREFIX_UPPER|g; s|__PREFIX__|$PREFIX|g")
+  resp=$(gh api "repos/$OWNER/$repo/contents/AGENTS.md?ref=$branch" 2>&1) || {
+    if echo "$resp" | grep -q '"Not Found"'; then
+      resp="__NOT_FOUND__"
+    else
+      return 1
+    fi
+  }
+  if [ "$resp" != "__NOT_FOUND__" ]; then
+    existing=$(echo "$resp" | python3 -c "
+import json, base64, sys
+d = json.load(sys.stdin)
+print(base64.b64decode(d['content']).decode())" 2>/dev/null) || return 1
+  fi
+  AGENTS_MD=$(EXISTING="$existing" BLOCK="$AGENTS_BLOCK" python3 -c "
+import os, re
+existing = os.environ.get('EXISTING', '')
+block = os.environ.get('BLOCK', '')
+start, end = '<!-- pr-standards:start -->', '<!-- pr-standards:end -->'
+# Only replace when there is exactly one correctly ordered pair. A lone or
+# duplicated marker (manual edit, merge conflict) would make the non-greedy
+# regex span from the first stray marker to a later one, deleting whatever
+# real content sat between them -- appending fresh is the safe fallback.
+if existing.count(start) == 1 and existing.count(end) == 1 and existing.index(start) < existing.index(end):
+    out = re.sub(re.escape(start) + '.*?' + re.escape(end), lambda _: block, existing, flags=re.S)
+elif existing.strip():
+    out = existing.rstrip() + '\n\n' + block + '\n'
+else:
+    out = '# AGENTS.md\n\n' + block + '\n'
+print(out, end='')
+")
+}
+
+while IFS= read -r repo; do
+  [ -z "$repo" ] && continue
+
+  PREFIX=$(python3 -c "
+import json, base64
+prefixes = json.loads(base64.b64decode('$PREFIXES_B64').decode())
+print(prefixes.get('$repo', ''))
+")
+  [ -z "$PREFIX" ] && {
+    echo "SKIP  $repo  (no prefix)"
+    skipped_c=$(( skipped_c + 1 ))
+    continue
+  }
+
+  # ── Check eligibility ────────────────────────────────────────────────
+  # A repo can stay in repo-prefixes.json after it is deleted or renamed --
+  # prefixes are permanent by design (see build-repo-prefixes.py), so the
+  # registry is never pruned. A full fleet run walks every registry entry, so
+  # without this check a single deleted/renamed repo would FAIL forever and
+  # `exit 1` at the bottom would never go away. Tell that apart from a real
+  # lookup failure (auth, rate-limit) the same way the config/PR lookups do.
+  INFO=$(gh repo view "$OWNER/$repo" --json isFork,isArchived,diskUsage 2>/dev/null) || {
+    VIEW_ERR=$(gh repo view "$OWNER/$repo" --json isFork,isArchived,diskUsage 2>&1 >/dev/null)
+    if echo "$VIEW_ERR" | grep -qi 'could not resolve\|not found'; then
+      echo "SKIP  $repo  (no longer exists)"
+      skipped_c=$(( skipped_c + 1 ))
+    else
+      echo "FAIL  $repo  (can't view)"
+      fail_c=$(( fail_c + 1 ))
+    fi
+    continue
+  }
+  # One python3 call emits all three values with booleans lowercased so bash
+  # compares against 'true'/'false' correctly. Three calls carried too many
+  # chances for the same class of bug.
+  read -r IS_FORK IS_ARCHIVED DISK <<< "$(echo "$INFO" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+print(str(d['isFork']).lower(), str(d['isArchived']).lower(), d['diskUsage'])
+")"
+
+  if [ "$IS_ARCHIVED" = "true" ]; then
+    echo "SKIP  $repo  (archived)"; skipped_c=$(( skipped_c + 1 )); continue
+  fi
+  if [ "$IS_FORK" = "true" ]; then
+    echo "SKIP  $repo  (fork)"; skipped_c=$(( skipped_c + 1 )); continue
+  fi
+  if [ "$DISK" -lt 10 ]; then
+    echo "SKIP  $repo  (under 10KB)"; skipped_c=$(( skipped_c + 1 )); continue
+  fi
+
+  # ── Check if already done ────────────────────────────────────────────
+  # A repo is "done" once the config prefix matches and the three companion
+  # files exist -- existence only, not content. A companion whose content has
+  # drifted from the current template (e.g. after a template update) is not
+  # detected here and will not be repaired; only a missing companion triggers
+  # REPAIR below.
+  REPAIR_MISSING=""
+  CONFIG_RESP=$(gh api "repos/$OWNER/$repo/contents/.github/pr-standards.json" 2>&1) && {
+    CONFIG_PREFIX=$(echo "$CONFIG_RESP" | python3 -c "
+import json, base64, sys
+d = json.load(sys.stdin)
+c = base64.b64decode(d['content']).decode()
+p = json.loads(c).get('prefix', '')
+print(p)
+" 2>/dev/null)
+    if [ "$CONFIG_PREFIX" = "$PREFIX" ]; then
+      for F in ".github/pull_request_template.md" ".github/workflows/pr-standards.yml"; do
+        F_RESP=$(gh api "repos/$OWNER/$repo/contents/$F" --jq '.sha' 2>&1) || {
+          if ! echo "$F_RESP" | grep -q '"Not Found"'; then
+            echo "WARN  $repo  (companion lookup failed for $F)" >&2
+            fail_c=$(( fail_c + 1 ))
+            continue 2
+          fi
+          # 404 means file is genuinely missing -- add to repair list
+          REPAIR_MISSING+="$F "
+        }
+      done
+
+      # AGENTS.md needs its CONTENT checked, not just its existence. A repo with
+      # a hand-written AGENTS.md that has no markers, or one carrying a block
+      # from an older template, would otherwise report OK and never be repaired,
+      # which silently defeats the point: the non-Claude fleet members read this
+      # file to learn the standard. Existence is not adoption.
+      AGENTS_RESP=$(gh api "repos/$OWNER/$repo/contents/AGENTS.md" --jq '.content' 2>&1) || {
+        if ! echo "$AGENTS_RESP" | grep -q '"Not Found"'; then
+          echo "WARN  $repo  (companion lookup failed for AGENTS.md)" >&2
+          fail_c=$(( fail_c + 1 ))
+          continue
+        fi
+        AGENTS_RESP=""
+      }
+      EXPECTED_BLOCK=$(printf '%s' "$AGENTS_BLOCK_TPL" | sed "s|__PREFIX_UPPER__|$(printf '%s' "$PREFIX" | tr '[:lower:]' '[:upper:]')|g; s|__PREFIX__|$PREFIX|g")
+      if ! CURRENT_AGENTS=$(printf '%s' "$AGENTS_RESP" | base64 -d 2>/dev/null); then
+        CURRENT_AGENTS=""
+      fi
+      if ! AGENTS_BLOCK_MATCHES=$(EXPECTED="$EXPECTED_BLOCK" CURRENT="$CURRENT_AGENTS" python3 -c "
+import os, re
+current = os.environ.get('CURRENT', '')
+expected = os.environ.get('EXPECTED', '')
+start, end = '<!-- pr-standards:start -->', '<!-- pr-standards:end -->'
+m = re.search(re.escape(start) + '.*?' + re.escape(end), current, re.S)
+print('yes' if m and m.group(0).strip() == expected.strip() else 'no')
+" 2>/dev/null); then
+        echo "WARN  $repo  (could not compare the AGENTS.md block)" >&2
+        fail_c=$(( fail_c + 1 ))
+        continue
+      fi
+      if [ "$AGENTS_BLOCK_MATCHES" != "yes" ]; then
+        REPAIR_MISSING+="AGENTS.md "
+      fi
+      if [ -z "$REPAIR_MISSING" ]; then
+        echo "OK    $repo  (already has prefix '$PREFIX')"
+        already_c=$(( already_c + 1 ))
+        continue
+      fi
+      REPAIR_MISSING="${REPAIR_MISSING% }"
+      echo "REPAIR $repo  (missing: $REPAIR_MISSING)"
+    else
+      echo "NOTE  $repo  (prefix changed from '$CONFIG_PREFIX' to '$PREFIX')"
+    fi
+  } || {
+    # A missing config is a real 404 and means "not installed yet" -- fall
+    # through to the rollout below. Anything else (auth, rate-limit, 5xx) must
+    # not be mistaken for that, or a transient hiccup would re-roll out a repo
+    # that is already fully configured.
+    if ! echo "$CONFIG_RESP" | grep -q '"Not Found"'; then
+      echo "FAIL  $repo  (config lookup failed)"
+      fail_c=$(( fail_c + 1 ))
+      continue
+    fi
+  }
+
+  # ── Build files for this repo ────────────────────────────────────────
+  CONFIG_JSON=$(echo "$PR_CONFIG_TPL" | python3 -c "
+import json, sys
+cfg = json.load(sys.stdin)
+cfg['prefix'] = '$PREFIX'
+print(json.dumps(cfg, indent=2))
+")
+  PREFIX_UPPER=$(echo "$PREFIX" | tr '[:lower:]' '[:upper:]')
+  PR_BODY=$(echo "$PR_TEMPLATE_MD" | sed "s|<prefix>|$PREFIX|g; s|<PREFIX>|$PREFIX_UPPER|g")
+
+  # ── Dry run ──────────────────────────────────────────────────────────
+  if [ "$DRY" -eq 1 ]; then
+    if [ -n "$REPAIR_MISSING" ]; then
+      echo "WOULD  $repo  (repair: write missing $REPAIR_MISSING to the existing open-PR branch;"
+      echo "         falls back to a full rollout only if no repairable branch is found)"
+    else
+      echo "WOULD  $repo  (prefix=$PREFIX)"
+      echo "         create issue, branch ${PREFIX}-N-adopt-pr-standard, 4 files, PR"
+    fi
+    done_c=$(( done_c + 1 ))
+    continue
+  fi
+
+  # ── APPLY ─────────────────────────────────────────────────────────────
+  if [ -n "$REPAIR_MISSING" ]; then
+    # REPAIR: if the branch from the original rollout still exists, write
+    # only the missing files to it and skip issue creation and PR. If it
+    # was deleted (e.g. auto-deleted after the original PR merged), there is
+    # nothing to repair in place, so fall through to a full rollout below,
+    # which opens a fresh issue/branch/PR and rewrites all four files.
+    # Piping straight into `head -1` would throw away gh's exit status, so a
+    # transient failure (auth, rate-limit) here would look identical to "no
+    # matching branch" and fall through to opening a brand-new issue/branch/PR
+    # for a repo that already has one in flight.
+    # Require the issue-number segment. startswith/endswith alone matches any
+    # branch shaped like <prefix>-anything-adopt-pr-standard, so a hand-made
+    # cr-cleanup-adopt-pr-standard with an open PR would be adopted by the repair
+    # path -- and the open-PR check that follows only proves a PR exists, not that
+    # this tool created it. The rollout would then write its four managed files
+    # into somebody else's pull request.
+    BRANCH_LIST=$(gh api --paginate "repos/$OWNER/$repo/branches?per_page=100" --jq ".[].name | select(test(\"^${PREFIX}-[0-9]+-adopt-pr-standard$\"))" 2>/dev/null)
+    if [ $? -ne 0 ]; then
+      echo "FAIL  $repo  (REPAIR: branch listing failed)"
+      fail_c=$(( fail_c + 1 ))
+      continue
+    fi
+    # A branch that outlived its PR (merged without auto-delete, or closed)
+    # has no way to get its new commits to the default branch. Several
+    # matching branches can exist (a stale one left behind, plus a fresh
+    # one) -- check each in turn rather than only the first, or a stale
+    # branch would shadow a later one that actually has an open PR and the
+    # repair would fall through to a duplicate full rollout instead.
+    BRANCH=""
+    while IFS= read -r candidate; do
+      [ -z "$candidate" ] && continue
+      OPEN_PR=$(gh pr list --repo "$OWNER/$repo" --head "$candidate" --state open --json number --jq '.[0].number // empty' 2>/dev/null)
+      if [ $? -ne 0 ]; then
+        echo "FAIL  $repo  (REPAIR: PR lookup failed)"
+        fail_c=$(( fail_c + 1 ))
+        continue 2
+      fi
+      if [ -n "$OPEN_PR" ]; then
+        BRANCH="$candidate"
+        break
+      fi
+    done <<< "$BRANCH_LIST"
+    if [ -n "$BRANCH" ]; then
+      DEFAULT_BRANCH=$(gh api "repos/$OWNER/$repo" --jq '.default_branch')
+      AGENTS_MD=""
+      case "$REPAIR_MISSING" in
+        *AGENTS.md*)
+          build_agents_md "$repo" "$BRANCH" || {
+            echo "FAIL  $repo  (REPAIR: cannot read AGENTS.md)"
+            fail_c=$(( fail_c + 1 ))
+            continue
+          }
+          ;;
+      esac
+      REPAIR_FAIL=0
+      for FP in $REPAIR_MISSING; do
+        case "$FP" in
+          *.json)        FC="$CONFIG_JSON" ;;
+          *_template.md) FC="$PR_BODY" ;;
+          AGENTS.md)     FC="$AGENTS_MD" ;;
+          *)             FC="$WORKFLOW_YML" ;;
+        esac
+        # A 404 means the file is new and no sha belongs in the payload. Any
+        # other failure means we could not read a file that may well exist, and
+        # sending no sha then overwrites it. Tell the two apart rather than
+        # treating every error as "not there", the same way the config read does.
+        SHA_RESP=$(gh api "repos/$OWNER/$repo/contents/$FP?ref=$BRANCH" 2>&1) || {
+          if ! echo "$SHA_RESP" | grep -q '"Not Found"'; then
+            echo "WARN  $repo  (REPAIR: cannot read $FP)"
+            REPAIR_FAIL=1
+            continue
+          fi
+          SHA_RESP=""
+        }
+        EXISTING_SHA=$(echo "$SHA_RESP" | python3 -c "
+import json, sys
+raw = sys.stdin.read().strip()
+print(json.loads(raw).get('sha', '') if raw else '')
+" 2>/dev/null || echo "")
+        # BRANCH comes from a GitHub API listing (line ~220), not from our own
+        # trusted inputs -- anyone with push access to this one repo controls
+        # its literal bytes. It must reach Python as data (env var), never
+        # spliced into the source string, or a branch name like
+        # foo'+__import__("os").system("...")+'bar runs on the next --apply.
+        PAYLOAD_JSON=$(BRANCH="$BRANCH" EXISTING_SHA="$EXISTING_SHA" python3 -c "
+import json, base64, os, sys
+content = sys.stdin.read()
+content_b64 = base64.b64encode(content.encode()).decode()
+payload = {'message': '[pr-standards] add missing $FP', 'branch': os.environ['BRANCH'], 'content': content_b64}
+sha = os.environ.get('EXISTING_SHA', '')
+if sha:
+    payload['sha'] = sha
+print(json.dumps(payload))
+" <<< "$FC")
+        gh api "repos/$OWNER/$repo/contents/$FP" --method PUT --silent --input - <<< "$PAYLOAD_JSON" 2>/dev/null || {
+          echo "WARN  $repo  (REPAIR: $FP failed)"
+          REPAIR_FAIL=1
+        }
+      done
+      if [ "$REPAIR_FAIL" -ne 0 ]; then
+        echo "FAIL  $repo  (REPAIR: one or more writes failed)"
+        fail_c=$(( fail_c + 1 ))
+        continue
+      fi
+      echo "REPAIR $repo  (wrote missing: $REPAIR_MISSING)"
+      repaired_c=$(( repaired_c + 1 ))
+      continue
+    fi
+    echo "NOTE  $repo  (REPAIR: no repairable branch, falling back to full rollout)"
+  fi
+
+  # Step A: create the issue, or reuse the one a failed run left behind.
+  # A run that dies after this point leaves an open issue and a branch. The
+  # already-done check only reads the default branch, so it cannot see them, and
+  # a retry used to mint a second issue and a second branch for the same repo.
+  # Title alone is not a safe match: any unrelated open issue that happens to
+  # be titled exactly "Adopt the fleet PR standard" would be reused here and
+  # later closed by the rollout PR. Stamp our own issues with a marker and
+  # require it, so only issues this script created are ever reused.
+  ISSUE_TITLE="Adopt the fleet PR standard"
+  ISSUE_MARKER="<!-- pr-standards-rollout -->"
+  ISSUE_NUM=$(gh issue list --repo "$OWNER/$repo" --state open --limit 50 \
+    --search "$ISSUE_TITLE in:title" --json number,title,body \
+    --jq "[.[] | select(.title == \"$ISSUE_TITLE\" and ((.body // \"\") | contains(\"$ISSUE_MARKER\"))) | .number] | first // empty" 2>/dev/null)
+  if [ $? -ne 0 ]; then
+    # A transient failure here (auth, rate-limit) must not look like "no
+    # issue exists" — that would mint a duplicate issue every retry.
+    echo "FAIL  $repo  (issue lookup failed)"
+    fail_c=$(( fail_c + 1 ))
+    continue
+  fi
+  if [ -n "$ISSUE_NUM" ]; then
+    echo "      $repo  (reusing open issue #$ISSUE_NUM from an earlier run)"
+  else
+  ISSUE_NUM=$(gh issue create \
+    --repo "$OWNER/$repo" \
+    --title "Adopt the fleet PR standard" \
+    --body "Set up branch naming, PR title enforcement, and size checks.
+
+- \`.github/pr-standards.json\` — prefix \`$PREFIX\`
+- \`pull_request_template.md\` — checklist template
+- \`.github/workflows/pr-standards.yml\` — enforcement workflow
+
+Branch names: \`$PREFIX-<issue>-<slug>\`
+PR titles: \`[$PREFIX_UPPER-<ISSUE>] description\`
+
+$ISSUE_MARKER
+" 2>/dev/null | grep -oE '[0-9]+$' | head -1)
+  fi
+  if [ -z "$ISSUE_NUM" ]; then
+    echo "FAIL  $repo  (issue create returned no number)"
+    fail_c=$(( fail_c + 1 ))
+    continue
+  fi
+
+  BRANCH="${PREFIX}-${ISSUE_NUM}-adopt-pr-standard"
+  DEFAULT_BRANCH=$(gh api "repos/$OWNER/$repo" --jq '.default_branch' 2>/dev/null)
+  SHA=$(gh api "repos/$OWNER/$repo/git/refs/heads/$DEFAULT_BRANCH" --jq '.object.sha' 2>/dev/null) || {
+    echo "FAIL  $repo  (SHA)"
+    fail_c=$(( fail_c + 1 ))
+    continue
+  }
+
+  # Step B: create branch, or reuse it if a prior run already made one but
+  # died before the PR (the issue reuse above means a retry hits this same
+  # branch name, and creating a ref that already exists always fails).
+  if ! gh api "repos/$OWNER/$repo/git/refs/heads/$BRANCH" &>/dev/null; then
+    gh api "repos/$OWNER/$repo/git/refs" \
+      --method POST --silent \
+      -f ref="refs/heads/$BRANCH" \
+      -f sha="$SHA" 2>/dev/null || {
+      echo "FAIL  $repo  (branch)"
+      fail_c=$(( fail_c + 1 ))
+      continue
+    }
+  fi
+
+  # Step C: write three files via contents API
+  # AGENTS.md is how codex, pi, kimi, muse and gemini learn the standard;
+  # CLAUDE.md covers the Claude accounts from ~/Documents/Personal. The builder
+  # merges the block between its markers so a second run updates it instead of
+  # appending a second copy, and keeps whatever else the file already says.
+  build_agents_md "$repo" "$BRANCH" || {
+    echo "FAIL  $repo  (cannot read AGENTS.md)"
+    fail_c=$(( fail_c + 1 ))
+    continue
+  }
+
+  WRITE_FAIL=0; WRITE_FAIL_FILE=""
+  for item in ".github/pr-standards.json" ".github/pull_request_template.md" ".github/workflows/pr-standards.yml" "AGENTS.md"; do
+    FP="$item"
+
+    # Pick correct content for each file
+    case "$FP" in
+      *.json)        FC="$CONFIG_JSON" ;;
+      *_template.md) FC="$PR_BODY" ;;
+      AGENTS.md)     FC="$AGENTS_MD" ;;
+      *)             FC="$WORKFLOW_YML" ;;
+    esac
+
+    EXISTING_SHA=$(gh api "repos/$OWNER/$repo/contents/$FP?ref=$BRANCH" \
+      --jq '.sha' 2>/dev/null || echo "")
+
+    # Build payload with base64-encoded content
+    PAYLOAD_JSON=$(python3 -c "
+import json, base64
+import sys
+
+# Read content from stdin (reliable for multi-line)
+content = sys.stdin.read()
+content_b64 = base64.b64encode(content.encode()).decode()
+
+payload = {
+    'message': '[$PREFIX_UPPER-$ISSUE_NUM] Add pr-standards config',
+    'branch': '$BRANCH',
+    'content': content_b64,
+}
+if '$EXISTING_SHA':
+    payload['sha'] = '$EXISTING_SHA'
+print(json.dumps(payload))
+" <<< "$FC")
+
+    gh api "repos/$OWNER/$repo/contents/$FP" \
+      --method PUT --silent \
+      --input - <<< "$PAYLOAD_JSON" 2>/dev/null || {
+      echo "WARN  $repo  (failed $FP — may need workflow scope)"
+      WRITE_FAIL=1
+      WRITE_FAIL_FILE="$FP"
+    }
+  done
+
+  # Step D: abort if any write failed — leave the branch for a re-run
+  if [ "$WRITE_FAIL" -eq 1 ]; then
+    echo "FAIL  $repo  (partial write: $WRITE_FAIL_FILE, left branch $BRANCH for re-run)"
+    fail_c=$(( fail_c + 1 ))
+    continue
+  fi
+
+  # Step E: open PR, or reuse one a prior run already opened for this branch
+  # (issue and branch reuse above mean a retry reaches this same head branch,
+  # and `gh pr create` always fails when a PR for it is already open).
+  EXISTING_PR=$(gh pr list --repo "$OWNER/$repo" --head "$BRANCH" --state open --json number --jq '.[0].number // empty' 2>/dev/null)
+  if [ $? -ne 0 ]; then
+    # A transient failure here (auth, rate-limit) must not look like "no PR
+    # exists" -- gh pr create would then fail against the already-open PR and
+    # a repo that already succeeded would be reported as FAIL.
+    echo "FAIL  $repo  (PR lookup failed)"
+    fail_c=$(( fail_c + 1 ))
+    continue
+  fi
+  if [ -n "$EXISTING_PR" ]; then
+    echo "DONE  $repo  (#$ISSUE_NUM -> $BRANCH -> reusing PR #$EXISTING_PR)"
+    done_c=$(( done_c + 1 ))
+    continue
+  fi
+
+  gh pr create \
+    --repo "$OWNER/$repo" \
+    --base "$DEFAULT_BRANCH" \
+    --head "$BRANCH" \
+    --title "[$PREFIX_UPPER-$ISSUE_NUM] Adopt the fleet PR standard" \
+    --body "Closes #$ISSUE_NUM
+
+## What
+
+Adopts the fleet PR standard in this repo. Adds \`.github/pr-standards.json\`
+(prefix \`$PREFIX\`), a pull request template, the \`pr-standards\` CI check, and
+the standard block in \`AGENTS.md\`.
+
+## Why
+
+Agents open pull requests faster than anyone reviews them. This repo gets the
+same rule as the rest of the fleet: one issue, one PR, one concern, under 500
+counted lines. From here on, branches are \`$PREFIX-<issue>-<slug>\` and titles
+are \`[$PREFIX_UPPER-<issue>] Subject\`.
+
+The standard: https://github.com/pooriaarab/scripts/blob/main/pr-standards.md
+
+## How I verified
+
+This PR obeys the rule it installs. Its branch, title and body are what the new
+check requires, so the check running on this PR is the test.
+
+Assisted-by: pooriaarab/scripts:pr-standards-rollout" \
+    2>/dev/null && {
+      echo "DONE  $repo  (#$ISSUE_NUM -> $BRANCH -> PR)"
+      # An assignment, not (( done_c++ )). Post-increment returns the value
+      # before incrementing, so on the first success it returns 0, the group
+      # exits 1, the || branch also runs, and one repo is reported both DONE
+      # and FAIL while fail_c climbs.
+      done_c=$(( done_c + 1 ))
+    } || {
+      echo "FAIL  $repo  (PR)"
+      fail_c=$(( fail_c + 1 ))
+    }
+
+done <<< "$REPOS_LIST"
+
+echo ""
+echo "=== tally: done=$done_c  already=$already_c  repaired=$repaired_c  skipped=$skipped_c  failed=$fail_c ==="
+[ "$fail_c" -gt 0 ] && exit 1 || exit 0
