@@ -283,6 +283,14 @@ def test_global_hooks_path_shapes():
         '#!/bin/bash\n'
         'exit 0  # do not call hooks/pre-push\n'
     )
+    # A real pre-push chain that never touches this repo at all: the parent
+    # directory of the target merely happens to end in "hooks", so a plain
+    # substring search for "hooks/pre-push" would misread this as delegation
+    # even though it always execs someone else's shared hook instead.
+    unrelated_hooks_path = (
+        '#!/bin/bash\n'
+        'exec "/opt/shared-hooks/pre-push" "$@"\n'
+    )
     results = []
     for label, global_hook, want_install in [
         ("no hooksPath", None, True),
@@ -290,6 +298,7 @@ def test_global_hooks_path_shapes():
         ("hooksPath without a delegator", own_policy, False),
         ("hooksPath mentioning delegation only in a comment", commented_mention, False),
         ("hooksPath mentioning delegation only in a trailing comment", trailing_comment_mention, False),
+        ("hooksPath delegating to an unrelated hooks/pre-push path", unrelated_hooks_path, False),
     ]:
         d = tempfile.mkdtemp(); repo = f"{d}/repo"
         os.makedirs(f"{repo}/.github")
