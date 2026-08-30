@@ -63,6 +63,10 @@ export const DEFAULT_CONFIG = {
   excludeGlobs: DEFAULT_EXCLUDE_GLOBS,
   requireProof: true,
   proofOverrideLabel: 'proof-not-applicable',
+  // Warn first, then ratchet. A fleet where no repo runs its tests in CI would
+  // go red everywhere on the day this became a failure, and a standard that
+  // turns every repo red on its first day gets switched off.
+  requireAttributableProof: false,
   uiGlobs: [
     '**/*.tsx', '**/*.jsx', '**/*.vue', '**/*.svelte', '**/*.css', '**/*.scss',
     '**/*.html', '**/components/**', '**/app/**/page.*', '**/pages/**',
@@ -421,6 +425,13 @@ function countUserAttachments(body) {
   return new Set(assetIds).size;
 }
 
+// A link to the run that produced the evidence. `bun test -> 214 passed` is a
+// string an agent types; a run id is a claim about something that happened on a
+// runner, at a commit, which a reader can open.
+function hasRunLink(body) {
+  return /https:\/\/github\.com\/[^\s)\]]+\/actions\/runs\/\d+/.test(verificationSection(body));
+}
+
 function hasValidProofNa(body) {
   const lines = verificationSection(body).split('\n');
   for (const line of lines) {
@@ -520,6 +531,24 @@ export function checkProof(body, files, labels = [], config = DEFAULT_CONFIG) {
         'One image shows the result, not the change. Add the other side.',
       ));
     }
+  }
+  // Evidence has to be attributable, not merely present. Prose under "How I
+  // verified" costs an agent nothing to write, and it is indistinguishable from
+  // the same prose written after running nothing. A run link, or an attachment,
+  // points at something that happened outside the body.
+  //
+  // This does not fire when the visible-change check above already failed: that
+  // failure says the same thing, and two findings for one gap reads as two gaps.
+  const uiProofFailed = failures.some((item) => item.check === 'proof of a visible change');
+  if (!uiProofFailed && !hasValidProofNa(body) && countUserAttachments(body) === 0 && !hasRunLink(body)) {
+    const finding = fail(
+      'attributable proof',
+      'the evidence is prose only',
+      'a link to the CI run that produced it, an attachment, or `Proof: n/a — <reason>`',
+      'Paste the URL of the Actions run whose log holds this output, or say why the change has nothing to show.',
+    );
+    if (config.requireAttributableProof) failures.push(finding);
+    else warnings.push(finding);
   }
   return { failures, warnings, overridden: false };
 }
@@ -749,6 +778,7 @@ export function validateConfig(config) {
   if (!Array.isArray(config.exemptBranches) || !config.exemptBranches.every((value) => typeof value === 'string')) throw new ConfigurationError('exemptBranches must be an array of strings');
   if (!Array.isArray(config.excludeGlobs) || !config.excludeGlobs.every((value) => typeof value === 'string')) throw new ConfigurationError('excludeGlobs must be an array of strings');
   if (typeof config.requireProof !== 'boolean') throw new ConfigurationError('requireProof must be true or false');
+  if (typeof config.requireAttributableProof !== 'boolean') throw new ConfigurationError('requireAttributableProof must be true or false');
   if (typeof config.proofOverrideLabel !== 'string' || !config.proofOverrideLabel) throw new ConfigurationError('proofOverrideLabel must be a non-empty string');
   if (!Array.isArray(config.uiGlobs) || !config.uiGlobs.every((value) => typeof value === 'string')) throw new ConfigurationError('uiGlobs must be an array of strings');
   if (!Array.isArray(config.uiExcludeGlobs) || !config.uiExcludeGlobs.every((value) => typeof value === 'string')) throw new ConfigurationError('uiExcludeGlobs must be an array of strings');

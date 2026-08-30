@@ -125,7 +125,17 @@ The checker enforces only what it can cheaply and mechanically:
 - **Owner label clears it.** `proof-not-applicable`, resolved through the same
   ownership check as `oversized-approved`, skips both the UI attachment and the
   committed media checks. A label the author applies to its own PR does not count.
-- `requireProof: false` turns off both proof checks for a repo with no
+- **Prose alone is not evidence.** `bun test -> 214 passed` costs an agent
+  nothing to write and reads identically whether or not the tests ran. So the
+  `How I verified` section must also carry something that happened outside the
+  body: a link to the Actions run whose log holds that output
+  (`.../actions/runs/<id>`), an attachment, or a `Proof: n/a` reason. This
+  **warns** by default and fails when a repo sets `requireAttributableProof:
+  true`. It stays a warning in the fleet default because a repo that does not yet
+  run its tests in CI would go red on day one, and a standard that turns every
+  repo red on its first day gets switched off. Turn it on per repo once the
+  repo's own tests run in CI.
+- `requireProof: false` turns off every proof check for a repo with no
   user-facing surface.
 
 Escape hatch, when proof truly does not apply:
@@ -228,6 +238,7 @@ reads it; nothing fetches a central registry at check time.
   "overrideLabel": "oversized-approved",
   "proofOverrideLabel": "proof-not-applicable",
   "requireProof": true,
+  "requireAttributableProof": false,
   "uiGlobs": ["**/*.tsx", "**/*.jsx", "**/*.vue", "**/*.svelte", "**/*.css", "**/*.scss", "**/*.html", "**/components/**", "**/app/**/page.*", "**/pages/**"],
   "uiExcludeGlobs": ["**/*.test.*", "**/*.spec.*", "**/__tests__/**", "**/*.stories.*", "**/pages/api/**"],
   "exemptBranches": ["main", "release", "refactor", "gh-pages"],

@@ -518,7 +518,8 @@ test('proof: media belongs in user-attachments, not in the commit', () => {
     const file = { filename, status: 'added' };
     assert.equal(isCommittedProofMedia(file), false, `should not flag ${filename}`);
     const r = checkProof(validBody, [file], [], config);
-    assert.equal(r.failures.length + r.warnings.length, 0);
+    assert.equal(r.failures.length, 0, `should not fail on ${filename}`);
+    assert.equal(r.warnings.some((w) => w.check === 'committed proof media'), false);
   }
 
   // Only an added file is suspicious: editing a media file already in the repo
@@ -630,4 +631,50 @@ test('proof: an indented code line is not a fence, and an angle-bracketed URL is
     'Assisted-by: agent:model',
   ].join('\n');
   assert.equal(warned(checkProof(angled, uiFiles, [], config)), true);
+});
+
+test('proof: evidence has to point at something outside the body', () => {
+  const config = { ...DEFAULT_CONFIG, prefix: 'cr' };
+  const runLink = 'https://github.com/pooriaarab/scripts/actions/runs/1234567890';
+
+  // `bun test -> 214 passed` is a string an agent types. It reads exactly the
+  // same whether the agent ran the tests or not, which is why it warns.
+  const prose = checkProof(validBody, [], [], config);
+  assert.equal(prose.warnings.some((w) => w.check === 'attributable proof'), true);
+  assert.equal(prose.failures.length, 0);
+
+  // A run id is a claim about something that happened on a runner, at a commit.
+  const linked = `${validBody.replace('bun test -> 214 passed', `bun test -> 214 passed\n${runLink}`)}`;
+  assert.equal(checkProof(linked, [], [], config).warnings.length, 0);
+
+  // An attachment is evidence too: it was captured, not typed.
+  const attached = validBody.replace(
+    'bun test -> 214 passed',
+    '![after](https://github.com/user-attachments/assets/aaaa-bbbb)',
+  );
+  assert.equal(checkProof(attached, [], [], config).warnings.length, 0);
+
+  // A stated reason clears it, and the council judges whether the reason holds.
+  const waived = validBody.replace(
+    'bun test -> 214 passed',
+    'Proof: n/a — a type-level refactor with no runtime path',
+  );
+  assert.equal(checkProof(waived, [], [], config).warnings.length, 0);
+
+  // A run link somewhere else in the body is not evidence for this section.
+  const wrongSection = validBody.replace('## Why', `${runLink}\n\n## Why`);
+  assert.equal(checkProof(wrongSection, [], [], config).warnings.some((w) => w.check === 'attributable proof'), true);
+
+  // The ratchet: a repo that has its tests in CI can turn the warning into a
+  // failure, and the fleet default stays a warning so nobody goes red on day one.
+  const strict = { ...config, requireAttributableProof: true };
+  assert.equal(checkProof(validBody, [], [], strict).failures.some((f) => f.check === 'attributable proof'), true);
+  assert.equal(checkProof(linked, [], [], strict).failures.length, 0);
+
+  // One gap, one finding. A visible change with no attachment already fails for
+  // exactly this reason, and a second finding would read as a second problem.
+  const uiFile = [{ filename: 'src/components/Card.tsx', status: 'modified' }];
+  const uiResult = checkProof(validBody, uiFile, [], strict);
+  assert.equal(uiResult.failures.filter((f) => f.check === 'attributable proof').length, 0);
+  assert.equal(uiResult.failures.some((f) => f.check === 'proof of a visible change'), true);
 });
