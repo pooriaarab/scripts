@@ -64,12 +64,19 @@ jobs:
       #
       # --retry-all-errors is what makes the retry cover an HTTP error rather
       # than only a connection failure.
+      #
+      # Downloaded to a file, not piped straight into tar: curl restarts a
+      # retried attempt from byte zero, but a pipe has no seek, so a
+      # connection that drops mid-archive would leave the truncated first
+      # attempt's bytes sitting in front of the successful retry's, and tar
+      # would extract that concatenation instead of the archive.
       - name: Fetch the checker
         run: |
           mkdir -p /tmp/prs
           curl --retry 5 --retry-delay 2 --retry-all-errors -fsSL \
-            "https://codeload.github.com/pooriaarab/scripts/tar.gz/refs/tags/pr-standards-v1" \
-            | tar -xz -C /tmp/prs --strip-components=1
+            -o /tmp/pr-standards.tar.gz \
+            "https://codeload.github.com/pooriaarab/scripts/tar.gz/refs/tags/pr-standards-v1"
+          tar -xzf /tmp/pr-standards.tar.gz -C /tmp/prs --strip-components=1
           chmod +x /tmp/prs/pr-standards
           # A truncated archive must fail here, not later as a rule violation.
           node /tmp/prs/pr-standards --selfcheck
