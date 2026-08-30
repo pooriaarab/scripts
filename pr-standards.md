@@ -229,7 +229,7 @@ reads it; nothing fetches a central registry at check time.
   "proofOverrideLabel": "proof-not-applicable",
   "requireProof": true,
   "uiGlobs": ["**/*.tsx", "**/*.jsx", "**/*.vue", "**/*.svelte", "**/*.css", "**/*.scss", "**/*.html", "**/components/**", "**/app/**/page.*", "**/pages/**"],
-  "uiExcludeGlobs": ["**/*.test.*", "**/*.spec.*", "**/__tests__/**", "**/*.stories.*"],
+  "uiExcludeGlobs": ["**/*.test.*", "**/*.spec.*", "**/__tests__/**", "**/*.stories.*", "**/pages/api/**"],
   "exemptBranches": ["main", "release", "refactor", "gh-pages"],
   "excludeGlobs": ["..."]
 }
