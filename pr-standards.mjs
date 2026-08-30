@@ -1238,6 +1238,8 @@ export async function resolveSingleLabel(repo, number, labels, labelName, config
   const expected = `applied by ${owner} or a repo admin`;
   const fix = labelName === config.overrideLabel
     ? `Only ${owner} or a repo admin can clear the size caps. An agent cannot clear its own PR. On an organization repo, list the people who may in overrideActors.`
+    : labelName === config.destructiveLabel
+    ? `Only ${owner} or a repo admin can clear a destructive change. An agent cannot clear its own PR.`
     : `Only ${owner} or a repo admin can clear the proof requirement. An agent cannot clear its own PR.`;
   warnings.push(fail(
     `${labelName} ignored`,
@@ -1266,6 +1268,8 @@ export async function resolveOverrideLabels(repo, number, labels, config, warnin
         'a readable audit trail for the override',
         labelName === config.overrideLabel
           ? 'The size caps were applied. Re-run when the API is reachable.'
+          : labelName === config.destructiveLabel
+          ? 'The destructive change check was applied. Re-run when the API is reachable.'
           : 'The proof checks were applied. Re-run when the API is reachable.',
       ));
     }
