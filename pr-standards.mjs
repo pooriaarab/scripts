@@ -68,7 +68,7 @@ export const DEFAULT_CONFIG = {
     '**/*.html', '**/components/**', '**/app/**/page.*', '**/pages/**',
   ],
   uiExcludeGlobs: [
-    '**/*.test.*', '**/*.spec.*', '**/__tests__/**', '**/*.stories.*',
+    '**/*.test.*', '**/*.spec.*', '**/__tests__/**', '**/*.stories.*', '**/pages/api/**',
   ],
 };
 
@@ -366,18 +366,33 @@ function hasCommandAndResult(text) {
 // that documents this checker quotes its own escape hatch, and a quoted rule
 // must not satisfy the rule it quotes.
 function visibleBody(body) {
-  return String(body || '')
-    .replace(/<!--[\s\S]*?-->/g, '')
-    // The closing fence must use the same delimiter as the opening one — a
-    // ``` fence only closes on ```, never on ~~~. Accepting either as the
-    // closer let a "Proof: n/a" line that GitHub still renders inside a
-    // backtick fence (because the ~~~ line does not close it) show up here
-    // as plain visible text.
-    // An opening fence with no matching closer runs to the end of the
-    // document on GitHub too — so if the regex only matched a real closing
-    // line, an unclosed fence left the rest of the body, "Proof: n/a" line
-    // included, sitting here as if it were plain text.
-    .replace(/^[ \t]*(```|~~~)[\s\S]*?(?:^[ \t]*\1[ \t]*$|$(?![\s\S]))/gm, '');
+  const withoutComments = String(body || '').replace(/<!--[\s\S]*?-->/g, '');
+  const lines = withoutComments.split('\n');
+  const visible = [];
+  let fence = null;
+  for (const line of lines) {
+    if (fence) {
+      // The closing fence must use the same character as the opening one and
+      // at least as many repeats — GitHub only closes a fence of length N on a
+      // line with N or more of that same character. A regex that always
+      // looked for exactly three let a four-backtick-fenced block run past its
+      // real closing line (looking for a bare ``` that never came) and
+      // swallow real proof sitting after it, and let a ~~~ line masquerade as
+      // the closer for a ``` fence and cut a hidden block short too early.
+      if (new RegExp(`^[ \\t]*[${fence.char}]{${fence.len},}[ \\t]*$`).test(line)) fence = null;
+      continue;
+    }
+    const open = /^[ \t]*(`{3,}|~{3,})/.exec(line);
+    if (open) {
+      fence = { char: open[1][0], len: open[1].length };
+      continue;
+    }
+    visible.push(line);
+  }
+  // An opening fence with no matching closer runs to the end of the document
+  // on GitHub too, so an unterminated fence drops everything after it here —
+  // the loop above never stops skipping once `fence` is set.
+  return visible.join('\n');
 }
 
 // The proof escape hatch and the attachment count only count evidence that
