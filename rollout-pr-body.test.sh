@@ -39,13 +39,16 @@ case "$BODY" in
   *) say 1 'the body carries the precheck output, not a claim about it'; printf '%s\n' "$BODY" ;;
 esac
 
-# The authority, not a regex that guesses at it.
-GITHUB_REPOSITORY="$OWNER/$repo" BODY="$BODY" node --input-type=module -e '
+# The authority, not a regex that guesses at it. cd into $HERE first: node
+# resolves a relative import in an -e/--input-type=module script against the
+# process's cwd, not the script's own directory, so running this test via an
+# absolute path from anywhere else would fail to find pr-standards.mjs.
+(cd "$HERE" && GITHUB_REPOSITORY="$OWNER/$repo" BODY="$BODY" node --input-type=module -e '
 import { validateBody, DEFAULT_CONFIG } from "./pr-standards.mjs";
 const result = validateBody(process.env.BODY, 997, { ...DEFAULT_CONFIG, prefix: "cr" });
 for (const failure of result.failures) console.log(`      ${failure.check}: ${failure.got}`);
 process.exit(result.ok ? 0 : 1);
-'
+')
 say $? 'validateBody accepts the body the rollout opens'
 
 [ $fail -eq 0 ] && echo && echo "all passing"
