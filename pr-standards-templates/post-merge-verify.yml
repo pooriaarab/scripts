@@ -1,0 +1,119 @@
+name: post-merge-verify
+
+# Merged is not live. CI proves the change is good on a runner. Nothing else
+# proves it reached production, and a deploy that fails quietly leaves the old
+# build serving while every check stays green.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: post-merge-verify-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: Verify the merged commit is live
+    # The job only waits on an external API, so it takes the smallest runner.
+    runs-on: ubicloud-standard-2
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Check the deploy
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
+          REPORT: ${{ runner.temp }}/verify-failure.md
+        run: |
+          set -euo pipefail
+          python3 <<'PY'
+          import json, os, pathlib, sys, time, urllib.error, urllib.request
+
+          expected = os.environ["EXPECTED_SHA"]
+          report = pathlib.Path(os.environ["REPORT"])
+
+          # Most repos in the fleet do not deploy. An absent config keeps the
+          # job green; a repo without a deploy must never carry a red branch.
+          try:
+              config = json.loads(pathlib.Path(".github/pr-standards.json").read_text())["postMergeVerify"]
+          except (OSError, ValueError, KeyError):
+              print("No postMergeVerify config. Nothing to check.")
+              sys.exit(0)
+
+          url = config["url"].rstrip("/")
+          sha_path = config.get("shaPath")
+          sha_key = config.get("shaJsonKey", "sha")
+          deadline = time.monotonic() + int(config.get("timeoutSeconds", 900))
+
+          def get(target):
+              request = urllib.request.Request(target, headers={"User-Agent": "post-merge-verify"})
+              with urllib.request.urlopen(request, timeout=15) as response:
+                  return response.status, response.read(4096).decode("utf-8", "replace")
+
+          def fail(reason):
+              report.write_text(reason)
+              sys.exit(reason)
+
+          # Poll the version endpoint until it reports the commit that just
+          # merged. Back off so a fleet of repos does not hammer one endpoint.
+          if sha_path:
+              wait, last = 5, "(no response)"
+              while True:
+                  try:
+                      _, body = get(url + sha_path)
+                      last = body.strip()[:500]
+                      if json.loads(body).get(sha_key, "").strip() == expected:
+                          print(f"Live SHA is {expected}.")
+                          break
+                  except (urllib.error.URLError, ValueError, OSError) as error:
+                      last = f"{type(error).__name__}: {error}"
+                  if time.monotonic() >= deadline:
+                      fail(f"- Failing step: poll `{url}{sha_path}` for the live SHA\n"
+                           f"- Expected SHA: `{expected}`\n"
+                           f"- Last response: `{last}`\n")
+                  time.sleep(wait)
+                  wait = min(wait * 2, 60)
+
+          # A version endpoint can report the new SHA while the site itself is
+          # broken, so ask the primary URL too.
+          try:
+              status, body = get(url)
+          except (urllib.error.URLError, OSError) as error:
+              fail(f"- Failing step: request `{url}`\n- Error: `{type(error).__name__}: {error}`\n")
+          if not 200 <= status < 300:
+              fail(f"- Failing step: request `{url}`\n- Status: `{status}`, expected 2xx\n"
+                   f"- Body: `{body.strip()[:500]}`\n")
+          print(f"{url} returned {status}.")
+          PY
+
+      # A failure nobody sees is the same as no check at all. One open issue per
+      # repo is enough: a deploy that stays broken across five pushes must not
+      # open five issues.
+      - name: Report a deploy that did not go live
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          REPORT: ${{ runner.temp }}/verify-failure.md
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          SHORT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          TITLE="Deploy did not go live: ${SHORT_SHA:0:7}"
+          {
+            echo "The post-merge check failed."
+            echo
+            cat "$REPORT" 2>/dev/null || echo "- The check failed before it wrote a reason."
+            echo "- Run: $RUN_URL"
+          } > "$RUNNER_TEMP/issue-body.md"
+          EXISTING=$(gh issue list --repo "$REPO" --state open --limit 1 \
+            --search '"Deploy did not go live" in:title' --json number --jq '.[0].number // empty')
+          if [ -n "$EXISTING" ]; then
+            gh issue comment "$EXISTING" --repo "$REPO" --body-file "$RUNNER_TEMP/issue-body.md"
+          else
+            gh issue create --repo "$REPO" --title "$TITLE" --body-file "$RUNNER_TEMP/issue-body.md"
+          fi
