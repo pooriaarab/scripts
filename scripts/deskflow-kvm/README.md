@@ -140,3 +140,47 @@ Verified by effect rather than by log: Explorer's `SelectedItems().Count` went
 to 8 across eight Cmd+clicks in a single hold, with the trace showing one
 `LWin` key-down and one `LControl` per click. Explorer ignores Win for click
 semantics, so leaving it held costs nothing.
+
+## `#MenuMaskKey` is AutoHotkey v1 — in v2 it is a syntax error
+
+Porting or copy-pasting an AHK snippet is the most likely way to take down a
+whole script, because a v1 directive is still *syntactically plausible* to a
+reader and fails only at load time:
+
+```ahk
+#MenuMaskKey vkE8       ; v1. In v2: "This line does not contain a recognized action"
+A_MenuMaskKey := "vkE8" ; v2. Assignable built-in variable, not a directive.
+```
+
+Both forms were parse-checked to confirm this. The failure mode is what makes it
+expensive: **a syntax error means the script does not load at all**, so every
+mapping in it stops working at once while the process still appears in the task
+list. The reported symptom was "Cmd+Delete stopped working" — nothing to do with
+the line that was actually wrong.
+
+A suggestion from any source, including an LLM, gets parse-checked before it is
+deployed. This one arrived from a model, was deployed twice unchecked, and broke
+the keyboard both times.
+
+## A bare `{LWin up}` opens the Start menu and eats the next shortcut
+
+Windows treats a Win key-up with no key pressed in between as a **Win tap**. So a
+handler that releases a forwarded Win in order to substitute another modifier
+pops the Start menu, which steals focus before the intended keystroke lands.
+
+What makes this genuinely hard to find is that it is *action-order dependent*. A
+different handler that happens to send a mask key first will mask the following
+Win-up too, so the broken shortcut appears to work — until that unrelated handler
+is changed. Symptoms:
+
+- an unrelated shortcut "randomly" stops working
+- it breaks only after some *other* feature is edited
+- it works in isolation but not in a real sequence of actions
+
+Mask every release, ideally globally: `A_MenuMaskKey := "vkE8"`.
+
+**The diagnostic principle worth keeping:** when a change to feature A breaks
+unrelated feature B, suspect shared global state — here the logical modifier
+state, which every handler reads and writes — rather than coincidence. Two
+handlers touching the same Win-up were coupled through the OS, not through code,
+so nothing in either file hinted at the dependency.
