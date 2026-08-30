@@ -369,12 +369,26 @@ function visibleBody(body) {
   const lines = String(body || '').split('\n');
   const visible = [];
   let fence = null;
+  let inComment = false;
   // A fence marker can sit behind a blockquote prefix (`> ``` `), and GitHub
   // still treats it as a real fence there. Strip the prefix only to test for
   // the marker; the pushed line keeps it, since the quoted prose is still
   // visible text.
   const unquoted = (line) => line.replace(/^(?:\s{0,3}>\s?)+/, '');
-  for (const line of lines) {
+  for (let line of lines) {
+    // An HTML comment is raw text on GitHub: nothing inside it is parsed as
+    // markdown, so a fence marker that happens to sit inside one (a template's
+    // hidden instructions demonstrating the escape-hatch syntax, say) must
+    // never be read as a real fence opener. Resolve any comment on the line
+    // before looking for fence markers, and while a comment spans multiple
+    // lines skip straight past them — an unterminated comment runs to the end
+    // of the document on GitHub too.
+    if (inComment) {
+      const close = line.indexOf('-->');
+      if (close === -1) continue;
+      line = line.slice(close + 3);
+      inComment = false;
+    }
     if (fence) {
       // The closing fence must use the same character as the opening one and
       // at least as many repeats — GitHub only closes a fence of length N on a
@@ -385,6 +399,22 @@ function visibleBody(body) {
       // the closer for a ``` fence and cut a hidden block short too early.
       if (new RegExp(`^ {0,3}[${fence.char}]{${fence.len},}[ \\t]*$`).test(unquoted(line))) fence = null;
       continue;
+    }
+    // Strip any comment(s) fully contained on this line — including one that
+    // hides a triple-backtick example — before testing for a fence opener.
+    // Fenced content is never scanned for comment markers (that check sits
+    // behind the `if (fence)` branch above and returns before reaching here),
+    // so a real fence that happens to contain comment-like text is untouched.
+    while (true) {
+      const openIdx = line.indexOf('<!--');
+      if (openIdx === -1) break;
+      const closeIdx = line.indexOf('-->', openIdx + 4);
+      if (closeIdx === -1) {
+        line = line.slice(0, openIdx);
+        inComment = true;
+        break;
+      }
+      line = line.slice(0, openIdx) + line.slice(closeIdx + 3);
     }
     // At most three spaces of indent, the same ceiling GitHub uses. A line
     // indented four or more is indented code, not a fence, and treating one as
@@ -399,16 +429,11 @@ function visibleBody(body) {
     }
     visible.push(line);
   }
-  // An opening fence with no matching closer runs to the end of the document
-  // on GitHub too, so an unterminated fence drops everything after it here —
-  // the loop above never stops skipping once `fence` is set.
-  //
-  // Comments are stripped only now, after fences are resolved on the raw
-  // text. Stripping them first could delete a real closing fence when the
-  // fenced content happened to contain an HTML comment that spanned it,
-  // silently hiding genuine proof written after that fence as if it were
-  // still inside the block.
-  return visible.join('\n').replace(/<!--[\s\S]*?-->/g, '');
+  // An opening fence (or an unterminated comment) with no matching closer
+  // runs to the end of the document on GitHub too, so either one drops
+  // everything after it here — the loop above never stops skipping once
+  // `fence` or `inComment` is set.
+  return visible.join('\n');
 }
 
 // The proof escape hatch and the attachment count only count evidence that
@@ -438,6 +463,11 @@ function countUserAttachments(body) {
 function hasValidProofNa(body) {
   const lines = verificationSection(body).split('\n');
   for (const line of lines) {
+    // Four or more spaces (or a leading tab) renders as an indented code
+    // block on GitHub — the same syntax this convention's own docs use to
+    // show the escape hatch. A PR body that quotes that example verbatim
+    // must not be read as the author invoking it.
+    if (/^(?: {4,}|\t)/.test(line)) continue;
     const match = /^\s*Proof:\s*n\/a\s*[—–-]\s*(.+)\s*$/i.exec(line);
     if (match && match[1].trim().length >= 20) return true;
   }
