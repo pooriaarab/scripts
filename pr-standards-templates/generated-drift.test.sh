@@ -45,6 +45,7 @@ DIRTY='{"generators":["echo regenerated > generated.txt"]}'
 # unless the setup really ran first.
 SETUP='{"generatorSetup":"echo committed > .setup-src","generators":["cp .setup-src generated.txt && rm .setup-src"]}'
 BROKEN='{"generators":["exit 3"]}'
+MALFORMED='not valid json'
 
 check 0 'passes when the repo has no config'          none
 check 0 'passes when no generators are configured'    '{"prefix":"scr"}'
@@ -52,6 +53,7 @@ check 0 'passes when the generator changes nothing'   "$CLEAN"
 check 1 'fails when the generator changes a file'     "$DIRTY"
 check 0 'runs generatorSetup before the generators'   "$SETUP"
 check 1 'fails when a generator itself fails'         "$BROKEN"
+check 1 'fails on malformed config instead of silently skipping' "$MALFORMED"
 
 # The report is what the PR comment quotes. An empty one leaves the author with
 # a red check and no idea which file to regenerate.

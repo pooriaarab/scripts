@@ -23,6 +23,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Regenerate and compare
+        id: regen
         env:
           REPORT: ${{ runner.temp }}/drift.md
         run: |
@@ -36,10 +37,14 @@ jobs:
           # cannot satisfy would leave it permanently red, which teaches
           # everyone to ignore a red check.
           try:
-              config = json.loads(pathlib.Path(".github/pr-standards.json").read_text())
-          except (OSError, ValueError):
+              config_text = pathlib.Path(".github/pr-standards.json").read_text()
+          except OSError:
               print("No .github/pr-standards.json. Nothing to check.")
               sys.exit(0)
+          try:
+              config = json.loads(config_text)
+          except ValueError as e:
+              sys.exit(f"Malformed .github/pr-standards.json: {e}")
           generators = [g for g in config.get("generators", []) if isinstance(g, str) and g.strip()]
           if not generators:
               print("No generators configured. Nothing to check.")
@@ -87,11 +92,17 @@ jobs:
           REPO: ${{ github.repository }}
           PR: ${{ github.event.pull_request.number }}
           REPORT: ${{ runner.temp }}/drift.md
+          REGEN_OUTCOME: ${{ steps.regen.outcome }}
         run: |
           set -euo pipefail
           MARKER="<!-- generated-drift -->"
           if [ -f "$REPORT" ]; then
             { echo "$MARKER"; echo "### Generated file drift"; echo; cat "$REPORT"; } > body.md
+          elif [ "$REGEN_OUTCOME" != "success" ]; then
+            # The regenerate step itself errored (a broken generator, not drift).
+            # Leave any existing drift comment alone rather than mislabel the
+            # failure as resolved.
+            exit 0
           else
             # Say nothing unless an earlier run already complained. A repo with
             # no drift should carry no comment at all.
