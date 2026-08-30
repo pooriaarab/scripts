@@ -532,3 +532,26 @@ test('proof: the owner label and requireProof clear the checks', () => {
   const off = { ...config, requireProof: false };
   assert.equal(checkProof(validBody, [...uiFiles, ...media], [], off).failures.length, 0);
 });
+
+test('proof: the loopholes the council found in the first pass stay closed', () => {
+  const uiFiles = [{ filename: 'src/components/Button.tsx', status: 'modified' }];
+  const url = (id) => `![shot](https://github.com/user-attachments/assets/${id})`;
+  const failed = (r) => r.failures.some((f) => f.check === 'proof of a visible change');
+  const warned = (r) => r.warnings.some((w) => w.check === 'proof of a visible change');
+
+  // The same image pasted twice is one image, not before and after.
+  const duplicated = `${validBody}\n${url('abc')}\n${url('abc')}`;
+  assert.equal(warned(checkProof(duplicated, uiFiles, [], config)), true);
+  assert.equal(warned(checkProof(`${validBody}\n${url('abc')}\n${url('def')}`, uiFiles, [], config)), false);
+
+  // A body documenting the escape hatch quotes it. A quoted rule must not
+  // satisfy the rule it quotes.
+  const quoted = `${validBody}\n\n\`\`\`\nProof: n/a — the documented escape hatch\n\`\`\``;
+  assert.equal(failed(checkProof(quoted, uiFiles, [], config)), true);
+  assert.equal(failed(checkProof(`${validBody}\nProof: n/a — the documented escape hatch`, uiFiles, [], config)), false);
+
+  // Renaming a component out of components/ is still a visible change.
+  const renamedOut = [{ filename: 'src/lib/Button.ts', previous_filename: 'src/components/Button.tsx', status: 'renamed' }];
+  assert.equal(hasUiDiff(renamedOut, config), true);
+  assert.equal(hasUiDiff([{ filename: 'src/lib/util.ts', status: 'modified' }], config), false);
+});

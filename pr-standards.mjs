@@ -362,15 +362,24 @@ function hasCommandAndResult(text) {
 // Proof helpers — an agent can type "tested locally" for free; a screenshot
 // or a real command output costs work, so proof is the part worth checking.
 // A user-attachments URL is the only proof that does not bloat the repo.
+// A comment is not visible text, and neither is a fenced code block: a body
+// that documents this checker quotes its own escape hatch, and a quoted rule
+// must not satisfy the rule it quotes.
+function visibleBody(body) {
+  return String(body || '')
+    .replace(/<!--[\s\S]*?-->/g, '')
+    .replace(/^[ \t]*(?:```|~~~)[\s\S]*?^[ \t]*(?:```|~~~)[ \t]*$/gm, '');
+}
+
 function countUserAttachments(body) {
-  const visible = String(body || '').replace(/<!--[\s\S]*?-->/g, '');
-  const matches = visible.match(/https:\/\/github\.com\/user-attachments\/assets\/[^\s"'\)\]]+/g);
-  return matches ? matches.length : 0;
+  const matches = visibleBody(body).match(/https:\/\/github\.com\/user-attachments\/assets\/[^\s"'\)\]]+/g);
+  // Distinct URLs, because the same image pasted twice is one image. The
+  // threshold asks for before AND after, not for two links.
+  return matches ? new Set(matches).size : 0;
 }
 
 function hasValidProofNa(body) {
-  const visible = String(body || '').replace(/<!--[\s\S]*?-->/g, '');
-  const lines = visible.split('\n');
+  const lines = visibleBody(body).split('\n');
   for (const line of lines) {
     const match = /^\s*Proof:\s*n\/a\s*[—–-]\s*(.+)\s*$/i.exec(line);
     if (match && match[1].trim().length >= 20) return true;
@@ -389,7 +398,11 @@ export function isUiFile(filename, config = DEFAULT_CONFIG) {
 
 export function hasUiDiff(files, config = DEFAULT_CONFIG) {
   if (!Array.isArray(files) || files.length === 0) return false;
-  return files.some((file) => isUiFile(String(file.filename || file || ''), config));
+  // A rename carries the new path in `filename` and the old one in
+  // `previous_filename`. Moving a component out of components/ is still a
+  // change a user can see, so both paths decide whether proof is required.
+  return files.some((file) => [file.filename || file || '', file.previous_filename || '']
+    .some((path) => path && isUiFile(String(path), config)));
 }
 
 const PROOF_MEDIA_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'mp4', 'mov', 'webm']);
