@@ -243,10 +243,14 @@ is_personal_github_url() {
 # below, and the run would report INSTALL for a guard that never runs. The
 # delegation target is a literal path any delegator has to name, so requiring
 # it in the file is the cheapest signal that is not a guess.
+# Comment lines are excluded from that search: a pre-push that only mentions
+# "hooks/pre-push" in a remark explaining why it does NOT delegate (a real
+# shape for a policy hook to take) would otherwise match, and the run would
+# report INSTALL for a guard that still never runs.
 hooks_path_delegates() {
   local dir="$1"
   [ -x "$dir/pre-push" ] || return 1
-  grep -q 'hooks/pre-push' "$dir/pre-push" 2>/dev/null
+  grep -vE '^[[:space:]]*#' "$dir/pre-push" 2>/dev/null | grep -q 'hooks/pre-push'
 }
 
 is_eligible() {

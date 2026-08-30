@@ -268,11 +268,20 @@ def test_global_hooks_path_shapes():
         'exec "$(git rev-parse --git-common-dir)/hooks/pre-push" "$@"\n'
     )
     own_policy = '#!/bin/bash\nexit 0\n'
+    # Mentions the delegation path only in a comment explaining that it does
+    # NOT delegate -- a real shape for a policy hook, and one a plain
+    # substring search on the file would misread as a delegator.
+    commented_mention = (
+        '#!/bin/bash\n'
+        '# This hook does not delegate to hooks/pre-push; it enforces its own policy.\n'
+        'exit 0\n'
+    )
     results = []
     for label, global_hook, want_install in [
         ("no hooksPath", None, True),
         ("hooksPath with a delegator", delegator, True),
         ("hooksPath without a delegator", own_policy, False),
+        ("hooksPath mentioning delegation only in a comment", commented_mention, False),
     ]:
         d = tempfile.mkdtemp(); repo = f"{d}/repo"
         os.makedirs(f"{repo}/.github")
