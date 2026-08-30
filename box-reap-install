@@ -22,6 +22,10 @@ interval="${BOX_REAP_INTERVAL:-900}"
 
 [[ "$(uname -s)" == "Darwin" ]] || { echo "launchd is macOS-only; on Linux use a systemd timer around box-reap-cron." >&2; exit 2; }
 
+# The reaper parses `box list --json` with python3. Without it the orphan sweep cannot
+# enumerate anything, so check before installing an agent that would fail every 15 minutes.
+command -v python3 >/dev/null 2>&1 || { echo "python3 not found; box-reap-cron needs it to parse box list output." >&2; exit 2; }
+
 mkdir -p "$bin_dir" "$agent_dir" "$HOME/.config/ascii-box"
 
 for f in box-reap box-reap-cron box-guard box-perf-check box-perf-cron; do

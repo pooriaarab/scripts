@@ -73,24 +73,52 @@ echo "----- exit=$rc" >> "$LOG"
 ORPHAN_AGE="${BOX_REAP_ORPHAN_AGE:-20m}"
 STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/box-work"
 
+# A claim file only means something while its session lives. A session killed before
+# `box-session end` runs leaves the file behind, and a stale claim would shield its Box
+# from the sweep forever. So a claim expires: past CLAIM_TTL the Box is treated as
+# unclaimed, which is the safe direction — it still has to pass the activity probe.
+CLAIM_TTL_MIN="${BOX_REAP_CLAIM_TTL_MIN:-360}"
+
 claimed=""
+stale_claims=""
 for f in "$STATE_DIR"/*.id; do
   [[ -f "$f" ]] || continue
-  claimed="$claimed $(tr -d '[:space:]' < "$f")"
+  id="$(tr -d '[:space:]' < "$f")"
+  [[ -n "$id" ]] || continue
+  if [[ -n "$(find "$f" -mmin "+$CLAIM_TTL_MIN" 2>/dev/null)" ]]; then
+    stale_claims="$stale_claims $(basename "$f" .id):$id"
+  else
+    claimed="$claimed $id"
+  fi
 done
+
+# Enumeration failure must not look like "no orphans". Capture the list, check the status,
+# and fail loudly: a silent empty result would skip the sweep while the job still reported
+# the first reaper's exit code, which is how a cost leak hides behind a green cron.
+if ! box_json="$(box list --json 2>&1)"; then
+  echo "$(date -u +%FT%TZ) ERROR: box list failed, skipping orphan sweep: ${box_json:0:200}" >> "$LOG"
+  exit 4
+fi
+if ! orphan_ids="$(printf '%s' "$box_json" | python3 -c '
+import sys, json
+d = json.load(sys.stdin)
+for b in d["boxes"]:
+    print(b["id"])
+' 2>&1)"; then
+  echo "$(date -u +%FT%TZ) ERROR: could not parse box list, skipping orphan sweep: ${orphan_ids:0:200}" >> "$LOG"
+  exit 4
+fi
 
 orphan_args=()
 while read -r id; do
   [[ -n "$id" ]] || continue
   case " $claimed " in *" $id "*) continue ;; esac
   orphan_args+=(--box "$id")
-done < <(box list --json 2>/dev/null | python3 -c '
-import sys, json
-try:
-    for b in json.load(sys.stdin).get("boxes", []):
-        print(b["id"])
-except Exception:
-    pass')
+done <<< "$orphan_ids"
+
+if [[ -n "$stale_claims" ]]; then
+  echo "$(date -u +%FT%TZ) stale claim file(s) past ${CLAIM_TTL_MIN}m, treating as unclaimed:$stale_claims" >> "$LOG"
+fi
 
 if [[ ${#orphan_args[@]} -gt 0 ]]; then
   {

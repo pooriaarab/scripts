@@ -133,9 +133,17 @@ credit check projected a **$287 overrun** inside a 15-day window. One sweep took
 Boxes and roughly a third of the burn.
 
 So `box-reap-cron` sweeps unclaimed Boxes at a shorter age (`BOX_REAP_ORPHAN_AGE`, default
-20m) than claimed ones (`BOX_REAP_AGE`, default 45m). Age is the only thing that changes —
-the same probe still runs, so a busy Box is still never stopped. Being unclaimed is
-evidence about intent, not about activity, and the two must not be confused.
+20m) than claimed ones (`BOX_REAP_AGE`, default 45m). Age is the only thing that changes:
+being unclaimed never stops a Box by itself, the probe still has to find it quiet. That is
+a weaker guarantee than it sounds — an I/O-bound job uses little CPU, so anything that
+matters must touch the heartbeat file (see the section above). Unclaimed is evidence about
+intent, not about activity, and the two must not be confused.
+
+**A claim is only trustworthy while its session lives.** If a session is killed before
+`box-session end` runs, its `.id` file stays behind, and a stale claim would shield that
+Box from every later sweep — forever. So a claim expires: past `BOX_REAP_CLAIM_TTL_MIN`
+(default 360, i.e. 6h) the Box is treated as unclaimed and logged as such. Expiring in that
+direction is the safe one, because the probe still gates the stop.
 
 Expect a few "failed to stop: Box is archived" lines in a sweep. That is a Box that hit its
 own archive deadline between the plan and the execute. Archived Boxes are free; nothing is
@@ -165,15 +173,17 @@ and any Box running with auto-stop disabled.
 
 `box` must be on `PATH`; cron does not read your shell profile.
 
-## The hourly reaper (added 2026-08-28)
+## The periodic reaper (added 2026-08-28, tightened 2026-08-30)
 
 Nothing was stopping Boxes. `com.pooriaarab.crabbox-sweep` existed but was
 **not loaded** in launchd, ran once a day at 09:00, still defaulted to
 `provider=gcp`, and did not scan `~/Documents/Personal`.
 
-`com.pooriaarab.box-reap` replaces it. It runs `box-reap` hourly with
-`--stop-idle-older-than 45m --execute`, so the decision still goes through the
-CPU/load/heartbeat checks and never reaps on Box state.
+`com.pooriaarab.box-reap` replaces it, installed by `./box-reap-install`. It started
+hourly with `--stop-idle-older-than 45m --execute`; since 2026-08-30 it runs **every 15
+minutes** and sweeps unclaimed Boxes too, because hourly could not keep up — Boxes were
+created faster than a 45-minute threshold checked once an hour could catch them. The
+decision still goes through the CPU/load/heartbeat checks and never reaps on Box state.
 
 **macOS TCC is the trap.** A launchd agent cannot read `~/Documents` without
 Full Disk Access granted by hand. The first install failed with
@@ -218,7 +228,7 @@ an interactive shell. A convention every caller must remember is not a control.
 So `box-guard` repairs the state instead. It sweeps for Boxes with no deadline
 and gives them one with `box extend --ttl`, which sets the remaining lifetime on
 a **running** Box in place — no stop, no restart, so it cannot interrupt real
-work. It runs hourly from `box-reap-cron`, before the reap.
+work. It runs every 15 minutes from `box-reap-cron`, before the reap.
 
 Two things checked while diagnosing this, both worth keeping:
 
