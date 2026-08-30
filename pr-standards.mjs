@@ -373,21 +373,35 @@ function visibleBody(body) {
     // closer let a "Proof: n/a" line that GitHub still renders inside a
     // backtick fence (because the ~~~ line does not close it) show up here
     // as plain visible text.
-    .replace(/^[ \t]*(```|~~~)[\s\S]*?^[ \t]*\1[ \t]*$/gm, '');
+    // An opening fence with no matching closer runs to the end of the
+    // document on GitHub too — so if the regex only matched a real closing
+    // line, an unclosed fence left the rest of the body, "Proof: n/a" line
+    // included, sitting here as if it were plain text.
+    .replace(/^[ \t]*(```|~~~)[\s\S]*?(?:^[ \t]*\1[ \t]*$|$(?![\s\S]))/gm, '');
+}
+
+// The proof escape hatch and the attachment count only count evidence that
+// lives where the convention says evidence lives: the "How I verified"
+// section. An attachment link left over in an unrelated section of the body
+// is not evidence of anything, and neither is a "Proof: n/a" line dropped
+// outside it.
+function verificationSection(body) {
+  return sectionBody(visibleBody(body), 'How I verified') || '';
 }
 
 function countUserAttachments(body) {
-  const matches = visibleBody(body).match(/https:\/\/github\.com\/user-attachments\/assets\/[^\s"'\)\]]+/g);
+  const matches = verificationSection(body).match(/https:\/\/github\.com\/user-attachments\/assets\/[^\s"'\)\]]+/g);
   if (!matches) return 0;
   // Distinct assets, because the same image pasted twice is one image. The
   // threshold asks for before AND after, not for two links — and a query
-  // string or fragment appended to the same asset id is still one asset.
-  const assetIds = matches.map((url) => url.split(/[?#]/)[0]);
+  // string, fragment, or trailing sentence punctuation appended to the same
+  // asset id is still one asset.
+  const assetIds = matches.map((url) => url.split(/[?#]/)[0].replace(/[.,;:!?]+$/, ''));
   return new Set(assetIds).size;
 }
 
 function hasValidProofNa(body) {
-  const lines = visibleBody(body).split('\n');
+  const lines = verificationSection(body).split('\n');
   for (const line of lines) {
     const match = /^\s*Proof:\s*n\/a\s*[—–-]\s*(.+)\s*$/i.exec(line);
     if (match && match[1].trim().length >= 20) return true;
