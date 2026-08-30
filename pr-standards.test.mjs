@@ -6,6 +6,7 @@ import {
   DEFAULT_CONFIG,
   checkProof,
   checkDestructive,
+  checkDependencies,
   checkSize,
   countClosingReferences,
   validateCommits,
@@ -712,4 +713,51 @@ test('destructive: a change that cannot be undone stops for a person', () => {
   const many = Array.from({ length: 9 }, (_, i) => ({ filename: `db/migrations/${i}.sql` }));
   const message = checkDestructive(many, [], config).failures[0].got;
   assert.equal(message.includes('and 4 more'), true);
+});
+
+test('dependency: a new package needs a stated licence, size and reason', () => {
+  const config = { ...DEFAULT_CONFIG, prefix: 'cr' };
+  const manifest = (patch) => [{ filename: 'package.json', patch }];
+
+  const addOne = manifest([
+    ' {',
+    '   "dependencies": {',
+    '     "react": "^19.0.0",',
+    '+    "lodash": "^4.17.21"',
+    '   }',
+  ].join('\n'));
+
+  const silent = checkDependencies(addOne, validBody, config);
+  assert.deepEqual(silent.added, ['lodash']);
+  assert.equal(silent.failures.length, 1);
+  assert.equal(silent.failures[0].check, 'new dependency');
+
+  const stated = `${validBody}\n\nDependency: lodash — MIT, adds 24 kB gzipped, and we need deep-merge in three places`;
+  assert.equal(checkDependencies(addOne, stated, config).failures.length, 0);
+
+  // A one-word reason is not a reason. "needed" passes no reviewer.
+  const thin = `${validBody}\n\nDependency: lodash — needed`;
+  assert.equal(checkDependencies(addOne, thin, config).failures.length, 1);
+
+  // A version bump edits a line that already existed, so the name is on both
+  // sides of the patch. Bumping every dependency in a repo must not demand a
+  // paragraph for each.
+  const bump = manifest(['-    "react": "^19.0.0",', '+    "react": "^19.1.0",'].join('\n'));
+  assert.deepEqual(checkDependencies(bump, validBody, config).added, []);
+
+  // Manifest keys that are not dependencies have no version-shaped value.
+  const rename = manifest(['+  "name": "my-package",', '+  "license": "MIT",'].join('\n'));
+  assert.deepEqual(checkDependencies(rename, validBody, config).added, []);
+
+  // Only manifests are read. A dependency-looking line in ordinary source is
+  // not a dependency.
+  const source = [{ filename: 'src/app.ts', patch: '+    "lodash": "^4.17.21"' }];
+  assert.deepEqual(checkDependencies(source, validBody, config).added, []);
+
+  // go.mod carries its own shape.
+  const goMod = [{ filename: 'go.mod', patch: '+\tgithub.com/spf13/cobra v1.8.0' }];
+  assert.deepEqual(checkDependencies(goMod, validBody, config).added, ['github.com/spf13/cobra']);
+
+  // A repo opts out with an empty list.
+  assert.equal(checkDependencies(addOne, validBody, { ...config, dependencyManifests: [] }).failures.length, 0);
 });
