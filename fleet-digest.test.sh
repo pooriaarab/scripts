@@ -29,7 +29,17 @@ if [[ "$ARGS" == *"auth status"* ]]; then
 fi
 # users/<owner>/repos -> list repos
 if [[ "$ARGS" == *"users/"*"/repos"* ]]; then
-  if [[ -f "$DATA_DIR/user_repos.json" ]]; then cat "$DATA_DIR/user_repos.json"; else echo "[]"; fi
+  page1="[]"
+  if [[ -f "$DATA_DIR/user_repos.json" ]]; then page1=$(cat "$DATA_DIR/user_repos.json"); fi
+  if [[ "$ARGS" == *"--slurp"* ]]; then
+    if [[ -f "$DATA_DIR/user_repos_page2.json" ]]; then
+      printf '[%s,%s]' "$page1" "$(cat "$DATA_DIR/user_repos_page2.json")"
+    else
+      printf '[%s]' "$page1"
+    fi
+  else
+    printf '%s' "$page1"
+  fi
   exit 0
 fi
 # contents/.github/pr-standards.json
@@ -68,7 +78,17 @@ if [[ "$ARGS" =~ repos/[^/]+/[^/?\ ]+$ ]] || [[ "$ARGS" =~ repos/[^/]+/[^/?\ ]+\
 fi
 # pulls?state=open
 if [[ "$ARGS" == *"pulls?state=open"* ]]; then
-  if [[ -f "$DATA_DIR/open_prs.json" ]]; then cat "$DATA_DIR/open_prs.json"; else echo "[]"; fi
+  page1="[]"
+  if [[ -f "$DATA_DIR/open_prs.json" ]]; then page1=$(cat "$DATA_DIR/open_prs.json"); fi
+  if [[ "$ARGS" == *"--slurp"* ]]; then
+    if [[ -f "$DATA_DIR/open_prs_page2.json" ]]; then
+      printf '[%s,%s]' "$page1" "$(cat "$DATA_DIR/open_prs_page2.json")"
+    else
+      printf '[%s]' "$page1"
+    fi
+  else
+    printf '%s' "$page1"
+  fi
   exit 0
 fi
 # pulls/<num>/reviews
@@ -470,6 +490,97 @@ JSON
   rm -rf "$td"
 }
 
+# gh api --paginate (without --slurp) would emit each page as its own JSON
+# array, which is not valid JSON to a single json.loads. This checks that
+# a two-page result for open PRs is actually merged, not just parsed without
+# crashing: a PR that only exists on the second page must still show up.
+test_paginated_prs_are_merged() {
+  local td bindir datadir out rc
+  td=$(mktemp -d); bindir="$td/bin"; datadir="$td/data"
+  make_fake_gh "$bindir" "$datadir"
+  cat > "$datadir/open_prs.json" <<'JSON'
+[
+  {
+    "number": 60,
+    "title": "First page PR",
+    "body": "Closes #60",
+    "html_url": "https://github.com/pooriaarab/repo-a/pull/60",
+    "labels": [],
+    "created_at": "2026-08-28T10:00:00Z",
+    "updated_at": "2026-08-28T10:00:00Z",
+    "draft": false,
+    "head": {"sha": "pg60sha"}
+  }
+]
+JSON
+  cat > "$datadir/open_prs_page2.json" <<'JSON'
+[
+  {
+    "number": 61,
+    "title": "Second page PR",
+    "body": "Closes #61",
+    "html_url": "https://github.com/pooriaarab/repo-a/pull/61",
+    "labels": [],
+    "created_at": "2026-08-28T10:00:00Z",
+    "updated_at": "2026-08-28T10:00:00Z",
+    "draft": false,
+    "head": {"sha": "pg61sha"}
+  }
+]
+JSON
+  echo "[]" > "$datadir/reviews_60.json"
+  echo "[]" > "$datadir/reviews_61.json"
+  echo '{"check_runs":[{"name":"lint","status":"completed","conclusion":"success"}]}' > "$datadir/checks_pg60sha.json"
+  echo '{"check_runs":[{"name":"lint","status":"completed","conclusion":"success"}]}' > "$datadir/checks_pg61sha.json"
+  echo '{"state":"success"}' > "$datadir/status.json"
+  echo '{"workflow_runs":[]}' > "$datadir/latest_run.json"
+  out=$(FAKE_DATA_DIR="$datadir" PATH="$bindir:$PATH" "$SCRIPT" --repos pooriaarab/repo-a 2>&1); rc=$?
+  if echo "$out" | grep -q "PR #60" && echo "$out" | grep -q "PR #61"; then
+    pass "a second page of open PRs is not dropped"
+  else
+    fail "a second page of open PRs is not dropped" "rc=$rc out=$out"
+  fi
+  rm -rf "$td"
+}
+
+# A PR with a review that requested changes is waiting on its author, not on
+# a human decision about green checks, so it must not be reported ready.
+test_changes_requested_not_ready() {
+  local td bindir datadir out rc
+  td=$(mktemp -d); bindir="$td/bin"; datadir="$td/data"
+  make_fake_gh "$bindir" "$datadir"
+  cat > "$datadir/open_prs.json" <<'JSON'
+[
+  {
+    "number": 62,
+    "title": "Green but changes requested",
+    "body": "Closes #62",
+    "html_url": "https://github.com/pooriaarab/repo-a/pull/62",
+    "labels": [],
+    "created_at": "2026-08-28T10:00:00Z",
+    "updated_at": "2026-08-28T10:00:00Z",
+    "draft": false,
+    "head": {"sha": "cr62sha"}
+  }
+]
+JSON
+  cat > "$datadir/reviews_62.json" <<'JSON'
+[
+  {"state": "CHANGES_REQUESTED", "submitted_at": "2026-08-29T10:00:00Z"}
+]
+JSON
+  echo '{"check_runs":[{"name":"lint","status":"completed","conclusion":"success"}]}' > "$datadir/checks_cr62sha.json"
+  echo '{"state":"success"}' > "$datadir/status.json"
+  echo '{"workflow_runs":[]}' > "$datadir/latest_run.json"
+  out=$(FAKE_DATA_DIR="$datadir" PATH="$bindir:$PATH" "$SCRIPT" --repos pooriaarab/repo-a 2>&1); rc=$?
+  if echo "$out" | grep -q "Nothing needs you."; then
+    pass "a PR with changes requested is not reported ready"
+  else
+    fail "a PR with changes requested is not reported ready" "rc=$rc out=$out"
+  fi
+  rm -rf "$td"
+}
+
 test_help
 test_empty
 test_label_missing
@@ -482,6 +593,8 @@ test_proof_label
 test_queued_is_not_green
 test_no_checks_is_not_green
 test_one_line_per_pr
+test_paginated_prs_are_merged
+test_changes_requested_not_ready
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"

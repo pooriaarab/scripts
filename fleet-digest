@@ -100,10 +100,32 @@ gh_api_silent() {
   gh api "$@" 2>/dev/null
 }
 
+# `gh api --paginate` (without --slurp) writes each page as its own JSON
+# array back to back, which is not valid JSON on its own. --slurp wraps the
+# pages in an outer array instead, so a multi-page result comes back as an
+# array of page-arrays; flatten it one level. A single non-paginated response
+# passes through unchanged.
+flatten_pages() {
+  python3 -c '
+import json, sys
+try:
+    data = json.loads(sys.stdin.read() or "[]")
+except Exception:
+    data = []
+if isinstance(data, list) and data and all(isinstance(x, list) for x in data):
+    flat = []
+    for page in data:
+        flat.extend(page)
+    data = flat
+print(json.dumps(data))
+'
+}
+
 list_all_repos_raw() {
   # Return JSON array of repos for the owner.
-  # Uses --paginate so large accounts are not truncated.
-  gh_api --paginate "users/${OWNER}/repos?per_page=100" 2>/dev/null || gh_api "users/${OWNER}/repos?per_page=100" 2>/dev/null || echo "[]"
+  # Uses --paginate --slurp so large accounts (>100 repos) are not truncated
+  # or split across unparsable JSON pages.
+  gh api --paginate --slurp "users/${OWNER}/repos?per_page=100" 2>/dev/null | flatten_pages || gh_api "users/${OWNER}/repos?per_page=100" 2>/dev/null || echo "[]"
 }
 
 repo_default_branch() {
@@ -135,7 +157,9 @@ repo_has_standards() {
 
 fetch_open_prs() {
   local owner_repo="$1"
-  gh_api "repos/${owner_repo}/pulls?state=open&per_page=100" 2>/dev/null || echo "[]"
+  # --paginate --slurp so repos with more than 100 open PRs are not silently
+  # truncated to the first page.
+  gh api --paginate --slurp "repos/${owner_repo}/pulls?state=open&per_page=100" 2>/dev/null | flatten_pages || gh_api "repos/${owner_repo}/pulls?state=open&per_page=100" 2>/dev/null || echo "[]"
 }
 
 fetch_reviews() {
@@ -418,6 +442,7 @@ for repo in repos:
         if not draft and head_sha:
             checks_file = os.path.join(tmpdir, f"{safe}.pr{number}.checks.json")
             status_file = os.path.join(tmpdir, f"{safe}.pr{number}.status.json")
+            reviews_file = os.path.join(tmpdir, f"{safe}.pr{number}.reviews.json")
             try:
                 checks_data = json.loads(open(checks_file).read() or '{"check_runs":[]}')
             except Exception:
@@ -426,8 +451,31 @@ for repo in repos:
                 status_data = json.loads(open(status_file).read() or '{"state":""}')
             except Exception:
                 status_data = {"state":""}
+            try:
+                ready_reviews_data = json.loads(open(reviews_file).read() or "[]")
+                if isinstance(ready_reviews_data, dict):
+                    ready_reviews_data = []
+            except Exception:
+                ready_reviews_data = []
             check_runs = checks_data if isinstance(checks_data, list) else (checks_data.get("check_runs") or [])
             combined = (status_data.get("state") or "").lower() if isinstance(status_data, dict) else ""
+
+            # A green PR that a reviewer sent back for changes is waiting on
+            # its author, not on a human decision about green checks — do not
+            # call it ready.
+            latest_review_at = None
+            latest_review_state = None
+            for rv in ready_reviews_data:
+                if not isinstance(rv, dict):
+                    continue
+                state = (rv.get("state") or "").upper()
+                if state not in ("APPROVED", "CHANGES_REQUESTED"):
+                    continue
+                d = parse_gh_date(rv.get("submitted_at") or rv.get("created_at") or rv.get("updated_at"))
+                if d and (latest_review_at is None or d > latest_review_at):
+                    latest_review_at = d
+                    latest_review_state = state
+            changes_requested = latest_review_state == "CHANGES_REQUESTED"
 
             # Green means every check finished and none of them failed. A check
             # still queued is NOT green: a stuck third-party app sat QUEUED for
@@ -449,6 +497,7 @@ for repo in repos:
                 and not unfinished
                 and not failed
                 and combined not in ("pending", "failure", "error")
+                and not changes_requested
             )
 
             # One line per pull request. A PR already listed for a missing label
