@@ -115,6 +115,27 @@ gh_api_silent() {
   gh api "$@" 2>/dev/null
 }
 
+# Runs a --paginate --slurp query through a flattening function, falling back
+# to a single non-paginated call only when the paginated call itself failed
+# to run. The paginated output is captured into a variable before deciding
+# whether to fall back: piping it straight into the flattener (`gh api ... |
+# flatten_pages || fallback`) let both sides run, because the flattener
+# always succeeds and prints a value (even "[]" on empty input) regardless of
+# whether the upstream call failed, so `set -o pipefail` still reported the
+# pipeline as failed and triggered the fallback — and its output landed right
+# after the flattener's on the same stdout, corrupting the JSON and making
+# the caller silently treat the whole repo as empty.
+gh_paginated() {
+  local query="$1" flatten_fn="$2" fallback_query="$3" default="$4"
+  local out rc=0
+  out=$(gh api --paginate --slurp "$query" 2>/dev/null) || rc=$?
+  if (( rc == 0 )); then
+    printf '%s' "$out" | "$flatten_fn"
+  else
+    gh_api "$fallback_query" 2>/dev/null || printf '%s' "$default"
+  fi
+}
+
 # `gh api --paginate` (without --slurp) writes each page as its own JSON
 # array back to back, which is not valid JSON on its own. --slurp wraps the
 # pages in an outer array instead, so a multi-page result comes back as an
@@ -140,7 +161,7 @@ list_all_repos_raw() {
   # Return JSON array of repos for the owner.
   # Uses --paginate --slurp so large accounts (>100 repos) are not truncated
   # or split across unparsable JSON pages.
-  gh api --paginate --slurp "users/${OWNER}/repos?per_page=100" 2>/dev/null | flatten_pages || gh_api "users/${OWNER}/repos?per_page=100" 2>/dev/null || echo "[]"
+  gh_paginated "users/${OWNER}/repos?per_page=100" flatten_pages "users/${OWNER}/repos?per_page=100" "[]"
 }
 
 repo_default_branch() {
@@ -176,14 +197,14 @@ fetch_open_prs() {
   local owner_repo="$1"
   # --paginate --slurp so repos with more than 100 open PRs are not silently
   # truncated to the first page.
-  gh api --paginate --slurp "repos/${owner_repo}/pulls?state=open&per_page=100" 2>/dev/null | flatten_pages || gh_api "repos/${owner_repo}/pulls?state=open&per_page=100" 2>/dev/null || echo "[]"
+  gh_paginated "repos/${owner_repo}/pulls?state=open&per_page=100" flatten_pages "repos/${owner_repo}/pulls?state=open&per_page=100" "[]"
 }
 
 fetch_reviews() {
   local owner_repo="$1" number="$2"
   # --paginate --slurp so a PR with more than 100 reviews is not silently
   # truncated to the first page.
-  gh api --paginate --slurp "repos/${owner_repo}/pulls/${number}/reviews?per_page=100" 2>/dev/null | flatten_pages || gh_api "repos/${owner_repo}/pulls/${number}/reviews?per_page=100" 2>/dev/null || echo "[]"
+  gh_paginated "repos/${owner_repo}/pulls/${number}/reviews?per_page=100" flatten_pages "repos/${owner_repo}/pulls/${number}/reviews?per_page=100" "[]"
 }
 
 # The check-runs endpoint wraps its array in a `check_runs` field instead of
@@ -213,7 +234,7 @@ fetch_check_runs() {
   # --paginate --slurp so a commit with more than 100 check runs (common with
   # matrix builds) is not silently truncated to the first page, which could
   # hide a failing or still-queued run and report the PR green.
-  gh api --paginate --slurp "repos/${owner_repo}/commits/${sha}/check-runs?per_page=100" 2>/dev/null | flatten_check_runs_pages || gh_api "repos/${owner_repo}/commits/${sha}/check-runs?per_page=100" 2>/dev/null || echo '{"check_runs":[]}'
+  gh_paginated "repos/${owner_repo}/commits/${sha}/check-runs?per_page=100" flatten_check_runs_pages "repos/${owner_repo}/commits/${sha}/check-runs?per_page=100" '{"check_runs":[]}'
 }
 
 fetch_status() {
@@ -503,20 +524,25 @@ for repo in repos:
 
             # A green PR that a reviewer sent back for changes is waiting on
             # its author, not on a human decision about green checks — do not
-            # call it ready.
-            latest_review_at = None
-            latest_review_state = None
+            # call it ready. Track each reviewer's own latest decisive review
+            # rather than the single latest review overall: otherwise a later
+            # APPROVED from a second reviewer would paper over a first
+            # reviewer's still-unresolved CHANGES_REQUESTED.
+            latest_state_by_reviewer = {}
             for rv in ready_reviews_data:
                 if not isinstance(rv, dict):
                     continue
                 state = (rv.get("state") or "").upper()
                 if state not in ("APPROVED", "CHANGES_REQUESTED"):
                     continue
+                reviewer = ((rv.get("user") or {}).get("login")) or ""
                 d = parse_gh_date(rv.get("submitted_at") or rv.get("created_at") or rv.get("updated_at"))
-                if d and (latest_review_at is None or d > latest_review_at):
-                    latest_review_at = d
-                    latest_review_state = state
-            changes_requested = latest_review_state == "CHANGES_REQUESTED"
+                prev = latest_state_by_reviewer.get(reviewer)
+                if prev is None or (d and (prev[0] is None or d > prev[0])):
+                    latest_state_by_reviewer[reviewer] = (d, state)
+            changes_requested = any(
+                state == "CHANGES_REQUESTED" for _, state in latest_state_by_reviewer.values()
+            )
 
             # Green means every check finished and none of them failed. A check
             # still queued is NOT green: a stuck third-party app sat QUEUED for

@@ -79,6 +79,7 @@ fi
 # pulls?state=open
 if [[ "$ARGS" == *"pulls?state=open"* ]]; then
   if [[ -f "$DATA_DIR/fail_open_prs" ]]; then exit 1; fi
+  if [[ -f "$DATA_DIR/fail_open_prs_paginated" ]] && [[ "$ARGS" == *"--paginate"* ]]; then exit 1; fi
   page1="[]"
   if [[ -f "$DATA_DIR/open_prs.json" ]]; then page1=$(cat "$DATA_DIR/open_prs.json"); fi
   if [[ "$ARGS" == *"--slurp"* ]]; then
@@ -645,6 +646,46 @@ test_gh_api_failure_is_not_silent() {
   rm -rf "$td"
 }
 
+# A paginated fetch that fails outright (not "succeeds with zero results")
+# must not corrupt the fallback's output. The buggy version piped the
+# paginated call straight into the flattener, which always prints valid JSON
+# even on empty input, so pipefail's failure still triggered the fallback and
+# its output landed right after the flattener's "[]" on the same stdout —
+# invalid JSON that got silently parsed as an empty PR list, dropping every
+# open PR in the repo without a warning.
+test_paginated_failure_falls_back_cleanly() {
+  local td bindir datadir out rc
+  td=$(mktemp -d); bindir="$td/bin"; datadir="$td/data"
+  make_fake_gh "$bindir" "$datadir"
+  touch "$datadir/fail_open_prs_paginated"
+  cat > "$datadir/open_prs.json" <<'JSON'
+[
+  {
+    "number": 80,
+    "title": "Should survive a paginated-fetch failure",
+    "body": "Closes #80\n\nAsk for the `oversized-approved` label.",
+    "html_url": "https://github.com/pooriaarab/repo-a/pull/80",
+    "labels": [],
+    "created_at": "2026-08-28T10:00:00Z",
+    "updated_at": "2026-08-28T10:00:00Z",
+    "draft": false,
+    "head": {"sha": "fb80sha"}
+  }
+]
+JSON
+  echo "[]" > "$datadir/reviews_80.json"
+  echo '{"check_runs":[]}' > "$datadir/checks_fb80sha.json"
+  echo '{"state":""}' > "$datadir/status.json"
+  echo '{"workflow_runs":[]}' > "$datadir/latest_run.json"
+  out=$(FAKE_DATA_DIR="$datadir" PATH="$bindir:$PATH" "$SCRIPT" --repos pooriaarab/repo-a 2>&1); rc=$?
+  if echo "$out" | grep -q "PR #80" && echo "$out" | grep -q "oversized-approved"; then
+    pass "a failed paginated PR fetch falls back without corrupting the result"
+  else
+    fail "a failed paginated PR fetch falls back without corrupting the result" "rc=$rc out=$out"
+  fi
+  rm -rf "$td"
+}
+
 test_help
 test_empty
 test_label_missing
@@ -661,6 +702,7 @@ test_paginated_prs_are_merged
 test_changes_requested_not_ready
 test_paginated_check_runs_are_merged
 test_gh_api_failure_is_not_silent
+test_paginated_failure_falls_back_cleanly
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
