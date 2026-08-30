@@ -282,6 +282,74 @@ else
   fail_msg "--json prints valid JSON — got: $out"
 fi
 
+# Test 7: PR merged to a non-default branch is excluded (denominator and defects).
+set_branch "main"
+write_prs <<'JSON'
+[
+  {"number":50,"title":"Backport thing","body":"Assisted-by: agent-c:model3","mergedAt":"2025-01-10T10:00:00Z","baseRefName":"release-1.0"}
+]
+JSON
+write_commits <<'JSON'
+[]
+JSON
+write_files 50 <<'JSON'
+["c.txt"]
+JSON
+out=$(run owner/repo --since 2025-01-01 --window-days 7)
+if echo "$out" | grep -q "agent-c:model3"; then
+  fail_msg "PR merged to non-default branch is excluded — output: $out"
+else
+  ok "PR merged to non-default branch is excluded"
+fi
+if echo "$out" | grep -E -q "TOTAL.*0.*0.*0\.0%"; then
+  ok "non-default-branch PR excluded from TOTAL"
+else
+  fail_msg "non-default-branch PR excluded from TOTAL — output: $out"
+fi
+
+# Test 8: GitHub's "Revert" button commit (with trailing PR number) counts.
+write_prs <<'JSON'
+[
+  {"number":60,"title":"Add gizmo","body":"Assisted-by: agent-d:model4","mergedAt":"2025-01-10T10:00:00Z","baseRefName":"main"}
+]
+JSON
+write_commits <<'JSON'
+[{"message":"Revert \"Add gizmo\" (#61)","date":"2025-01-11T10:00:00Z"}]
+JSON
+write_files 60 <<'JSON'
+["d.txt"]
+JSON
+out=$(run owner/repo --since 2025-01-01 --window-days 7)
+if echo "$out" | grep -E -q "agent-d:model4.*1.*1.*100\.0%"; then
+  ok "GitHub-style revert with (#N) suffix counts"
+else
+  fail_msg "GitHub-style revert with (#N) suffix counts — output: $out"
+fi
+
+# Test 9: a cross-repo "Closes other/repo#100" must not match a same-repo
+# "Fixes #100" that refers to an unrelated, same-numbered issue.
+write_prs <<'JSON'
+[
+  {"number":70,"title":"Add gadget","body":"Closes other/repo#100\n\nAssisted-by: agent-e:model5","mergedAt":"2025-01-10T10:00:00Z","baseRefName":"main"},
+  {"number":71,"title":"Update gadget docs","body":"Fixes #100","mergedAt":"2025-01-12T10:00:00Z","baseRefName":"main"}
+]
+JSON
+write_commits <<'JSON'
+[]
+JSON
+write_files 70 <<'JSON'
+["e.txt"]
+JSON
+write_files 71 <<'JSON'
+["e.txt"]
+JSON
+out=$(run owner/repo --since 2025-01-01 --window-days 7)
+if echo "$out" | grep -E -q "agent-e:model5.*1.*0.*0\.0%"; then
+  ok "cross-repo issue reference does not false-match a same-repo Fixes #N"
+else
+  fail_msg "cross-repo issue reference does not false-match — output: $out"
+fi
+
 echo "---"
 echo "$pass passed, $fail failed"
 if (( fail > 0 )); then exit 1; fi

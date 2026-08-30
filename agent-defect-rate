@@ -137,13 +137,14 @@ for repo in "${REPOS[@]}"; do
   # grep JSON. Read the payload from a file rather than argv: a repo with many
   # closed PRs (each with a full body) can produce JSON larger than the OS
   # argument-size limit.
-  REPO="$repo" SINCE="$SINCE" python3 - "$tmp" "$prs_raw" <<'PY'
+  REPO="$repo" SINCE="$SINCE" BRANCH="$branch" python3 - "$tmp" "$prs_raw" <<'PY'
 import json, os, sys
 tmp = sys.argv[1]
 with open(sys.argv[2]) as f:
     raw = f.read()
 repo = os.environ["REPO"]
 since = os.environ["SINCE"]
+branch = os.environ["BRANCH"]
 
 # `gh api --paginate` runs the --jq filter once per page, so a repo with more
 # than one page prints one JSON array per page back to back (e.g. "[...][...]"),
@@ -170,12 +171,16 @@ for doc in load_json_docs(raw):
         prs.extend(doc)
     elif isinstance(doc, dict):
         prs.append(doc)
-# Keep only PRs merged on/after since (compare date prefix).
+# Keep only PRs merged on/after since (compare date prefix) and merged into
+# the repo's default branch: revert commits are only ever fetched from that
+# branch, so a PR merged elsewhere (e.g. a release branch) could never be
+# flagged as a defect and would just understate the rate by sitting in the
+# denominator.
 filtered = []
 for p in prs:
     merged = p.get("mergedAt") or ""
     # mergedAt is ISO8601; compare YYYY-MM-DD prefix.
-    if merged and merged[:10] >= since:
+    if merged and merged[:10] >= since and p.get("baseRefName") == branch:
         p["repo"] = repo
         filtered.append(p)
 old_path = os.path.join(tmp, "all_prs.json")
@@ -339,14 +344,21 @@ def parse_agent(body):
             return val
     return "unattributed"
 
-def closing_issue_numbers(body):
+def closing_issue_numbers(body, repo):
     # Extract issue numbers from GitHub closing keywords.
     # Matches: Close, Closes, Closed, Fix, Fixes, Fixed, Resolve, Resolves, Resolved
     # optionally with colon, optionally cross-repo.
+    # A cross-repo reference (e.g. "Closes other/repo#123") names a different
+    # repo's issue #123, not this repo's. Drop it instead of collapsing it onto
+    # bare "#123", which would otherwise let an unrelated same-numbered issue
+    # in this repo falsely match a later "Fixes #123".
     nums = []
-    for m in re.finditer(r'(?i)(?:close|closes|closed|fix|fixes|fixed|resolve|resolves|resolved)\s*:?\s*(?:[A-Za-z0-9_.\-]+/[A-Za-z0-9_.\-]+\#|\#)(\d+)', body or ""):
+    for m in re.finditer(r'(?i)(?:close|closes|closed|fix|fixes|fixed|resolve|resolves|resolved)\s*:?\s*(?:([A-Za-z0-9_.\-]+/[A-Za-z0-9_.\-]+)\#|\#)(\d+)', body or ""):
+        ref_repo = m.group(1)
+        if ref_repo and ref_repo != repo:
+            continue
         try:
-            nums.append(int(m.group(1)))
+            nums.append(int(m.group(2)))
         except Exception:
             pass
     return nums
@@ -354,7 +366,7 @@ def closing_issue_numbers(body):
 # Enrich PRs with agent and linked issues.
 for pr in prs:
     pr["agent"] = parse_agent(pr.get("body") or "")
-    pr["linkedIssues"] = closing_issue_numbers(pr.get("body") or "")
+    pr["linkedIssues"] = closing_issue_numbers(pr.get("body") or "", pr["repo"])
     pr["mergedAt_dt"] = parse_iso(pr["mergedAt"])
 
 # Sort PRs by merge time for later fix detection.
@@ -371,6 +383,10 @@ def is_revert_defect(pr, commits):
         return False
     window_end = merged_dt + datetime.timedelta(days=window_days)
     revert_subject = f'Revert "{title}"'
+    # GitHub's own "Revert" button produces `Revert "Title" (#123)`, appending
+    # the revert PR's own number (unrelated to this PR's number) when merged.
+    # Accept that optional suffix, not just an exact-string match.
+    revert_pattern = re.compile(r'^' + re.escape(revert_subject) + r'(?:\s*\(#\d+\))?$')
     for c in commits:
         msg = c.get("message") or ""
         date_s = c.get("date") or ""
@@ -379,9 +395,9 @@ def is_revert_defect(pr, commits):
             continue
         if c_dt <= merged_dt or c_dt > window_end:
             continue
-        # Check subject exact match.
+        # Check subject match, with or without GitHub's "(#N)" suffix.
         subject = msg.split("\n", 1)[0].strip()
-        if subject == revert_subject:
+        if revert_pattern.match(subject):
             return True
         low = msg.lower()
         # Plain substring matching would let PR #1 match inside "reverts #10"
