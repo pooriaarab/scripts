@@ -61,7 +61,7 @@ lifecycle_acquire() {
     fi
     sleep 0.2
     waited=$((waited + 1))
-    [[ $waited -lt 50 ]] || return 0   # 10s: proceed rather than hang a session hook
+    [[ $waited -lt 50 ]] || return 1   # 10s: give up rather than hang a session hook
   done
   return 0
 }
@@ -73,10 +73,16 @@ case "${1:-status}" in
     # Register this session BEFORE warming, so `end` can tell whether it is the last one
     # out. Sessions on this machine run a dozen deep; without this, the first session to
     # end stopped the Box the others were using.
-    lifecycle_acquire
-    mkdir -p "$SESSIONS"
-    : > "$SESSIONS/$SESSION_KEY"
-    lifecycle_release
+    # Only release if we actually own it: on a timed-out acquire, rmdir-ing the lock
+    # would tear it out from under whichever process legitimately still holds it.
+    if lifecycle_acquire; then
+      mkdir -p "$SESSIONS"
+      : > "$SESSIONS/$SESSION_KEY"
+      lifecycle_release
+    else
+      mkdir -p "$SESSIONS"
+      : > "$SESSIONS/$SESSION_KEY"
+    fi
     # Only one warm per repo at a time. mkdir is atomic, so it serialises concurrent
     # SessionStart hooks. Without it, two sessions starting inside the ~100s warm window
     # both saw no id, both created a Box, and the second overwrote the first's id file —
@@ -102,7 +108,7 @@ case "${1:-status}" in
 import sys,json
 try: print(json.load(sys.stdin)["box"].get("state",""))
 except Exception: print("")')"
-      case "$st" in ready|idle|running) echo "[box-session] $NAME already has Box $id ($st)"; exit 0 ;; esac
+      case "$st" in ready|idle|running) touch "$STATE/$NAME.id"; echo "[box-session] $NAME already has Box $id ($st)"; exit 0 ;; esac
     fi
     echo "[box-session] warming a Box for $NAME in the background (~100s; reuse is ~4s)"
     # Detach fully: the hook must not hold the session open.
@@ -112,8 +118,8 @@ except Exception: print("")')"
   end)
     # The deregister, the count and the stop are one critical section: a start landing
     # between the count and the stop would lose its Box immediately.
-    lifecycle_acquire
-    trap lifecycle_release EXIT
+    # Same ownership guard as `start`: only trap the release if the lock is actually ours.
+    lifecycle_acquire && trap lifecycle_release EXIT
     rm -f "$SESSIONS/$SESSION_KEY"
     [[ -f "$STATE/$NAME.id" ]] || exit 0
     # Last one out stops the Box. Any other session still registered for this repo is
