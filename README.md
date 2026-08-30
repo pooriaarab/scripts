@@ -94,6 +94,7 @@ needs both.
 | `box-git-sync.sh` | Runs inside a Box that already has the repo: fetches the commit the laptop is on instead of uploading a tree |
 | `box-fast-attach` | Attach a worktree to a running Box in ~2s over `box host`, instead of ~84s through crabbox |
 | `box-unpack.sh` | Runs inside a Box: unpacks the delta `box-fast-attach` sends and installs only when the lockfile moved |
+| `agent-defect-rate` | Defect rate per `Assisted-by` agent: how often merged PRs get reverted or hot-fixed within the window. Shows the denominator next to every rate |
 
 ## pr-standards-rollout
 
