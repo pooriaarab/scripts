@@ -210,6 +210,31 @@ Caution: do not add `pr-standards` as a required status check on a repo before
 the workflow is installed there. Requiring a check the repo never runs blocks
 every pull request in that repo, permanently.
 
+## The two local layers
+
+CI is the authority, but it is also the slowest feedback. Two local layers catch a
+bad branch before GitHub ever sees it. Neither is a boundary — `--no-verify` skips
+the git hook, and another agent's harness never loaded the Claude Code hook — so
+treat them as early feedback, not enforcement.
+
+- `install-pr-hooks --apply` puts the `pre-push` hook in every eligible checkout.
+- `hooks/pr-standards-guard.sh` is the Claude Code `PreToolUse` hook, and the
+  earliest feedback available: it rejects a branch name before the branch exists.
+  Register it in `.claude/settings.json` under `hooks.PreToolUse` with matcher
+  `Bash`:
+
+  ```json
+  { "type": "command", "command": "<path>/hooks/pr-standards-guard.sh" }
+  ```
+
+  It checks only branch *creation*. Deleting or renaming a branch is how you
+  recover from a bad name, so guarding those would trap you in one. It lets a call
+  through whenever it cannot parse its own input, because blocking on its own bug
+  is worse than the branch name it guards against.
+
+To install the standard itself in a repo — the config, the PR template and the
+workflow — use `pr-standards-rollout`.
+
 ## Usage
 
 ```bash
