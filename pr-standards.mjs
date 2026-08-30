@@ -80,6 +80,13 @@ export const DEFAULT_CONFIG = {
     '**/*credential*',
   ],
   destructiveLabel: 'human-reviewed',
+  dependencyManifests: [
+    '**/package.json',
+    '**/composer.json',
+    '**/requirements.txt',
+    '**/requirements-*.txt',
+    '**/go.mod',
+  ],
   uiGlobs: [
     '**/*.tsx', '**/*.jsx', '**/*.vue', '**/*.svelte', '**/*.css', '**/*.scss',
     '**/*.html', '**/components/**', '**/app/**/page.*', '**/pages/**',
@@ -504,6 +511,72 @@ export function isCommittedProofMedia(file) {
   return isProofMediaPath(filename);
 }
 
+// A dependency is the cheapest line an agent can write and the most expensive
+// one to remove. Nobody reads the licence, nobody measures what it costs to
+// ship, and by the time either matters the package has thirty callers.
+//
+// The checker cannot fetch a licence or weigh a bundle, and a check that needs
+// the network is a check that fails on a bad day. It asks the author to write
+// the answer down instead, and the review council judges whether the answer is
+// true. Stating a wrong licence is a lie a reviewer can catch; adding a package
+// silently is not.
+const DEPENDENCY_LINE = /^\s*Dependency:\s*([^\s—–-]+)[^—–-]*[—–-]\s*(.+)$/;
+
+function addedDependencies(file) {
+  const patch = String(file.patch || '');
+  if (!patch) return [];
+  const name = String(file.filename || '');
+  const added = new Set();
+  const removed = new Set();
+  for (const line of patch.split('\n')) {
+    if (line[0] !== '+' && line[0] !== '-') continue;
+    const body = line.slice(1);
+    let match = null;
+    if (name.endsWith('.json')) {
+      // A manifest key whose value looks like a version range. This skips
+      // "name", "scripts" and the rest without needing to track which JSON
+      // block the hunk sits in.
+      match = /^\s*"([^"]+)"\s*:\s*"([\^~><=]?\d|\*|workspace:|npm:|file:|link:|catalog:)/.exec(body);
+    } else if (name.endsWith('go.mod')) {
+      match = /^\s*([a-z0-9.\-]+\.[a-z]{2,}\/[^\s]+)\s+v\d/.exec(body);
+    } else {
+      match = /^\s*([A-Za-z0-9._-]+)\s*(?:[=<>~!]=|$)/.exec(body);
+    }
+    if (!match) continue;
+    (line[0] === '+' ? added : removed).add(match[1]);
+  }
+  // A version bump edits a line that already existed, so the name shows up on
+  // both sides. Only a name that is purely new is a new dependency.
+  return [...added].filter((dependency) => !removed.has(dependency));
+}
+
+export function checkDependencies(files, body, config = DEFAULT_CONFIG) {
+  const manifests = config.dependencyManifests || [];
+  if (manifests.length === 0) return { failures: [], added: [] };
+  const added = new Set();
+  for (const file of files || []) {
+    const name = String(file.filename || '');
+    if (!manifests.some((pattern) => matchesGlob(name, pattern))) continue;
+    for (const dependency of addedDependencies(file)) added.add(dependency);
+  }
+  if (added.size === 0) return { failures: [], added: [] };
+
+  const explained = new Map();
+  for (const line of visibleBody(body).split('\n')) {
+    const match = DEPENDENCY_LINE.exec(line);
+    if (match && match[2].trim().length >= 30) explained.set(match[1], match[2].trim());
+  }
+  const failures = [...added]
+    .filter((dependency) => !explained.has(dependency))
+    .map((dependency) => fail(
+      'new dependency',
+      `${dependency} is added with no stated reason`,
+      `a line reading \`Dependency: ${dependency} — <licence>, <size added>, <why nothing already here does this>\``,
+      'Write the licence and the size it adds. The checker cannot fetch either, and the review council reads what you wrote — so an answer that is wrong is one a reviewer can catch, while a silent addition is not.',
+    ));
+  return { failures, added: [...added] };
+}
+
 // A schema migration, a billing path, an infrastructure plan and a credential
 // file share one property: getting them wrong is not a bug you fix in the next
 // PR. Reading the diff is not enough to know a migration is reversible or that
@@ -821,6 +894,7 @@ export function validateConfig(config) {
   if (typeof config.requireProof !== 'boolean') throw new ConfigurationError('requireProof must be true or false');
   if (typeof config.requireAttributableProof !== 'boolean') throw new ConfigurationError('requireAttributableProof must be true or false');
   if (!Array.isArray(config.destructiveGlobs)) throw new ConfigurationError('destructiveGlobs must be an array');
+  if (!Array.isArray(config.dependencyManifests)) throw new ConfigurationError('dependencyManifests must be an array');
   if (typeof config.destructiveLabel !== 'string' || !config.destructiveLabel) throw new ConfigurationError('destructiveLabel must be a non-empty string');
   if (typeof config.proofOverrideLabel !== 'string' || !config.proofOverrideLabel) throw new ConfigurationError('proofOverrideLabel must be a non-empty string');
   if (!Array.isArray(config.uiGlobs) || !config.uiGlobs.every((value) => typeof value === 'string')) throw new ConfigurationError('uiGlobs must be an array of strings');
@@ -1408,6 +1482,11 @@ async function runPr(options) {
   warnings.push(...proofResult.warnings);
   if (proofResult.overridden) passes.push(`proof waived by ${config.proofOverrideLabel}`);
   else if (proofResult.failures.length === 0) passes.push('proof of work');
+  const dependencyResult = checkDependencies(files, pull.body || '', config);
+  failures.push(...dependencyResult.failures);
+  if (dependencyResult.added.length > 0 && dependencyResult.failures.length === 0) {
+    passes.push(`${dependencyResult.added.length} new dependency reason(s) stated`);
+  }
   const destructiveResult = checkDestructive(files, labels, config);
   failures.push(...destructiveResult.failures);
   if (destructiveResult.matched.length > 0 && destructiveResult.failures.length === 0) {

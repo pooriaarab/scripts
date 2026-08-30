@@ -239,6 +239,7 @@ reads it; nothing fetches a central registry at check time.
   "proofOverrideLabel": "proof-not-applicable",
   "requireProof": true,
   "requireAttributableProof": false,
+  "dependencyManifests": ["**/package.json", "**/composer.json", "**/requirements.txt", "**/requirements-*.txt", "**/go.mod"],
   "destructiveLabel": "human-reviewed",
   "destructiveGlobs": ["**/migrations/**", "**/*.sql", "**/billing/**", "**/*.tf", "**/terraform/**", "**/*secret*", "**/*credential*"],
   "uiGlobs": ["**/*.tsx", "**/*.jsx", "**/*.vue", "**/*.svelte", "**/*.css", "**/*.scss", "**/*.html", "**/components/**", "**/app/**/page.*", "**/pages/**"],
@@ -259,6 +260,32 @@ because a change that closes an issue is not a chore and belongs on a numbered
 branch. The obvious implementation gets this wrong. Written as "there is no issue
 number, so skip the checks that need one", the knob quietly disables the title and
 body rules too, and becomes a way to opt out of the whole standard.
+
+## A new dependency states its case
+
+A dependency is the cheapest line an agent can write and the most expensive one
+to remove. Nobody reads the licence, nobody measures what it costs to ship, and
+by the time either matters the package has thirty callers.
+
+The checker reads the manifests in `dependencyManifests` and pulls out names the
+diff *adds* — a version bump edits a line that already exists, so it does not
+count. Each new name needs a line in the body:
+
+    Dependency: <name> — <licence>, <size it adds>, <why nothing already here does this>
+
+At least 30 characters after the dash. `Dependency: lodash — needed` fails.
+
+The checker does not verify the licence or the size, and that is the design
+rather than a gap. Fetching either means a network call inside a check, so the
+check goes red on a registry outage and everyone learns to re-run it. Writing the
+answer down is enough to change the outcome: a stated licence is a claim the
+review council reads and a reviewer can catch, while a package added in silence
+is not a claim at all.
+
+Manifests understood today: `package.json` and `composer.json` (a key whose value
+looks like a version range), `go.mod`, and `requirements*.txt`. `Cargo.toml` and
+`Gemfile` are not read yet — a repo using them sees no dependency check rather
+than a wrong one. Set `dependencyManifests: []` to opt out.
 
 ## Destructive changes stop for a person
 
