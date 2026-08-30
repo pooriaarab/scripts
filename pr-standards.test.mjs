@@ -514,7 +514,13 @@ test('proof: media belongs in user-attachments, not in the commit', () => {
 
   // Everything else is a product asset. A repo full of real images must not
   // start failing because one of them is a png.
-  for (const filename of ['public/logo.png', 'public/assets/bg.jpg', 'src/assets/icon.png', 'assets/image.png', 'src/app/logo.png']) {
+  for (const filename of [
+    'public/logo.png', 'public/assets/bg.jpg', 'src/assets/icon.png', 'assets/image.png', 'src/app/logo.png',
+    // A real asset can be named "before" or "after" (a comparison-slider image,
+    // say) without being screenshot-of-a-PR proof. The asset-directory
+    // exemption must win over the before/after naming heuristic.
+    'public/assets/before-login.png', 'public/hero-before-after.png', 'src/assets/after-signup.png',
+  ]) {
     const file = { filename, status: 'added' };
     assert.equal(isCommittedProofMedia(file), false, `should not flag ${filename}`);
     const r = checkProof(validBody, [file], [], config);

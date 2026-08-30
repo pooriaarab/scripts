@@ -493,19 +493,24 @@ export function hasUiDiff(files, config = DEFAULT_CONFIG) {
 }
 
 const PROOF_MEDIA_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'mp4', 'mov', 'webm']);
-const PROOF_MEDIA_GLOBS = [
-  'screenshot*/**',
-  '**/screenshots/**',
-  'proof*/**',
-  '**/*before*',
-  '**/*after*',
-  '**/*demo-recording*',
-];
+// A directory named for proof media is an unambiguous signal regardless of
+// where it sits, so these apply everywhere, including under public/** or
+// **/assets/**.
+const PROOF_MEDIA_DIR_GLOBS = ['screenshot*/**', '**/screenshots/**', 'proof*/**'];
+// These match on filename alone, so a real product asset — a before/after
+// comparison-slider image, say — would otherwise trip them just for being
+// named "before" or "after". A file under a real asset directory is a real
+// asset regardless of what it is named, so the naming heuristic only applies
+// outside those directories.
+const PROOF_MEDIA_NAME_GLOBS = ['**/*before*', '**/*after*', '**/*demo-recording*'];
+const PROOF_MEDIA_ASSET_DIR_GLOBS = ['public/**', '**/assets/**'];
 
 function isProofMediaPath(filename) {
   const normalized = String(filename).replaceAll('\\', '/').replace(/^\.\//, '');
   if (!normalized.includes('/')) return true;
-  return PROOF_MEDIA_GLOBS.some((pattern) => matchesGlob(normalized, pattern));
+  if (PROOF_MEDIA_DIR_GLOBS.some((pattern) => matchesGlob(normalized, pattern))) return true;
+  if (PROOF_MEDIA_ASSET_DIR_GLOBS.some((pattern) => matchesGlob(normalized, pattern))) return false;
+  return PROOF_MEDIA_NAME_GLOBS.some((pattern) => matchesGlob(normalized, pattern));
 }
 
 export function isCommittedProofMedia(file) {
