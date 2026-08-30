@@ -100,7 +100,10 @@ command -v python3 >/dev/null 2>&1 || { echo "error: python3 not found" >&2; exi
 # All network goes through these functions so the test can stub gh on PATH.
 fetch_default_branch() {
   local repo="$1"
-  gh api "repos/$repo" --jq '.default_branch // "main"' 2>/dev/null || echo "main"
+  # Do not swallow failures here: a gh auth/rate-limit/network error must abort
+  # the run, not be silently substituted with "main" for a repo whose actual
+  # default branch is something else.
+  gh api "repos/$repo" --jq '.default_branch // "main"'
 }
 
 fetch_merged_prs() {
@@ -121,15 +124,24 @@ echo "[]" > "$all_prs"
 
 for repo in "${REPOS[@]}"; do
   branch=$(fetch_default_branch "$repo")
-  # Store branch per repo for later commit fetching.
-  echo "$branch" > "$tmp/branch_${repo//\//_}"
+  # Store branch per repo for later commit fetching. Nest by the repo's own
+  # "owner/repo" path components instead of substituting '/' with '_': repo
+  # names may themselves contain '_', so two different repos (e.g. "a_b/c" and
+  # "a/b_c") can otherwise collapse onto the same flattened filename.
+  mkdir -p "$tmp/repos/$repo"
+  echo "$branch" > "$tmp/repos/$repo/branch"
 
-  prs_json=$(fetch_merged_prs "$repo")
-  # Filter by --since and attach repo + branch label. Use python3 so we never grep JSON.
-  REPO="$repo" SINCE="$SINCE" python3 - "$tmp" "$prs_json" <<'PY'
+  prs_raw="$tmp/prs_raw.json"
+  fetch_merged_prs "$repo" > "$prs_raw"
+  # Filter by --since and attach repo + branch label. Use python3 so we never
+  # grep JSON. Read the payload from a file rather than argv: a repo with many
+  # closed PRs (each with a full body) can produce JSON larger than the OS
+  # argument-size limit.
+  REPO="$repo" SINCE="$SINCE" python3 - "$tmp" "$prs_raw" <<'PY'
 import json, os, sys
 tmp = sys.argv[1]
-raw = sys.argv[2]
+with open(sys.argv[2]) as f:
+    raw = f.read()
 repo = os.environ["REPO"]
 since = os.environ["SINCE"]
 
@@ -248,8 +260,9 @@ for pr in prs:
 
 all_commits = {}
 for repo, rprs in repos.items():
-    # Read branch
-    branch_file = os.path.join(tmp, f"branch_{repo.replace('/', '_')}")
+    # Read branch. Nested by "owner/repo" path components to match how it was
+    # written, so distinct repos never collide on a flattened filename.
+    branch_file = os.path.join(tmp, "repos", repo, "branch")
     try:
         with open(branch_file) as f:
             branch = f.read().strip() or "main"
@@ -371,7 +384,10 @@ def is_revert_defect(pr, commits):
         if subject == revert_subject:
             return True
         low = msg.lower()
-        if f"reverts #{num}" in low or f"revert of #{num}" in low:
+        # Plain substring matching would let PR #1 match inside "reverts #10"
+        # (the digits of #10 start with "1"), so require the number not be
+        # followed by another digit.
+        if re.search(rf'reverts #{num}(?!\d)', low) or re.search(rf'revert of #{num}(?!\d)', low):
             return True
     return False
 
