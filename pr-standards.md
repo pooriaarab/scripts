@@ -239,6 +239,8 @@ reads it; nothing fetches a central registry at check time.
   "proofOverrideLabel": "proof-not-applicable",
   "requireProof": true,
   "requireAttributableProof": false,
+  "destructiveLabel": "human-reviewed",
+  "destructiveGlobs": ["**/migrations/**", "**/*.sql", "**/billing/**", "**/*.tf", "**/terraform/**", "**/*secret*", "**/*credential*"],
   "uiGlobs": ["**/*.tsx", "**/*.jsx", "**/*.vue", "**/*.svelte", "**/*.css", "**/*.scss", "**/*.html", "**/components/**", "**/app/**/page.*", "**/pages/**"],
   "uiExcludeGlobs": ["**/*.test.*", "**/*.spec.*", "**/__tests__/**", "**/*.stories.*", "**/pages/api/**"],
   "exemptBranches": ["main", "release", "refactor", "gh-pages"],
@@ -257,6 +259,40 @@ because a change that closes an issue is not a chore and belongs on a numbered
 branch. The obvious implementation gets this wrong. Written as "there is no issue
 number, so skip the checks that need one", the knob quietly disables the title and
 body rules too, and becomes a way to opt out of the whole standard.
+
+## Destructive changes stop for a person
+
+A schema migration, a billing path, an infrastructure plan and a credential file
+share one property: getting them wrong is not a defect you fix in the next pull
+request. No amount of reading the diff tells you a migration is reversible or
+that a price change is the intended one.
+
+So the checker does not try to judge. A pull request touching `destructiveGlobs`
+fails until the repo owner applies `human-reviewed`, resolved through the same
+ownership check as the other two labels — an agent cannot clear its own stop.
+
+The default list is deliberately short:
+
+```
+**/migrations/**   **/*.sql   **/billing/**   **/*.tf   **/terraform/**
+**/*secret*   **/*credential*
+```
+
+Every glob costs a human decision on every pull request that matches it. A list
+long enough to catch everything trains the owner to apply the label without
+reading, which is worse than having no gate. Add to it per repo, from real
+incidents, never for comfort. Set it to `[]` to opt out.
+
+`.github/workflows/**` is *not* in the default list, and the omission is a
+judgement call rather than an oversight: in a fleet where a rollout writes a
+workflow into every repo, including it would demand a label on every adoption
+pull request and burn the owner's attention on the one change they already
+decided to make. A repo whose workflows hold deploy credentials should add it.
+
+**The gate assumes nothing merges without a human.** It fails a check; it cannot
+stop a merge. On a repo where an unattended process merges with the account
+token, this label is a suggestion. Fix the merger first, or the gate is
+decoration.
 
 ## The four layers
 
