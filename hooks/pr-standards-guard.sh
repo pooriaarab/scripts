@@ -32,16 +32,31 @@ command = (data.get("tool_input") or {}).get("command") or data.get("command") o
 #
 # Pad the operators before tokenising. shlex keeps `true&&git` as one token, so
 # an unspaced operator hid the git call from the whole guard.
+#
+# A newline separates commands exactly like `;` does, so a multi-line Bash
+# call is segmented one line at a time. Comments are enabled so `# ...; git
+# checkout -b x` is recognised as dead text instead of a second segment —
+# without that, a comment that merely mentions a branch got blocked.
 OPERATORS = {"&&", "||", ";", "|", "&"}
-padded = re.sub(r"(\|\||&&|;|\||&)", r" \1 ", command)
-segments, current = [], []
-for token in shlex.split(padded):
-    if token in OPERATORS:
-        segments.append(current)
-        current = []
-    else:
-        current.append(token)
-segments.append(current)
+segments = []
+for line in command.split("\n"):
+    padded = re.sub(r"(\|\||&&|;|\||&)", r" \1 ", line)
+    current = []
+    try:
+        tokens = shlex.split(padded, comments=True)
+    except ValueError:
+        continue
+    for token in tokens:
+        if token in OPERATORS:
+            segments.append(current)
+            current = []
+        else:
+            current.append(token)
+    segments.append(current)
+
+# A leading `FOO=bar` assignment is not the command word. Skipping it is what
+# lets `FOO=bar git checkout -b x` still be seen as a git invocation.
+ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 
 # `git branch` is mostly a query. Only these flags can accompany a creation, so
 # any other flag means the line lists or inspects branches and creates nothing.
@@ -60,23 +75,35 @@ def created_branch(tokens):
     if not rest:
         return None
 
-    def value_after(flags):
-        for position, token in enumerate(rest[:-1]):
-            if token in flags and not rest[position + 1].startswith("-"):
-                return rest[position + 1]
+    def value_after(candidates, flags):
+        for position, token in enumerate(candidates[:-1]):
+            if token in flags and not candidates[position + 1].startswith("-"):
+                return candidates[position + 1]
         return None
 
     # Only branch CREATION is checked. Deleting or renaming a branch is how you
     # recover from a bad name, so a guard that blocked those would trap you.
     if rest[0] == "checkout":
-        return value_after({"-b", "-B", "--orphan"})
+        return value_after(rest, {"-b", "-B", "--orphan"})
     if rest[0] == "switch":
-        return value_after({"-c", "-C", "--orphan"})
+        return value_after(rest, {"-c", "-C", "--orphan"})
+    if rest[0] == "worktree":
+        # Only `add` creates a branch; `list`/`remove`/`prune`/`lock` do not.
+        if len(rest) > 1 and rest[1] == "add":
+            return value_after(rest, {"-b", "-B"})
+        return None
     if rest[0] == "branch":
-        flags = {token for token in rest[1:] if token.startswith("-")}
+        args = rest[1:]
+        # `--` ends option parsing, so a name after it is never mistaken for a flag.
+        if "--" in args:
+            split = args.index("--")
+            flag_tokens, names = args[:split], args[split + 1:]
+        else:
+            flag_tokens = [token for token in args if token.startswith("-")]
+            names = [token for token in args if not token.startswith("-")]
+        flags = {token for token in flag_tokens if token.startswith("-")}
         if not flags <= BRANCH_CREATE_FLAGS:
             return None
-        names = [token for token in rest[1:] if not token.startswith("-")]
         if not names:
             return None
         # `git branch -c <source> <new>` copies. The new name is the last one,
@@ -88,6 +115,10 @@ def created_branch(tokens):
 # Every segment is checked. A chain that creates two branches used to have only
 # its first name validated, so the bad second name went through unseen.
 for tokens in segments:
+    start = 0
+    while start < len(tokens) and ASSIGNMENT.match(tokens[start]):
+        start += 1
+    tokens = tokens[start:]
     if not tokens or os.path.basename(tokens[0]) != "git":
         continue
     name = created_branch(tokens)

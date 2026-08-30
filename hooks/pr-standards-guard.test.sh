@@ -42,6 +42,11 @@ check 2 'sees a git call after an unspaced operator'   'true&&git checkout -b my
 check 2 'checks every branch a chain creates'          'git checkout -b scr-12-do-one-thing && git checkout -b my-cool-feature'
 check 0 'allows listing branches by pattern'           'git branch --list my-cool-*'
 check 0 'allows showing the current branch'            'git branch --show-current'
+check 0 'ignores a git call hidden in a comment'       'echo ok # note; git checkout -b my-cool-feature'
+check 2 'sees a git call on the next line'             $'echo ready\ngit checkout -b my-cool-feature'
+check 2 'sees a git call after an env var assignment'  'FOO=bar git checkout -b my-cool-feature'
+check 2 'treats -- as end of options for git branch'   'git branch -- my-cool-feature'
+check 2 'sees a branch created via git worktree add'   'git worktree add -b my-cool-feature /tmp/tree'
 
 [ "$fails" = 0 ] || { printf '\n%s failing\n' "$fails" >&2; exit 1; }
 printf '\nall passing\n'
