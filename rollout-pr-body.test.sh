@@ -20,6 +20,17 @@ ISSUE_NUM=997
 BRANCH="$PREFIX-$ISSUE_NUM-adopt-pr-standard"
 DEFAULT_BRANCH=main
 
+# The precheck block seeds its scratch dir from $CONFIG_JSON, same as the real
+# rollout builds it from the real template -- not hand-copied, so this cannot
+# drift from either the template file or the rollout's own transform of it.
+PR_CONFIG_TPL=$(cat "$HERE/pr-standards-templates/pr-standards.json")
+CONFIG_JSON=$(echo "$PR_CONFIG_TPL" | python3 -c "
+import json, sys
+cfg = json.load(sys.stdin)
+cfg['prefix'] = '$PREFIX'
+print(json.dumps(cfg, indent=2))
+")
+
 # Take the rollout's real precheck block and body, and run them. sed carves out
 # the region between the two markers so the test cannot drift from the source.
 eval "$(sed -n '/^  # The PR that installs the standard has to obey it/,/^  gh pr create/p' "$ROLLOUT" \

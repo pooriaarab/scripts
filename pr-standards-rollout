@@ -538,21 +538,26 @@ print(json.dumps(payload))
   # the branch and title about to be opened and paste the real output. Prose
   # about obeying the rule reads the same whether or not anyone ran anything,
   # which is the whole reason the rule asks for a command and a result.
-  # GITHUB_REPOSITORY is how precheck learns which repo's prefix to derive; the
-  # target repo has no config on disk here.
+  # GITHUB_REPOSITORY names the target repo; the prefix itself comes from the
+  # seeded config below, not from guessing at this name.
   PR_TITLE="[$PREFIX_UPPER-$ISSUE_NUM] Adopt the fleet PR standard"
   # Two lines, with the command itself first on its own. The checker looks for a
   # command at the START of a line, so folding the env assignment onto the front
   # of it hides the command and the evidence reads as prose again.
   PRECHECK_CMD="export GITHUB_REPOSITORY=$OWNER/$repo
 \$ ./pr-standards precheck --branch $BRANCH --title '$PR_TITLE'"
-  # Run from a scratch directory with no .github/pr-standards.json and no git
-  # ancestry of its own. "scripts" -- this checkout -- is itself a rollout
-  # target (see repo-prefixes.json). Once its own config lands on main,
-  # loadConfig would read THIS repo's prefix off local disk for every repo's
-  # precheck, no matter what GITHUB_REPOSITORY says, silently breaking the
-  # rollout for everyone but itself.
+  # Run from a scratch directory with no git ancestry of its own, seeded with
+  # the exact .github/pr-standards.json this rollout is about to write to the
+  # target repo. "scripts" -- this checkout -- is itself a rollout target (see
+  # repo-prefixes.json), so a scratch dir with no config at all would make
+  # loadConfig fall back to derivePrefix(repoName) -- and repo-prefixes.json
+  # exists precisely because that guess collides for most repos (every
+  # single-word "vibe*" repo derives "vib" and needs the registry to tell them
+  # apart). Without the seeded config, precheck would validate the real branch
+  # and title against the wrong, guessed prefix and reject them every time.
   PRECHECK_SCRATCH=$(mktemp -d)
+  mkdir -p "$PRECHECK_SCRATCH/.github"
+  printf '%s' "$CONFIG_JSON" > "$PRECHECK_SCRATCH/.github/pr-standards.json"
   PR_STANDARDS_BIN="$(cd "$(dirname "$0")" && pwd)/pr-standards"
   PRECHECK_OUT=$(cd "$PRECHECK_SCRATCH" && GITHUB_REPOSITORY="$OWNER/$repo" "$PR_STANDARDS_BIN" \
     precheck --branch "$BRANCH" --title "$PR_TITLE" 2>&1)
