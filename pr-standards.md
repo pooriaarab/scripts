@@ -287,6 +287,11 @@ looks like a version range), `go.mod`, and `requirements*.txt`. `Cargo.toml` and
 `Gemfile` are not read yet — a repo using them sees no dependency check rather
 than a wrong one. Set `dependencyManifests: []` to opt out.
 
+GitHub omits the patch for a manifest diff too large to inline. That is exactly
+the diff most likely to smuggle in a dependency unseen, so a matched manifest
+with real changes and no patch fails the check rather than passing silently —
+state what was added, or split the change so it can be read.
+
 ## Destructive changes stop for a person
 
 A schema migration, a billing path, an infrastructure plan and a credential file

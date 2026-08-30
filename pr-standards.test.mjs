@@ -761,3 +761,71 @@ test('dependency: a new package needs a stated licence, size and reason', () => 
   // A repo opts out with an empty list.
   assert.equal(checkDependencies(addOne, validBody, { ...config, dependencyManifests: [] }).failures.length, 0);
 });
+
+test('dependency: a hyphenated name is not truncated at the hyphen', () => {
+  const config = { ...DEFAULT_CONFIG, prefix: 'cr' };
+  const addLodashEs = [{
+    filename: 'package.json',
+    patch: [
+      '   "dependencies": {',
+      '     "react": "^19.0.0",',
+      '+    "lodash-es": "^4.17.21"',
+    ].join('\n'),
+  }];
+  assert.deepEqual(checkDependencies(addLodashEs, validBody, config).added, ['lodash-es']);
+
+  const stated = `${validBody}\n\nDependency: lodash-es — MIT, adds 18 kB gzipped, tree-shakeable import of lodash`;
+  assert.deepEqual(checkDependencies(addLodashEs, stated, config).failures, []);
+});
+
+test('dependency: a brand-new package.json does not flag its own "version" field', () => {
+  const config = { ...DEFAULT_CONFIG, prefix: 'cr' };
+  const newManifest = [{
+    filename: 'package.json',
+    status: 'added',
+    patch: [
+      '+{',
+      '+  "name": "my-package",',
+      '+  "version": "1.0.0",',
+      '+  "dependencies": {',
+      '+    "lodash": "^4.17.21"',
+      '+  }',
+      '+}',
+    ].join('\n'),
+  }];
+  assert.deepEqual(checkDependencies(newManifest, validBody, config).added, ['lodash']);
+});
+
+test('dependency: requirements.txt extras and bare comparison operators are detected', () => {
+  const config = { ...DEFAULT_CONFIG, prefix: 'cr' };
+  const extras = [{ filename: 'requirements.txt', patch: '+requests[security]>=2.32' }];
+  assert.deepEqual(checkDependencies(extras, validBody, config).added, ['requests']);
+
+  const bareOperator = [{ filename: 'requirements.txt', patch: '+Django>3.0' }];
+  assert.deepEqual(checkDependencies(bareOperator, validBody, config).added, ['Django']);
+
+  const directRef = [{ filename: 'requirements.txt', patch: '+requests @ https://example.test/requests.whl' }];
+  assert.deepEqual(checkDependencies(directRef, validBody, config).added, ['requests']);
+});
+
+test('dependency: moving a package between manifests in one PR is not a new dependency', () => {
+  const config = { ...DEFAULT_CONFIG, prefix: 'cr' };
+  const moved = [
+    { filename: 'packages/app/package.json', patch: '-    "react": "^19.0.0",' },
+    { filename: 'packages/lib/package.json', patch: '+    "react": "^19.0.0",' },
+  ];
+  assert.deepEqual(checkDependencies(moved, validBody, config).added, []);
+});
+
+test('dependency: a manifest diff too large for GitHub to include fails closed', () => {
+  const config = { ...DEFAULT_CONFIG, prefix: 'cr' };
+  const tooLarge = [{ filename: 'package.json', additions: 4000, deletions: 10 }];
+  const result = checkDependencies(tooLarge, validBody, config);
+  assert.equal(result.failures.length, 1);
+  assert.equal(result.failures[0].check, 'new dependency');
+
+  // A pure rename with no content change also has no patch, but nothing
+  // changed, so there is nothing to flag.
+  const renamedOnly = [{ filename: 'package.json', additions: 0, deletions: 0 }];
+  assert.deepEqual(checkDependencies(renamedOnly, validBody, config).failures, []);
+});
