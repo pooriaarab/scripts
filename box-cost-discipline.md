@@ -116,7 +116,30 @@ box-reap --stop-idle-older-than 2h --require-heartbeat --execute
 
 ## Optional: run it on a schedule
 
-**No cron job is installed by this repo.** Add one yourself if you want it.
+**`./box-reap-install` installs the cron job** (launchd, every 15 minutes by default).
+It copies the reaper to `~/.local/bin`, copies the credential to `~/.config/ascii-box/env`,
+writes and loads both agents, then verifies the agent is actually alive rather than
+trusting `launchctl load`. Idempotent, so re-run it after changing the scripts.
+
+### Unclaimed Boxes are the ones that actually accumulate
+
+`box-session` records the Box it warmed for a repo in
+`~/.local/state/box-work/<repo>.id`. Any other running Box is **unclaimed**: a session
+ended without stopping it, or someone ran a bare `box new`. Nothing will ever claim it
+again, so it bills until its archive deadline.
+
+Measured 2026-08-30 on this account: **14 running Boxes, 2 claimed, 12 unclaimed.** The
+credit check projected a **$287 overrun** inside a 15-day window. One sweep took it to 5
+Boxes and roughly a third of the burn.
+
+So `box-reap-cron` sweeps unclaimed Boxes at a shorter age (`BOX_REAP_ORPHAN_AGE`, default
+20m) than claimed ones (`BOX_REAP_AGE`, default 45m). Age is the only thing that changes —
+the same probe still runs, so a busy Box is still never stopped. Being unclaimed is
+evidence about intent, not about activity, and the two must not be confused.
+
+Expect a few "failed to stop: Box is archived" lines in a sweep. That is a Box that hit its
+own archive deadline between the plan and the execute. Archived Boxes are free; nothing is
+wrong.
 Start in dry-run for a few days and read the log before adding `--execute`:
 
 ```cron

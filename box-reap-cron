@@ -59,6 +59,48 @@ echo "===== $(date -u +%FT%TZ) box-reap --stop-idle-older-than $AGE --execute" >
 rc=$?
 echo "----- exit=$rc" >> "$LOG"
 
+# ORPHANS: a Box no session claims.
+#
+# box-session records the Box it warmed for a repo in ~/.local/state/box-work/<repo>.id.
+# Any other running Box was started by a session that ended without stopping it, or by a
+# bare `box new`. Nothing will ever claim it again, so it bills until its archive deadline.
+# Measured here on 2026-08-30: 14 running Boxes, 2 claimed, 12 orphaned — enough burn for
+# the credit check to project a $287 overrun in a 15-day window.
+#
+# Orphans get a shorter age than claimed Boxes, and nothing else changes: the same
+# box-reap probe still runs, so a busy Box is still never stopped. The age is the only
+# knob, because "unclaimed" is evidence about intent, not about activity.
+ORPHAN_AGE="${BOX_REAP_ORPHAN_AGE:-20m}"
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/box-work"
+
+claimed=""
+for f in "$STATE_DIR"/*.id; do
+  [[ -f "$f" ]] || continue
+  claimed="$claimed $(tr -d '[:space:]' < "$f")"
+done
+
+orphan_args=()
+while read -r id; do
+  [[ -n "$id" ]] || continue
+  case " $claimed " in *" $id "*) continue ;; esac
+  orphan_args+=(--box "$id")
+done < <(box list --json 2>/dev/null | python3 -c '
+import sys, json
+try:
+    for b in json.load(sys.stdin).get("boxes", []):
+        print(b["id"])
+except Exception:
+    pass')
+
+if [[ ${#orphan_args[@]} -gt 0 ]]; then
+  {
+    echo "===== $(date -u +%FT%TZ) orphan sweep: $(( ${#orphan_args[@]} / 2 )) unclaimed Box(es), age $ORPHAN_AGE"
+    echo "claimed:${claimed:- none}"
+    "$REAP" --stop-idle-older-than "$ORPHAN_AGE" --execute "${orphan_args[@]}" 2>&1
+    echo "----- orphan exit=$?"
+  } >> "$LOG" 2>&1
+fi
+
 # Keep the log from growing without bound.
 if [[ -f "$LOG" ]] && [[ $(wc -l < "$LOG") -gt 5000 ]]; then
   tail -2000 "$LOG" > "$LOG.tmp" && mv "$LOG.tmp" "$LOG"
