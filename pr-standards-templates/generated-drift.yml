@@ -45,7 +45,10 @@ jobs:
               config = json.loads(config_text)
           except ValueError as e:
               sys.exit(f"Malformed .github/pr-standards.json: {e}")
-          generators = [g for g in config.get("generators", []) if isinstance(g, str) and g.strip()]
+          raw_generators = config.get("generators", [])
+          if not isinstance(raw_generators, list) or not all(isinstance(g, str) for g in raw_generators):
+              sys.exit('Malformed .github/pr-standards.json: "generators" must be a list of strings')
+          generators = [g for g in raw_generators if g.strip()]
           if not generators:
               print("No generators configured. Nothing to check.")
               sys.exit(0)
@@ -96,6 +99,11 @@ jobs:
         run: |
           set -euo pipefail
           MARKER="<!-- generated-drift -->"
+          # Paginated: a long-running PR can carry more issue comments than a
+          # single page, and the marker comment (posted on an earlier run) can
+          # fall outside the first page.
+          EXISTING=$(gh api --paginate "repos/$REPO/issues/$PR/comments" --jq \
+            "[.[] | select(.body | startswith(\"$MARKER\")) | .id] | first // empty")
           if [ -f "$REPORT" ]; then
             { echo "$MARKER"; echo "### Generated file drift"; echo; cat "$REPORT"; } > body.md
           elif [ "$REGEN_OUTCOME" != "success" ]; then
@@ -106,14 +114,10 @@ jobs:
           else
             # Say nothing unless an earlier run already complained. A repo with
             # no drift should carry no comment at all.
-            EXISTING=$(gh api "repos/$REPO/issues/$PR/comments" --jq \
-              "[.[] | select(.body | startswith(\"$MARKER\")) | .id] | first // empty")
             [ -n "$EXISTING" ] || exit 0
             { echo "$MARKER"; echo "### Generated file drift — resolved"; echo;
               echo "The generators now change nothing."; } > body.md
           fi
-          EXISTING=$(gh api "repos/$REPO/issues/$PR/comments" --jq \
-            "[.[] | select(.body | startswith(\"$MARKER\")) | .id] | first // empty")
           if [ -n "$EXISTING" ]; then
             gh api "repos/$REPO/issues/comments/$EXISTING" -X PATCH -F body=@body.md --silent
           else
