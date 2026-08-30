@@ -43,21 +43,32 @@ jobs:
       # lives in `pr-standards.mjs` beside it. Fetching only the launcher gets
       # you a job that fails on a missing import.
       #
-      # Resolve the tag to one commit SHA before fetching either file. Two
-      # bare `curl`s against the tag name would each re-resolve it, so a tag
-      # moved between the two requests could hand this job a launcher and an
-      # engine from different revisions.
+      # One request for the whole tag, rather than resolving it through the API
+      # and then fetching each file. That is not only shorter:
+      #
+      #   - The launcher and the engine cannot come from two revisions, because
+      #     they arrive in one archive. Resolving a SHA first bought the same
+      #     property at the cost of an extra call.
+      #   - No authenticated API call, so nothing here spends the account's
+      #     quota. That matters at fleet scale: after the rollout every pull
+      #     request on 63 repos ran the old `gh api` line, which is a good way
+      #     to induce the rate limit the check is then judged by. A secondary
+      #     limit answers 403 while `gh api rate_limit` still reports a full
+      #     quota, so the check went red for a reason with nothing to do with
+      #     the pull request, and the reason it gave was misleading.
+      #   - pooriaarab/scripts is public, so the archive needs no token.
+      #
+      # --retry-all-errors is what makes the retry cover an HTTP error rather
+      # than only a connection failure.
       - name: Fetch the checker
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
           mkdir -p /tmp/prs
-          SHA=$(gh api repos/pooriaarab/scripts/git/ref/tags/pr-standards-v1 --jq .object.sha)
-          for f in pr-standards pr-standards.mjs; do
-            curl -fsSL -o "/tmp/prs/$f" \
-              "https://raw.githubusercontent.com/pooriaarab/scripts/$SHA/$f"
-          done
+          curl --retry 5 --retry-delay 2 --retry-all-errors -fsSL \
+            "https://codeload.github.com/pooriaarab/scripts/tar.gz/refs/tags/pr-standards-v1" \
+            | tar -xz -C /tmp/prs --strip-components=1
           chmod +x /tmp/prs/pr-standards
+          # A truncated archive must fail here, not later as a rule violation.
+          node /tmp/prs/pr-standards --selfcheck
 
       - name: Check branch, title, description, and size
         env:
