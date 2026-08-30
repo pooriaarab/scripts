@@ -38,13 +38,15 @@ jobs:
           # everyone to ignore a red check.
           try:
               config_text = pathlib.Path(".github/pr-standards.json").read_text()
-          except OSError:
+          except (FileNotFoundError, NotADirectoryError):
               print("No .github/pr-standards.json. Nothing to check.")
               sys.exit(0)
           try:
               config = json.loads(config_text)
           except ValueError as e:
               sys.exit(f"Malformed .github/pr-standards.json: {e}")
+          if not isinstance(config, dict):
+              sys.exit("Malformed .github/pr-standards.json: expected a JSON object")
           raw_generators = config.get("generators", [])
           if not isinstance(raw_generators, list) or not all(isinstance(g, str) for g in raw_generators):
               sys.exit('Malformed .github/pr-standards.json: "generators" must be a list of strings')
@@ -61,6 +63,8 @@ jobs:
                   sys.exit(f"Generator failed: {command}")
 
           setup = config.get("generatorSetup")
+          if setup is not None and not isinstance(setup, str):
+              sys.exit('Malformed .github/pr-standards.json: "generatorSetup" must be a string')
           if setup:
               run(setup)
           for generator in generators:

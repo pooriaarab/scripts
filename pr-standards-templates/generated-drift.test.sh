@@ -49,6 +49,11 @@ MALFORMED='not valid json'
 # A string instead of an array is a natural typo (generatorSetup takes a bare
 # string), and iterating a string yields its characters as one-letter commands.
 WRONG_TYPE='{"generators":"true"}'
+# A top-level JSON array or primitive is valid JSON, so it slips past the
+# json.loads error and reaches config.get, which only a dict has.
+TOP_LEVEL_ARRAY='["true"]'
+# A list instead of a string is the mirror-image typo of WRONG_TYPE.
+SETUP_WRONG_TYPE='{"generatorSetup":["echo hi"],"generators":["true"]}'
 
 check 0 'passes when the repo has no config'          none
 check 0 'passes when no generators are configured'    '{"prefix":"scr"}'
@@ -58,6 +63,8 @@ check 0 'runs generatorSetup before the generators'   "$SETUP"
 check 1 'fails when a generator itself fails'         "$BROKEN"
 check 1 'fails on malformed config instead of silently skipping' "$MALFORMED"
 check 1 'fails when generators is a string instead of a list' "$WRONG_TYPE"
+check 1 'fails when the config is a top-level array instead of an object' "$TOP_LEVEL_ARRAY"
+check 1 'fails when generatorSetup is a list instead of a string' "$SETUP_WRONG_TYPE"
 
 # The report is what the PR comment quotes. An empty one leaves the author with
 # a red check and no idea which file to regenerate.
