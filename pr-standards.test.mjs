@@ -712,3 +712,28 @@ test('proof: a third council pass loopholes stay closed', () => {
   ].join('\n');
   assert.equal(failed(checkProof(commentInsideFence, uiFiles, [], config)), true);
 });
+
+test('proof: a stray fence never swallows a screenshot, but never grants a waiver either', () => {
+  const uiFiles = [{ filename: 'src/components/Button.tsx', status: 'modified' }];
+  const url = (id) => `https://github.com/user-attachments/assets/${id}`;
+  const failed = (r) => r.failures.some((f) => f.check === 'proof of a visible change');
+  const body = (...lines) => ['## What', 'x', '## Why', 'y', '## How I verified', 'ran it -> pass', ...lines, 'Assisted-by: agent:model'].join('\n');
+
+  // A fence opened inside a blockquote used to stay open once the quoting
+  // stopped, so everything below it vanished and an honest PR failed.
+  const quoted = body('> ```', '> an example someone quoted', `![before](${url('aaa')})`, `![after](${url('bbb')})`);
+  assert.equal(failed(checkProof(quoted, uiFiles, [], config)), false);
+
+  // Same for a fence that simply never closes.
+  const stray = body('```', `![before](${url('aaa')})`, `![after](${url('bbb')})`);
+  assert.equal(failed(checkProof(stray, uiFiles, [], config)), false);
+
+  // The escape hatch keeps failing closed: an unclosed fence must not turn a
+  // quoted `Proof: n/a` into a real waiver.
+  const waiver = body('```', 'Proof: n/a — the documented escape hatch, unclosed');
+  assert.equal(failed(checkProof(waiver, uiFiles, [], config)), true);
+
+  // A properly closed fence still hides what it wraps, from both callers.
+  const closed = body('```', `![quoted](${url('aaa')})`, '```');
+  assert.equal(failed(checkProof(closed, uiFiles, [], config)), true);
+});
