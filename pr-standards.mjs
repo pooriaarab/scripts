@@ -26,12 +26,16 @@ export const DEFAULT_BANNED_COMMIT_TRAILERS = [
 ];
 
 export const DEFAULT_EXCLUDE_GLOBS = [
+  // Anchored at any depth, not just the repo root. A monorepo keeps a lockfile
+  // per workspace, and an unanchored pattern counted apps/*/package-lock.json
+  // against the 500-line cap -- so a dependency bump failed the size check on
+  // thousands of generated lines nobody reads.
   '**/*.lock',
-  'package-lock.json',
-  'bun.lockb',
-  'pnpm-lock.yaml',
-  'yarn.lock',
-  'Cargo.lock',
+  '**/package-lock.json',
+  '**/bun.lockb',
+  '**/pnpm-lock.yaml',
+  '**/yarn.lock',
+  '**/Cargo.lock',
   'dist/**',
   'build/**',
   '.next/**',
