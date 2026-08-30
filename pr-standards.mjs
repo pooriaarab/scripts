@@ -368,14 +368,22 @@ function hasCommandAndResult(text) {
 function visibleBody(body) {
   return String(body || '')
     .replace(/<!--[\s\S]*?-->/g, '')
-    .replace(/^[ \t]*(?:```|~~~)[\s\S]*?^[ \t]*(?:```|~~~)[ \t]*$/gm, '');
+    // The closing fence must use the same delimiter as the opening one — a
+    // ``` fence only closes on ```, never on ~~~. Accepting either as the
+    // closer let a "Proof: n/a" line that GitHub still renders inside a
+    // backtick fence (because the ~~~ line does not close it) show up here
+    // as plain visible text.
+    .replace(/^[ \t]*(```|~~~)[\s\S]*?^[ \t]*\1[ \t]*$/gm, '');
 }
 
 function countUserAttachments(body) {
   const matches = visibleBody(body).match(/https:\/\/github\.com\/user-attachments\/assets\/[^\s"'\)\]]+/g);
-  // Distinct URLs, because the same image pasted twice is one image. The
-  // threshold asks for before AND after, not for two links.
-  return matches ? new Set(matches).size : 0;
+  if (!matches) return 0;
+  // Distinct assets, because the same image pasted twice is one image. The
+  // threshold asks for before AND after, not for two links — and a query
+  // string or fragment appended to the same asset id is still one asset.
+  const assetIds = matches.map((url) => url.split(/[?#]/)[0]);
+  return new Set(assetIds).size;
 }
 
 function hasValidProofNa(body) {
@@ -1076,38 +1084,31 @@ async function runPrecheck(options) {
 // actor the rule exists to stop. So find who applied it and honour it only from
 // the owner. If the events cannot be read, drop the override rather than trust
 // it: failing closed on an escape hatch is the safe direction.
-export async function resolveSingleLabel(repo, number, labels, labelName, config, warnings) {
+//
+// Paginate once for every override label present, not once per label: this
+// endpoint defaults to 30 items, and label changes, reopens and `referenced`
+// events from every commit that mentions the issue all land here, so on a
+// real PR the labelling event is often several pages in. Two override labels
+// used to mean walking that same history twice, sequentially.
+async function fetchLabelAppliers(repo, number, labelNames) {
+  const appliers = new Map(labelNames.map((name) => [name, null]));
+  for (let page = 1; ; page += 1) {
+    const events = await apiRequest(`issues/${number}/events?per_page=100&page=${page}`, repo);
+    if (!Array.isArray(events)) break;
+    for (const event of events) {
+      if (event.event === 'labeled' && labelNames.includes(event.label?.name)) {
+        appliers.set(event.label.name, event.actor?.login || null);
+      }
+    }
+    if (events.length < 100) break;
+  }
+  return appliers;
+}
+
+export async function resolveSingleLabel(repo, number, labels, labelName, config, warnings, applier = null) {
   if (!labels.includes(labelName)) return labels;
   const owner = repo.split('/')[0];
   const allowed = new Set([owner, ...(config.overrideActors || [])].map((name) => name.toLowerCase()));
-  let applier = null;
-  try {
-    // Paginate. This endpoint defaults to 30 items, and label changes, reopens
-    // and `referenced` events from every commit that mentions the issue all
-    // land here, so on a real PR the labelling event is often not on page one.
-    // Missing it stripped a legitimate override and failed a PR that should
-    // have passed.
-    for (let page = 1; ; page += 1) {
-      const events = await apiRequest(`issues/${number}/events?per_page=100&page=${page}`, repo);
-      if (!Array.isArray(events)) break;
-      for (const event of events) {
-        if (event.event === 'labeled' && event.label?.name === labelName) {
-          applier = event.actor?.login || null;
-        }
-      }
-      if (events.length < 100) break;
-    }
-  } catch {
-    warnings.push(fail(
-      `${labelName} ignored`,
-      'the label events could not be read',
-      'a readable audit trail for the override',
-      labelName === config.overrideLabel
-        ? 'The size caps were applied. Re-run when the API is reachable.'
-        : 'The proof checks were applied. Re-run when the API is reachable.',
-    ));
-    return labels.filter((name) => name !== labelName);
-  }
   if (applier && allowed.has(applier.toLowerCase())) return labels;
   // On an organization-owned repo the first path segment is the org slug, not
   // anyone's login, so the name comparison above can never match and the
@@ -1139,8 +1140,28 @@ export async function resolveOverrideLabels(repo, number, labels, config, warnin
   // Both the size and the proof escape hatches share the same ownership
   // check: the repo owner (or an admin) must have applied the label. An
   // agent cannot clear its own requirement.
-  let result = await resolveSingleLabel(repo, number, labels, config.overrideLabel, config, warnings);
-  result = await resolveSingleLabel(repo, number, result, config.proofOverrideLabel, config, warnings);
+  const labelNames = [config.overrideLabel, config.proofOverrideLabel].filter((name) => labels.includes(name));
+  if (labelNames.length === 0) return labels;
+  let appliers;
+  try {
+    appliers = await fetchLabelAppliers(repo, number, labelNames);
+  } catch {
+    for (const labelName of labelNames) {
+      warnings.push(fail(
+        `${labelName} ignored`,
+        'the label events could not be read',
+        'a readable audit trail for the override',
+        labelName === config.overrideLabel
+          ? 'The size caps were applied. Re-run when the API is reachable.'
+          : 'The proof checks were applied. Re-run when the API is reachable.',
+      ));
+    }
+    return labels.filter((name) => !labelNames.includes(name));
+  }
+  let result = labels;
+  for (const labelName of labelNames) {
+    result = await resolveSingleLabel(repo, number, result, labelName, config, warnings, appliers.get(labelName));
+  }
   return result;
 }
 
