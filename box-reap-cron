@@ -105,6 +105,22 @@ done
 # forever.
 worktree_slugs=""
 stale_slugs=""
+slug_files=""
+# Same fail-loud requirement as the box-list enumeration below: if TCC (or anything else)
+# blocks this find, a swallowed error here would silently produce an empty slug set, and a
+# Box a live worktree is attached to would look unclaimed instead of skipping the sweep. A
+# missing directory is not that -- a fresh machine with nothing cloned yet is not an error.
+if [[ -d "$HOME/Documents/Personal" ]]; then
+  slug_err="$(mktemp)"
+  slug_files="$(find "$HOME/Documents/Personal" -maxdepth 5 -name .crabbox-slug -print 2>"$slug_err")"
+  find_rc=$?
+  if [[ $find_rc -ne 0 ]]; then
+    echo "$(date -u +%FT%TZ) ERROR: could not enumerate worktree slugs, skipping orphan sweep: $(tr '\n' ' ' < "$slug_err" | cut -c1-200)" >> "$LOG"
+    rm -f "$slug_err"
+    exit 4
+  fi
+  rm -f "$slug_err"
+fi
 while read -r f; do
   [[ -f "$f" ]] || continue
   slug="$(tr -d '[:space:]' < "$f")"
@@ -114,7 +130,7 @@ while read -r f; do
   else
     worktree_slugs="$worktree_slugs $slug"
   fi
-done < <(find "$HOME/Documents/Personal" -maxdepth 5 -name .crabbox-slug -print 2>/dev/null)
+done <<< "$slug_files"
 
 if [[ -n "$stale_slugs" ]]; then
   echo "$(date -u +%FT%TZ) worktree slug(s) untouched for ${CLAIM_TTL_MIN}m, no longer shielding:$stale_slugs" >> "$LOG"
