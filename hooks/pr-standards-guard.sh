@@ -17,8 +17,8 @@ command -v python3 >/dev/null 2>&1 || exit 0
 input=$(cat || true)
 [ -n "$input" ] || exit 0
 
-branch=$(INPUT="$input" python3 <<'PY' 2>/dev/null || true
-import json, os, shlex
+branches=$(INPUT="$input" python3 <<'PY' 2>/dev/null || true
+import json, os, re, shlex
 
 data = json.loads(os.environ.get("INPUT", ""))
 if (data.get("tool_name") or data.get("tool") or "Bash") != "Bash":
@@ -29,15 +29,27 @@ command = (data.get("tool_input") or {}).get("command") or data.get("command") o
 # checkout -b y` is still seen while `echo git checkout -b y` is not. A
 # segment is only a git invocation when its FIRST word is git; matching the
 # word anywhere blocked every command that merely mentioned a branch.
+#
+# Pad the operators before tokenising. shlex keeps `true&&git` as one token, so
+# an unspaced operator hid the git call from the whole guard.
 OPERATORS = {"&&", "||", ";", "|", "&"}
+padded = re.sub(r"(\|\||&&|;|\||&)", r" \1 ", command)
 segments, current = [], []
-for token in shlex.split(command):
+for token in shlex.split(padded):
     if token in OPERATORS:
         segments.append(current)
         current = []
     else:
         current.append(token)
 segments.append(current)
+
+# `git branch` is mostly a query. Only these flags can accompany a creation, so
+# any other flag means the line lists or inspects branches and creates nothing.
+# Validating a `--list` pattern made the guard block a harmless command, which
+# is the one failure this hook must never have.
+BRANCH_CREATE_FLAGS = {"-f", "--force", "-t", "--track", "--no-track", "-c", "-C", "--copy"}
+BRANCH_COPY_FLAGS = {"-c", "-C", "--copy"}
+
 
 def created_branch(tokens):
     # Skip git's own global flags, so `git -C dir checkout -b x` still parses.
@@ -57,27 +69,41 @@ def created_branch(tokens):
     # Only branch CREATION is checked. Deleting or renaming a branch is how you
     # recover from a bad name, so a guard that blocked those would trap you.
     if rest[0] == "checkout":
-        return value_after({"-b", "-B"})
+        return value_after({"-b", "-B", "--orphan"})
     if rest[0] == "switch":
-        return value_after({"-c", "-C"})
-    if rest[0] == "branch" and not {"-d", "-D", "--delete", "-m", "-M", "--move"} & set(rest):
+        return value_after({"-c", "-C", "--orphan"})
+    if rest[0] == "branch":
+        flags = {token for token in rest[1:] if token.startswith("-")}
+        if not flags <= BRANCH_CREATE_FLAGS:
+            return None
         names = [token for token in rest[1:] if not token.startswith("-")]
-        return names[0] if names else None
+        if not names:
+            return None
+        # `git branch -c <source> <new>` copies. The new name is the last one,
+        # and it is the only one this guard has any say over.
+        return names[-1] if flags & BRANCH_COPY_FLAGS else names[0]
     return None
 
+
+# Every segment is checked. A chain that creates two branches used to have only
+# its first name validated, so the bad second name went through unseen.
 for tokens in segments:
     if not tokens or os.path.basename(tokens[0]) != "git":
         continue
     name = created_branch(tokens)
     if name:
         print(name)
-        break
 PY
 )
 
-[ -n "$branch" ] || exit 0
+[ -n "$branches" ] || exit 0
 
-if ! output=$(pr-standards precheck --branch "$branch" 2>&1); then
-  printf 'Branch "%s" does not meet the PR standard:\n%s\n' "$branch" "$output" >&2
-  exit 2
-fi
+status=0
+while IFS= read -r branch; do
+  [ -n "$branch" ] || continue
+  if ! output=$(pr-standards precheck --branch "$branch" 2>&1); then
+    printf 'Branch "%s" does not meet the PR standard:\n%s\n' "$branch" "$output" >&2
+    status=2
+  fi
+done <<< "$branches"
+exit "$status"

@@ -35,6 +35,13 @@ check 0 'allows deleting a badly named branch'         'git branch -D my-cool-fe
 check 0 'allows renaming a badly named branch'         'git branch -m my-cool-feature scr-12-do-one-thing'
 check 0 'ignores a command that is not git'            'echo git checkout -b nope'
 check 0 'lets unparseable input through'               'git checkout -b "unterminated'
+check 2 'blocks an orphan branch'                      'git checkout --orphan my-cool-feature'
+check 2 'blocks the orphan form of git switch'         'git switch --orphan my-cool-feature'
+check 2 'checks the copy target, not the source'       'git branch -c scr-12-do-one-thing my-cool-feature'
+check 2 'sees a git call after an unspaced operator'   'true&&git checkout -b my-cool-feature'
+check 2 'checks every branch a chain creates'          'git checkout -b scr-12-do-one-thing && git checkout -b my-cool-feature'
+check 0 'allows listing branches by pattern'           'git branch --list my-cool-*'
+check 0 'allows showing the current branch'            'git branch --show-current'
 
 [ "$fails" = 0 ] || { printf '\n%s failing\n' "$fails" >&2; exit 1; }
 printf '\nall passing\n'
