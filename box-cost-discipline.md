@@ -139,6 +139,20 @@ a weaker guarantee than it sounds — an I/O-bound job uses little CPU, so anyth
 matters must touch the heartbeat file (see the section above). Unclaimed is evidence about
 intent, not about activity, and the two must not be confused.
 
+### There are two claim namespaces, and only one of them stopped anything
+
+`box-session`/`box-work` claim a Box in `~/.local/state/box-work/<repo>.id`. But
+`crabbox-attach` — the `git worktree add` wrapper — **also** creates a Box, and records it
+in the worktree as `.crabbox-slug`, holding a slug rather than a `bx_` id. Nothing that
+stops Boxes ever read that file.
+
+That cut both ways. Those Boxes were never stopped by anything, and they also looked
+unclaimed to the sweep, so a Box a live worktree was attached to could be stopped while its
+session was thinking rather than building. `box-reap-cron` now resolves worktree slugs
+against the live Box list (matching `subdomain` or `name`) and treats a match as claimed. A
+slug with no match is a stale marker from a Box that is already gone, and is ignored — most
+of the ones on this machine are exactly that, left over from the GCP-era leases.
+
 **A claim is only trustworthy while its session lives.** If a session is killed before
 `box-session end` runs, its `.id` file stays behind, and a stale claim would shield that
 Box from every later sweep — forever. So a claim expires: past `BOX_REAP_CLAIM_TTL_MIN`

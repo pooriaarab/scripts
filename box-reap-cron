@@ -92,6 +92,19 @@ for f in "$STATE_DIR"/*.id; do
   fi
 done
 
+# SECOND CLAIM NAMESPACE. `crabbox-attach` (the git-worktree-add wrapper) also creates
+# Boxes, and records them in the WORKTREE as `.crabbox-slug` — a slug, not a bx_ id, in a
+# namespace `box-session` and `box-work` never read. Ignoring it cuts both ways: those
+# Boxes look unclaimed here (so nothing ever stopped them), and a Box a live worktree is
+# attached to could be swept while its session is merely thinking rather than building.
+# So resolve slugs against the live Box list and treat a match as claimed. A slug with no
+# match is a stale marker from a deleted Box and is ignored.
+worktree_slugs=""
+while read -r f; do
+  [[ -f "$f" ]] || continue
+  worktree_slugs="$worktree_slugs $(tr -d '[:space:]' < "$f")"
+done < <(find "$HOME/Documents/Personal" -maxdepth 5 -name .crabbox-slug -print 2>/dev/null)
+
 # Enumeration failure must not look like "no orphans". Capture the list, check the status,
 # and fail loudly: a silent empty result would skip the sweep while the job still reported
 # the first reaper's exit code, which is how a cost leak hides behind a green cron.
@@ -99,10 +112,14 @@ if ! box_json="$(box list --json 2>&1)"; then
   echo "$(date -u +%FT%TZ) ERROR: box list failed, skipping orphan sweep: ${box_json:0:200}" >> "$LOG"
   exit 4
 fi
-if ! orphan_ids="$(printf '%s' "$box_json" | python3 -c '
-import sys, json
+if ! orphan_ids="$(printf '%s' "$box_json" | WORKTREE_SLUGS="$worktree_slugs" python3 -c '
+import sys, json, os
+slugs = set(os.environ.get("WORKTREE_SLUGS", "").split())
 d = json.load(sys.stdin)
 for b in d["boxes"]:
+    # A Box a live worktree points at is in use, whichever namespace recorded it.
+    if b.get("subdomain") in slugs or b.get("name") in slugs:
+        continue
     print(b["id"])
 ' 2>&1)"; then
   echo "$(date -u +%FT%TZ) ERROR: could not parse box list, skipping orphan sweep: ${orphan_ids:0:200}" >> "$LOG"
