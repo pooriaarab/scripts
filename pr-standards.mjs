@@ -366,10 +366,14 @@ function hasCommandAndResult(text) {
 // that documents this checker quotes its own escape hatch, and a quoted rule
 // must not satisfy the rule it quotes.
 function visibleBody(body) {
-  const withoutComments = String(body || '').replace(/<!--[\s\S]*?-->/g, '');
-  const lines = withoutComments.split('\n');
+  const lines = String(body || '').split('\n');
   const visible = [];
   let fence = null;
+  // A fence marker can sit behind a blockquote prefix (`> ``` `), and GitHub
+  // still treats it as a real fence there. Strip the prefix only to test for
+  // the marker; the pushed line keeps it, since the quoted prose is still
+  // visible text.
+  const unquoted = (line) => line.replace(/^(?:\s{0,3}>\s?)+/, '');
   for (const line of lines) {
     if (fence) {
       // The closing fence must use the same character as the opening one and
@@ -379,7 +383,7 @@ function visibleBody(body) {
       // real closing line (looking for a bare ``` that never came) and
       // swallow real proof sitting after it, and let a ~~~ line masquerade as
       // the closer for a ``` fence and cut a hidden block short too early.
-      if (new RegExp(`^ {0,3}[${fence.char}]{${fence.len},}[ \\t]*$`).test(line)) fence = null;
+      if (new RegExp(`^ {0,3}[${fence.char}]{${fence.len},}[ \\t]*$`).test(unquoted(line))) fence = null;
       continue;
     }
     // At most three spaces of indent, the same ceiling GitHub uses. A line
@@ -388,7 +392,7 @@ function visibleBody(body) {
     // failing a pull request that had done nothing wrong. An over-eager fence
     // costs a false failure; a missed one costs a quoted example counted as
     // evidence. Only the first of those is worth avoiding.
-    const open = /^ {0,3}(`{3,}|~{3,})/.exec(line);
+    const open = /^ {0,3}(`{3,}|~{3,})/.exec(unquoted(line));
     if (open) {
       fence = { char: open[1][0], len: open[1].length };
       continue;
@@ -398,7 +402,13 @@ function visibleBody(body) {
   // An opening fence with no matching closer runs to the end of the document
   // on GitHub too, so an unterminated fence drops everything after it here —
   // the loop above never stops skipping once `fence` is set.
-  return visible.join('\n');
+  //
+  // Comments are stripped only now, after fences are resolved on the raw
+  // text. Stripping them first could delete a real closing fence when the
+  // fenced content happened to contain an HTML comment that spanned it,
+  // silently hiding genuine proof written after that fence as if it were
+  // still inside the block.
+  return visible.join('\n').replace(/<!--[\s\S]*?-->/g, '');
 }
 
 // The proof escape hatch and the attachment count only count evidence that
@@ -411,7 +421,11 @@ function verificationSection(body) {
 }
 
 function countUserAttachments(body) {
-  const matches = verificationSection(body).match(/https:\/\/github\.com\/user-attachments\/assets\/[^\s"'\)\]]+/g);
+  // Backtick excluded along with the closing-paren/bracket/quote characters:
+  // a URL wrapped in inline code (`` `https://...assets/abc` ``) is the same
+  // asset as one linked as a Markdown image, and a backtick is never a real
+  // URL character, so it must never be captured as part of the id.
+  const matches = verificationSection(body).match(/https:\/\/github\.com\/user-attachments\/assets\/[^\s"'`\)\]]+/g);
   if (!matches) return 0;
   // Distinct assets, because the same image pasted twice is one image. The
   // threshold asks for before AND after, not for two links — and a query
