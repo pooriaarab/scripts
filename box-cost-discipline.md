@@ -153,6 +153,11 @@ against the live Box list (matching `subdomain` or `name`) and treats a match as
 slug with no match is a stale marker from a Box that is already gone, and is ignored — most
 of the ones on this machine are exactly that, left over from the GCP-era leases.
 
+A worktree claim also ages out, at the same `BOX_REAP_CLAIM_TTL_MIN`. Removing a worktree
+takes its `.crabbox-slug` with it, so that case reaps itself; the case the TTL covers is a
+worktree that still exists while nobody has touched it for hours, whose Box would otherwise
+be shielded forever. Six such slugs were shielding nothing real on the first run.
+
 **A claim is only trustworthy while its session lives.** If a session is killed before
 `box-session end` runs, its `.id` file stays behind, and a stale claim would shield that
 Box from every later sweep — forever. So a claim expires: past `BOX_REAP_CLAIM_TTL_MIN`

@@ -99,11 +99,26 @@ done
 # attached to could be swept while its session is merely thinking rather than building.
 # So resolve slugs against the live Box list and treat a match as claimed. A slug with no
 # match is a stale marker from a deleted Box and is ignored.
+# A worktree claim ages out like a session claim does. Removing a worktree takes its
+# .crabbox-slug with it, so that case reaps itself; the case this covers is a worktree that
+# still exists but nobody has touched for hours, whose Box would otherwise be shielded
+# forever.
 worktree_slugs=""
+stale_slugs=""
 while read -r f; do
   [[ -f "$f" ]] || continue
-  worktree_slugs="$worktree_slugs $(tr -d '[:space:]' < "$f")"
+  slug="$(tr -d '[:space:]' < "$f")"
+  [[ -n "$slug" ]] || continue
+  if [[ -n "$(find "$f" -mmin "+$CLAIM_TTL_MIN" 2>/dev/null)" ]]; then
+    stale_slugs="$stale_slugs $slug"
+  else
+    worktree_slugs="$worktree_slugs $slug"
+  fi
 done < <(find "$HOME/Documents/Personal" -maxdepth 5 -name .crabbox-slug -print 2>/dev/null)
+
+if [[ -n "$stale_slugs" ]]; then
+  echo "$(date -u +%FT%TZ) worktree slug(s) untouched for ${CLAIM_TTL_MIN}m, no longer shielding:$stale_slugs" >> "$LOG"
+fi
 
 # Enumeration failure must not look like "no orphans". Capture the list, check the status,
 # and fail loudly: a silent empty result would skip the sweep while the job still reported
