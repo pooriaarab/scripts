@@ -83,6 +83,19 @@ case "${1:-status}" in
       mkdir -p "$SESSIONS"
       : > "$SESSIONS/$SESSION_KEY"
     fi
+    # Already have a live one? Say so and stop -- before ever touching the warming lock.
+    # This has to run before the lock is acquired: the lock is never released on this
+    # early exit (see below), so if it ran after, every start call for the life of the
+    # Box would take the lock and leave it dangling, and any start that lands while it is
+    # held falsely reports "another start is warming" instead of checking the id file.
+    if [[ -f "$STATE/$NAME.id" ]]; then
+      id="$(tr -d '[:space:]' < "$STATE/$NAME.id")"
+      st="$(box info "$id" --json 2>/dev/null | python3 -c '
+import sys,json
+try: print(json.load(sys.stdin)["box"].get("state",""))
+except Exception: print("")')"
+      case "$st" in ready|idle|running) touch "$STATE/$NAME.id"; echo "[box-session] $NAME already has Box $id ($st)"; exit 0 ;; esac
+    fi
     # Only one warm per repo at a time. mkdir is atomic, so it serialises concurrent
     # SessionStart hooks. Without it, two sessions starting inside the ~100s warm window
     # both saw no id, both created a Box, and the second overwrote the first's id file —
@@ -99,17 +112,8 @@ case "${1:-status}" in
     fi
     # NO trap to release the lock: `start` returns in milliseconds while the warm runs
     # detached for ~100s, so releasing on exit would leave the window unguarded — which is
-    # the whole bug. The lock is cleared by `box-work` writing the id (a later start then
-    # short-circuits on the id), by `end`, or by the 5-minute staleness check above.
-    # Already have a live one? Say so and stop.
-    if [[ -f "$STATE/$NAME.id" ]]; then
-      id="$(tr -d '[:space:]' < "$STATE/$NAME.id")"
-      st="$(box info "$id" --json 2>/dev/null | python3 -c '
-import sys,json
-try: print(json.load(sys.stdin)["box"].get("state",""))
-except Exception: print("")')"
-      case "$st" in ready|idle|running) touch "$STATE/$NAME.id"; echo "[box-session] $NAME already has Box $id ($st)"; exit 0 ;; esac
-    fi
+    # the whole bug. The lock is cleared by `end`, or by the 5-minute staleness check above;
+    # a later start that finds the id file now exits above without ever touching it.
     echo "[box-session] warming a Box for $NAME in the background (~100s; reuse is ~4s)"
     # Detach fully: the hook must not hold the session open.
     nohup "$BOXWORK" "$ROOT" >"$STATE/$NAME.warm.log" 2>&1 </dev/null &
