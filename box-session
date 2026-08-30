@@ -45,6 +45,27 @@ SESSIONS="$STATE/$NAME.sessions"
 # and end hooks; the worktree path is the fallback, which is right in practice because a
 # session works in one worktree.
 SESSION_KEY="$(printf '%s' "${CLAUDE_CODE_SESSION_ID:-$ROOT}" | tr -c 'A-Za-z0-9._-' '_')"
+# Two locks, because they guard different lengths of time. WARM_LOCK ($LOCK) is held for the
+# ~100s of a detached warm so only one Box is created. LIFECYCLE_LOCK is held for
+# milliseconds around "register a session" and around "count sessions, then stop" — without
+# it a start can register after `end` counted zero and before it stops, and `end` then stops
+# the Box the new session just adopted.
+LIFECYCLE_LOCK="$STATE/$NAME.lifecycle.lock"
+lifecycle_acquire() {
+  local waited=0
+  mkdir -p "$STATE"
+  while ! mkdir "$LIFECYCLE_LOCK" 2>/dev/null; do
+    if [[ -n "$(find "$LIFECYCLE_LOCK" -maxdepth 0 -mmin +1 2>/dev/null)" ]]; then
+      rmdir "$LIFECYCLE_LOCK" 2>/dev/null || true   # holder died
+      continue
+    fi
+    sleep 0.2
+    waited=$((waited + 1))
+    [[ $waited -lt 50 ]] || return 0   # 10s: proceed rather than hang a session hook
+  done
+  return 0
+}
+lifecycle_release() { rmdir "$LIFECYCLE_LOCK" 2>/dev/null || true; }
 
 case "${1:-status}" in
   start)
@@ -52,8 +73,10 @@ case "${1:-status}" in
     # Register this session BEFORE warming, so `end` can tell whether it is the last one
     # out. Sessions on this machine run a dozen deep; without this, the first session to
     # end stopped the Box the others were using.
+    lifecycle_acquire
     mkdir -p "$SESSIONS"
     : > "$SESSIONS/$SESSION_KEY"
+    lifecycle_release
     # Only one warm per repo at a time. mkdir is atomic, so it serialises concurrent
     # SessionStart hooks. Without it, two sessions starting inside the ~100s warm window
     # both saw no id, both created a Box, and the second overwrote the first's id file —
@@ -87,6 +110,10 @@ except Exception: print("")')"
     disown 2>/dev/null || true
     exit 0 ;;
   end)
+    # The deregister, the count and the stop are one critical section: a start landing
+    # between the count and the stop would lose its Box immediately.
+    lifecycle_acquire
+    trap lifecycle_release EXIT
     rm -f "$SESSIONS/$SESSION_KEY"
     [[ -f "$STATE/$NAME.id" ]] || exit 0
     # Last one out stops the Box. Any other session still registered for this repo is
@@ -97,10 +124,16 @@ except Exception: print("")')"
       exit 0
     fi
     id="$(tr -d '[:space:]' < "$STATE/$NAME.id")"
-    box stop "$id" >/dev/null 2>&1 && echo "[box-session] stopped $NAME Box $id"
-    rm -f "$STATE/$NAME.id"
-    rmdir "$SESSIONS" 2>/dev/null || true
-    rmdir "$LOCK" 2>/dev/null || true
+    # Keep the id if the stop failed. Dropping it strands a running Box: the next box-work
+    # cannot reuse what it cannot see, so it creates a duplicate.
+    if box stop "$id" >/dev/null 2>&1; then
+      echo "[box-session] stopped $NAME Box $id"
+      rm -f "$STATE/$NAME.id"
+      rmdir "$SESSIONS" 2>/dev/null || true
+      rmdir "$LOCK" 2>/dev/null || true
+    else
+      echo "[box-session] FAILED to stop $NAME Box $id -- keeping the id so it can be reused or reaped" >&2
+    fi
     exit 0 ;;
   status)
     if [[ -f "$STATE/$NAME.id" ]]; then
