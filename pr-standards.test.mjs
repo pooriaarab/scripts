@@ -631,3 +631,41 @@ test('proof: an indented code line is not a fence, and an angle-bracketed URL is
   ].join('\n');
   assert.equal(warned(checkProof(angled, uiFiles, [], config)), true);
 });
+
+test('proof: a second council pass loopholes stay closed', () => {
+  const uiFiles = [{ filename: 'src/components/Button.tsx', status: 'modified' }];
+  const url = (id) => `https://github.com/user-attachments/assets/${id}`;
+  const failed = (r) => r.failures.some((f) => f.check === 'proof of a visible change');
+  const warned = (r) => r.warnings.some((w) => w.check === 'proof of a visible change');
+
+  // The same asset once as a Markdown image and once wrapped in inline code is
+  // still one image, not before and after — a trailing backtick is not part
+  // of the URL.
+  const backtickWrapped = `${validBody}\n![shot](${url('abc')})\nAlso see \`${url('abc')}\`.`;
+  assert.equal(warned(checkProof(backtickWrapped, uiFiles, [], config)), true);
+  assert.equal(failed(checkProof(backtickWrapped, uiFiles, [], config)), false);
+
+  // A fenced example quoted inside a blockquote is still a fence: two
+  // attachment URLs quoted there as documentation must not count as real
+  // before-and-after proof.
+  const blockquotedFence = [
+    '## What', 'x', '## Why', 'y', '## How I verified',
+    'ran it -> pass',
+    '> ```', `> ![before](${url('aaa')})`, `> ![after](${url('bbb')})`, '> ```',
+    'Assisted-by: agent:model',
+  ].join('\n');
+  assert.equal(failed(checkProof(blockquotedFence, uiFiles, [], config)), true);
+  assert.equal(warned(checkProof(blockquotedFence, uiFiles, [], config)), false);
+
+  // An HTML comment that spans across a fence's own closing line must not
+  // delete that closer and swallow real proof written after it.
+  const commentEatsCloser = [
+    '## What', 'x', '## Why', 'y', '## How I verified',
+    'ran it -> pass',
+    '```', 'hidden', '<!-- note', '```', 'still hidden', '-->',
+    `![before](${url('aaa')})`, `![after](${url('bbb')})`,
+    'Assisted-by: agent:model',
+  ].join('\n');
+  assert.equal(failed(checkProof(commentEatsCloser, uiFiles, [], config)), false);
+  assert.equal(warned(checkProof(commentEatsCloser, uiFiles, [], config)), false);
+});
