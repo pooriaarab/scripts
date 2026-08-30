@@ -1,0 +1,585 @@
+#!/usr/bin/env bash
+# fleet-digest — one message a day that contains only what a person must decide.
+#
+# WHY THIS EXISTS
+# This fleet runs many agents across many repos. A notification per pull request
+# stops being read within a week, and once nobody reads them every gate becomes
+# decoration. One message a day, containing only what a person must decide, is
+# the attention budget that keeps the gates real.
+#
+# WHAT IT REPORTS (ONLY THESE FOUR)
+# 1. An open PR that asks for an owner-only label in its body but does not carry it.
+# 2. A repo whose default branch has a failing latest CI run.
+# 3. An open PR that has seen no push and no review for longer than --stale-days.
+# 4. An open PR whose checks are all green and which waits only for a human.
+#
+# WHAT IT LEAVES OUT (BY DESIGN)
+# It never reports green CI, open PRs that are active, PRs with failing checks
+# that still need an agent, or repos without .github/pr-standards.json. A digest
+# that always has content teaches you to skip it. When every list is empty it
+# prints "Nothing needs you." and exits 0 — that line is the point.
+#
+# FAILURE IT PREVENTS
+# Alert fatigue. A stream of FYIs trains a person to ignore every message, so
+# the one message that needs a human decision also gets ignored. This script
+# protects that decision by refusing to emit FYIs.
+set -euo pipefail
+
+usage() {
+  cat <<'USAGE'
+Usage: fleet-digest [--owner NAME] [--repos a,b,c] [--stale-days N] [--json] [--markdown]
+
+  --owner NAME     GitHub owner to scan (default: pooriaarab)
+  --repos LIST     comma-separated repo names (e.g. a,b,c). Overrides discovery.
+                   Each name may be short (repo) or full (owner/repo).
+  --stale-days N   days without push or review before a PR is stale (default: 3)
+  --json           print JSON only on stdout
+  --markdown       print Markdown ready to paste into an issue or chat
+  --help           show this help
+
+Default repo set: every non-archived repo the owner has that contains
+.github/pr-standards.json. --repos overrides this discovery.
+
+Reports only items that need a person:
+  1. Open PR that requests an owner-only label in its body but lacks it
+  2. Repo with a failing latest CI run on the default branch
+  3. Open PR with no push and no review for longer than --stale-days
+  4. Open PR with all checks green that waits only for a human
+
+Group by repo. One line per item with a link.
+Prints "Nothing needs you." and exits 0 when every list is empty.
+USAGE
+}
+
+OWNER="pooriaarab"
+REPOS_ARG=""
+STALE_DAYS=3
+JSON=0
+MARKDOWN=0
+
+while (( $# )); do
+  case "$1" in
+    --owner)
+      OWNER="${2:-}"; [[ -n "$OWNER" ]] || { echo "error: --owner needs a value" >&2; exit 2; }
+      shift 2 ;;
+    --owner=*) OWNER="${1#--owner=}"; [[ -n "$OWNER" ]] || { echo "error: --owner needs a value" >&2; exit 2; }; shift ;;
+    --repos)
+      REPOS_ARG="${2:-}"; [[ -n "$REPOS_ARG" ]] || { echo "error: --repos needs a value" >&2; exit 2; }
+      shift 2 ;;
+    --repos=*) REPOS_ARG="${1#--repos=}"; shift ;;
+    --stale-days)
+      STALE_DAYS="${2:-}"; [[ "$STALE_DAYS" =~ ^[0-9]+$ ]] || { echo "error: --stale-days needs a positive integer" >&2; exit 2; }
+      STALE_DAYS=$((10#$STALE_DAYS))
+      (( STALE_DAYS > 0 )) || { echo "error: --stale-days needs a positive integer" >&2; exit 2; }
+      shift 2 ;;
+    --stale-days=*) STALE_DAYS="${1#--stale-days=}"; [[ "$STALE_DAYS" =~ ^[0-9]+$ ]] || { echo "error: --stale-days needs a positive integer" >&2; exit 2; }; STALE_DAYS=$((10#$STALE_DAYS)); shift ;;
+    --json) JSON=1; shift ;;
+    --markdown) MARKDOWN=1; shift ;;
+    --help|-h) usage; exit 0 ;;
+    -*) echo "error: unknown flag $1" >&2; usage >&2; exit 2 ;;
+    *) echo "error: unexpected argument $1" >&2; usage >&2; exit 2 ;;
+  esac
+done
+
+if (( JSON && MARKDOWN )); then
+  echo "error: choose --json or --markdown, not both" >&2; exit 2
+fi
+
+command -v gh >/dev/null 2>&1 || { echo "error: gh CLI not found" >&2; exit 3; }
+command -v python3 >/dev/null 2>&1 || { echo "error: python3 not found" >&2; exit 3; }
+
+# Every network call goes through one of the functions below. Tests stub gh
+# with a fake on PATH, so each function is one gh invocation to keep the stub
+# simple. Parse JSON with python3 -c; never grep JSON.
+
+gh_api() {
+  gh api "$@" 2>/dev/null
+}
+
+gh_api_silent() {
+  gh api "$@" 2>/dev/null
+}
+
+list_all_repos_raw() {
+  # Return JSON array of repos for the owner.
+  # Uses --paginate so large accounts are not truncated.
+  gh_api --paginate "users/${OWNER}/repos?per_page=100" 2>/dev/null || gh_api "users/${OWNER}/repos?per_page=100" 2>/dev/null || echo "[]"
+}
+
+repo_default_branch() {
+  local repo="$1"
+  local owner_repo
+  if [[ "$repo" == *"/"* ]]; then owner_repo="$repo"; else owner_repo="${OWNER}/${repo}"; fi
+  gh_api "repos/${owner_repo}" --jq '.default_branch' 2>/dev/null || echo "main"
+}
+
+repo_has_standards() {
+  local repo="$1"
+  local owner_repo
+  if [[ "$repo" == *"/"* ]]; then owner_repo="$repo"; else owner_repo="${OWNER}/${repo}"; fi
+  if gh_api_silent "repos/${owner_repo}/contents/.github/pr-standards.json" --silent >/dev/null 2>&1; then
+    return 0
+  fi
+  # Fallback: gh may not support --silent in stub; try full fetch and check for name field
+  local out
+  out=$(gh_api "repos/${owner_repo}/contents/.github/pr-standards.json" 2>/dev/null || true)
+  if echo "$out" | python3 -c 'import sys,json; d=json.load(sys.stdin); assert "name" in d or "sha" in d or "content" in d' 2>/dev/null; then
+    return 0
+  fi
+  # Also accept stub that returns {"exists": true} or similar truthy
+  if echo "$out" | python3 -c 'import sys,json; d=json.load(sys.stdin); sys.exit(0 if d.get("exists") else 1)' 2>/dev/null; then
+    return 0
+  fi
+  return 1
+}
+
+fetch_open_prs() {
+  local owner_repo="$1"
+  gh_api "repos/${owner_repo}/pulls?state=open&per_page=100" 2>/dev/null || echo "[]"
+}
+
+fetch_reviews() {
+  local owner_repo="$1" number="$2"
+  gh_api "repos/${owner_repo}/pulls/${number}/reviews?per_page=100" 2>/dev/null || echo "[]"
+}
+
+fetch_check_runs() {
+  local owner_repo="$1" sha="$2"
+  gh_api "repos/${owner_repo}/commits/${sha}/check-runs?per_page=100" 2>/dev/null || echo '{"check_runs":[]}'
+}
+
+fetch_status() {
+  local owner_repo="$1" sha="$2"
+  gh_api "repos/${owner_repo}/commits/${sha}/status" 2>/dev/null || echo '{"state":""}'
+}
+
+fetch_latest_run() {
+  local owner_repo="$1" branch="$2"
+  # Prefer actions/runs filtered by branch; fall back to empty
+  gh_api "repos/${owner_repo}/actions/runs?branch=${branch}&per_page=1&status=completed" 2>/dev/null || gh_api "repos/${owner_repo}/actions/runs?branch=${branch}&per_page=1" 2>/dev/null || echo '{"workflow_runs":[]}'
+}
+
+# Build list of repos to scan
+REPOS=()
+if [[ -n "$REPOS_ARG" ]]; then
+  IFS=',' read -ra _parts <<< "$REPOS_ARG"
+  for p in "${_parts[@]}"; do
+    p=$(echo "$p" | tr -d '[:space:]')
+    [[ -z "$p" ]] && continue
+    if [[ "$p" == *"/"* ]]; then
+      REPOS+=("$p")
+    else
+      REPOS+=("${OWNER}/${p}")
+    fi
+  done
+else
+  raw_repos=$(list_all_repos_raw)
+  # Extract non-archived repo full names via python3
+  mapfile -t REPOS < <(OWNER="$OWNER" python3 -c '
+import json, os, sys
+raw = sys.stdin.read()
+try:
+    data = json.loads(raw)
+except Exception:
+    data = []
+owner = os.environ.get("OWNER","")
+# data may be a list of repo objects or a dict with items
+if isinstance(data, dict) and "items" in data:
+    data = data["items"]
+for r in data:
+    if not isinstance(r, dict):
+        continue
+    archived = r.get("archived", False)
+    if archived:
+        continue
+    full = r.get("full_name") or (owner + "/" + r.get("name","") if r.get("name") else "")
+    if full and "/" in full:
+        print(full)
+    elif r.get("name"):
+        print(owner + "/" + r.get("name"))
+' <<< "$raw_repos")
+  # Filter to those that contain .github/pr-standards.json
+  if (( ${#REPOS[@]} > 0 )); then
+    filtered=()
+    for repo in "${REPOS[@]}"; do
+      if repo_has_standards "$repo"; then
+        filtered+=("$repo")
+      fi
+    done
+    REPOS=("${filtered[@]}")
+  fi
+fi
+
+# Prepare temp files
+tmpdir=$(mktemp -d)
+trap 'rm -rf "$tmpdir"' EXIT
+
+# Collect items per repo using python3 for JSON handling
+# Each repo produces a json file in tmpdir
+
+# Helper: check if body requests a label but label is absent
+# Labels we care about: oversized-approved, proof-not-applicable
+# Body request is a case-insensitive substring match.
+
+for repo in "${REPOS[@]}"; do
+  # Normalize repo to owner/name
+  owner_repo="$repo"
+  # Fetch default branch
+  default_branch=$(repo_default_branch "$owner_repo" 2>/dev/null || echo "main")
+  default_branch=$(echo "$default_branch" | tr -d '\r\n' | head -n1)
+  [[ -z "$default_branch" ]] && default_branch="main"
+
+  # Fetch latest CI run for default branch
+  latest_run_json=$(fetch_latest_run "$owner_repo" "$default_branch" 2>/dev/null || echo '{"workflow_runs":[]}')
+
+  # Fetch open PRs
+  prs_json=$(fetch_open_prs "$owner_repo" 2>/dev/null || echo "[]")
+
+  # Write repo data for python processing
+  repo_safe=$(echo "$owner_repo" | tr '/' '_')
+  printf '%s' "$latest_run_json" > "$tmpdir/${repo_safe}.run.json"
+  printf '%s' "$prs_json" > "$tmpdir/${repo_safe}.prs.json"
+  printf '%s' "$default_branch" > "$tmpdir/${repo_safe}.branch"
+
+  # For each PR, fetch reviews and check runs
+  # Use python to extract numbers and shas
+  pr_list=$(python3 -c '
+import json, sys
+data = json.loads(open(sys.argv[1]).read() or "[]")
+if isinstance(data, dict):
+    data = []
+for pr in data:
+    n = pr.get("number")
+    sha = (pr.get("head") or {}).get("sha") or pr.get("sha") or ""
+    if n is not None:
+        print(f"{n}\t{sha}")
+' "$tmpdir/${repo_safe}.prs.json" 2>/dev/null || true)
+
+  while IFS=$'\t' read -r pr_number pr_sha; do
+    [[ -z "$pr_number" ]] && continue
+    reviews_json=$(fetch_reviews "$owner_repo" "$pr_number" 2>/dev/null || echo "[]")
+    printf '%s' "$reviews_json" > "$tmpdir/${repo_safe}.pr${pr_number}.reviews.json"
+    if [[ -n "$pr_sha" && "$pr_sha" != "null" ]]; then
+      checks_json=$(fetch_check_runs "$owner_repo" "$pr_sha" 2>/dev/null || echo '{"check_runs":[]}')
+      status_json=$(fetch_status "$owner_repo" "$pr_sha" 2>/dev/null || echo '{"state":""}')
+    else
+      checks_json='{"check_runs":[]}'
+      status_json='{"state":""}'
+    fi
+    printf '%s' "$checks_json" > "$tmpdir/${repo_safe}.pr${pr_number}.checks.json"
+    printf '%s' "$status_json" > "$tmpdir/${repo_safe}.pr${pr_number}.status.json"
+  done <<< "$pr_list"
+done
+
+# Aggregate into a single JSON result
+OWNER="$OWNER" STALE_DAYS="$STALE_DAYS" TMPDIR="$tmpdir" REPOS_STR="$(printf '%s\n' "${REPOS[@]}")" python3 - "$tmpdir" <<'PY'
+import os, json, glob, re
+from datetime import datetime, timezone, timedelta
+
+owner = os.environ.get("OWNER","")
+stale_days = int(os.environ.get("STALE_DAYS","3"))
+tmpdir = os.environ.get("TMPDIR","")
+repos_str = os.environ.get("REPOS_STR","")
+repos = [r for r in repos_str.split("\n") if r]
+
+def parse_gh_date(s):
+    if not s or s == "null":
+        return None
+    try:
+        # GitHub dates are ISO8601 with Z
+        if s.endswith("Z"):
+            s = s[:-1] + "+00:00"
+        return datetime.fromisoformat(s)
+    except Exception:
+        return None
+
+now = datetime.now(timezone.utc)
+
+result = {
+    "owner": owner,
+    "stale_days": stale_days,
+    "repos": [],
+}
+
+# Per-repo buckets
+for repo in repos:
+    safe = repo.replace("/","_")
+    branch_file = os.path.join(tmpdir, f"{safe}.branch")
+    run_file = os.path.join(tmpdir, f"{safe}.run.json")
+    prs_file = os.path.join(tmpdir, f"{safe}.prs.json")
+    try:
+        branch = open(branch_file).read().strip() or "main"
+    except Exception:
+        branch = "main"
+    try:
+        run_data = json.loads(open(run_file).read() or '{"workflow_runs":[]}')
+    except Exception:
+        run_data = {"workflow_runs":[]}
+    try:
+        prs_data = json.loads(open(prs_file).read() or "[]")
+        if isinstance(prs_data, dict):
+            prs_data = []
+    except Exception:
+        prs_data = []
+
+    failing_ci = None
+    # Check latest run conclusion
+    runs = run_data.get("workflow_runs") if isinstance(run_data, dict) else []
+    if runs and isinstance(runs, list) and len(runs) > 0:
+        latest = runs[0]
+        conclusion = latest.get("conclusion") or latest.get("status")
+        # conclusion values: success, failure, cancelled, timed_out, etc.
+        if conclusion in ("failure", "timed_out", "cancelled", "action_required"):
+            failing_ci = {
+                "repo": repo,
+                "branch": branch,
+                "conclusion": conclusion,
+                "html_url": latest.get("html_url") or f"https://github.com/{repo}/actions/runs/{latest.get('id','')}",
+                "name": latest.get("name") or latest.get("display_title") or "CI",
+            }
+        # Also check if status is completed and conclusion is failure via check
+        # Some stubs use {"conclusion":"failure"} directly
+
+    label_requests = []
+    stale_prs = []
+    ready_prs = []
+
+    for pr in prs_data:
+        if not isinstance(pr, dict):
+            continue
+        number = pr.get("number")
+        title = pr.get("title") or ""
+        body = pr.get("body") or ""
+        html_url = pr.get("html_url") or f"https://github.com/{repo}/pull/{number}"
+        labels = pr.get("labels") or []
+        # labels may be list of dicts or strings
+        label_names = []
+        for lb in labels:
+            if isinstance(lb, dict):
+                label_names.append(lb.get("name","").lower())
+            elif isinstance(lb, str):
+                label_names.append(lb.lower())
+        created_at = parse_gh_date(pr.get("created_at"))
+        updated_at = parse_gh_date(pr.get("updated_at"))
+        draft = pr.get("draft", False)
+        head_sha = (pr.get("head") or {}).get("sha") or pr.get("sha") or ""
+        # 1. Label requests
+        body_lower = body.lower()
+        for needed in ("oversized-approved", "proof-not-applicable"):
+            if needed in body_lower and needed not in label_names:
+                label_requests.append({
+                    "repo": repo,
+                    "number": number,
+                    "title": title,
+                    "html_url": html_url,
+                    "needed_label": needed,
+                })
+                # Only one entry per PR even if both labels requested? Report each needed label separately?
+                # Spec says body requests oversized-approved or proof-not-applicable and label is absent.
+                # If both are requested and both absent, that is two items but we collapse to one per needed label.
+                # Keep both so each missing label is actionable.
+        # 3. Stale PRs: open longer than stale_days with no push and no review in that time
+        # No push = updated_at older than stale_days; no review = latest review older than stale_days or no reviews
+        if created_at:
+            # Use safe file for reviews
+            reviews_file = os.path.join(tmpdir, f"{safe}.pr{number}.reviews.json")
+            try:
+                reviews_data = json.loads(open(reviews_file).read() or "[]")
+                if isinstance(reviews_data, dict):
+                    reviews_data = []
+            except Exception:
+                reviews_data = []
+            latest_review = None
+            for rv in reviews_data:
+                if not isinstance(rv, dict):
+                    continue
+                d = parse_gh_date(rv.get("submitted_at") or rv.get("created_at") or rv.get("updated_at"))
+                if d and (latest_review is None or d > latest_review):
+                    latest_review = d
+            # Determine last activity: max of updated_at and latest_review
+            # Stale means both pushes and reviews are old
+            # Push recency is updated_at
+            stale_cutoff = now - timedelta(days=stale_days)
+            # PR must have been open longer than stale_days
+            open_duration_ok = (now - created_at).total_seconds() > stale_days * 86400
+            if open_duration_ok:
+                push_stale = (updated_at is None) or (updated_at < stale_cutoff)
+                review_stale = (latest_review is None) or (latest_review < stale_cutoff)
+                if push_stale and review_stale:
+                    stale_prs.append({
+                        "repo": repo,
+                        "number": number,
+                        "title": title,
+                        "html_url": html_url,
+                        "updated_at": pr.get("updated_at"),
+                        "created_at": pr.get("created_at"),
+                    })
+        # 4. Ready PRs: checks all green and waiting only on a human
+        if not draft and head_sha:
+            checks_file = os.path.join(tmpdir, f"{safe}.pr{number}.checks.json")
+            status_file = os.path.join(tmpdir, f"{safe}.pr{number}.status.json")
+            try:
+                checks_data = json.loads(open(checks_file).read() or '{"check_runs":[]}')
+            except Exception:
+                checks_data = {"check_runs":[]}
+            try:
+                status_data = json.loads(open(status_file).read() or '{"state":""}')
+            except Exception:
+                status_data = {"state":""}
+            check_runs = checks_data if isinstance(checks_data, list) else (checks_data.get("check_runs") or [])
+            combined = (status_data.get("state") or "").lower() if isinstance(status_data, dict) else ""
+
+            # Green means every check finished and none of them failed. A check
+            # still queued is NOT green: a stuck third-party app sat QUEUED for
+            # hours while a commit status reported success, and reading the
+            # status alone called that pull request ready.
+            unfinished = any(
+                (run.get("status") or "").lower() != "completed"
+                for run in check_runs if isinstance(run, dict)
+            )
+            failed = any(
+                (run.get("conclusion") or "").lower() not in ("success", "neutral", "skipped")
+                for run in check_runs if isinstance(run, dict)
+            )
+            # A pull request with no check runs at all is not green, it is
+            # unknown: CI has usually not started yet. Calling that ready sends
+            # a person to look at a PR before its own checks have spoken.
+            all_green = (
+                bool(check_runs)
+                and not unfinished
+                and not failed
+                and combined not in ("pending", "failure", "error")
+            )
+
+            # One line per pull request. A PR already listed for a missing label
+            # or for going stale does not need a second line saying it is ready:
+            # the reader has already been told to look at it.
+            already_listed = {item["number"] for item in label_requests + stale_prs}
+            if all_green and number not in already_listed:
+                ready_prs.append({
+                    "repo": repo,
+                    "number": number,
+                    "title": title,
+                    "html_url": html_url,
+                })
+
+    entry = {
+        "repo": repo,
+        "default_branch": branch,
+        "failing_ci": failing_ci,
+        "label_requests": label_requests,
+        "stale_prs": stale_prs,
+        "ready_prs": ready_prs,
+    }
+    result["repos"].append(entry)
+
+# Also build flat arrays for json consumers
+flat = {
+    "owner": result["owner"],
+    "stale_days": result["stale_days"],
+    "failing_ci": [],
+    "label_requests": [],
+    "stale_prs": [],
+    "ready_prs": [],
+}
+for r in result["repos"]:
+    if r["failing_ci"]:
+        flat["failing_ci"].append(r["failing_ci"])
+    flat["label_requests"].extend(r["label_requests"])
+    flat["stale_prs"].extend(r["stale_prs"])
+    flat["ready_prs"].extend(r["ready_prs"])
+
+# Write full result for bash to consume
+out_path = os.path.join(tmpdir, "result.json")
+with open(out_path, "w") as f:
+    json.dump({"grouped": result, "flat": flat}, f, indent=2)
+
+# Also write flat as separate for json mode
+flat_path = os.path.join(tmpdir, "flat.json")
+with open(flat_path, "w") as f:
+    json.dump(flat, f, indent=2)
+
+PY
+
+# Read result
+flat_json="$tmpdir/flat.json"
+grouped_json="$tmpdir/result.json"
+
+# Determine if any items exist
+has_items=$(python3 -c '
+import json
+flat=json.load(open("'"$flat_json"'"))
+total=len(flat.get("failing_ci",[]))+len(flat.get("label_requests",[]))+len(flat.get("stale_prs",[]))+len(flat.get("ready_prs",[]))
+print("yes" if total>0 else "no")
+')
+
+if [[ "$has_items" == "no" ]]; then
+  if (( JSON )); then
+    cat "$flat_json"
+    exit 0
+  fi
+  if (( MARKDOWN )); then
+    echo "Nothing needs you."
+    exit 0
+  fi
+  echo "Nothing needs you."
+  exit 0
+fi
+
+if (( JSON )); then
+  cat "$flat_json"
+  exit 0
+fi
+
+if (( MARKDOWN )); then
+  python3 - "$grouped_json" <<'PY'
+import json, sys
+data=json.load(open(sys.argv[1]))
+grouped=data["grouped"]
+flat=data["flat"]
+print("# Fleet digest")
+print("")
+# Group by repo in markdown
+for r in grouped["repos"]:
+    repo=r["repo"]
+    items=[]
+    if r["failing_ci"]:
+        fc=r["failing_ci"]
+        items.append(f"- [ ] `{repo}` — default branch `{fc['branch']}` CI failed ({fc['conclusion']}) — {fc['html_url']}")
+    for lr in r["label_requests"]:
+        items.append(f"- [ ] `{repo}` — PR #{lr['number']} needs owner: add `{lr['needed_label']}` — {lr['html_url']} — {lr['title']}")
+    for sp in r["stale_prs"]:
+        items.append(f"- [ ] `{repo}` — PR #{sp['number']} is stale (no push or review for {grouped['stale_days']}d) — {sp['html_url']} — {sp['title']}")
+    for rp in r["ready_prs"]:
+        items.append(f"- [ ] `{repo}` — PR #{rp['number']} checks green, needs human review — {rp['html_url']} — {rp['title']}")
+    if items:
+        print(f"## {repo}")
+        for it in items:
+            print(it)
+        print("")
+PY
+  exit 0
+fi
+
+# Default human text output grouped by repo
+python3 - "$grouped_json" <<'PY'
+import json, sys
+data=json.load(open(sys.argv[1]))
+grouped=data["grouped"]
+for r in grouped["repos"]:
+    repo=r["repo"]
+    lines=[]
+    if r["failing_ci"]:
+        fc=r["failing_ci"]
+        lines.append(f"  CI failed on {fc['branch']} ({fc['conclusion']}) — {fc['html_url']}  — needs you to fix the build")
+    for lr in r["label_requests"]:
+        lines.append(f"  PR #{lr['number']} needs owner: add `{lr['needed_label']}` — {lr['html_url']} — {lr['title']}")
+    for sp in r["stale_prs"]:
+        lines.append(f"  PR #{sp['number']} is stale (no activity for {grouped['stale_days']}d) — {sp['html_url']} — {sp['title']}")
+    for rp in r["ready_prs"]:
+        lines.append(f"  PR #{rp['number']} checks are green and waits for a human — {rp['html_url']} — {rp['title']}")
+    if lines:
+        print(f"{repo}:")
+        for l in lines:
+            print(l)
+PY
