@@ -712,4 +712,9 @@ test('destructive: a change that cannot be undone stops for a person', () => {
   const many = Array.from({ length: 9 }, (_, i) => ({ filename: `db/migrations/${i}.sql` }));
   const message = checkDestructive(many, [], config).failures[0].got;
   assert.equal(message.includes('and 4 more'), true);
+
+  // A migration renamed out of migrations/** still matches on its old path,
+  // the same way hasUiDiff catches a component moved out of components/.
+  const renamed = [{ filename: 'archive/0110_drop_old.txt', previous_filename: 'db/migrations/0110_drop_old.sql' }];
+  assert.equal(checkDestructive(renamed, [], config).failures.length, 1);
 });

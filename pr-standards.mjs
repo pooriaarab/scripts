@@ -516,9 +516,13 @@ export function isCommittedProofMedia(file) {
 export function checkDestructive(files, labels = [], config = DEFAULT_CONFIG) {
   const globs = config.destructiveGlobs || [];
   if (globs.length === 0) return { failures: [], matched: [] };
+  // A rename carries the new path in `filename` and the old one in
+  // `previous_filename` (see hasUiDiff above). A migration renamed out of
+  // `migrations/**` while its contents are rewritten must still match.
   const matched = (files || [])
-    .map((file) => String(file.filename || file || ''))
-    .filter((path) => path && globs.some((pattern) => matchesGlob(path, pattern)));
+    .filter((file) => [file.filename || file || '', file.previous_filename || '']
+      .some((path) => path && globs.some((pattern) => matchesGlob(String(path), pattern))))
+    .map((file) => String(file.filename || file || ''));
   if (matched.length === 0) return { failures: [], matched: [] };
   if (labels.includes(config.destructiveLabel)) return { failures: [], matched };
   return {
@@ -820,7 +824,7 @@ export function validateConfig(config) {
   if (!Array.isArray(config.excludeGlobs) || !config.excludeGlobs.every((value) => typeof value === 'string')) throw new ConfigurationError('excludeGlobs must be an array of strings');
   if (typeof config.requireProof !== 'boolean') throw new ConfigurationError('requireProof must be true or false');
   if (typeof config.requireAttributableProof !== 'boolean') throw new ConfigurationError('requireAttributableProof must be true or false');
-  if (!Array.isArray(config.destructiveGlobs)) throw new ConfigurationError('destructiveGlobs must be an array');
+  if (!Array.isArray(config.destructiveGlobs) || !config.destructiveGlobs.every((value) => typeof value === 'string')) throw new ConfigurationError('destructiveGlobs must be an array of strings');
   if (typeof config.destructiveLabel !== 'string' || !config.destructiveLabel) throw new ConfigurationError('destructiveLabel must be a non-empty string');
   if (typeof config.proofOverrideLabel !== 'string' || !config.proofOverrideLabel) throw new ConfigurationError('proofOverrideLabel must be a non-empty string');
   if (!Array.isArray(config.uiGlobs) || !config.uiGlobs.every((value) => typeof value === 'string')) throw new ConfigurationError('uiGlobs must be an array of strings');
