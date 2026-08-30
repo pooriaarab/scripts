@@ -365,17 +365,36 @@ function hasCommandAndResult(text) {
 // A comment is not visible text, and neither is a fenced code block: a body
 // that documents this checker quotes its own escape hatch, and a quoted rule
 // must not satisfy the rule it quotes.
-function visibleBody(body) {
+function visibleBody(body, { unmatchedFenceHides }) {
   const lines = String(body || '').split('\n');
   const visible = [];
   let fence = null;
   let inComment = false;
-  // A fence marker can sit behind a blockquote prefix (`> ``` `), and GitHub
+  // A blockquote prefix makes the line part of a quote container. A fence opened
+// inside one cannot close outside it, so both facts have to travel together.
+function isQuoted(line) {
+  return /^(?:\s{0,3}>\s?)+/.test(line);
+}
+
+// Look ahead for the closer, within the same blockquote container if the
+// opener was quoted. Nothing is consumed; this only answers whether the fence
+// is real.
+function hasCloser(lines, openIndex, fence, quoted) {
+  const closer = new RegExp(`^ {0,3}[${fence.char}]{${fence.len},}[ \\t]*$`);
+  for (let index = openIndex + 1; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (quoted && !isQuoted(line)) return false;
+    if (closer.test(line.replace(/^(?:\s{0,3}>\s?)+/, ''))) return true;
+  }
+  return false;
+}
+
+// A fence marker can sit behind a blockquote prefix (`> ``` `), and GitHub
   // still treats it as a real fence there. Strip the prefix only to test for
   // the marker; the pushed line keeps it, since the quoted prose is still
   // visible text.
   const unquoted = (line) => line.replace(/^(?:\s{0,3}>\s?)+/, '');
-  for (let line of lines) {
+  for (let [index, line] of lines.entries()) {
     // An HTML comment is raw text on GitHub: nothing inside it is parsed as
     // markdown, so a fence marker that happens to sit inside one (a template's
     // hidden instructions demonstrating the escape-hatch syntax, say) must
@@ -397,8 +416,15 @@ function visibleBody(body) {
       // real closing line (looking for a bare ``` that never came) and
       // swallow real proof sitting after it, and let a ~~~ line masquerade as
       // the closer for a ``` fence and cut a hidden block short too early.
-      if (new RegExp(`^ {0,3}[${fence.char}]{${fence.len},}[ \\t]*$`).test(unquoted(line))) fence = null;
-      continue;
+      // A blockquote is a container: when the quoting stops, so does anything
+      // opened inside it. Without this a `> ``` ` leaked out of its quote and
+      // kept swallowing lines that were never part of it.
+      if (fence.quoted && !isQuoted(line)) {
+        fence = null;
+      } else {
+        if (new RegExp(`^ {0,3}[${fence.char}]{${fence.len},}[ \\t]*$`).test(unquoted(line))) fence = null;
+        continue;
+      }
     }
     // Strip any comment(s) fully contained on this line — including one that
     // hides a triple-backtick example — before testing for a fence opener.
@@ -423,16 +449,17 @@ function visibleBody(body) {
     // costs a false failure; a missed one costs a quoted example counted as
     // evidence. Only the first of those is worth avoiding.
     const open = /^ {0,3}(`{3,}|~{3,})/.exec(unquoted(line));
-    if (open) {
-      fence = { char: open[1][0], len: open[1].length };
+    // Whether an unmatched opener hides what follows depends on what the
+    // caller is asking, and the two questions want opposite answers. See the
+    // two callers below.
+    if (open && (unmatchedFenceHides || hasCloser(lines, index, { char: open[1][0], len: open[1].length }, isQuoted(line)))) {
+      fence = { char: open[1][0], len: open[1].length, quoted: isQuoted(line) };
       continue;
     }
     visible.push(line);
   }
-  // An opening fence (or an unterminated comment) with no matching closer
-  // runs to the end of the document on GitHub too, so either one drops
-  // everything after it here — the loop above never stops skipping once
-  // `fence` or `inComment` is set.
+  // An unterminated comment still runs to the end of the document, as it does
+  // on GitHub. An unmatched fence deliberately does not — see above.
   return visible.join('\n');
 }
 
@@ -441,8 +468,18 @@ function visibleBody(body) {
 // section. An attachment link left over in an unrelated section of the body
 // is not evidence of anything, and neither is a "Proof: n/a" line dropped
 // outside it.
-function verificationSection(body) {
-  return sectionBody(visibleBody(body), 'How I verified') || '';
+// GitHub runs an unterminated fence to the end of the document. Matching that
+// exactly is right for one caller and a false-failure machine for the other, so
+// each asks for what it needs:
+//
+//   - The escape hatch fails CLOSED. A `Proof: n/a` inside a fence that never
+//     closes must not grant a waiver, the same way an override label nobody can
+//     attribute is dropped rather than honoured.
+//   - The evidence fails OPEN. A stray ``` above a screenshot must not swallow
+//     it and fail a pull request that did nothing wrong. Counting the contents
+//     of a genuinely broken fence as evidence is the harmless direction.
+function verificationSection(body, { unmatchedFenceHides }) {
+  return sectionBody(visibleBody(body, { unmatchedFenceHides }), 'How I verified') || '';
 }
 
 function countUserAttachments(body) {
@@ -450,7 +487,7 @@ function countUserAttachments(body) {
   // a URL wrapped in inline code (`` `https://...assets/abc` ``) is the same
   // asset as one linked as a Markdown image, and a backtick is never a real
   // URL character, so it must never be captured as part of the id.
-  const matches = verificationSection(body).match(/https:\/\/github\.com\/user-attachments\/assets\/[^\s"'`\)\]]+/g);
+  const matches = verificationSection(body, { unmatchedFenceHides: false }).match(/https:\/\/github\.com\/user-attachments\/assets\/[^\s"'`\)\]]+/g);
   if (!matches) return 0;
   // Distinct assets, because the same image pasted twice is one image. The
   // threshold asks for before AND after, not for two links — and a query
@@ -461,7 +498,7 @@ function countUserAttachments(body) {
 }
 
 function hasValidProofNa(body) {
-  const lines = verificationSection(body).split('\n');
+  const lines = verificationSection(body, { unmatchedFenceHides: true }).split('\n');
   for (const line of lines) {
     // Four or more spaces (or a leading tab) renders as an indented code
     // block on GitHub — the same syntax this convention's own docs use to
