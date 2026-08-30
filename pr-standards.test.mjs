@@ -491,6 +491,12 @@ test('proof: a visible change needs before and after attachments', () => {
   assert.equal(isUiFile('src/components/Button.test.tsx', config), false);
   assert.equal(hasUiDiff(uiFiles, config), true);
   assert.equal(hasUiDiff([{ filename: 'src/server/api.ts' }], config), false);
+
+  // A Next.js Pages Router API route lives under pages/ but renders nothing —
+  // the broad **/pages/** glob must not send it down the screenshot path.
+  assert.equal(isUiFile('pages/api/users.ts', config), false);
+  assert.equal(isUiFile('src/pages/api/[id].ts', config), false);
+  assert.equal(isUiFile('pages/index.tsx', config), true);
 });
 
 test('proof: media belongs in user-attachments, not in the commit', () => {
@@ -571,4 +577,18 @@ test('proof: the loopholes the council found in the first pass stay closed', () 
   const bodyWithHeading = (extra) => `Closes #142\n\n## What\nFixes it.\n\n## Why\nBecause.\n\n## Notes\n${extra}\n\n## How I verified\nbun test -> 214 passed`;
   assert.equal(failed(checkProof(bodyWithHeading(url('abc')), uiFiles, [], config)), true);
   assert.equal(failed(checkProof(bodyWithHeading('Proof: n/a — a reason placed under the wrong heading'), uiFiles, [], config)), true);
+
+  // A fence closes on a line with at least as many of the same character as
+  // opened it, not on a literal three. A four-backtick fence used to hide a
+  // real, four-backtick-only closing line and run to the end of the document,
+  // swallowing genuine proof that came after it.
+  const fourBacktickThenReal = `${validBody}\n\n\`\`\`\`\nhidden\n\`\`\`\`\n\n${url('abc')}\n${url('def')}`;
+  assert.equal(warned(checkProof(fourBacktickThenReal, uiFiles, [], config)), false);
+  assert.equal(failed(checkProof(fourBacktickThenReal, uiFiles, [], config)), false);
+
+  // A ``` fence still only closes on ```, never on a same-position ~~~ line —
+  // mixing fence characters must not close early and un-hide the middle of a
+  // fenced block.
+  const mismatchedFence = `${validBody}\n\n\`\`\`\n~~~\nProof: n/a — still inside the backtick fence, not closed by tildes\n\`\`\``;
+  assert.equal(failed(checkProof(mismatchedFence, uiFiles, [], config)), true);
 });
