@@ -592,3 +592,42 @@ test('proof: the loopholes the council found in the first pass stay closed', () 
   const mismatchedFence = `${validBody}\n\n\`\`\`\n~~~\nProof: n/a — still inside the backtick fence, not closed by tildes\n\`\`\``;
   assert.equal(failed(checkProof(mismatchedFence, uiFiles, [], config)), true);
 });
+
+test('proof: an indented code line is not a fence, and an angle-bracketed URL is the same asset', () => {
+  const uiFiles = [{ filename: 'src/components/Button.tsx', status: 'modified' }];
+  const url = (id) => `https://github.com/user-attachments/assets/${id}`;
+  const failed = (r) => r.failures.some((f) => f.check === 'proof of a visible change');
+  const warned = (r) => r.warnings.some((w) => w.check === 'proof of a visible change');
+
+  // Four spaces of indent is indented code, not a fence opener. Treating it as
+  // one swallowed every line after it, so real proof below vanished and a PR
+  // that had done nothing wrong failed.
+  const indented = [
+    '## What', 'x', '## Why', 'y', '## How I verified',
+    'ran it -> pass',
+    '    ```  an indented line that merely contains backticks',
+    `![before](${url('aaa')})`,
+    `![after](${url('bbb')})`,
+    'Assisted-by: agent:model',
+  ].join('\n');
+  assert.equal(failed(checkProof(indented, uiFiles, [], config)), false);
+  assert.equal(warned(checkProof(indented, uiFiles, [], config)), false);
+
+  // A real fence still hides what it wraps.
+  const fenced = [
+    '## What', 'x', '## Why', 'y', '## How I verified',
+    'ran it -> pass',
+    '```', `![quoted](${url('aaa')})`, '```',
+    'Assisted-by: agent:model',
+  ].join('\n');
+  assert.equal(failed(checkProof(fenced, uiFiles, [], config)), true);
+
+  // <url> and url are the same asset, so pasting one image both ways is still
+  // one image and must not clear the before-and-after threshold.
+  const angled = [
+    '## What', 'x', '## Why', 'y', '## How I verified',
+    'ran it -> pass', url('aaa'), `<${url('aaa')}>`,
+    'Assisted-by: agent:model',
+  ].join('\n');
+  assert.equal(warned(checkProof(angled, uiFiles, [], config)), true);
+});

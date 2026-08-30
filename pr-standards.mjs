@@ -379,10 +379,16 @@ function visibleBody(body) {
       // real closing line (looking for a bare ``` that never came) and
       // swallow real proof sitting after it, and let a ~~~ line masquerade as
       // the closer for a ``` fence and cut a hidden block short too early.
-      if (new RegExp(`^[ \\t]*[${fence.char}]{${fence.len},}[ \\t]*$`).test(line)) fence = null;
+      if (new RegExp(`^ {0,3}[${fence.char}]{${fence.len},}[ \\t]*$`).test(line)) fence = null;
       continue;
     }
-    const open = /^[ \t]*(`{3,}|~{3,})/.exec(line);
+    // At most three spaces of indent, the same ceiling GitHub uses. A line
+    // indented four or more is indented code, not a fence, and treating one as
+    // an opener swallowed every line after it — dropping real proof and
+    // failing a pull request that had done nothing wrong. An over-eager fence
+    // costs a false failure; a missed one costs a quoted example counted as
+    // evidence. Only the first of those is worth avoiding.
+    const open = /^ {0,3}(`{3,}|~{3,})/.exec(line);
     if (open) {
       fence = { char: open[1][0], len: open[1].length };
       continue;
@@ -411,7 +417,7 @@ function countUserAttachments(body) {
   // threshold asks for before AND after, not for two links — and a query
   // string, fragment, or trailing sentence punctuation appended to the same
   // asset id is still one asset.
-  const assetIds = matches.map((url) => url.split(/[?#]/)[0].replace(/[.,;:!?]+$/, ''));
+  const assetIds = matches.map((url) => url.split(/[?#]/)[0].replace(/>+$/, '').replace(/[.,;:!?]+$/, ''));
   return new Set(assetIds).size;
 }
 
