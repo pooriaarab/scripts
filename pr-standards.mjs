@@ -67,6 +67,19 @@ export const DEFAULT_CONFIG = {
   // go red everywhere on the day this became a failure, and a standard that
   // turns every repo red on its first day gets switched off.
   requireAttributableProof: false,
+  // Changes that destroy data or move money. A checker can tell that a diff
+  // touches one; it cannot tell whether the change is safe. So it stops and
+  // asks a person, rather than guessing.
+  destructiveGlobs: [
+    '**/migrations/**',
+    '**/*.sql',
+    '**/billing/**',
+    '**/*.tf',
+    '**/terraform/**',
+    '**/*secret*',
+    '**/*credential*',
+  ],
+  destructiveLabel: 'human-reviewed',
   uiGlobs: [
     '**/*.tsx', '**/*.jsx', '**/*.vue', '**/*.svelte', '**/*.css', '**/*.scss',
     '**/*.html', '**/components/**', '**/app/**/page.*', '**/pages/**',
@@ -491,6 +504,34 @@ export function isCommittedProofMedia(file) {
   return isProofMediaPath(filename);
 }
 
+// A schema migration, a billing path, an infrastructure plan and a credential
+// file share one property: getting them wrong is not a bug you fix in the next
+// PR. Reading the diff is not enough to know a migration is reversible or that
+// a price change is the intended one, so this check does not try. It stops and
+// routes to a person.
+//
+// Deliberately narrow. Every glob here costs a human decision on every PR that
+// touches it, and a list long enough to catch everything trains the owner to
+// apply the label without reading. Add to it per repo, never for comfort.
+export function checkDestructive(files, labels = [], config = DEFAULT_CONFIG) {
+  const globs = config.destructiveGlobs || [];
+  if (globs.length === 0) return { failures: [], matched: [] };
+  const matched = (files || [])
+    .map((file) => String(file.filename || file || ''))
+    .filter((path) => path && globs.some((pattern) => matchesGlob(path, pattern)));
+  if (matched.length === 0) return { failures: [], matched: [] };
+  if (labels.includes(config.destructiveLabel)) return { failures: [], matched };
+  return {
+    matched,
+    failures: [fail(
+      'destructive change',
+      matched.slice(0, 5).join(', ') + (matched.length > 5 ? ` and ${matched.length - 5} more` : ''),
+      `the \`${config.destructiveLabel}\` label, applied by the repo owner`,
+      'A person has to read this one. Getting a migration, a billing path, an infrastructure plan or a credential wrong is not a defect you fix in the next pull request.',
+    )],
+  };
+}
+
 // Proof is one question — does this pull request show the work it did — so it
 // is one check, even though its evidence comes from three places: the body, the
 // files, and the labels. Splitting it across validateBody and checkSize made
@@ -779,6 +820,8 @@ export function validateConfig(config) {
   if (!Array.isArray(config.excludeGlobs) || !config.excludeGlobs.every((value) => typeof value === 'string')) throw new ConfigurationError('excludeGlobs must be an array of strings');
   if (typeof config.requireProof !== 'boolean') throw new ConfigurationError('requireProof must be true or false');
   if (typeof config.requireAttributableProof !== 'boolean') throw new ConfigurationError('requireAttributableProof must be true or false');
+  if (!Array.isArray(config.destructiveGlobs)) throw new ConfigurationError('destructiveGlobs must be an array');
+  if (typeof config.destructiveLabel !== 'string' || !config.destructiveLabel) throw new ConfigurationError('destructiveLabel must be a non-empty string');
   if (typeof config.proofOverrideLabel !== 'string' || !config.proofOverrideLabel) throw new ConfigurationError('proofOverrideLabel must be a non-empty string');
   if (!Array.isArray(config.uiGlobs) || !config.uiGlobs.every((value) => typeof value === 'string')) throw new ConfigurationError('uiGlobs must be an array of strings');
   if (!Array.isArray(config.uiExcludeGlobs) || !config.uiExcludeGlobs.every((value) => typeof value === 'string')) throw new ConfigurationError('uiExcludeGlobs must be an array of strings');
@@ -1205,7 +1248,8 @@ export async function resolveOverrideLabels(repo, number, labels, config, warnin
   // Both the size and the proof escape hatches share the same ownership
   // check: the repo owner (or an admin) must have applied the label. An
   // agent cannot clear its own requirement.
-  const labelNames = [config.overrideLabel, config.proofOverrideLabel].filter((name) => labels.includes(name));
+  const labelNames = [config.overrideLabel, config.proofOverrideLabel, config.destructiveLabel]
+    .filter((name) => labels.includes(name));
   if (labelNames.length === 0) return labels;
   let appliers;
   try {
@@ -1364,6 +1408,11 @@ async function runPr(options) {
   warnings.push(...proofResult.warnings);
   if (proofResult.overridden) passes.push(`proof waived by ${config.proofOverrideLabel}`);
   else if (proofResult.failures.length === 0) passes.push('proof of work');
+  const destructiveResult = checkDestructive(files, labels, config);
+  failures.push(...destructiveResult.failures);
+  if (destructiveResult.matched.length > 0 && destructiveResult.failures.length === 0) {
+    passes.push(`destructive change cleared by ${config.destructiveLabel}`);
+  }
   const sizeResult = checkSize(summary, config, labels);
   failures.push(...sizeResult.failures);
   warnings.push(...sizeResult.warnings);
