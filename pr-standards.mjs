@@ -520,11 +520,19 @@ export function isCommittedProofMedia(file) {
 // the answer down instead, and the review council judges whether the answer is
 // true. Stating a wrong licence is a lie a reviewer can catch; adding a package
 // silently is not.
-const DEPENDENCY_LINE = /^\s*Dependency:\s*([^\s—–-]+)[^—–-]*[—–-]\s*(.+)$/;
+//
+// The separator must have whitespace on both sides, because a dependency name
+// can itself contain a hyphen (`lodash-es`, `react-dom`) and that hyphen must
+// stay part of the captured name rather than being read as the split point.
+const DEPENDENCY_LINE = /^\s*Dependency:\s*(\S+)\s+[—–-]\s+(.+)$/;
 
-function addedDependencies(file) {
+// package.json/composer.json keys whose value happens to look like a version
+// range but are not a dependency — "version" pins the package's own release,
+// not something it depends on.
+const NON_DEPENDENCY_KEYS = new Set(['version']);
+
+function lineChanges(file) {
   const patch = String(file.patch || '');
-  if (!patch) return [];
   const name = String(file.filename || '');
   const added = new Set();
   const removed = new Set();
@@ -537,36 +545,56 @@ function addedDependencies(file) {
       // "name", "scripts" and the rest without needing to track which JSON
       // block the hunk sits in.
       match = /^\s*"([^"]+)"\s*:\s*"([\^~><=]?\d|\*|workspace:|npm:|file:|link:|catalog:)/.exec(body);
+      if (match && NON_DEPENDENCY_KEYS.has(match[1])) match = null;
     } else if (name.endsWith('go.mod')) {
       match = /^\s*([a-z0-9.\-]+\.[a-z]{2,}\/[^\s]+)\s+v\d/.exec(body);
     } else {
-      match = /^\s*([A-Za-z0-9._-]+)\s*(?:[=<>~!]=|$)/.exec(body);
+      // requirements.txt: a name, an optional extras marker (`pkg[extra]`),
+      // then a comparison operator (one or two characters), a direct
+      // reference (`pkg @ url`), or the end of the line for an unpinned name.
+      match = /^\s*([A-Za-z0-9._-]+)(?:\[[^\]]*\])?\s*(?:[=<>~!]=?|@|$)/.exec(body);
     }
     if (!match) continue;
     (line[0] === '+' ? added : removed).add(match[1]);
   }
-  // A version bump edits a line that already existed, so the name shows up on
-  // both sides. Only a name that is purely new is a new dependency.
-  return [...added].filter((dependency) => !removed.has(dependency));
+  return { added, removed };
 }
 
 export function checkDependencies(files, body, config = DEFAULT_CONFIG) {
   const manifests = config.dependencyManifests || [];
   if (manifests.length === 0) return { failures: [], added: [] };
   const added = new Set();
+  const removed = new Set();
+  const unreadable = [];
   for (const file of files || []) {
     const name = String(file.filename || '');
     if (!manifests.some((pattern) => matchesGlob(name, pattern))) continue;
-    for (const dependency of addedDependencies(file)) added.add(dependency);
+    if (file.status === 'removed') continue;
+    if (!file.patch) {
+      // GitHub omits the patch once a diff is too large, but also leaves it
+      // unset for a plain rename with no content change — only the former is
+      // a place a dependency could have snuck in unseen.
+      const changedLines = (Number(file.additions) || 0) + (Number(file.deletions) || 0);
+      if (changedLines > 0) unreadable.push(name);
+      continue;
+    }
+    const changes = lineChanges(file);
+    for (const dependency of changes.added) added.add(dependency);
+    for (const dependency of changes.removed) removed.add(dependency);
   }
-  if (added.size === 0) return { failures: [], added: [] };
+  // A version bump edits a line that already existed, so the name shows up on
+  // both sides within one file. A dependency moved from one manifest to
+  // another in the same PR reads the same way across files. Either way, only
+  // a name that is purely new is a new dependency.
+  const newlyAdded = [...added].filter((dependency) => !removed.has(dependency));
+  if (newlyAdded.length === 0 && unreadable.length === 0) return { failures: [], added: [] };
 
   const explained = new Map();
   for (const line of visibleBody(body).split('\n')) {
     const match = DEPENDENCY_LINE.exec(line);
     if (match && match[2].trim().length >= 30) explained.set(match[1], match[2].trim());
   }
-  const failures = [...added]
+  const failures = newlyAdded
     .filter((dependency) => !explained.has(dependency))
     .map((dependency) => fail(
       'new dependency',
@@ -574,7 +602,15 @@ export function checkDependencies(files, body, config = DEFAULT_CONFIG) {
       `a line reading \`Dependency: ${dependency} — <licence>, <size added>, <why nothing already here does this>\``,
       'Write the licence and the size it adds. The checker cannot fetch either, and the review council reads what you wrote — so an answer that is wrong is one a reviewer can catch, while a silent addition is not.',
     ));
-  return { failures, added: [...added] };
+  for (const name of unreadable) {
+    failures.push(fail(
+      'new dependency',
+      `${name} changed but the diff was too large to read line by line`,
+      'a `Dependency: <name> — ...` line for any package it adds, or confirmation in the PR body that none was added',
+      'GitHub omits the patch for very large diffs, so this checker cannot tell what changed. State what was added, or split the change so it can be read.',
+    ));
+  }
+  return { failures, added: newlyAdded };
 }
 
 // A schema migration, a billing path, an infrastructure plan and a credential
