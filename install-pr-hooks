@@ -238,30 +238,24 @@ is_personal_github_url() {
 
 # A global or system core.hooksPath replaces git's search path outright, so
 # .git/hooks is dead unless the pre-push in that directory chains back to it.
-# An executable file alone does not prove that it does: a global pre-push that
-# enforces its own policy and never chains would swallow the hook installed
-# below, and the run would report INSTALL for a guard that never runs. The
-# delegation target is a literal path any delegator has to name, so requiring
-# it in the file is the cheapest signal that is not a guess.
-# Comments are stripped (not just whole-comment lines) before that search: a
-# pre-push that only mentions "hooks/pre-push" in a trailing remark explaining
-# why it does NOT delegate (e.g. "exit 0  # do not call hooks/pre-push", a
-# real shape for a policy hook to take) would otherwise match on that mention
-# alone, and the run would report INSTALL for a guard that still never runs.
-# "hooks/pre-push" alone is not enough: any path whose parent directory name
-# merely ends in "hooks" (e.g. a completely unrelated
-# /opt/shared-hooks/pre-push) also contains that substring, so a global hook
-# that execs some other shared hook -- never this repo's own -- would match
-# too. The SKIP message above tells people to delegate via
-# "$(git rev-parse --git-common-dir)/hooks/pre-push", so also require that the
-# file references git-common-dir; a script that happens to mention both an
-# unrelated "*hooks/pre-push" path and git-common-dir for unrelated reasons is
-# not a realistic false positive.
+#
+# Whether it chains is not something to infer. Three rounds of review narrowed a
+# grep over the delegator's source -- strip comments, require "hooks/pre-push",
+# then also require "git-common-dir" -- and each round still had a false
+# positive, because reading intent out of someone else's shell script is a guess.
+# A wrong guess here is silent in the worst way: the run prints INSTALL and the
+# delegation note for a hook git will never call.
+#
+# So the delegator declares itself, exactly as this tool marks its own hooks
+# with a version sentinel. An explicit contract cannot false-positive, and it
+# costs one comment line in a file somebody had to write anyway. The SKIP
+# message below prints the line to add.
+DELEGATION_MARKER='# install-pr-hooks: delegates to $(git rev-parse --git-common-dir)/hooks/pre-push'
+
 hooks_path_delegates() {
-  local dir="$1" content
+  local dir="$1"
   [ -x "$dir/pre-push" ] || return 1
-  content=$(sed -E 's/#.*$//' "$dir/pre-push" 2>/dev/null)
-  grep -q 'git-common-dir' <<<"$content" && grep -q 'hooks/pre-push' <<<"$content"
+  grep -qxF "$DELEGATION_MARKER" "$dir/pre-push" 2>/dev/null
 }
 
 is_eligible() {
@@ -441,9 +435,10 @@ for root in "${ROOTS[@]}"; do
         else
           echo "SKIP    $repo  (core.hooksPath is set outside this repo, at $hooks_path)"
           echo "        Installing there would hook every repo on this machine, including work ones."
-          echo "        Give $hooks_path a pre-push that delegates to the repo hook at"
-          echo "        \$(git rev-parse --git-common-dir)/hooks/pre-push, or set core.hooksPath"
-          echo "        in this repo only, or unset it globally."
+          echo "        To install here instead, make $hooks_path/pre-push chain to the repo's"
+          echo "        own hook and declare that it does, by adding this exact line to it:"
+          echo "            $DELEGATION_MARKER"
+          echo "        Or set core.hooksPath in this repo only, or unset it globally."
           skipped=$((skipped+1)); continue
         fi
       else

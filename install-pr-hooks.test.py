@@ -263,42 +263,48 @@ def test_global_hooks_path_shapes():
     hook in front of pushes from work repos.
     """
     import shutil, subprocess as sp
+    # The marker is the contract. It is read out of the installer rather than
+    # retyped, so a change to the line there fails this test instead of quietly
+    # making every real delegator on the fleet look unmarked.
+    marker = next(
+        ln.split("=", 1)[1].strip().strip("'")
+        for ln in (HERE / "install-pr-hooks").read_text().splitlines()
+        if ln.startswith("DELEGATION_MARKER=")
+    )
     delegator = (
-        '#!/bin/bash\n'
+        "#!/bin/bash\n"
+        f"{marker}\n"
         'exec "$(git rev-parse --git-common-dir)/hooks/pre-push" "$@"\n'
     )
-    own_policy = '#!/bin/bash\nexit 0\n'
-    # Mentions the delegation path only in a comment explaining that it does
-    # NOT delegate -- a real shape for a policy hook, and one a plain
-    # substring search on the file would misread as a delegator.
-    commented_mention = (
-        '#!/bin/bash\n'
-        '# This hook does not delegate to hooks/pre-push; it enforces its own policy.\n'
-        'exit 0\n'
+    own_policy = "#!/bin/bash\nexit 0\n"
+    # A real delegator that never declared itself. This is what the explicit
+    # contract costs, and it is deliberate: the SKIP message prints the line to
+    # add, and a missed install is recoverable in a way a false INSTALL is not.
+    unmarked_delegator = (
+        "#!/bin/bash\n"
+        'exec "$(git rev-parse --git-common-dir)/hooks/pre-push" "$@"\n'
     )
-    # Same trap, but the mention trails on the same line as real code -- a
-    # plain "strip lines starting with #" pass leaves this line alone and
-    # still matches on the trailing remark.
-    trailing_comment_mention = (
-        '#!/bin/bash\n'
-        'exit 0  # do not call hooks/pre-push\n'
-    )
-    # A real pre-push chain that never touches this repo at all: the parent
-    # directory of the target merely happens to end in "hooks", so a plain
-    # substring search for "hooks/pre-push" would misread this as delegation
-    # even though it always execs someone else's shared hook instead.
-    unrelated_hooks_path = (
-        '#!/bin/bash\n'
+    # Everything three rounds of heuristic looked for, in a hook that always
+    # execs somebody else's shared file and never this repo's. It mentions
+    # git-common-dir outside a comment and contains the substring
+    # "hooks/pre-push" in an unrelated path. Any grep-based check passes it;
+    # the marker does not.
+    heuristic_bait = (
+        "#!/bin/bash\n"
+        'echo "common dir is $(git rev-parse --git-common-dir)" >> /tmp/hooklog\n'
         'exec "/opt/shared-hooks/pre-push" "$@"\n'
     )
     results = []
-    for label, global_hook, want_install in [
-        ("no hooksPath", None, True),
-        ("hooksPath with a delegator", delegator, True),
-        ("hooksPath without a delegator", own_policy, False),
-        ("hooksPath mentioning delegation only in a comment", commented_mention, False),
-        ("hooksPath mentioning delegation only in a trailing comment", trailing_comment_mention, False),
-        ("hooksPath delegating to an unrelated hooks/pre-push path", unrelated_hooks_path, False),
+    for label, global_hook, want_install, mode in [
+        ("no hooksPath", None, True, 0o755),
+        ("hooksPath with a declared delegator", delegator, True, 0o755),
+        ("hooksPath without a delegator", own_policy, False, 0o755),
+        ("hooksPath delegating but not declaring it", unmarked_delegator, False, 0o755),
+        ("hooksPath baiting every heuristic, no marker", heuristic_bait, False, 0o755),
+        # Declared, but git will not run it. Installing on the strength of the
+        # marker alone would print INSTALL for a hook that never fires, which
+        # is the failure the marker exists to rule out.
+        ("hooksPath declaring delegation but not executable", delegator, False, 0o644),
     ]:
         d = tempfile.mkdtemp(); repo = f"{d}/repo"
         os.makedirs(f"{repo}/.github")
@@ -308,7 +314,7 @@ def test_global_hooks_path_shapes():
             os.makedirs(shared)
             gh = f"{shared}/pre-push"
             pathlib.Path(gh).write_text(global_hook)
-            os.chmod(gh, 0o755)
+            os.chmod(gh, mode)
             pathlib.Path(cfg).write_text(f"[core]\n\thooksPath = {shared}\n")
         env = {**os.environ, "GIT_CONFIG_GLOBAL": cfg}
         sp.run(["git", "-C", repo, "init", "-q"], check=True, env=env)
@@ -348,8 +354,14 @@ def test_relative_global_hooks_path_resolves_against_repo():
     os.makedirs(f"{repo}/.github")
     os.makedirs(f"{repo}/.githooks")
     delegate = f"{repo}/.githooks/pre-push"
+    marker = next(
+        ln.split("=", 1)[1].strip().strip("'")
+        for ln in (HERE / "install-pr-hooks").read_text().splitlines()
+        if ln.startswith("DELEGATION_MARKER=")
+    )
     pathlib.Path(delegate).write_text(
-        '#!/bin/bash\n'
+        "#!/bin/bash\n"
+        f"{marker}\n"
         'exec "$(git rev-parse --git-common-dir)/hooks/pre-push" "$@"\n'
     )
     os.chmod(delegate, 0o755)
