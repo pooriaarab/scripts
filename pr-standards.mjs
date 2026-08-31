@@ -369,7 +369,7 @@ function sentenceCount(text) {
 // for a refusal to answer, and the proof check must honour it. Two copies of
 // this pattern would eventually disagree, and the disagreement would look like
 // a lazy body rather than a drifted regex.
-const PROOF_NA_LINE = /^\s*Proof:\s*n\/a\s*[—–-]\s*(.+)\s*$/i;
+const PROOF_NA_LINE = /^\s*Proof:\s*n\/a\s*[—–-]\s*(\S.*)\s*$/i;
 
 function hasCommandAndResult(text) {
   const lines = String(text).split('\n').map((line) => line.trim()).filter(Boolean);
@@ -439,11 +439,16 @@ export function validateBody(body, issueNumber, config = DEFAULT_CONFIG) {
   // documented proof escape hatch, `Proof: n/a — <reason>`, is an answer, and
   // the docs say to write it in this very section — so the guard failed every
   // pull request that used the hatch correctly, and blamed lazy verification
-  // rather than naming the line. Drop a valid hatch line before the guard runs.
+  // rather than naming the line. Swap a valid hatch line for its reason before
+  // the guard runs, rather than dropping the line outright: a reason of just
+  // "TODO" or "N/A" is still a refusal, and the guard must still see it.
   // A bare N/A, a TODO, "tested locally", and a `Proof: n/a` with no reason all
   // still fail.
   const claimed = verified === null ? null
-    : verified.split('\n').filter((line) => !PROOF_NA_LINE.test(line)).join('\n');
+    : verified.split('\n').map((line) => {
+      const hatch = PROOF_NA_LINE.exec(line);
+      return hatch ? hatch[1] : line;
+    }).join('\n');
   if (!verified || /\b(?:N\/A|TODO|tested locally)\b/i.test(claimed) || !hasCommandAndResult(verified)) {
     failures.push(fail(
       '## How I verified',
