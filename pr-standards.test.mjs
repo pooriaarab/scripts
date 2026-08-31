@@ -880,6 +880,35 @@ test('proof: an indented code block cannot smuggle attachment URLs as evidence',
   assert.equal(failed(checkProof(realProof, uiFiles, [], config)), false);
 });
 
+test('proof: an escaped comment is literal text, so what it wraps is evidence', () => {
+  // The escape check only changes the outcome for a CLOSED comment. For an
+  // unterminated one the line-start rule already refuses to latch, because the
+  // backslash itself is text before the marker -- so the two existing cases
+  // pass with the escape check removed and this is the one that pins it.
+  //
+  // GitHub renders `\<!-- ... -->` literally, so the attachments inside it are
+  // on screen and are real proof. Stripping it as a comment failed a pull
+  // request for screenshots the reviewer could see.
+  const uiFiles = [{ filename: 'src/components/Button.tsx', status: 'modified' }];
+  const url = (id) => `https://github.com/user-attachments/assets/${id}`;
+  const failed = (r) => r.failures.some((f) => f.check === 'proof of a visible change');
+  const body = [
+    '## What', 'x', '## Why', 'y', '## How I verified', 'ran it -> pass',
+    `\\<!-- ![before](${url('aaa')}) ![after](${url('bbb')}) -->`,
+    'Assisted-by: agent:model',
+  ].join('\n');
+  assert.equal(failed(checkProof(body, uiFiles, [], config)), false);
+
+  // An unescaped closed comment is still hidden, so quoting the template in one
+  // is still not evidence.
+  const hidden = [
+    '## What', 'x', '## Why', 'y', '## How I verified', 'ran it -> pass',
+    `<!-- ![before](${url('ccc')}) ![after](${url('ddd')}) -->`,
+    'Assisted-by: agent:model',
+  ].join('\n');
+  assert.equal(failed(checkProof(hidden, uiFiles, [], config)), true);
+});
+
 test('proof: a stray comment marker in prose does not swallow real proof', () => {
   const uiFiles = [{ filename: 'src/components/Button.tsx', status: 'modified' }];
   const url = (id) => `https://github.com/user-attachments/assets/${id}`;
