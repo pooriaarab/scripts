@@ -48,6 +48,23 @@ Not part of the diagnosis order above.
 | `claude-token-rotate` | Rotate a Claude OAuth token into every repo that runs the review action. Reads the token from a hidden prompt, never an argument, because an argument lands in shell history and the process list. |
 | `install-pr-hooks` | Installs the `pr-standards` pre-push hook into local pooriaarab checkouts that have adopted `.github/pr-standards.json`. Dry-run by default; `--apply` writes, `--uninstall --apply` removes. See [pr-standards.md](pr-standards.md). |
 
+## Tests
+
+`.github/workflows/tests.yml` runs every test in this repo on each pull request:
+the checker's `node --test` suite, the PreToolUse guard, the prefix builder, the
+hook installer, and the branch-pattern check. Each group runs even after an
+earlier one fails, so one run names every failure rather than only the first.
+
+Run them locally the same way:
+
+```bash
+node --test pr-standards.test.mjs
+PATH="$PWD:$PATH" ./hooks/pr-standards-guard.test.sh
+python3 build-repo-prefixes.test.py
+python3 install-pr-hooks.test.py
+./adopt-branch-pattern.test.sh
+```
+
 ## pr-standards
 
 Checks a branch or a pull request against the [PR standard](pr-standards.md): one
