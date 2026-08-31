@@ -625,4 +625,13 @@ test('the proof escape hatch does not read as a refusal to answer', () => {
   // A hatch with no reason after the dash is not a valid hatch, so the guard
   // still sees the n/a.
   assert.equal(verifiedFails('`node --test` -> 40 passed\n\nProof: n/a'), true);
+  // A hatch whose "reason" is only whitespace has no reason either. Dropping
+  // the whole line (instead of swapping in the reason) would have hidden the
+  // n/a from the guard and let this through.
+  assert.equal(verifiedFails('`node --test` -> 40 passed\n\nProof: n/a —    '), true);
+  // A hatch reason that is itself just "TODO" or "N/A" is still a refusal.
+  // Dropping the whole matching line would have hidden the refusal token
+  // along with the harmless "n/a" prefix.
+  assert.equal(verifiedFails('`node --test` -> 40 passed\n\nProof: n/a — TODO'), true);
+  assert.equal(verifiedFails('`node --test` -> 40 passed\n\nProof: n/a — N/A'), true);
 });
