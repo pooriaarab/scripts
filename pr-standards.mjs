@@ -479,9 +479,22 @@ function hasCloser(lines, openIndex, fence, quoted) {
         // An UNTERMINATED comment runs to the end of the document only when its
         // marker opens the line. GitHub's block-level rule works that way, and
         // latching on a marker found mid-sentence turns one stray `<!--` in
-        // prose into a silent proof failure. An inline comment is still
-        // stripped wherever it sits, because GitHub hides that too.
-        if (line.slice(0, openIdx).replace(/^(?:\s{0,3}>\s?)+/, '').trim() !== '') break;
+        // prose into a silent proof failure -- UNLESS a later line closes it
+        // before the paragraph does (a blank line ends both the paragraph and
+        // any hope of that `-->` still applying). GitHub's inline rule reads a
+        // mid-sentence `<!--` that closes later in the same paragraph as a raw
+        // HTML comment too, so whatever sits between the marker and its closer
+        // is hidden from the reviewer even though it never made it into
+        // `verified`, and must not count as evidence here either.
+        const prefix = line.slice(0, openIdx).replace(/^(?:\s{0,3}>\s?)+/, '');
+        if (prefix.trim() !== '') {
+          let closesInParagraph = false;
+          for (let ahead = index + 1; ahead < lines.length; ahead += 1) {
+            if (lines[ahead].trim() === '') break;
+            if (lines[ahead].includes('-->')) { closesInParagraph = true; break; }
+          }
+          if (!closesInParagraph) break;
+        }
         line = line.slice(0, openIdx);
         inComment = true;
         break;
