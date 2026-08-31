@@ -1,0 +1,92 @@
+name: tests
+
+# The checker in this repo tells every other repo to prove its work, and its own
+# tests ran nowhere. So a pull request here proved itself with output pasted into
+# the body, which is exactly what the checker calls prose rather than evidence.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    runs-on: ubicloud-standard-4
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Set up Node 22
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+
+      - name: Run Node tests
+        id: node-tests
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          node --test pr-standards.test.mjs
+
+      - name: Run guard tests
+        id: guard-tests
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          export PATH="$GITHUB_WORKSPACE:$PATH"
+          ./hooks/pr-standards-guard.test.sh
+
+      - name: Run prefix tests
+        id: prefix-tests
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          python3 build-repo-prefixes.test.py
+
+      - name: Run hook install tests
+        id: hook-install-tests
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          python3 install-pr-hooks.test.py
+
+      - name: Run branch pattern tests
+        id: branch-pattern-tests
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          ./adopt-branch-pattern.test.sh
+
+      # Every group above runs even after one fails, so one run names every
+      # failure instead of only the first. This step turns the outcomes back
+      # into a single verdict, and names the group that failed.
+      - name: Report the verdict
+        if: ${{ !cancelled() }}
+        env:
+          # A shell variable name cannot hold a dash, so these are underscored
+          # rather than named after their steps.
+          node_tests: ${{ steps.node-tests.outcome }}
+          guard_tests: ${{ steps.guard-tests.outcome }}
+          prefix_tests: ${{ steps.prefix-tests.outcome }}
+          hook_install_tests: ${{ steps.hook-install-tests.outcome }}
+          branch_pattern_tests: ${{ steps.branch-pattern-tests.outcome }}
+        run: |
+          set -uo pipefail
+          failed=0
+          for group in node_tests guard_tests prefix_tests hook_install_tests branch_pattern_tests; do
+            outcome="${!group}"
+            printf '%-22s %s\n' "$group" "$outcome"
+            [ "$outcome" = success ] || failed=1
+          done
+          exit "$failed"
