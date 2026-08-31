@@ -1039,7 +1039,6 @@ async function resolveOverrideLabels(repo, number, labels, config, warnings) {
 // repo-prefixes.json before it derives anything, and a caller that derived
 // first made every lookup miss.
 async function fetchRemoteConfig(repo, repoName, ref) {
-  const fallback = resolveFallbackPrefix(repoName);
   try {
     const query = ref ? `?ref=${encodeURIComponent(ref)}` : '';
     const response = await apiRequest(`contents/.github/pr-standards.json${query}`, repo);
@@ -1056,8 +1055,16 @@ async function fetchRemoteConfig(repo, repoName, ref) {
         throw new ConfigurationError(`${repo} .github/pr-standards.json must contain a JSON object`);
       }
       const config = { ...DEFAULT_CONFIG, ...overrides };
-      const prefixSource = overrides.prefix ? 'config' : fallback.source;
-      if (!overrides.prefix) config.prefix = fallback.prefix;
+      // Only consult the registry when the repo's own config leaves the
+      // prefix unset -- an explicit prefix must win even if this repo's
+      // registry entry happens to be invalid, since that entry is then
+      // irrelevant to this config.
+      let prefixSource = 'config';
+      if (!overrides.prefix) {
+        const fallback = resolveFallbackPrefix(repoName);
+        config.prefix = fallback.prefix;
+        prefixSource = fallback.source;
+      }
       validateConfig(config);
       // Say where the prefix came from. A wrong prefix fails the branch name,
       // the title and the closing reference as three findings, and the only
@@ -1078,6 +1085,7 @@ async function fetchRemoteConfig(repo, repoName, ref) {
       throw error;
     }
   }
+  const fallback = resolveFallbackPrefix(repoName);
   const config = { ...DEFAULT_CONFIG, prefix: fallback.prefix };
   validateConfig(config);
   const provenance = fallback.source === 'registry'
