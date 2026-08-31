@@ -706,6 +706,11 @@ test('proof: the same image pasted twice is one image', () => {
   assert.equal(warned(checkProof(`${validBody}\n${url('abc')}\n${url('abc?raw=1')}`, uiFiles, [], config)), true);
   // Two genuinely different assets clear it.
   assert.equal(warned(checkProof(`${validBody}\n${url('abc')}\n${url('def')}`, uiFiles, [], config)), false);
+  // Nor does trailing prose punctuation on a bare URL make it a second one:
+  // the markdown embed stops at the closing paren, but a bare URL followed by
+  // a period in a sentence keeps that period as part of the match.
+  const bare = (id) => `https://github.com/user-attachments/assets/${id}`;
+  assert.equal(warned(checkProof(`${validBody}\nBefore: ${bare('abc')}. After: ${url('abc')}`, uiFiles, [], config)), true);
 });
 
 test('the proof escape hatch does not read as a refusal to answer', () => {

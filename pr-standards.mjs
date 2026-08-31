@@ -399,8 +399,12 @@ function countUserAttachments(body) {
   if (!matches) return 0;
   // Distinct assets, not link count. The threshold asks for before AND after,
   // so the same image pasted twice is one image and must not clear it -- and a
-  // query string or fragment on the same asset is still that asset.
-  return new Set(matches.map((url) => url.split(/[?#]/)[0])).size;
+  // query string or fragment on the same asset is still that asset. The match
+  // itself excludes `)`, `]`, quotes and whitespace, but not sentence
+  // punctuation, so a bare URL followed by a period or comma in prose keeps
+  // that character; strip it too or the same asset pasted once inside
+  // markdown and once in prose counts as two.
+  return new Set(matches.map((url) => url.split(/[?#]/)[0].replace(/[.,;:!?]+$/, ''))).size;
 }
 
 function hasValidProofNa(body) {
