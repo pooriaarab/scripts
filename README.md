@@ -84,10 +84,12 @@ CI run it again on the PR.
 Exit 0 clean, 1 on a failure, 2 on a configuration problem. Warnings never change
 the exit code.
 
-Settings come from `.github/pr-standards.json` in the repo being checked. With no
-config file, the prefix is derived from the repo name, which it reads from
-`GITHUB_REPOSITORY` or the origin remote rather than the directory name. A worktree
-is checked out to a directory you named, so the basename is only the last resort.
+Settings come from `.github/pr-standards.json` in the repo being checked. If that
+file does not set a prefix, the checker reads the bundled `repo-prefixes.json`
+registry. A repo absent from both sources gets a prefix derived from its name,
+which it reads from `GITHUB_REPOSITORY` or the origin remote rather than the
+directory name. A worktree is checked out to a directory you named, so the
+basename is only the last resort.
 
 Two files, not one. `pr-standards` is a launcher and `pr-standards.mjs` holds the
 engine, which is also what the test suite imports. Anything fetching this checker

@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import fs, { readFileSync } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
 
 import {
   ConfigurationError,
@@ -10,6 +14,7 @@ import {
   validateCommits,
   validateConfig,
   derivePrefix,
+  loadConfig,
   matchesGlob,
   summarizeFiles,
   validateBody,
@@ -47,6 +52,96 @@ test('derives prefixes from repository names', () => {
   assert.equal(derivePrefix('popcornteam'), 'pop');
   assert.equal(derivePrefix('imecore'), 'ime');
   assert.equal(derivePrefix('one-two-three-four-five'), 'ottf');
+});
+
+test('loadConfig uses the registry prefix for an unconfigured fleet repo', () => {
+  // vibeads derives to vib, which twelve other repos also derive to. Only the
+  // registry knows the collision was resolved to va.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'prs-noconfig-'));
+  try {
+    const loaded = loadConfig(root, 'vibeads');
+    assert.equal(loaded.config.prefix, 'va');
+    assert.equal(loaded.prefixSource, 'registry');
+    assert.match(loaded.provenance, /repo-prefixes\.json/);
+    assert.notEqual(derivePrefix('vibeads'), 'va');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('the repo config outranks the registry', () => {
+  // The registry is the fleet's answer for a repo that has not decided. A repo
+  // that has decided outranks it, or rolling out a config could not change a
+  // prefix and every repo would be pinned to whatever the registry said.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'prs-config-'));
+  try {
+    fs.mkdirSync(path.join(root, '.github'));
+    fs.writeFileSync(path.join(root, '.github', 'pr-standards.json'), '{"prefix":"zz"}');
+    const loaded = loadConfig(root, 'vibeads');
+    assert.equal(loaded.config.prefix, 'zz');
+    assert.equal(loaded.prefixSource, 'config');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('the registry is found beside the checker, not beside the repo', () => {
+  // In CI the checker is unpacked into a temp directory and run against a
+  // different repo's checkout, so a path resolved against the working directory
+  // finds nothing and every repo silently falls back to derivation.
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'prs-elsewhere-'));
+  try {
+    const launcher = fileURLToPath(new URL('./pr-standards', import.meta.url));
+    const result = spawnSync(process.execPath, [launcher, 'precheck',
+      '--branch', 'va-1-some-slug', '--title', '[VA-1] Do a thing here'], {
+      cwd,
+      encoding: 'utf8',
+      env: { ...process.env, GITHUB_REPOSITORY: 'pooriaarab/vibeads' },
+    });
+    assert.match(result.stdout, /Using prefix: va \(from repo-prefixes\.json\)/);
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+  } finally {
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test('an unreadable registry falls through to derivation', () => {
+  // The registry is a convenience, not a dependency. If it is ever absent or
+  // corrupt the checker has to keep judging pull requests, so this asserts the
+  // catch actually falls through rather than surfacing as a configuration
+  // error that would fail every PR in the fleet at once.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'prs-badregistry-'));
+  try {
+    const here = path.dirname(fileURLToPath(import.meta.url));
+    for (const f of ['pr-standards', 'pr-standards.mjs']) {
+      fs.copyFileSync(path.join(here, f), path.join(dir, f));
+    }
+    fs.chmodSync(path.join(dir, 'pr-standards'), 0o755);
+    fs.writeFileSync(path.join(dir, 'repo-prefixes.json'), '{ not json');
+    const result = spawnSync(process.execPath, [path.join(dir, 'pr-standards'), 'precheck',
+      '--branch', 'vib-1-some-slug', '--title', '[VIB-1] Do a thing here'], {
+      cwd: dir,
+      encoding: 'utf8',
+      env: { ...process.env, GITHUB_REPOSITORY: 'pooriaarab/vibeads' },
+    });
+    // Exit 2 is the configuration-error code, which is what a throw would give.
+    assert.notEqual(result.status, 2, result.stdout + result.stderr);
+    assert.match(result.stdout, /Using prefix: vib \(derived/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('loadConfig derives a prefix for a repo absent from config and registry', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'prs-new-'));
+  try {
+    const loaded = loadConfig(root, 'brand-new-repo');
+    assert.equal(loaded.config.prefix, 'bnr');
+    assert.equal(loaded.prefixSource, 'derived');
+    assert.match(loaded.provenance, /derived/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test('always derives a prefix the config will accept', () => {
@@ -472,6 +567,16 @@ test('the rollout template states a decision, never a copy of a default', () => 
   // The placeholder the rollout substitutes must survive, or every repo gets
   // the literal string as its prefix.
   assert.equal(template.prefix, '__PREFIX__');
+});
+
+test('the CI bundle includes the registry beside the checker', () => {
+  // The checker reads repo-prefixes.json from its own directory, so the fetch
+  // step has to put it there. Unpacking the whole tag does that for free; a
+  // step that named individual files would have to list the registry too, and
+  // omitting it would leave every unadopted repo silently deriving a prefix.
+  const workflow = readFileSync(new URL('./pr-standards-templates/pr-standards.yml', import.meta.url), 'utf8');
+  assert.match(workflow, /tar -xzf \S+ -C \S+ --strip-components=1\s*$/m);
+  assert.doesNotMatch(workflow, /for f in pr-standards/);
 });
 
 test('a lockfile is excluded wherever a workspace keeps it', () => {
