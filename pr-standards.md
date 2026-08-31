@@ -216,24 +216,34 @@ belongs to the review council, see the scope lens in `vibecodereview`.
 Each repo carries `.github/pr-standards.json`. The rollout writes it; the check
 reads it; nothing fetches a central registry at check time.
 
+**The file states what the repo decides, and nothing else.** A fresh rollout
+decides one thing:
+
+```json
+{
+  "prefix": "cr"
+}
+```
+
+Everything else stays at the default, in the checker, where fixing it once fixes
+it for every repo. A copied default is not a no-op: the file is merged over the
+defaults, so a repo that restates all of them is pinned to the values of the day
+it was rolled out and a later fix never reaches it. That is the opposite of what
+one central checker is for, and it is what the moving `pr-standards-v1` tag exists
+to avoid.
+
+Add a key only to record a decision that differs, and the diff then says what the
+repo chose:
+
 ```json
 {
   "prefix": "cr",
-  "requireIssue": true,
-  "allowChoreEscape": false,
-  "maxLines": 500,
-  "maxFiles": 40,
-  "maxTopLevelDirs": 3,
-  "minBodyChars": 120,
-  "overrideLabel": "oversized-approved",
-  "proofOverrideLabel": "proof-not-applicable",
-  "requireProof": true,
-  "uiGlobs": ["**/*.tsx", "**/*.jsx", "**/*.vue", "**/*.svelte", "**/*.css", "**/*.scss", "**/*.html", "**/components/**", "**/app/**/page.*", "**/pages/**"],
-  "uiExcludeGlobs": ["**/*.test.*", "**/*.spec.*", "**/__tests__/**", "**/*.stories.*", "**/pages/api/**"],
-  "exemptBranches": ["main", "release", "refactor", "gh-pages"],
-  "excludeGlobs": ["..."]
+  "maxLines": 900,
+  "allowChoreEscape": true
 }
 ```
+
+The full set of keys and their defaults is `DEFAULT_CONFIG` in `pr-standards.mjs`.
 
 `allowChoreEscape` is off. Turn it on and a `chore/<slug>` branch skips the issue
 requirement, which helps if dependency bumps and CI fixes start costing more in
@@ -279,6 +289,31 @@ They are early feedback, not a boundary.
 Caution: do not add `pr-standards` as a required status check on a repo before
 the workflow is installed there. Requiring a check the repo never runs blocks
 every pull request in that repo, permanently.
+
+## The two local layers
+
+CI is the authority, but it is also the slowest feedback. Two local layers catch a
+bad branch before GitHub ever sees it. Neither is a boundary — `--no-verify` skips
+the git hook, and another agent's harness never loaded the Claude Code hook — so
+treat them as early feedback, not enforcement.
+
+- `install-pr-hooks --apply` puts the `pre-push` hook in every eligible checkout.
+- `hooks/pr-standards-guard.sh` is the Claude Code `PreToolUse` hook, and the
+  earliest feedback available: it rejects a branch name before the branch exists.
+  Register it in `.claude/settings.json` under `hooks.PreToolUse` with matcher
+  `Bash`:
+
+  ```json
+  { "type": "command", "command": "<path>/hooks/pr-standards-guard.sh" }
+  ```
+
+  It checks only branch *creation*. Deleting or renaming a branch is how you
+  recover from a bad name, so guarding those would trap you in one. It lets a call
+  through whenever it cannot parse its own input, because blocking on its own bug
+  is worse than the branch name it guards against.
+
+To install the standard itself in a repo — the config, the PR template and the
+workflow — use `pr-standards-rollout`.
 
 ## Usage
 
