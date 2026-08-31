@@ -105,6 +105,33 @@ test('the registry is found beside the checker, not beside the repo', () => {
   }
 });
 
+test('an unreadable registry falls through to derivation', () => {
+  // The registry is a convenience, not a dependency. If it is ever absent or
+  // corrupt the checker has to keep judging pull requests, so this asserts the
+  // catch actually falls through rather than surfacing as a configuration
+  // error that would fail every PR in the fleet at once.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'prs-badregistry-'));
+  try {
+    const here = path.dirname(fileURLToPath(import.meta.url));
+    for (const f of ['pr-standards', 'pr-standards.mjs']) {
+      fs.copyFileSync(path.join(here, f), path.join(dir, f));
+    }
+    fs.chmodSync(path.join(dir, 'pr-standards'), 0o755);
+    fs.writeFileSync(path.join(dir, 'repo-prefixes.json'), '{ not json');
+    const result = spawnSync(process.execPath, [path.join(dir, 'pr-standards'), 'precheck',
+      '--branch', 'vib-1-some-slug', '--title', '[VIB-1] Do a thing here'], {
+      cwd: dir,
+      encoding: 'utf8',
+      env: { ...process.env, GITHUB_REPOSITORY: 'pooriaarab/vibeads' },
+    });
+    // Exit 2 is the configuration-error code, which is what a throw would give.
+    assert.notEqual(result.status, 2, result.stdout + result.stderr);
+    assert.match(result.stdout, /Using prefix: vib \(derived/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('loadConfig derives a prefix for a repo absent from config and registry', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'prs-new-'));
   try {
