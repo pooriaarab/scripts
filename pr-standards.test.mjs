@@ -998,3 +998,30 @@ test('an exempt branch is exempt from proof too', async () => {
     delete process.env.GITHUB_REPOSITORY;
   }
 });
+
+test('the documented proof hatch is not a refusal to answer', () => {
+  // The two rules this feature adds contradicted each other. checkProof accepts
+  // `Proof: n/a — <reason>` and the docs say to write it under How I verified;
+  // validateBody rejected any N/A in that section. So a change with no visible
+  // surface could not pass at all, written exactly where it was told to write.
+  // Found by hitting it on this pull request's own body.
+  const section = (...lines) => [
+    'Closes #64', '', '## What', 'One sentence.', '', '## Why', 'Because.', '',
+    '## How I verified', ...lines, '', 'Assisted-by: agent:model',
+  ].join('\n');
+  const config = { ...DEFAULT_CONFIG, prefix: 'scr' };
+  const evidence = '$ node --test pr-standards.test.mjs\ntests 48 / pass 48 / fail 0';
+
+  const withHatch = section(evidence, '', 'Proof: n/a — a CI checker with no user-visible surface');
+  assert.equal(validateBody(withHatch, 64, config).ok, true);
+
+  // A bare refusal still fails, which is what the guard is for.
+  for (const refusal of ['N/A', 'n/a', 'TODO', 'tested locally']) {
+    const body = section(evidence, '', refusal);
+    assert.equal(validateBody(body, 64, config).ok, false, `${refusal} should still fail`);
+  }
+
+  // So does a hatch with no reason behind it -- it does not match the accepted
+  // form, so it is left in place and reads as the bare refusal it is.
+  assert.equal(validateBody(section(evidence, '', 'Proof: n/a'), 64, config).ok, false);
+});
