@@ -696,6 +696,13 @@ test('prefix precedence holds on the CI path, not only in loadConfig', async () 
   // A repo that states a prefix has decided, so its own config outranks the
   // registry. The registry outranks derivation, because derivation is a guess
   // and the registry is the fleet's answer. Nothing may outrank the config.
+  const registry = JSON.parse(readFileSync(new URL('./repo-prefixes.json', import.meta.url), 'utf8'));
+  // Only a repo whose registry prefix differs from its derived one can tell the
+  // three sources apart.
+  const mismatch = Object.entries(registry).find(([n, p]) => derivePrefix(n) !== p);
+  assert.ok(mismatch, 'repo-prefixes.json has no entry whose prefix differs from its derived one');
+  const [name, registered] = mismatch;
+
   const originalWrite = process.stdout.write;
   const originalPath = process.env.PATH;
   const originalToken = process.env.GITHUB_TOKEN;
@@ -703,11 +710,6 @@ test('prefix precedence holds on the CI path, not only in loadConfig', async () 
   process.env.PATH = '';
   process.env.GITHUB_TOKEN = 'test-token';
   process.env.GITHUB_REPOSITORY = 'other/repo';
-
-  const registry = JSON.parse(readFileSync(new URL('./repo-prefixes.json', import.meta.url), 'utf8'));
-  // Only a repo whose registry prefix differs from its derived one can tell the
-  // three sources apart.
-  const [name, registered] = Object.entries(registry).find(([n, p]) => derivePrefix(n) !== p);
 
   const run = async (configBody, branch) => {
     let output = '';
