@@ -632,6 +632,36 @@ test('proof: a visible change needs before and after attachments', () => {
   assert.equal(hasUiDiff([{ filename: 'src/server/api.ts' }], config), false);
 });
 
+test('proof: pasting the same attachment twice is not before and after', () => {
+  const uiFiles = [{ filename: 'src/components/Button.tsx', status: 'modified' }];
+  const url = 'https://github.com/user-attachments/assets/abc0';
+  const sameUrlTwice = `${validBody}\n![a](${url})\n![b](${url})`;
+
+  const failed = (r) => r.failures.some((f) => f.check === 'proof of a visible change');
+  const warned = (r) => r.warnings.some((w) => w.check === 'proof of a visible change');
+
+  // A repeated URL is one artifact, not two. It must still warn like a single
+  // attachment, not silently pass as a before-and-after pair.
+  assert.equal(warned(checkProof(sameUrlTwice, uiFiles, [], config)), true);
+  assert.equal(failed(checkProof(sameUrlTwice, uiFiles, [], config)), false);
+});
+
+test('proof: a stray unclosed HTML comment hides the rest of the body, like it does on GitHub', () => {
+  const uiFiles = [{ filename: 'src/components/Button.tsx', status: 'modified' }];
+  const url1 = 'https://github.com/user-attachments/assets/abc0';
+  const url2 = 'https://github.com/user-attachments/assets/abc1';
+  // GitHub's CommonMark renderer treats an unterminated `<!--` as running to
+  // end of document, so nothing after it renders. The checker must agree,
+  // not treat the unclosed marker as inert and count what GitHub hides.
+  const hiddenByUnclosedComment = `${validBody}\n<!-- oops\n![a](${url1})\n![b](${url2})`;
+  const visibleNa = `${validBody}\n<!-- oops\nProof: n/a — a change with no visible surface at all`;
+
+  const failed = (r) => r.failures.some((f) => f.check === 'proof of a visible change');
+  assert.equal(failed(checkProof(hiddenByUnclosedComment, uiFiles, [], config)), true);
+  // The n/a line itself is inside the hidden region too, so it still fails.
+  assert.equal(failed(checkProof(visibleNa, uiFiles, [], config)), true);
+});
+
 test('proof: media belongs in user-attachments, not in the commit', () => {
   const flagged = [
     'screenshots/home.png', 'screenshot-123/demo.png', 'a/b/screenshots/x.jpg',
