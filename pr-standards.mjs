@@ -505,11 +505,20 @@ function verificationSection(body, { unmatchedFenceHides }) {
 }
 
 function countUserAttachments(body) {
+  // Four or more spaces of indent (or a leading tab) renders as an indented
+  // code block on GitHub, same as the check already applies to the escape
+  // hatch below: the text shows as-is, never as a clickable link or an
+  // embedded image, so a URL sitting in one is not real before-and-after
+  // evidence, only the same characters typed where they render as inert text.
+  const text = verificationSection(body, { unmatchedFenceHides: false })
+    .split('\n')
+    .filter((line) => !/^(?: {4,}|\t)/.test(line))
+    .join('\n');
   // Backtick excluded along with the closing-paren/bracket/quote characters:
   // a URL wrapped in inline code (`` `https://...assets/abc` ``) is the same
   // asset as one linked as a Markdown image, and a backtick is never a real
   // URL character, so it must never be captured as part of the id.
-  const matches = verificationSection(body, { unmatchedFenceHides: false }).match(/https:\/\/github\.com\/user-attachments\/assets\/[^\s"'`\)\]]+/g);
+  const matches = text.match(/https:\/\/github\.com\/user-attachments\/assets\/[^\s"'`\)\]]+/g);
   if (!matches) return 0;
   // Distinct assets, because the same image pasted twice is one image. The
   // threshold asks for before AND after, not for two links — and a query
