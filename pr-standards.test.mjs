@@ -951,6 +951,26 @@ test('proof: a stray comment marker in prose does not swallow real proof', () =>
     ...tail,
   ].join('\n');
   assert.equal(failed(checkProof(inlineComment, uiFiles, [], config)), true);
+
+  // A marker that opens mid-sentence but closes on a LATER line, before the
+  // paragraph breaks, is still a raw HTML comment on GitHub -- inline HTML can
+  // span lines within one paragraph. The two attachments trapped inside it are
+  // hidden from a human reviewer and must not count as evidence.
+  const midSentenceClosesLater = [
+    ...head, `note <!-- ![before](${url('iii')})`, `![after](${url('jjj')}) -->`, 'end',
+    ...tail,
+  ].join('\n');
+  assert.equal(failed(checkProof(midSentenceClosesLater, uiFiles, [], config)), true);
+
+  // But a blank line ends the paragraph first, so a `-->` in some unrelated
+  // later paragraph must not reach back and hide this one's real proof.
+  const midSentenceThenBlankThenCloser = [
+    ...head, 'We removed the <!-- marker from the template',
+    `![before](${url('kkk')})`, `![after](${url('lll')})`,
+    '', 'Unrelated later paragraph -->',
+    ...tail,
+  ].join('\n');
+  assert.equal(failed(checkProof(midSentenceThenBlankThenCloser, uiFiles, [], config)), false);
 });
 
 test('an exempt branch is exempt from proof too', async () => {
