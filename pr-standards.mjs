@@ -364,6 +364,13 @@ function sentenceCount(text) {
   return String(text).split(/[.!?]+(?=\s|$)/).map((part) => part.trim()).filter(Boolean).length;
 }
 
+// The documented escape hatch, in the one form the checker accepts. It lives in
+// a constant because two rules read it: the body check below must not mistake it
+// for a refusal to answer, and the proof check must honour it. Two copies of
+// this pattern would eventually disagree, and the disagreement would look like
+// a lazy body rather than a drifted regex.
+const PROOF_NA_LINE = /^\s*Proof:\s*n\/a\s*[—–-]\s*(\S.*)\s*$/i;
+
 function hasCommandAndResult(text) {
   const lines = String(text).split('\n').map((line) => line.trim()).filter(Boolean);
   // The word boundary goes AFTER the command name, not before it. Without it
@@ -428,7 +435,30 @@ export function validateBody(body, issueNumber, config = DEFAULT_CONFIG) {
   if (!why) {
     failures.push(fail('PR body section', 'missing ## Why', '## Why with the problem and reason for the fix', 'Add a ## Why section.'));
   }
-  if (!verified || /\b(?:N\/A|TODO|tested locally)\b/i.test(verified) || !hasCommandAndResult(verified)) {
+  // The N/A guard exists to reject a section that refuses to answer. The
+  // documented proof escape hatch, `Proof: n/a — <reason>`, is an answer, and
+  // the docs say to write it in this very section — so the guard failed every
+  // pull request that used the hatch correctly, and blamed lazy verification
+  // rather than naming the line. Swap a valid hatch line for its reason before
+  // the guard runs, rather than dropping the line outright: a reason of just
+  // "TODO" or "N/A" is still a refusal, and the guard must still see it.
+  // A bare N/A, a TODO, "tested locally", and a `Proof: n/a` with no reason all
+  // still fail.
+  // Quoted text is not a claim. A body that explains the rule inside the section
+  // the rule reads — "a bare `N/A`, a `TODO`, \"tested locally\"" — was failed by
+  // its own explanation, and the message named nothing. Drop fenced blocks and
+  // inline code before testing for a refusal to answer. Only this test is
+  // affected: hasCommandAndResult still reads the raw section, because a command
+  // and its output belong in a code block.
+  const claimed = verified === null ? null
+    : verified
+      .replace(/^ {0,3}(`{3,}|~{3,})[\s\S]*?^ {0,3}\1[ \t]*$/gm, '')
+      .replace(/`[^`\n]*`/g, '')
+      .split('\n').map((line) => {
+        const hatch = PROOF_NA_LINE.exec(line);
+        return hatch ? hatch[1] : line;
+      }).join('\n');
+  if (!verified || /\b(?:N\/A|TODO|tested locally)\b/i.test(claimed) || !hasCommandAndResult(verified)) {
     failures.push(fail(
       '## How I verified',
       verified || 'missing',
