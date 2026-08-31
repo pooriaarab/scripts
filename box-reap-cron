@@ -59,6 +59,135 @@ echo "===== $(date -u +%FT%TZ) box-reap --stop-idle-older-than $AGE --execute" >
 rc=$?
 echo "----- exit=$rc" >> "$LOG"
 
+# ORPHANS: a Box no session claims.
+#
+# box-session records the Box it warmed for a repo in ~/.local/state/box-work/<repo>.id.
+# Any other running Box was started by a session that ended without stopping it, or by a
+# bare `box new`. Nothing will ever claim it again, so it bills until its archive deadline.
+# Measured here on 2026-08-30: 14 running Boxes, 2 claimed, 12 orphaned — enough burn for
+# the credit check to project a $287 overrun in a 15-day window.
+#
+# Orphans get a shorter age than claimed Boxes, and nothing else changes: the same
+# box-reap probe still runs, so a busy Box is still never stopped. The age is the only
+# knob, because "unclaimed" is evidence about intent, not about activity.
+ORPHAN_AGE="${BOX_REAP_ORPHAN_AGE:-15m}"
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/box-work"
+
+# A claim file only means something while its session lives. A session killed before
+# `box-session end` runs leaves the file behind, and a stale claim would shield its Box
+# from the sweep forever. So a claim expires: past CLAIM_TTL the Box is treated as
+# unclaimed, which is the safe direction — it still has to pass the activity probe.
+CLAIM_TTL_MIN="${BOX_REAP_CLAIM_TTL_MIN:-360}"
+
+claimed=""
+stale_claims=""
+for f in "$STATE_DIR"/*.id; do
+  [[ -f "$f" ]] || continue
+  id="$(tr -d '[:space:]' < "$f")"
+  [[ -n "$id" ]] || continue
+  name="$(basename "$f" .id)"
+  # The .id file's mtime only moves when box-session (re)writes it, not while a session
+  # just sits on a Box it already warmed -- a single session older than CLAIM_TTL_MIN would
+  # otherwise go stale out from under itself. A non-empty $name.sessions dir means a live
+  # session is still registered, so trust that over the file's age.
+  if [[ -n "$(find "$STATE_DIR/$name.sessions" -mindepth 1 -maxdepth 1 2>/dev/null)" ]]; then
+    claimed="$claimed $id"
+  elif [[ -n "$(find "$f" -mmin "+$CLAIM_TTL_MIN" 2>/dev/null)" ]]; then
+    stale_claims="$stale_claims $name:$id"
+  else
+    claimed="$claimed $id"
+  fi
+done
+
+# SECOND CLAIM NAMESPACE. `crabbox-attach` (the git-worktree-add wrapper) also creates
+# Boxes, and records them in the WORKTREE as `.crabbox-slug` — a slug, not a bx_ id, in a
+# namespace `box-session` and `box-work` never read. Ignoring it cuts both ways: those
+# Boxes look unclaimed here (so nothing ever stopped them), and a Box a live worktree is
+# attached to could be swept while its session is merely thinking rather than building.
+# So resolve slugs against the live Box list and treat a match as claimed. A slug with no
+# match is a stale marker from a deleted Box and is ignored.
+# A worktree claim ages out like a session claim does. Removing a worktree takes its
+# .crabbox-slug with it, so that case reaps itself; the case this covers is a worktree that
+# still exists but nobody has touched for hours, whose Box would otherwise be shielded
+# forever.
+worktree_slugs=""
+stale_slugs=""
+slug_files=""
+# Same fail-loud requirement as the box-list enumeration below: if TCC (or anything else)
+# blocks this find, a swallowed error here would silently produce an empty slug set, and a
+# Box a live worktree is attached to would look unclaimed instead of skipping the sweep. A
+# missing directory is not that -- a fresh machine with nothing cloned yet is not an error.
+if [[ -d "$HOME/Documents/Personal" ]]; then
+  slug_err="$(mktemp)"
+  slug_files="$(find "$HOME/Documents/Personal" -maxdepth 5 -name .crabbox-slug -print 2>"$slug_err")"
+  find_rc=$?
+  if [[ $find_rc -ne 0 ]]; then
+    echo "$(date -u +%FT%TZ) ERROR: could not enumerate worktree slugs, skipping orphan sweep: $(tr '\n' ' ' < "$slug_err" | cut -c1-200)" >> "$LOG"
+    rm -f "$slug_err"
+    exit 4
+  fi
+  rm -f "$slug_err"
+fi
+while read -r f; do
+  [[ -f "$f" ]] || continue
+  slug="$(tr -d '[:space:]' < "$f")"
+  [[ -n "$slug" ]] || continue
+  if [[ -n "$(find "$f" -mmin "+$CLAIM_TTL_MIN" 2>/dev/null)" ]]; then
+    stale_slugs="$stale_slugs $slug"
+  else
+    worktree_slugs="$worktree_slugs $slug"
+  fi
+done <<< "$slug_files"
+
+if [[ -n "$stale_slugs" ]]; then
+  echo "$(date -u +%FT%TZ) worktree slug(s) untouched for ${CLAIM_TTL_MIN}m, no longer shielding:$stale_slugs" >> "$LOG"
+fi
+
+# Enumeration failure must not look like "no orphans". Capture the list, check the status,
+# and fail loudly: a silent empty result would skip the sweep while the job still reported
+# the first reaper's exit code, which is how a cost leak hides behind a green cron.
+if ! box_json="$(box list --json 2>&1)"; then
+  echo "$(date -u +%FT%TZ) ERROR: box list failed, skipping orphan sweep: ${box_json:0:200}" >> "$LOG"
+  exit 4
+fi
+if ! orphan_ids="$(printf '%s' "$box_json" | WORKTREE_SLUGS="$worktree_slugs" python3 -c '
+import sys, json, os
+slugs = set(os.environ.get("WORKTREE_SLUGS", "").split())
+d = json.load(sys.stdin)
+for b in d["boxes"]:
+    # A Box a live worktree points at is in use, whichever namespace recorded it.
+    if b.get("subdomain") in slugs or b.get("name") in slugs:
+        continue
+    print(b["id"])
+' 2>&1)"; then
+  echo "$(date -u +%FT%TZ) ERROR: could not parse box list, skipping orphan sweep: ${orphan_ids:0:200}" >> "$LOG"
+  exit 4
+fi
+
+orphan_args=()
+while read -r id; do
+  [[ -n "$id" ]] || continue
+  case " $claimed " in *" $id "*) continue ;; esac
+  orphan_args+=(--box "$id")
+done <<< "$orphan_ids"
+
+if [[ -n "$stale_claims" ]]; then
+  echo "$(date -u +%FT%TZ) stale claim file(s) past ${CLAIM_TTL_MIN}m, treating as unclaimed:$stale_claims" >> "$LOG"
+fi
+
+if [[ ${#orphan_args[@]} -gt 0 ]]; then
+  {
+    echo "===== $(date -u +%FT%TZ) orphan sweep: $(( ${#orphan_args[@]} / 2 )) unclaimed Box(es), age $ORPHAN_AGE"
+    echo "claimed:${claimed:- none}"
+    "$REAP" --stop-idle-older-than "$ORPHAN_AGE" --execute "${orphan_args[@]}" 2>&1
+    orphan_rc=$?
+    echo "----- orphan exit=$orphan_rc"
+  } >> "$LOG" 2>&1
+  # Don't let a failed orphan sweep hide behind a successful initial reap: launchd
+  # only sees this script's final exit code, and that is what a green cron means.
+  [[ $rc -eq 0 ]] && rc=$orphan_rc
+fi
+
 # Keep the log from growing without bound.
 if [[ -f "$LOG" ]] && [[ $(wc -l < "$LOG") -gt 5000 ]]; then
   tail -2000 "$LOG" > "$LOG.tmp" && mv "$LOG.tmp" "$LOG"
