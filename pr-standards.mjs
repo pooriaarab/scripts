@@ -386,32 +386,10 @@ function hasCommandAndResult(text) {
 // Proof helpers — an agent can type "tested locally" for free; a screenshot
 // or a real command output costs work, so proof is the part worth checking.
 // A user-attachments URL is the only proof that does not bloat the repo.
-
-// GitHub's HTML-comment handling, not just the closed-tag case: an unclosed
-// `<!--` hides everything after it through end of body (CommonMark's HTML
-// block type 2 runs to end of document with no closing sequence), so a naive
-// regex that only strips *matched* `<!--...-->` pairs would leave content
-// after a stray unclosed comment looking "visible" to the checker while
-// GitHub renders none of it.
-// A fenced code block is literal text on GitHub: `<!--` inside one does not
-// start an HTML comment, so it must not feed the unclosed-comment truncation
-// below. Blank the fence bodies (keeping newlines, so line numbers and the
-// surrounding text are unaffected) before looking for comment markers.
-function blankFencedCode(text) {
-  return text.replace(/(^|\n)(`{3,}|~{3,})[^\n]*\n[\s\S]*?\n\2[ \t]*(?=\n|$)/g, (block) => block.replace(/[^\n]/g, ' '));
-}
-
-function stripComments(text) {
-  const unfenced = blankFencedCode(text);
-  const closed = unfenced.replace(/<!--[\s\S]*?-->/g, '');
-  const openIdx = closed.indexOf('<!--');
-  return openIdx === -1 ? closed : closed.slice(0, openIdx);
-}
-
 function countUserAttachments(body) {
-  const visible = stripComments(String(body || ''));
+  const visible = String(body || '').replace(/<!--[\s\S]*?-->/g, '');
   const matches = visible.match(/https:\/\/github\.com\/user-attachments\/assets\/[^\s"'\)\]]+/g);
-  return matches ? new Set(matches).size : 0;
+  return matches ? matches.length : 0;
 }
 
 // The escape hatch, in the one form the checker accepts. It is shared with
@@ -423,7 +401,7 @@ function countUserAttachments(body) {
 const PROOF_NA_LINE = /^\s*Proof:\s*n\/a\s*[—–-]\s*(.+)\s*$/i;
 
 function hasValidProofNa(body) {
-  const visible = stripComments(String(body || ''));
+  const visible = String(body || '').replace(/<!--[\s\S]*?-->/g, '');
   const lines = visible.split('\n');
   for (const line of lines) {
     const match = PROOF_NA_LINE.exec(line);
