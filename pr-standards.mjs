@@ -6,6 +6,10 @@ import { fileURLToPath } from 'node:url';
 
 const execFileAsync = promisify(execFile);
 
+// The registry ships beside the checker, and the CI job extracts the whole
+// archive, so this resolves inside /tmp on a runner as readily as in a checkout.
+const PREFIX_REGISTRY_PATH = fileURLToPath(new URL('./repo-prefixes.json', import.meta.url));
+
 // Banned AI attribution names in Co-authored-by trailers. These are matched as
 // whole words in the author name field so "Pia" does not match pi and "Gupta"
 // does not match GPT. vibecodereview is explicitly exempt.
@@ -132,6 +136,29 @@ export function derivePrefix(repoName) {
 
 function isValidPrefix(prefix) {
   return typeof prefix === 'string' && /^[a-z]{2,4}$/.test(prefix);
+}
+
+// repo-prefixes.json is the fleet's answer for a repo that has not adopted a
+// config yet. Deriving from the name is only a guess, and the rollout names an
+// adoption branch from the registry — so a checker that skips the registry
+// rejects the branch the rollout just created.
+function registryPrefix(repoName) {
+  try {
+    const registry = JSON.parse(fs.readFileSync(PREFIX_REGISTRY_PATH, 'utf8'));
+    if (!registry || Array.isArray(registry) || typeof registry !== 'object') return null;
+    const prefix = registry[String(repoName).split('/').filter(Boolean).pop() || ''];
+    return isValidPrefix(prefix) ? prefix : null;
+  } catch {
+    // A broken registry must not stop a new repo using derivation.
+    return null;
+  }
+}
+
+function resolveFallbackPrefix(repoName) {
+  const registered = registryPrefix(repoName);
+  return registered
+    ? { prefix: registered, source: 'registry' }
+    : { prefix: derivePrefix(repoName), source: 'derived' };
 }
 
 function isExemptBranch(name, config) {
@@ -997,7 +1024,11 @@ async function resolveOverrideLabels(repo, number, labels, config, warnings) {
   return labels.filter((name) => name !== config.overrideLabel);
 }
 
-async function fetchRemoteConfig(repo, defaultPrefix, ref) {
+// Takes the repository NAME, not a prefix. It has to look the name up in
+// repo-prefixes.json before it derives anything, and a caller that derived
+// first made every lookup miss.
+async function fetchRemoteConfig(repo, repoName, ref) {
+  const fallback = resolveFallbackPrefix(repoName);
   try {
     const query = ref ? `?ref=${encodeURIComponent(ref)}` : '';
     const response = await apiRequest(`contents/.github/pr-standards.json${query}`, repo);
@@ -1014,10 +1045,18 @@ async function fetchRemoteConfig(repo, defaultPrefix, ref) {
         throw new ConfigurationError(`${repo} .github/pr-standards.json must contain a JSON object`);
       }
       const config = { ...DEFAULT_CONFIG, ...overrides };
-      if (!Object.prototype.hasOwnProperty.call(overrides, 'prefix')) config.prefix = defaultPrefix;
-      if (!config.prefix) config.prefix = defaultPrefix;
+      const prefixSource = overrides.prefix ? 'config' : fallback.source;
+      if (!overrides.prefix) config.prefix = fallback.prefix;
       validateConfig(config);
-      return { config, provenance: `from ${repo} .github/pr-standards.json${ref ? ` @ ${ref}` : ''}` };
+      // Say where the prefix came from. A wrong prefix fails the branch name,
+      // the title and the closing reference as three findings, and the only
+      // way to see they are one cause is to print the source.
+      const provenance = prefixSource === 'config'
+        ? `from ${repo} .github/pr-standards.json${ref ? ` @ ${ref}` : ''}`
+        : prefixSource === 'registry'
+          ? `from repo-prefixes.json; ${repo} config sets no prefix`
+          : `derived; ${repo} config sets no prefix`;
+      return { config, provenance };
     }
   } catch (error) {
     if (error instanceof ApiError && error.status === 404) {
@@ -1028,9 +1067,12 @@ async function fetchRemoteConfig(repo, defaultPrefix, ref) {
       throw error;
     }
   }
-  const config = { ...DEFAULT_CONFIG, prefix: defaultPrefix };
+  const config = { ...DEFAULT_CONFIG, prefix: fallback.prefix };
   validateConfig(config);
-  return { config, provenance: `derived; ${repo} has no config` };
+  const provenance = fallback.source === 'registry'
+    ? `from repo-prefixes.json; ${repo} has no config`
+    : `derived; ${repo} has no config`;
+  return { config, provenance };
 }
 
 async function runPr(options) {
@@ -1053,7 +1095,13 @@ async function runPr(options) {
   // last rules that survived review, so it is the only honest thing to judge
   // against.
   const baseRef = pull.base?.ref;
-  const loaded = await fetchRemoteConfig(options.repo, derivePrefix(repoName), baseRef);
+  // fetchRemoteConfig takes the repository NAME, because it looks that name up
+  // in repo-prefixes.json before it derives anything. Handing it an
+  // already-derived prefix made every registry lookup miss, so the CI path
+  // never read the registry at all and every repo without its own config got a
+  // guess. The adoption pull request is where that bites: the rollout names the
+  // branch from the registry, and the check then rejects it.
+  const loaded = await fetchRemoteConfig(options.repo, repoName, baseRef);
   config = loaded.config;
   provenance = loaded.provenance;
   const branch = pull.head?.ref || '';
