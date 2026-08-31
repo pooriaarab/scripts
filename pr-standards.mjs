@@ -363,6 +363,14 @@ function hasCommandAndResult(text) {
   return command && result;
 }
 
+// The documented escape hatch, in the one form the checker accepts. It is
+// shared with validateBody's N/A guard: the guard exists to reject a section
+// that says only "N/A", and this line is a stated reason, not a refusal to
+// answer. Without the exemption the hatch failed the body check wherever the
+// docs say to write it, so a change with no visible surface could not pass at
+// all -- the two rules this feature adds contradicted each other.
+const PROOF_NA_LINE = /^\s*Proof:\s*n\/a\s*[—–-]\s*(.+)\s*$/i;
+
 // Proof helpers — an agent can type "tested locally" for free; a screenshot
 // or a real command output costs work, so proof is the part worth checking.
 // A user-attachments URL is the only proof that does not bloat the repo.
@@ -557,7 +565,7 @@ function hasValidProofNa(body) {
     // show the escape hatch. A PR body that quotes that example verbatim
     // must not be read as the author invoking it.
     if (/^(?: {4,}|\t)/.test(line)) continue;
-    const match = /^\s*Proof:\s*n\/a\s*[—–-]\s*(.+)\s*$/i.exec(line);
+    const match = PROOF_NA_LINE.exec(line);
     if (match && match[1].trim().length >= 20) return true;
   }
   return false;
@@ -716,7 +724,11 @@ export function validateBody(body, issueNumber, config = DEFAULT_CONFIG) {
   if (!why) {
     failures.push(fail('PR body section', 'missing ## Why', '## Why with the problem and reason for the fix', 'Add a ## Why section.'));
   }
-  if (!verified || /\b(?:N\/A|TODO|tested locally)\b/i.test(verified) || !hasCommandAndResult(verified)) {
+  // Drop a valid `Proof: n/a — <reason>` line before testing for a refusal to
+  // answer, so the hatch does not read as one. A bare "N/A" still fails.
+  const verifiedWithoutHatch = verified === null ? null
+    : verified.split('\n').filter((line) => !PROOF_NA_LINE.test(line)).join('\n');
+  if (!verified || /\b(?:N\/A|TODO|tested locally)\b/i.test(verifiedWithoutHatch) || !hasCommandAndResult(verified)) {
     failures.push(fail(
       '## How I verified',
       verified || 'missing',
