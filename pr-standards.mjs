@@ -1004,7 +1004,6 @@ async function runPrecheck(options) {
   return finish({ mode: 'precheck', prefix: config.prefix, provenance, failures, warnings: [], passes }, options.json);
 }
 
-
 async function fetchRemoteConfig(repo, repoName, ref) {
   const fallback = resolveFallbackPrefix(repoName);
   try {

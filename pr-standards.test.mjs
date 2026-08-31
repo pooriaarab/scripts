@@ -281,6 +281,7 @@ test('no label clears the size cap', () => {
   const stale = checkSize(summary, { ...config, maxLines: 500, maxFiles: 40, overrideLabel: 'oversized-approved', overrideActors: ['someone'] });
   assert.equal(stale.failures.length, 2);
 });
+
 test('enforces rules for chore branches (null issue)', () => {
   assert.equal(validateTitle('Added something', 'cr', null).ok, false);
   assert.equal(validateBody(validBody.replace('bun test -> 214 passed', 'TODO').replace('Closes #142\n\n', ''), null, config).ok, false);
