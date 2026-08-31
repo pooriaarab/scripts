@@ -5,6 +5,7 @@ import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 
 const execFileAsync = promisify(execFile);
+const PREFIX_REGISTRY_PATH = fileURLToPath(new URL('./repo-prefixes.json', import.meta.url));
 
 // Banned AI attribution names in Co-authored-by trailers. These are matched as
 // whole words in the author name field so "Pia" does not match pi and "Gupta"
@@ -141,6 +142,25 @@ export function derivePrefix(repoName) {
 
 function isValidPrefix(prefix) {
   return typeof prefix === 'string' && /^[a-z]{2,4}$/.test(prefix);
+}
+
+function registryPrefix(repoName) {
+  try {
+    const registry = JSON.parse(fs.readFileSync(PREFIX_REGISTRY_PATH, 'utf8'));
+    if (!registry || Array.isArray(registry) || typeof registry !== 'object') return null;
+    const prefix = registry[repoName];
+    return isValidPrefix(prefix) ? prefix : null;
+  } catch {
+    // A broken registry must not prevent a new repo from using derivation.
+    return null;
+  }
+}
+
+function resolveFallbackPrefix(repoName) {
+  const registered = registryPrefix(repoName);
+  return registered
+    ? { prefix: registered, source: 'registry' }
+    : { prefix: derivePrefix(repoName), source: 'derived' };
 }
 
 function isExemptBranch(name, config) {
@@ -932,10 +952,24 @@ export function loadConfig(root = repoRoot(), repoName = repositoryName(root)) {
     }
   }
   const config = { ...DEFAULT_CONFIG, ...overrides };
-  if (!Object.prototype.hasOwnProperty.call(overrides, 'prefix')) config.prefix = derivePrefix(repoName);
-  if (!config.prefix) config.prefix = derivePrefix(repoName);
+  let prefixSource = 'config';
+  if (!config.prefix) {
+    const fallback = resolveFallbackPrefix(repoName);
+    config.prefix = fallback.prefix;
+    prefixSource = fallback.source;
+  }
   validateConfig(config);
-  return { config, path: filename, usedDefaultPrefix: !Object.prototype.hasOwnProperty.call(overrides, 'prefix') };
+  return {
+    config,
+    path: filename,
+    prefixSource,
+    provenance: prefixSource === 'config'
+      ? 'from .github/pr-standards.json'
+      : prefixSource === 'registry'
+        ? 'from repo-prefixes.json'
+        : 'derived',
+    usedDefaultPrefix: !Object.prototype.hasOwnProperty.call(overrides, 'prefix'),
+  };
 }
 
 // Cached because apiRequest asks on every call, including once per page of a
@@ -1226,13 +1260,15 @@ Add --json to any command for machine-readable output.`;
 async function runBranch(options) {
   const root = repoRoot();
   const named = repositoryNameWithSource(root);
-  const { config, path: configPath } = loadConfig(root, named.name);
+  const { config, prefixSource } = loadConfig(root, named.name);
   // Say where the prefix came from. A prefix guessed from a directory name is
   // the one most likely to be wrong, so it must not look identical to one read
   // from the repo's own config.
-  const provenance = fs.existsSync(configPath)
+  const provenance = prefixSource === 'config'
     ? 'from .github/pr-standards.json'
-    : `derived from ${named.source}`;
+    : prefixSource === 'registry'
+      ? 'from repo-prefixes.json'
+      : `derived from ${named.source}`;
   if (options.branch || options.title || options.repo || options.number) throw new ConfigurationError('branch accepts only one optional branch name');
   const branch = options.positional[0] || currentBranch();
   if (options.positional.length > 1) throw new ConfigurationError('branch accepts one optional name');
@@ -1250,13 +1286,15 @@ async function runBranch(options) {
 async function runPrecheck(options) {
   const root = repoRoot();
   const named = repositoryNameWithSource(root);
-  const { config, path: configPath } = loadConfig(root, named.name);
+  const { config, prefixSource } = loadConfig(root, named.name);
   // Say where the prefix came from. A prefix guessed from a directory name is
   // the one most likely to be wrong, so it must not look identical to one read
   // from the repo's own config.
-  const provenance = fs.existsSync(configPath)
+  const provenance = prefixSource === 'config'
     ? 'from .github/pr-standards.json'
-    : `derived from ${named.source}`;
+    : prefixSource === 'registry'
+      ? 'from repo-prefixes.json'
+      : `derived from ${named.source}`;
   if (!options.branch) throw new ConfigurationError('precheck requires --branch');
   if (options.positional.length > 0 || options.repo || options.number) throw new ConfigurationError('precheck accepts --branch and optional --title only');
   const branchResult = validateBranchName(options.branch, config);
@@ -1363,7 +1401,8 @@ export async function resolveOverrideLabels(repo, number, labels, config, warnin
   return result;
 }
 
-async function fetchRemoteConfig(repo, defaultPrefix, ref) {
+async function fetchRemoteConfig(repo, repoName, ref) {
+  const fallback = resolveFallbackPrefix(repoName);
   try {
     const query = ref ? `?ref=${encodeURIComponent(ref)}` : '';
     const response = await apiRequest(`contents/.github/pr-standards.json${query}`, repo);
@@ -1380,10 +1419,15 @@ async function fetchRemoteConfig(repo, defaultPrefix, ref) {
         throw new ConfigurationError(`${repo} .github/pr-standards.json must contain a JSON object`);
       }
       const config = { ...DEFAULT_CONFIG, ...overrides };
-      if (!Object.prototype.hasOwnProperty.call(overrides, 'prefix')) config.prefix = defaultPrefix;
-      if (!config.prefix) config.prefix = defaultPrefix;
+      const prefixSource = config.prefix ? 'config' : fallback.source;
+      if (!config.prefix) config.prefix = fallback.prefix;
       validateConfig(config);
-      return { config, provenance: `from ${repo} .github/pr-standards.json${ref ? ` @ ${ref}` : ''}` };
+      const provenance = prefixSource === 'config'
+        ? `from ${repo} .github/pr-standards.json${ref ? ` @ ${ref}` : ''}`
+        : prefixSource === 'registry'
+          ? 'from repo-prefixes.json'
+          : `derived; ${repo} has no config prefix`;
+      return { config, provenance };
     }
   } catch (error) {
     if (error instanceof ApiError && error.status === 404) {
@@ -1394,9 +1438,12 @@ async function fetchRemoteConfig(repo, defaultPrefix, ref) {
       throw error;
     }
   }
-  const config = { ...DEFAULT_CONFIG, prefix: defaultPrefix };
+  const config = { ...DEFAULT_CONFIG, prefix: fallback.prefix };
   validateConfig(config);
-  return { config, provenance: `derived; ${repo} has no config` };
+  const provenance = fallback.source === 'registry'
+    ? `from repo-prefixes.json; ${repo} has no config`
+    : `derived; ${repo} has no config`;
+  return { config, provenance };
 }
 
 async function runPr(options) {
@@ -1419,7 +1466,7 @@ async function runPr(options) {
   // last rules that survived review, so it is the only honest thing to judge
   // against.
   const baseRef = pull.base?.ref;
-  const loaded = await fetchRemoteConfig(options.repo, derivePrefix(repoName), baseRef);
+  const loaded = await fetchRemoteConfig(options.repo, repoName, baseRef);
   config = loaded.config;
   provenance = loaded.provenance;
   const branch = pull.head?.ref || '';
