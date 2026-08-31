@@ -518,6 +518,23 @@ test('the CI path reads the prefix registry, not only a derived guess', () => {
   );
 });
 
+test('a registered but invalid prefix is surfaced, not silently derived', () => {
+  // A missing registry file has to degrade to derivation quietly, because
+  // that failure is fleet-wide and must not block every repo's check. But a
+  // single bad entry only affects the repo that owns it, and silently
+  // deriving past it would recreate the exact mismatched-prefix bug this
+  // registry exists to catch -- with no signal that the registry was wrong.
+  const source = readFileSync(new URL('./pr-standards.mjs', import.meta.url), 'utf8');
+  assert.ok(
+    /if \(!Object\.prototype\.hasOwnProperty\.call\(registry, key\)\) return null;/.test(source),
+    'an absent key must still fall through to derivation',
+  );
+  assert.ok(
+    /if \(!isValidPrefix\(prefix\)\) \{\s*\n\s*throw new ConfigurationError/.test(source),
+    'a present-but-invalid registry entry must throw, not silently derive past it',
+  );
+});
+
 test('the registry beats derivation, and a missing entry still derives', () => {
   const registry = JSON.parse(readFileSync(new URL('./repo-prefixes.json', import.meta.url), 'utf8'));
   const [name, prefix] = Object.entries(registry).find(([n, p]) => derivePrefix(n) !== p);

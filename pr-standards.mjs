@@ -143,15 +143,26 @@ function isValidPrefix(prefix) {
 // adoption branch from the registry — so a checker that skips the registry
 // rejects the branch the rollout just created.
 function registryPrefix(repoName) {
+  let registry;
   try {
-    const registry = JSON.parse(fs.readFileSync(PREFIX_REGISTRY_PATH, 'utf8'));
-    if (!registry || Array.isArray(registry) || typeof registry !== 'object') return null;
-    const prefix = registry[String(repoName).split('/').filter(Boolean).pop() || ''];
-    return isValidPrefix(prefix) ? prefix : null;
+    registry = JSON.parse(fs.readFileSync(PREFIX_REGISTRY_PATH, 'utf8'));
   } catch {
-    // A broken registry must not stop a new repo using derivation.
+    // A missing or unparseable registry must not stop a new repo using
+    // derivation -- that failure is fleet-wide, so it has to degrade safely.
     return null;
   }
+  if (!registry || Array.isArray(registry) || typeof registry !== 'object') return null;
+  const key = String(repoName).split('/').filter(Boolean).pop() || '';
+  if (!Object.prototype.hasOwnProperty.call(registry, key)) return null;
+  const prefix = registry[key];
+  // Unlike a broken file, a bad entry only affects the one repo that owns it.
+  // Silently deriving instead would recreate the exact mismatched-prefix
+  // failure this registry exists to prevent, with no signal that the
+  // registered value was the problem.
+  if (!isValidPrefix(prefix)) {
+    throw new ConfigurationError(`repo-prefixes.json has an invalid prefix for "${key}": ${JSON.stringify(prefix)}`);
+  }
+  return prefix;
 }
 
 function resolveFallbackPrefix(repoName) {
