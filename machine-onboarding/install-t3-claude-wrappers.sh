@@ -33,6 +33,7 @@ write() { # <name> <config-dir> <token-var> <label>
 # Rotate the token by editing ONE file: $ENVF
 set -uo pipefail
 ENVF="$ENVF"
+unset $var
 [ -f "\$ENVF" ] && . "\$ENVF"
 TOK="\${$var:-}"
 if [ -z "\$TOK" ]; then
