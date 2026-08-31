@@ -457,16 +457,29 @@ function hasCloser(lines, openIndex, fence, quoted) {
     // Fenced content is never scanned for comment markers (that check sits
     // behind the `if (fence)` branch above and returns before reaching here),
     // so a real fence that happens to contain comment-like text is untouched.
+    let cursor = 0;
     while (true) {
-      const openIdx = line.indexOf('<!--');
+      const openIdx = line.indexOf('<!--', cursor);
       if (openIdx === -1) break;
+      // `\<!--` renders as literal visible text on GitHub, not as a comment.
+      // Treating it as one latched the scanner on and dropped every line after
+      // it — including real screenshots — so an honest pull request failed for
+      // a reason nobody could see in the rendered body.
+      if (line[openIdx - 1] === '\\') { cursor = openIdx + 4; continue; }
       const closeIdx = line.indexOf('-->', openIdx + 4);
       if (closeIdx === -1) {
+        // An UNTERMINATED comment runs to the end of the document only when its
+        // marker opens the line. GitHub's block-level rule works that way, and
+        // latching on a marker found mid-sentence turns one stray `<!--` in
+        // prose into a silent proof failure. An inline comment is still
+        // stripped wherever it sits, because GitHub hides that too.
+        if (line.slice(0, openIdx).replace(/^(?:\s{0,3}>\s?)+/, '').trim() !== '') break;
         line = line.slice(0, openIdx);
         inComment = true;
         break;
       }
       line = line.slice(0, openIdx) + line.slice(closeIdx + 3);
+      cursor = openIdx;
     }
     // At most three spaces of indent, the same ceiling GitHub uses. A line
     // indented four or more is indented code, not a fence, and treating one as
@@ -1454,11 +1467,17 @@ async function runPr(options) {
     failures.push(...bodyResult.failures);
     if (bodyResult.ok) passes.push('PR body');
   }
-  const proofResult = checkProof(pull.body || '', files, labels, config);
-  failures.push(...proofResult.failures);
-  warnings.push(...proofResult.warnings);
-  if (proofResult.overridden) passes.push(`proof waived by ${config.proofOverrideLabel}`);
-  else if (proofResult.failures.length === 0) passes.push('proof of work');
+  // An exempt branch is exempt from the body rules, and the escape hatch lives
+  // in the body. Asking `release` or `dependabot/*` for proof would demand a
+  // `Proof: n/a` line in a template those branches were never asked to write,
+  // and there would be no way to satisfy it.
+  if (!branchResult.exempt) {
+    const proofResult = checkProof(pull.body || '', files, labels, config);
+    failures.push(...proofResult.failures);
+    warnings.push(...proofResult.warnings);
+    if (proofResult.overridden) passes.push(`proof waived by ${config.proofOverrideLabel}`);
+    else if (proofResult.failures.length === 0) passes.push('proof of work');
+  }
   const sizeResult = checkSize(summary, config, labels);
   failures.push(...sizeResult.failures);
   warnings.push(...sizeResult.warnings);
