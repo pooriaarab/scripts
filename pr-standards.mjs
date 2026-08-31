@@ -1035,9 +1035,12 @@ async function resolveOverrideLabels(repo, number, labels, config, warnings) {
   return labels.filter((name) => name !== config.overrideLabel);
 }
 
-// Takes the repository NAME, not a prefix. It has to look the name up in
-// repo-prefixes.json before it derives anything, and a caller that derived
-// first made every lookup miss.
+// Prefix precedence: the repo's own config on the BASE branch, then the
+// registry, then derivation. This path had no registry step at all, so a repo
+// mid-adoption — no config on base yet — fell straight to a guess. The rollout
+// names an adoption branch FROM the registry, so on the seventeen repos where
+// the registry and derivation disagree the check rejected the branch it had
+// just created, plus the title and the closing reference, off that one guess.
 async function fetchRemoteConfig(repo, repoName, ref) {
   try {
     const query = ref ? `?ref=${encodeURIComponent(ref)}` : '';
@@ -1114,12 +1117,8 @@ async function runPr(options) {
   // last rules that survived review, so it is the only honest thing to judge
   // against.
   const baseRef = pull.base?.ref;
-  // fetchRemoteConfig takes the repository NAME, because it looks that name up
-  // in repo-prefixes.json before it derives anything. Handing it an
-  // already-derived prefix made every registry lookup miss, so the CI path
-  // never read the registry at all and every repo without its own config got a
-  // guess. The adoption pull request is where that bites: the rollout names the
-  // branch from the registry, and the check then rejects it.
+  // Pass the NAME, not a derived prefix: fetchRemoteConfig looks the name up in
+  // repo-prefixes.json before it derives anything.
   const loaded = await fetchRemoteConfig(options.repo, repoName, baseRef);
   config = loaded.config;
   provenance = loaded.provenance;
