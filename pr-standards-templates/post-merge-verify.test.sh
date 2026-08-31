@@ -25,6 +25,7 @@ PY
 SHA=1111111111111111111111111111111111111111
 mkdir -p "$WORK/site"
 printf '{"sha": "%s"}' "$SHA" > "$WORK/site/version"
+printf '{"sha": null}' > "$WORK/site/version-null"
 printf 'ok' > "$WORK/site/index.html"
 (cd "$WORK/site" && exec python3 -m http.server 8731 >/dev/null 2>&1) &
 SERVER_PID=$!
@@ -61,6 +62,18 @@ rm -f "$WORK/report.md"
 ( cd "$WORK/repo" && EXPECTED_SHA=2222222222222222222222222222222222222222 REPORT="$WORK/report.md" python3 "$WORK/check.py" ) >/dev/null 2>&1
 if grep -q 'Expected SHA' "$WORK/report.md" 2>/dev/null; then printf 'ok    %s\n' 'writes a failure report the issue can quote'
 else printf 'FAIL  %s\n' 'writes a failure report the issue can quote'; fails=$((fails + 1)); fi
+
+# A transient non-string SHA (e.g. `{"sha": null}` mid-deploy) must keep
+# polling to the deadline, not crash out on the first response. A crash and a
+# real timeout both exit 1, so tell them apart by whether a report got written
+# — only the deadline path calls fail() and writes one.
+NULL_SHA='{"postMergeVerify":{"url":"http://127.0.0.1:8731","shaPath":"/version-null","timeoutSeconds":2}}'
+printf '%s' "$NULL_SHA" > "$WORK/repo/.github/pr-standards.json"
+rm -f "$WORK/report.md"
+( cd "$WORK/repo" && EXPECTED_SHA="$SHA" REPORT="$WORK/report.md" python3 "$WORK/check.py" ) >/dev/null 2>&1
+got=$?
+if [ "$got" = 1 ] && [ -f "$WORK/report.md" ]; then printf 'ok    %s\n' 'keeps polling instead of crashing on a null SHA'
+else printf 'FAIL  %s (want exit 1 with a report, got exit %s)\n' 'keeps polling instead of crashing on a null SHA' "$got"; fails=$((fails + 1)); fi
 
 [ "$fails" = 0 ] || { printf '\n%s failing\n' "$fails" >&2; exit 1; }
 printf '\nall passing\n'
