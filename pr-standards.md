@@ -278,6 +278,41 @@ treat them as early feedback, not enforcement.
 To install the standard itself in a repo — the config, the PR template and the
 workflow — use `pr-standards-rollout`.
 
+## VISION.md
+
+The checker asks whether a pull request is one thing. The review council asks
+whether it is well built. Neither can ask whether the change belongs in this repo
+at all, because nothing in the repo says what the repo is for. A change can pass
+every check, do exactly one thing, carry real proof, and still be the wrong change.
+
+`VISION.md` at the repo root closes that gap. The council reads it when the repo
+has one. `pr-standards-templates/VISION.md` is the template.
+
+Six sections, and only one of them does the work:
+
+| Section | What it answers |
+|---|---|
+| What this is | The repo in a user's words |
+| Who it is for | One named reader, never "everyone" |
+| What good looks like | Three to five observable outcomes |
+| **Explicitly not this** | **Three to five changes that would be well built and still wrong here** |
+| How it pays for itself | The business model, or whose time it saves |
+| The current bet | One sentence with a date |
+
+Write "Explicitly not this" last, and write it from requests you have already
+turned down. Every other section tells a reviewer what to accept. Only that one
+tells it what to reject, and a vision that rejects nothing changes no review.
+
+Two failures to avoid:
+
+- **A template left as prompts.** The council judges against whatever text is
+  there. Placeholder prose reads as a vision that permits everything, which is
+  worse than no file, because the absent file at least makes the council fall
+  back on the diff and the issue.
+- **A stale bet.** "The current bet" carries a date so drift is visible. A repo
+  whose bet has not moved in a year is either finished or abandoned, and the
+  vision should say which.
+
 ## Usage
 
 ```bash
