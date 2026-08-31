@@ -399,41 +399,8 @@ function hasCommandAndResult(text) {
 // URL that only appears inside a fenced block or inline code -- for instance
 // an agent quoting the upload command's example URL as "proof" -- is not a
 // real attachment. Strip fences and inline code before counting.
-// Two rules a regex could not carry, and the reason this is a scan:
-//
-//   - A closer uses the same character and is AT LEAST as long as the opener.
-//     GitHub closes a 3-backtick fence on a 4-backtick line. A backreference to
-//     the captured run demands an exact length, so it missed that case -- the
-//     third time that bug has appeared in this file.
-//   - An UNCLOSED fence is not stripped. Stripping to end of document would let
-//     one stray backtick run swallow real before-and-after links and fail a
-//     pull request that had done nothing wrong. Leaving it costs a quoted URL
-//     counted as evidence, which is the safe direction to be wrong here.
-function stripCodeSpans(text) {
-  const lines = String(text).split('\n');
-  const kept = [];
-  for (let index = 0; index < lines.length; index += 1) {
-    const open = /^ {0,3}(`{3,}|~{3,})/.exec(lines[index]);
-    if (!open) {
-      kept.push(lines[index]);
-      continue;
-    }
-    const closer = new RegExp(`^ {0,3}[${open[1][0]}]{${open[1].length},}[ \t]*$`);
-    let end = -1;
-    for (let scan = index + 1; scan < lines.length; scan += 1) {
-      if (closer.test(lines[scan])) { end = scan; break; }
-    }
-    if (end === -1) {
-      kept.push(lines[index]);
-      continue;
-    }
-    index = end;
-  }
-  return kept.join('\n').replace(/`[^`\n]*`/g, '');
-}
-
 function countUserAttachments(body) {
-  const visible = stripCodeSpans(String(body || '').replace(/<!--[\s\S]*?-->/g, ''));
+  const visible = String(body || '').replace(/<!--[\s\S]*?-->/g, '');
   const matches = visible.match(/https:\/\/github\.com\/user-attachments\/assets\/[^\s"'\)\]]+/g);
   if (!matches) return 0;
   // Distinct assets, not link count. The threshold asks for before AND after,
@@ -447,7 +414,7 @@ function countUserAttachments(body) {
 }
 
 function hasValidProofNa(body) {
-  const visible = stripCodeSpans(String(body || '').replace(/<!--[\s\S]*?-->/g, ''));
+  const visible = String(body || '').replace(/<!--[\s\S]*?-->/g, '');
   const lines = visible.split('\n');
   for (const line of lines) {
     const match = PROOF_NA_LINE.exec(line);

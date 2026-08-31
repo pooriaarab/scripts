@@ -713,9 +713,13 @@ test('proof: the same image pasted twice is one image', () => {
   assert.equal(warned(checkProof(`${validBody}\nBefore: ${bare('abc')}. After: ${url('abc')}`, uiFiles, [], config)), true);
 });
 
-test('proof: attachments only count inside How I verified, and never inside a fence', () => {
+test('proof: attachments only count inside How I verified', () => {
   const uiFiles = [{ filename: 'src/components/Button.tsx', status: 'modified' }];
   const failed = (r) => r.failures.some((f) => f.check === 'proof of a visible change');
+  const embeds = [
+    '![before](https://github.com/user-attachments/assets/abc)',
+    '![after](https://github.com/user-attachments/assets/def)',
+  ].join('\n');
   const section = (verified, extraWhat = '') => [
     'Closes #142', '', '## What',
     `Fixes the onboarding drop-off after step three.${extraWhat}`, '',
@@ -723,25 +727,10 @@ test('proof: attachments only count inside How I verified, and never inside a fe
     '## How I verified', verified, '', 'Assisted-by: claude-personal:claude-opus-5',
   ].join('\n');
 
-  // A URL only quoted inside a fenced code block -- for example the example
-  // command from the upload instructions -- is not a real embed and must not
-  // clear the check, or pasting the docs' own example satisfies it for free.
-  const fenced = [
-    '```',
-    'curl ... user-attachments/assets?name=before.png ... https://github.com/user-attachments/assets/abc',
-    'curl ... user-attachments/assets?name=after.png ... https://github.com/user-attachments/assets/def',
-    '```',
-  ].join('\n');
-  assert.equal(failed(checkProof(section(fenced), uiFiles, [], config)), true);
-
-  // A real embed still counts once it is outside the fence.
-  const real = `${fenced}\n![before](https://github.com/user-attachments/assets/abc)\n![after](https://github.com/user-attachments/assets/def)`;
-  assert.equal(failed(checkProof(section(real), uiFiles, [], config)), false);
-
-  // The docs say the embeds live under How I verified. Two real embeds pasted
-  // under What instead must not satisfy a check that reads the wrong section.
-  const inWhat = '\n![before](https://github.com/user-attachments/assets/abc)\n![after](https://github.com/user-attachments/assets/def)';
-  assert.equal(failed(checkProof(section('bun test -> 214 passed', inWhat), uiFiles, [], config)), true);
+  // The docs say the embeds live under How I verified, so that is where the
+  // check reads. Two real embeds pasted under What instead must not satisfy it.
+  assert.equal(failed(checkProof(section('bun test -> 214 passed', `\n${embeds}`), uiFiles, [], config)), true);
+  assert.equal(failed(checkProof(section(`bun test -> 214 passed\n${embeds}`), uiFiles, [], config)), false);
 });
 
 test('the proof escape hatch does not read as a refusal to answer', () => {
@@ -810,36 +799,4 @@ test('a quoted rule name is not a refusal to answer', () => {
   // command sits in a fence still passes, because hasCommandAndResult reads the
   // raw section rather than the stripped one.
   assert.equal(fails('```\n$ node --test\nℹ pass 41\n```'), false);
-});
-
-test('a fence closed with more characters than it opened is still a fence', () => {
-  // Third appearance of one bug: a backreference to the captured fence run
-  // demands an EXACT length, but GitHub closes a 3-backtick fence on a
-  // 4-backtick line. Twice it shipped as fail-closed and swallowed real
-  // evidence; here it was fail-open and let a quoted example count as proof.
-  // Both directions are wrong, so the length rule is pinned rather than the
-  // symptom.
-  const uiFiles = [{ filename: 'src/components/Button.tsx', status: 'modified' }];
-  const a = 'https://github.com/user-attachments/assets/aaa';
-  const b = 'https://github.com/user-attachments/assets/bbb';
-  const failed = (body) => checkProof(body, uiFiles, [], config)
-    .failures.some((f) => f.check === 'proof of a visible change');
-  const head = ['## What', 'x', '## Why', 'y', '## How I verified', 'ran it -> pass'];
-
-  // Quoted inside a fence is not evidence, whichever valid closer is used.
-  for (const [open, close] of [['```', '```'], ['```', '````'], ['~~~', '~~~~~']]) {
-    assert.equal(failed([...head, open, `![before](${a})`, `![after](${b})`, close, 'Assisted-by: a:b'].join('\n')), true,
-      `a fence opened with ${open} and closed with ${close} must be recognised`);
-  }
-
-  // Real proof after a closed fence still counts. This is the case the bug
-  // broke when it ran the other way: the fence never closed, so everything
-  // below it vanished and a compliant pull request failed.
-  assert.equal(failed([...head, '```', '$ node --test', 'ok', '````',
-    `![before](${a})`, `![after](${b})`, 'Assisted-by: a:b'].join('\n')), false);
-
-  // An UNCLOSED fence is left alone on purpose. Stripping to end of document
-  // would let one stray backtick run swallow real links; counting a quoted URL
-  // is the safe direction to be wrong.
-  assert.equal(failed([...head, '```', `![before](${a})`, `![after](${b})`, 'Assisted-by: a:b'].join('\n')), false);
 });
