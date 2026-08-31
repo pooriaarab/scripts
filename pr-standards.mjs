@@ -394,11 +394,13 @@ function hasCommandAndResult(text) {
 // or a real command output costs work, so proof is the part worth checking.
 // A user-attachments URL is the only proof that does not bloat the repo.
 //
-// A real embed is never fenced: the documented upload flow embeds an image as
-// `![alt](url)` or a bare URL on its own line, never inside a code block. So a
-// URL that only appears inside a fenced block or inline code -- for instance
-// an agent quoting the upload command's example URL as "proof" -- is not a
-// real attachment. Strip fences and inline code before counting.
+// Known gap: neither this nor hasValidProofNa strips fenced or inline code, so
+// a URL or `Proof: n/a` line quoted inside a code block -- for instance an
+// agent quoting the upload command's own example URL -- currently counts as
+// real proof. A fence-stripping fix was attempted and reverted twice for
+// breaking on a longer closing fence; it is tracked separately on
+// scr-64-hardening-wip rather than carried here at the risk of a third
+// regression.
 function countUserAttachments(body) {
   const visible = String(body || '').replace(/<!--[\s\S]*?-->/g, '');
   const matches = visible.match(/https:\/\/github\.com\/user-attachments\/assets\/[^\s"'\)\]]+/g);
