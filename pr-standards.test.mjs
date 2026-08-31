@@ -635,3 +635,32 @@ test('the proof escape hatch does not read as a refusal to answer', () => {
   assert.equal(verifiedFails('`node --test` -> 40 passed\n\nProof: n/a — TODO'), true);
   assert.equal(verifiedFails('`node --test` -> 40 passed\n\nProof: n/a — N/A'), true);
 });
+
+test('a quoted rule name is not a refusal to answer', () => {
+  // A body that explains the rule inside the section the rule reads was failed
+  // by its own explanation, and the message named nothing. This pull request's
+  // own body hit it, which is the only reason it was found: the guard reads
+  // prose, and prose about verification vocabulary is indistinguishable from a
+  // refusal unless quoting is respected.
+  const body = (verified) => [
+    '## What', 'One sentence.',
+    '## Why', 'Because of the reason.',
+    '## How I verified', verified,
+    'Assisted-by: agent:model',
+  ].join('\n\n');
+  const fails = (text) => validateBody(body(text), 142, config)
+    .failures.some((f) => f.check === '## How I verified');
+  const run = '`node --test` -> 41 passed';
+
+  // Inline code is a quotation, not a claim.
+  assert.equal(fails(`${run}\n\nThe test rejects a bare \`N/A\`, a \`TODO\`, and \`tested locally\`.`), false);
+  // So is a fenced block, which is where command output belongs.
+  assert.equal(fails(`${run}\n\n\`\`\`\nN/A\nTODO\n\`\`\``), false);
+  // Unquoted, they are still a refusal.
+  assert.equal(fails(`${run}\n\nN/A`), true);
+  assert.equal(fails(`${run}\n\ntested locally`), true);
+  // Stripping the quotes must not also strip the evidence: a section whose only
+  // command sits in a fence still passes, because hasCommandAndResult reads the
+  // raw section rather than the stripped one.
+  assert.equal(fails('```\n$ node --test\nℹ pass 41\n```'), false);
+});

@@ -444,11 +444,20 @@ export function validateBody(body, issueNumber, config = DEFAULT_CONFIG) {
   // "TODO" or "N/A" is still a refusal, and the guard must still see it.
   // A bare N/A, a TODO, "tested locally", and a `Proof: n/a` with no reason all
   // still fail.
+  // Quoted text is not a claim. A body that explains the rule inside the section
+  // the rule reads — "a bare `N/A`, a `TODO`, \"tested locally\"" — was failed by
+  // its own explanation, and the message named nothing. Drop fenced blocks and
+  // inline code before testing for a refusal to answer. Only this test is
+  // affected: hasCommandAndResult still reads the raw section, because a command
+  // and its output belong in a code block.
   const claimed = verified === null ? null
-    : verified.split('\n').map((line) => {
-      const hatch = PROOF_NA_LINE.exec(line);
-      return hatch ? hatch[1] : line;
-    }).join('\n');
+    : verified
+      .replace(/^ {0,3}(`{3,}|~{3,})[\s\S]*?^ {0,3}\1[ \t]*$/gm, '')
+      .replace(/`[^`\n]*`/g, '')
+      .split('\n').map((line) => {
+        const hatch = PROOF_NA_LINE.exec(line);
+        return hatch ? hatch[1] : line;
+      }).join('\n');
   if (!verified || /\b(?:N\/A|TODO|tested locally)\b/i.test(claimed) || !hasCommandAndResult(verified)) {
     failures.push(fail(
       '## How I verified',
