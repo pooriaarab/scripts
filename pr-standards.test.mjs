@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 import {
@@ -736,4 +737,37 @@ test('proof: a stray fence never swallows a screenshot, but never grants a waive
   // A properly closed fence still hides what it wraps, from both callers.
   const closed = body('```', `![quoted](${url('aaa')})`, '```');
   assert.equal(failed(checkProof(closed, uiFiles, [], config)), true);
+});
+
+test('the rollout template states a decision, never a copy of a default', () => {
+  // A copied default is not a no-op. loadConfig merges the file over
+  // DEFAULT_CONFIG, so a repo carrying the full set is pinned to the values of
+  // the day it was rolled out, and a fixed default never reaches it -- which is
+  // the opposite of what one central checker is for.
+  const template = JSON.parse(readFileSync(new URL('./pr-standards-templates/pr-standards.json', import.meta.url), 'utf8'));
+  for (const [key, value] of Object.entries(template)) {
+    if (key === 'prefix') continue;
+    assert.notDeepEqual(value, DEFAULT_CONFIG[key], `${key} in the template equals the default, so it pins every rolled-out repo to today's value`);
+  }
+  // The placeholder the rollout substitutes must survive, or every repo gets
+  // the literal string as its prefix.
+  assert.equal(template.prefix, '__PREFIX__');
+});
+
+test('a lockfile is excluded wherever a workspace keeps it', () => {
+  // The explicit lockfile names were anchored at the repo root, so a monorepo
+  // counted apps/*/package-lock.json against the 500-line cap and a dependency
+  // bump failed the size check on generated lines nobody reads.
+  for (const path of [
+    'package-lock.json', 'apps/website/package-lock.json',
+    'apps/api/bun.lockb', 'packages/x/pnpm-lock.yaml',
+    'crates/y/Cargo.lock', 'services/z/yarn.lock',
+  ]) {
+    assert.ok(
+      DEFAULT_CONFIG.excludeGlobs.some((glob) => matchesGlob(path, glob)),
+      `${path} is counted against the cap`,
+    );
+  }
+  // Still counts a real source file that merely lives near one.
+  assert.equal(DEFAULT_CONFIG.excludeGlobs.some((glob) => matchesGlob('apps/website/src/lock-screen.ts', glob)), false);
 });

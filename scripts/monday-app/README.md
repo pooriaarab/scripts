@@ -9,6 +9,27 @@ cd integrations/<app>
 npm install
 npm run build             # tsc --noEmit && vite build
 ```
+## Pre-submission checks
+
+Run the two cheap checks that caught real problems before opening the ~25-field
+submission form (see the `monday-app-submission` skill for the full Developer
+Center playbook):
+
+```bash
+./check-app.mjs --client-id <clientId>                    # install link is live
+./check-app.mjs --api-base <url> --api-key <key>          # reviewer key works
+./check-app.mjs --client-id <id> --api-base <url> --api-key <key>   # both
+
+MONDAY_API_KEY=<key> ./check-app.mjs --api-base <url>      # key via env, not argv
+```
+
+The client-id check follows `auth.monday.com/oauth2/authorize?...response_type=install`
+and asserts the 302's `oauth_payload_token` JWT decodes to that client id. The
+api-key check asserts `GET /posts` and `GET /accounts` both return 200 — a key
+that worked in a previous session had expired silently by submission time, so
+test immediately before submitting. Exit 0 = pass, 1 = a check failed,
+2 = usage error.
+
 Submit via the monday Developer Center (**portal-review** — no listing API; the
 `@mondaydotcomorg/apps-cli` deploys code, not the listing). No-code / "vibe code"
 apps are not eligible. Public hosting URL required (your host or monday code).
