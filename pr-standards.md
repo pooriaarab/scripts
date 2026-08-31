@@ -80,7 +80,11 @@ Four things, all required:
   A reference inside an HTML comment does not count, so an unedited template
   cannot trip it.
 - `## How I verified` must name a command and its result. `N/A`, `TODO`, `tested
-  locally`, and an unedited template comment all fail.
+  locally`, and an unedited template comment all fail. A change with no visible
+  surface to click through or screenshot still needs a command and its result;
+  add `Proof: n/a — <reason>` alongside it to say why there is nothing further
+  to show. The reason is not optional, and the hatch never waives the command
+  and its result — only the extra, visible proof.
 - Body under 120 characters fails. A description that only restates the diff is
   not a description.
 - The body must contain an `Assisted-by: <agent>:<model>` line. It discloses which
