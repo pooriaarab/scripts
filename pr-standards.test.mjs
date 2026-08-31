@@ -1210,3 +1210,37 @@ test('a fence closed with more characters than it opened is still a fence', () =
   ].join('\n');
   assert.equal(failed(checkProof(quotedHatch, uiFiles, [], config)), true);
 });
+
+test('proof: a URL quoted in a fence is not an embed, wherever the fence closes', () => {
+  // Two automated cycles on #66 wrote this behaviour from scratch -- once as
+  // blankFencedCode, once as stripCodeSpans -- while this branch's scanner
+  // already did it correctly. Both reimplementations backreferenced the opening
+  // fence's exact length and so missed a 3-open/4-close block; one failed
+  // closed and swallowed real evidence, the other failed open and let the
+  // upload docs' own example count as proof. The scanner here gets all four
+  // cases right, and now says so.
+  const uiFiles = [{ filename: 'src/components/Button.tsx', status: 'modified' }];
+  const a = 'https://github.com/user-attachments/assets/abc';
+  const b = 'https://github.com/user-attachments/assets/def';
+  const failed = (body) => checkProof(body, uiFiles, [], config)
+    .failures.some((f) => f.check === 'proof of a visible change');
+  const section = (verified, extraWhat = '') => [
+    'Closes #142', '', '## What',
+    `Fixes the onboarding drop-off after step three.${extraWhat}`, '',
+    '## Why', 'Issue #142 reports that users lose their progress at this step. This change keeps the progress state.', '',
+    '## How I verified', verified, '', 'Assisted-by: claude-personal:claude-opus-5',
+  ].join('\n');
+  const embeds = `![before](${a})\n![after](${b})`;
+
+  // Quoting the upload command's example URLs is not proof, on either closer.
+  for (const close of ['```', '````']) {
+    assert.equal(failed(section(['```', `curl ... ${a}`, `curl ... ${b}`, close].join('\n'))), true,
+      `a fence closed with ${close} must still hide what it wraps`);
+  }
+
+  // A real embed below the block still counts.
+  assert.equal(failed(section(['```', `curl ... ${a}`, '````', embeds].join('\n'))), false);
+
+  // And the embeds have to be under How I verified, where the reviewer looks.
+  assert.equal(failed(section('bun test -> 214 passed', `\n${embeds}`)), true);
+});
