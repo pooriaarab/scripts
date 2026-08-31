@@ -392,11 +392,19 @@ function countUserAttachments(body) {
   return matches ? matches.length : 0;
 }
 
+// The escape hatch, in the one form the checker accepts. It is shared with
+// validateBody's N/A guard: that guard rejects a How I verified section which
+// refuses to answer, and a hatch with a stated reason is an answer. Without the
+// exemption the hatch failed the body check wherever the documentation says to
+// write it, so a change with no visible surface could not pass at all -- the two
+// rules this feature adds contradicted each other.
+const PROOF_NA_LINE = /^\s*Proof:\s*n\/a\s*[—–-]\s*(.+)\s*$/i;
+
 function hasValidProofNa(body) {
   const visible = String(body || '').replace(/<!--[\s\S]*?-->/g, '');
   const lines = visible.split('\n');
   for (const line of lines) {
-    const match = /^\s*Proof:\s*n\/a\s*[—–-]\s*(.+)\s*$/i.exec(line);
+    const match = PROOF_NA_LINE.exec(line);
     if (match && match[1].trim().length >= 20) return true;
   }
   return false;
@@ -546,7 +554,11 @@ export function validateBody(body, issueNumber, config = DEFAULT_CONFIG) {
   if (!why) {
     failures.push(fail('PR body section', 'missing ## Why', '## Why with the problem and reason for the fix', 'Add a ## Why section.'));
   }
-  if (!verified || /\b(?:N\/A|TODO|tested locally)\b/i.test(verified) || !hasCommandAndResult(verified)) {
+  // Drop a valid hatch line before testing for a refusal to answer, so the
+  // hatch does not read as one. A bare "N/A" still fails.
+  const verifiedWithoutHatch = verified === null ? null
+    : verified.split('\n').filter((line) => !PROOF_NA_LINE.test(line)).join('\n');
+  if (!verified || /\b(?:N\/A|TODO|tested locally)\b/i.test(verifiedWithoutHatch) || !hasCommandAndResult(verified)) {
     failures.push(fail(
       '## How I verified',
       verified || 'missing',

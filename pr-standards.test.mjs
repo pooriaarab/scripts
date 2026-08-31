@@ -671,3 +671,24 @@ test('proof: the owner label and requireProof clear the checks', () => {
   const off = { ...config, requireProof: false };
   assert.equal(checkProof(validBody, [...uiFiles, ...media], [], off).failures.length, 0);
 });
+
+test('the documented proof hatch is not a refusal to answer', () => {
+  // The two rules this feature adds contradicted each other. checkProof accepts
+  // `Proof: n/a — <reason>` and the docs say to write it under How I verified;
+  // validateBody rejected any N/A in that section. So a change with no visible
+  // surface could not pass at all, written exactly where it was told to write
+  // it. Found by hitting it on this feature's own pull request.
+  const section = (...lines) => [
+    'Closes #64', '', '## What', 'One sentence.', '', '## Why', 'Because.', '',
+    '## How I verified', ...lines, '', 'Assisted-by: agent:model',
+  ].join('\n');
+  const cfg = { ...DEFAULT_CONFIG, prefix: 'scr' };
+  const evidence = '$ node --test pr-standards.test.mjs\ntests 43 / pass 43 / fail 0';
+
+  assert.equal(validateBody(section(evidence, '', 'Proof: n/a — a checker with no user-visible surface'), 64, cfg).ok, true);
+
+  // A bare refusal still fails, which is what the guard is for.
+  for (const refusal of ['N/A', 'n/a', 'TODO', 'tested locally', 'Proof: n/a']) {
+    assert.equal(validateBody(section(evidence, '', refusal), 64, cfg).ok, false, `${refusal} should still fail`);
+  }
+});
