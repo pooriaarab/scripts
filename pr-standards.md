@@ -24,7 +24,7 @@ Everything below is that sentence, made checkable.
 
 | Part | Rule |
 |---|---|
-| `prefix` | 2–4 lowercase letters. One per repo, fixed. Read from `.github/pr-standards.json`. |
+| `prefix` | 2–4 lowercase letters. One per repo, fixed. Read from repo config, then the bundled fleet registry, then derived from the repo name. |
 | `issue` | A GitHub issue number that **exists and is open**. No issue, no branch. No `0`, and no leading zeros, so one issue has exactly one branch name. |
 | `slug` | `[a-z0-9]+(-[a-z0-9]+)*`, 3–48 characters. Describes the change, not the file. |
 
@@ -147,8 +147,9 @@ belongs to the review council, see the scope lens in `vibecodereview`.
 
 ## Configuration
 
-Each repo carries `.github/pr-standards.json`. The rollout writes it; the check
-reads it; nothing fetches a central registry at check time.
+Each repo may carry `.github/pr-standards.json`. The rollout writes it, and the
+checker uses its prefix first. Without that prefix, the checker reads the
+bundled `repo-prefixes.json` registry, then derives a prefix for a new repo.
 
 **The file states what the repo decides, and nothing else.** A fresh rollout
 decides one thing:
