@@ -393,8 +393,20 @@ function hasCommandAndResult(text) {
 // Proof helpers — an agent can type "tested locally" for free; a screenshot
 // or a real command output costs work, so proof is the part worth checking.
 // A user-attachments URL is the only proof that does not bloat the repo.
+//
+// A real embed is never fenced: the documented upload flow embeds an image as
+// `![alt](url)` or a bare URL on its own line, never inside a code block. So a
+// URL that only appears inside a fenced block or inline code -- for instance
+// an agent quoting the upload command's example URL as "proof" -- is not a
+// real attachment. Strip fences and inline code before counting.
+function stripCodeSpans(text) {
+  return String(text)
+    .replace(/^ {0,3}(`{3,}|~{3,})[\s\S]*?^ {0,3}\1[ \t]*$/gm, '')
+    .replace(/`[^`\n]*`/g, '');
+}
+
 function countUserAttachments(body) {
-  const visible = String(body || '').replace(/<!--[\s\S]*?-->/g, '');
+  const visible = stripCodeSpans(String(body || '').replace(/<!--[\s\S]*?-->/g, ''));
   const matches = visible.match(/https:\/\/github\.com\/user-attachments\/assets\/[^\s"'\)\]]+/g);
   if (!matches) return 0;
   // Distinct assets, not link count. The threshold asks for before AND after,
@@ -408,7 +420,7 @@ function countUserAttachments(body) {
 }
 
 function hasValidProofNa(body) {
-  const visible = String(body || '').replace(/<!--[\s\S]*?-->/g, '');
+  const visible = stripCodeSpans(String(body || '').replace(/<!--[\s\S]*?-->/g, ''));
   const lines = visible.split('\n');
   for (const line of lines) {
     const match = PROOF_NA_LINE.exec(line);
@@ -485,9 +497,12 @@ export function checkProof(body, files, labels = [], config = DEFAULT_CONFIG) {
 
   // A visual change reviewed only as code is reviewed only half. The escape
   // hatch is a stated reason, which the review council judges — the checker
-  // cannot tell a real one from "n/a".
-  if (hasUiDiff(files || [], config) && !hasValidProofNa(body)) {
-    const count = countUserAttachments(body);
+  // cannot tell a real one from "n/a". Both live under ## How I verified per
+  // the docs, so an attachment or hatch line pasted under ## What or ## Why
+  // does not count: the evidence belongs where the reviewer is told to look.
+  const verifiedSection = sectionBody(body, 'How I verified') || '';
+  if (hasUiDiff(files || [], config) && !hasValidProofNa(verifiedSection)) {
+    const count = countUserAttachments(verifiedSection);
     if (count === 0) {
       failures.push(fail(
         'proof of a visible change',

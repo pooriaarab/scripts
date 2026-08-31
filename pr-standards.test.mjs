@@ -713,6 +713,37 @@ test('proof: the same image pasted twice is one image', () => {
   assert.equal(warned(checkProof(`${validBody}\nBefore: ${bare('abc')}. After: ${url('abc')}`, uiFiles, [], config)), true);
 });
 
+test('proof: attachments only count inside How I verified, and never inside a fence', () => {
+  const uiFiles = [{ filename: 'src/components/Button.tsx', status: 'modified' }];
+  const failed = (r) => r.failures.some((f) => f.check === 'proof of a visible change');
+  const section = (verified, extraWhat = '') => [
+    'Closes #142', '', '## What',
+    `Fixes the onboarding drop-off after step three.${extraWhat}`, '',
+    '## Why', 'Issue #142 reports that users lose their progress at this step. This change keeps the progress state.', '',
+    '## How I verified', verified, '', 'Assisted-by: claude-personal:claude-opus-5',
+  ].join('\n');
+
+  // A URL only quoted inside a fenced code block -- for example the example
+  // command from the upload instructions -- is not a real embed and must not
+  // clear the check, or pasting the docs' own example satisfies it for free.
+  const fenced = [
+    '```',
+    'curl ... user-attachments/assets?name=before.png ... https://github.com/user-attachments/assets/abc',
+    'curl ... user-attachments/assets?name=after.png ... https://github.com/user-attachments/assets/def',
+    '```',
+  ].join('\n');
+  assert.equal(failed(checkProof(section(fenced), uiFiles, [], config)), true);
+
+  // A real embed still counts once it is outside the fence.
+  const real = `${fenced}\n![before](https://github.com/user-attachments/assets/abc)\n![after](https://github.com/user-attachments/assets/def)`;
+  assert.equal(failed(checkProof(section(real), uiFiles, [], config)), false);
+
+  // The docs say the embeds live under How I verified. Two real embeds pasted
+  // under What instead must not satisfy a check that reads the wrong section.
+  const inWhat = '\n![before](https://github.com/user-attachments/assets/abc)\n![after](https://github.com/user-attachments/assets/def)';
+  assert.equal(failed(checkProof(section('bun test -> 214 passed', inWhat), uiFiles, [], config)), true);
+});
+
 test('the proof escape hatch does not read as a refusal to answer', () => {
   // `Proof: n/a — <reason>` is the documented escape hatch, and the docs say to
   // write it under `## How I verified`. The N/A guard matched it there, so
