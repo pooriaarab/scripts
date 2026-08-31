@@ -491,3 +491,40 @@ test('a lockfile is excluded wherever a workspace keeps it', () => {
   // Still counts a real source file that merely lives near one.
   assert.equal(DEFAULT_CONFIG.excludeGlobs.some((glob) => matchesGlob('apps/website/src/lock-screen.ts', glob)), false);
 });
+
+test('the CI path reads the prefix registry, not only a derived guess', () => {
+  // runPr used to hand fetchRemoteConfig an already-derived prefix where it
+  // expected the repository name, so every registry lookup missed. The fleet
+  // check then guessed a prefix for every repo that had not adopted a config,
+  // and the adoption pull request — whose branch the rollout names FROM the
+  // registry — failed the branch name, the title and the closing reference as
+  // three findings off that one wrong guess.
+  const registry = JSON.parse(readFileSync(new URL('./repo-prefixes.json', import.meta.url), 'utf8'));
+
+  // A name whose registry prefix differs from what derivation produces is the
+  // only case that can catch this. vibecodereview derives `vib` and is
+  // registered as `vcr`.
+  const divergent = Object.entries(registry).find(([name, prefix]) => derivePrefix(name) !== prefix);
+  assert.ok(divergent, 'registry has no entry that differs from derivation, so this test proves nothing');
+
+  const source = readFileSync(new URL('./pr-standards.mjs', import.meta.url), 'utf8');
+  assert.ok(
+    /fetchRemoteConfig\(options\.repo,\s*repoName,/.test(source),
+    'runPr must pass the repository name to fetchRemoteConfig, never a derived prefix',
+  );
+  assert.ok(
+    /const fallback = resolveFallbackPrefix\(repoName\)/.test(source),
+    'fetchRemoteConfig must consult the registry before deriving',
+  );
+});
+
+test('the registry beats derivation, and a missing entry still derives', () => {
+  const registry = JSON.parse(readFileSync(new URL('./repo-prefixes.json', import.meta.url), 'utf8'));
+  const [name, prefix] = Object.entries(registry).find(([n, p]) => derivePrefix(n) !== p);
+  // The registry wins where the two disagree...
+  assert.notEqual(derivePrefix(name), prefix);
+  // ...and a repo the registry has never heard of still gets a usable prefix,
+  // because a new repo must not be blocked on an entry nobody has added yet.
+  assert.equal(derivePrefix('a-brand-new-repo'), 'abnr');
+  assert.ok(/^[a-z]{2,4}$/.test(derivePrefix('a-brand-new-repo')));
+});
