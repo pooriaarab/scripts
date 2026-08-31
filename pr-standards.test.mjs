@@ -746,6 +746,22 @@ test('proof: a stray fence never swallows a screenshot, but never grants a waive
   assert.equal(failed(checkProof(closed, uiFiles, [], config)), true);
 });
 
+test('proof: a CRLF body still recognizes a closed fence', () => {
+  const uiFiles = [{ filename: 'src/components/Button.tsx', status: 'modified' }];
+  const url = (id) => `https://github.com/user-attachments/assets/${id}`;
+  const failed = (r) => r.failures.some((f) => f.check === 'proof of a visible change');
+  const body = (...lines) => ['## What', 'x', '## Why', 'y', '## How I verified', 'ran it -> pass', ...lines, 'Assisted-by: agent:model'].join('\r\n');
+
+  // A closing fence line ending in \r still closes the fence, so the two
+  // quoted URLs inside it must not count as real before-and-after proof.
+  const closed = body('```', `![quoted](${url('aaa')})`, `![quoted](${url('bbb')})`, '```');
+  assert.equal(failed(checkProof(closed, uiFiles, [], config)), true);
+
+  // Real evidence after the closed fence still counts.
+  const closedThenReal = body('```', 'an example', '```', `![before](${url('ccc')})`, `![after](${url('ddd')})`);
+  assert.equal(failed(checkProof(closedThenReal, uiFiles, [], config)), false);
+});
+
 test('the rollout template states a decision, never a copy of a default', () => {
   // A copied default is not a no-op. loadConfig merges the file over
   // DEFAULT_CONFIG, so a repo carrying the full set is pinned to the values of

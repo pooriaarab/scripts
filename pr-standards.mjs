@@ -370,7 +370,11 @@ function hasCommandAndResult(text) {
 // that documents this checker quotes its own escape hatch, and a quoted rule
 // must not satisfy the rule it quotes.
 function visibleBody(body, { unmatchedFenceHides }) {
-  const lines = String(body || '').split('\n');
+  // Normalize CRLF up front: a closing fence on a line that ends in a bare
+  // \r never matched the closer regex, so a CRLF-bodied PR left an otherwise
+  // closed fence looking unclosed and its contents — including any
+  // attachment URLs meant only as a quoted example — fell through as visible.
+  const lines = String(body || '').replace(/\r\n/g, '\n').split('\n');
   const visible = [];
   let fence = null;
   let inComment = false;
