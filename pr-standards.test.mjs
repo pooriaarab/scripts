@@ -663,4 +663,10 @@ test('a quoted rule name is not a refusal to answer', () => {
   // command sits in a fence still passes, because hasCommandAndResult reads the
   // raw section rather than the stripped one.
   assert.equal(fails('```\n$ node --test\nℹ pass 41\n```'), false);
+  // A fence closed with more backticks than it opened with is still valid
+  // Markdown (CommonMark only requires the closing run be at least as long),
+  // so its quoted N/A must be stripped too.
+  assert.equal(fails(`${run}\n\n\`\`\`\nN/A\nTODO\n\`\`\`\``), false);
+  // An inline span delimited by more than one backtick is still a quotation.
+  assert.equal(fails(`${run}\n\nThe guard rejects \`\`N/A\`\` too.`), false);
 });
