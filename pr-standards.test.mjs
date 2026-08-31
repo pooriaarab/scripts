@@ -569,6 +569,27 @@ test('the rollout template states a decision, never a copy of a default', () => 
   assert.equal(template.prefix, '__PREFIX__');
 });
 
+test('the managed AGENTS block has the spacing Prettier requires', () => {
+  // Prettier reads a comment followed immediately by content as one block and
+  // reformats it, so an AGENTS.md written by the rollout failed
+  // `prettier --check` and took a repo's whole verify job with it. The blank
+  // lines either side of the markers are what keep them separate.
+  //
+  // The assertions deliberately do not name the block's text. What has to hold
+  // is the shape at the two boundaries; pinning the last line of prose as well
+  // would fail this test for an edit that changes nothing Prettier cares about.
+  const block = readFileSync(new URL('./pr-standards-templates/agents-block.md', import.meta.url), 'utf8');
+  const lines = block.trimEnd().split('\n');
+
+  assert.equal(lines[0], '<!-- pr-standards:start -->');
+  assert.equal(lines[1], '', 'no blank line after the opening marker');
+  assert.notEqual(lines[2].trim(), '', 'the block should start right after one blank line');
+
+  assert.equal(lines.at(-1), '<!-- pr-standards:end -->');
+  assert.equal(lines.at(-2), '', 'no blank line before the closing marker');
+  assert.notEqual(lines.at(-3).trim(), '', 'the block should end right before one blank line');
+});
+
 test('the CI bundle includes the registry beside the checker', () => {
   // The checker reads repo-prefixes.json from its own directory, so the fetch
   // step has to put it there. Unpacking the whole tag does that for free; a
