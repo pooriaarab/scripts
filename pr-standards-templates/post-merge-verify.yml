@@ -19,7 +19,12 @@ jobs:
     name: Verify the merged commit is live
     # push fires on every branch, and not every repo in the fleet defaults to
     # `main` — skip anything that isn't this repo's actual default branch.
-    if: github.event_name == 'workflow_dispatch' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    #
+    # workflow_dispatch is held to the same rule rather than excused from it. It
+    # runs on whatever ref it was started from, so dispatching off a feature
+    # branch compared that branch's tip against the production live SHA and
+    # filed a "deploy did not go live" issue about a commit nobody deployed.
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
     # The job only waits on an external API, so it takes the smallest runner.
     runs-on: ubicloud-standard-2
     timeout-minutes: 20
