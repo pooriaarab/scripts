@@ -24,7 +24,7 @@ Everything below is that sentence, made checkable.
 
 | Part | Rule |
 |---|---|
-| `prefix` | 2–4 lowercase letters. One per repo, fixed. Read from `.github/pr-standards.json`. |
+| `prefix` | 2–4 lowercase letters. One per repo, fixed. Read from repo config, then the bundled fleet registry, then derived from the repo name. |
 | `issue` | A GitHub issue number that **exists and is open**. No issue, no branch. No `0`, and no leading zeros, so one issue has exactly one branch name. |
 | `slug` | `[a-z0-9]+(-[a-z0-9]+)*`, 3–48 characters. Describes the change, not the file. |
 
@@ -213,8 +213,9 @@ belongs to the review council, see the scope lens in `vibecodereview`.
 
 ## Configuration
 
-Each repo carries `.github/pr-standards.json`. The rollout writes it; the check
-reads it; nothing fetches a central registry at check time.
+Each repo may carry `.github/pr-standards.json`. The rollout writes it, and the
+checker uses its prefix first. Without that prefix, the checker reads the
+bundled `repo-prefixes.json` registry, then derives a prefix for a new repo.
 
 **The file states what the repo decides, and nothing else.** A fresh rollout
 decides one thing:
@@ -256,6 +257,35 @@ because a change that closes an issue is not a chore and belongs on a numbered
 branch. The obvious implementation gets this wrong. Written as "there is no issue
 number, so skip the checks that need one", the knob quietly disables the title and
 body rules too, and becomes a way to opt out of the whole standard.
+
+## Generated file drift
+
+A hand-edit to a generated file is a defect, not a shortcut. The edit reads
+correctly in review, and from then on the file disagrees with its generator: the
+next regeneration either reverts the change or keeps it and drifts further.
+Reading the diff cannot catch this. Running the generator can.
+
+The `generated-drift` workflow runs each command in `generators` on every pull
+request, then fails when `git status --porcelain` reports anything. The log
+carries the offending paths and `git diff --stat`, and the job leaves one comment
+naming the drifted files. It updates that comment on re-runs rather than posting
+a second one.
+
+Two keys in `.github/pr-standards.json` configure it:
+
+- `generators` — shell commands, in order, for example
+  `["bun run db:generate", "bun run build:types"]`. Absent or empty means the job
+  skips and passes, so a repo with no generators stays green.
+- `generatorSetup` — one optional command that runs first, for example
+  `bun install --frozen-lockfile`.
+
+`pr-standards-templates/generated-drift.test.sh` runs the embedded check against a
+throwaway git repo. It exists because the first version read its config through an
+unexported shell variable: every lookup raised, every raise was swallowed, and the
+job passed on every repo without running a generator. A check that silently never
+runs is worse than no check, because its green tick is a lie.
+
+Install it with `pr-standards-rollout --with-generated-drift`.
 
 ## The four layers
 
@@ -314,6 +344,41 @@ treat them as early feedback, not enforcement.
 
 To install the standard itself in a repo — the config, the PR template and the
 workflow — use `pr-standards-rollout`.
+
+## VISION.md
+
+The checker asks whether a pull request is one thing. The review council asks
+whether it is well built. Neither can ask whether the change belongs in this repo
+at all, because nothing in the repo says what the repo is for. A change can pass
+every check, do exactly one thing, carry real proof, and still be the wrong change.
+
+`VISION.md` at the repo root closes that gap. The council reads it when the repo
+has one. `pr-standards-templates/VISION.md` is the template.
+
+Six sections, and only one of them does the work:
+
+| Section | What it answers |
+|---|---|
+| What this is | The repo in a user's words |
+| Who it is for | One named reader, never "everyone" |
+| What good looks like | Three to five observable outcomes |
+| **Explicitly not this** | **Three to five changes that would be well built and still wrong here** |
+| How it pays for itself | The business model, or whose time it saves |
+| The current bet | One sentence with a date |
+
+Write "Explicitly not this" last, and write it from requests you have already
+turned down. Every other section tells a reviewer what to accept. Only that one
+tells it what to reject, and a vision that rejects nothing changes no review.
+
+Two failures to avoid:
+
+- **A template left as prompts.** The council judges against whatever text is
+  there. Placeholder prose reads as a vision that permits everything, which is
+  worse than no file, because the absent file at least makes the council fall
+  back on the diff and the issue.
+- **A stale bet.** "The current bet" carries a date so drift is visible. A repo
+  whose bet has not moved in a year is either finished or abandoned, and the
+  vision should say which.
 
 ## Usage
 
