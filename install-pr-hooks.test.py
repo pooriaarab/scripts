@@ -384,4 +384,38 @@ def test_relative_global_hooks_path_resolves_against_repo():
 if not test_relative_global_hooks_path_resolves_against_repo():
     ALL_OK = False
 
+
+def test_global_hooks_path_matching_the_default_needs_no_delegator():
+    """A global hooksPath that just spells out the default must still install.
+
+    core.hooksPath resolves a relative value against each repo's own working
+    tree, so a global (or system) value of ".git/hooks" lands on the exact
+    same directory as the plain default for every repo -- there is no
+    separate shared directory here, and nothing to delegate from. Demanding
+    the delegation marker in that case can never succeed: it asks the hook
+    this run is about to write to already declare, before being written,
+    that it forwards to itself.
+    """
+    import shutil, subprocess as sp
+    d = tempfile.mkdtemp(); repo = f"{d}/repo"
+    os.makedirs(f"{repo}/.github")
+    cfg = f"{d}/gitconfig"
+    pathlib.Path(cfg).write_text("[core]\n\thooksPath = .git/hooks\n")
+    env = {**os.environ, "GIT_CONFIG_GLOBAL": cfg}
+    sp.run(["git", "-C", repo, "init", "-q"], check=True, env=env)
+    sp.run(["git", "-C", repo, "remote", "add", "origin",
+            "https://github.com/pooriaarab/testrepo.git"], check=True, env=env)
+    pathlib.Path(f"{repo}/.github/pr-standards.json").write_text('{"prefix":"tt"}')
+    out = sp.run([str(HERE / "install-pr-hooks"), "--apply", "--root", d],
+                 capture_output=True, text=True, env=env).stdout
+    installed = os.path.isfile(f"{repo}/.git/hooks/pre-push")
+    shutil.rmtree(d, ignore_errors=True)
+    ok = installed and "SKIP" not in out
+    print(f"  {'OK ' if ok else 'FAIL'} global hooksPath matching the default installs directly   installed={installed} want=True")
+    return ok
+
+
+if not test_global_hooks_path_matching_the_default_needs_no_delegator():
+    ALL_OK = False
+
 sys.exit(0 if ALL_OK else 1)

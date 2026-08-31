@@ -426,7 +426,17 @@ for root in "${ROOTS[@]}"; do
         # Without this branch the git-hook layer of the standard cannot exist on
         # any machine with a global hooksPath, which is the common setup and the
         # one it was written for: a rollout here reported 71 skips, 0 installs.
-        if hooks_path_delegates "$resolved_hooks_path"; then
+        if [ "$resolved_hooks_path" = "$gitdir/hooks" ]; then
+          # A relative hooksPath resolves against each repo's own working
+          # tree, so a global or system value that happens to spell out the
+          # plain default (e.g. "core.hooksPath = .git/hooks") resolves right
+          # back to $gitdir/hooks for every repo -- there is no separate
+          # shared directory here, so there is nothing to delegate from.
+          # Requiring the marker in this case can never succeed: it would ask
+          # this exact file to declare, before being written, that it forwards
+          # to itself.
+          :
+        elif hooks_path_delegates "$resolved_hooks_path"; then
           if [ "$delegation_noted" = 0 ]; then
             echo "note: core.hooksPath is $hooks_path and its pre-push delegates to"
             echo "      each repo's own hook, so hooks install into .git/hooks as usual."
