@@ -380,11 +380,29 @@ function isQuoted(line) {
   return /^(?:\s{0,3}>\s?)+/.test(line);
 }
 
+// A fence opener may follow a list marker. GitHub reads ``` inside a list item
+// as a real fence, and a scan that did not swallowed the quoted example and
+// counted it as evidence — a `Proof: n/a` inside such a block granted a real
+// waiver. Capture where the fence characters start, because a fence opened in a
+// list closes at that same column, not at column zero.
+function fenceOpener(line) {
+  const match = /^( {0,3})((?:[-*+]|\d{1,9}[.)])[ \t]+)?(`{3,}|~{3,})/.exec(line);
+  if (!match) return null;
+  return { char: match[3][0], len: match[3].length, indent: match[1].length + (match[2] || '').length };
+}
+
+// The closer sits at the fence's own column, give or take the three spaces
+// GitHub always forgives. A closer test pinned to column zero left a fence
+// opened in a list item running to the end of the body.
+function fenceCloser(fence) {
+  return new RegExp(`^ {0,${fence.indent + 3}}[${fence.char}]{${fence.len},}[ \\t]*$`);
+}
+
 // Look ahead for the closer, within the same blockquote container if the
 // opener was quoted. Nothing is consumed; this only answers whether the fence
 // is real.
 function hasCloser(lines, openIndex, fence, quoted) {
-  const closer = new RegExp(`^ {0,3}[${fence.char}]{${fence.len},}[ \\t]*$`);
+  const closer = fenceCloser(fence);
   for (let index = openIndex + 1; index < lines.length; index += 1) {
     const line = lines[index];
     if (quoted && !isQuoted(line)) return false;
@@ -426,7 +444,7 @@ function hasCloser(lines, openIndex, fence, quoted) {
       if (fence.quoted && !isQuoted(line)) {
         fence = null;
       } else {
-        if (new RegExp(`^ {0,3}[${fence.char}]{${fence.len},}[ \\t]*$`).test(unquoted(line))) fence = null;
+        if (fenceCloser(fence).test(unquoted(line))) fence = null;
         continue;
       }
     }
@@ -452,12 +470,12 @@ function hasCloser(lines, openIndex, fence, quoted) {
     // failing a pull request that had done nothing wrong. An over-eager fence
     // costs a false failure; a missed one costs a quoted example counted as
     // evidence. Only the first of those is worth avoiding.
-    const open = /^ {0,3}(`{3,}|~{3,})/.exec(unquoted(line));
+    const open = fenceOpener(unquoted(line));
     // Whether an unmatched opener hides what follows depends on what the
     // caller is asking, and the two questions want opposite answers. See the
     // two callers below.
-    if (open && (unmatchedFenceHides || hasCloser(lines, index, { char: open[1][0], len: open[1].length }, isQuoted(line)))) {
-      fence = { char: open[1][0], len: open[1].length, quoted: isQuoted(line) };
+    if (open && (unmatchedFenceHides || hasCloser(lines, index, open, isQuoted(line)))) {
+      fence = { ...open, quoted: isQuoted(line) };
       continue;
     }
     visible.push(line);
