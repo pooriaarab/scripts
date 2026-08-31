@@ -1,0 +1,536 @@
+#!/usr/bin/env bash
+# Measure which agent produces the most defects.
+#
+# Every merged PR carries an `Assisted-by: <agent>:<model>` trailer. This script
+# counts how often each agent's merged PRs get reverted or hot-fixed soon after
+# they land. It reports a defect rate per agent.
+#
+# A low rate on a tiny merged count means nothing. A 0% rate from two PRs does
+# not show quality; it shows a small sample. The report must show the denominator
+# next to every rate, so the reader can tell signal from noise. Read the merged
+# count before you trust the rate.
+#
+# A PR counts as a defect when, within the window after its merge on the default
+# branch, either a revert commit appears or a later merged PR touches the same
+# files and marks itself as a fix.
+set -euo pipefail
+
+usage() {
+  cat <<'USAGE'
+Usage: agent-defect-rate owner/repo [owner/repo ...] [--since YYYY-MM-DD] [--window-days N] [--json]
+  owner/repo       one or more repositories to measure (e.g. pooriaarab/scripts)
+  --since DATE     only PRs merged on/after this date (default: 90 days ago)
+  --window-days N  days after merge to look for reverts/fixes (default: 7)
+  --json           machine-readable JSON output
+  --help           show this help
+
+Reads merged PRs via gh api. For each PR it parses the Assisted-by trailer;
+a PR with no trailer counts under "unattributed". A PR is a defect when, within
+--window-days of its merge on the default branch, either a revert commit lands or
+a later merged PR touches the same files and marks itself as a fix.
+USAGE
+}
+
+# Default window.
+WINDOW_DAYS=7
+SINCE=""
+JSON=0
+REPOS=()
+
+while (( $# )); do
+  case "$1" in
+    --json) JSON=1; shift ;;
+    --since)
+      SINCE="${2:-}"
+      [[ -n "$SINCE" ]] || { echo "error: --since needs YYYY-MM-DD" >&2; exit 2; }
+      [[ "$SINCE" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || { echo "error: --since needs YYYY-MM-DD" >&2; exit 2; }
+      shift 2 ;;
+    --since=*)
+      SINCE="${1#--since=}"
+      [[ "$SINCE" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || { echo "error: --since needs YYYY-MM-DD" >&2; exit 2; }
+      shift ;;
+    --window-days)
+      WINDOW_DAYS="${2:-}"
+      [[ "$WINDOW_DAYS" =~ ^[0-9]+$ ]] || { echo "error: --window-days needs a positive integer" >&2; exit 2; }
+      WINDOW_DAYS=$((10#$WINDOW_DAYS))
+      (( WINDOW_DAYS > 0 )) || { echo "error: --window-days needs a positive integer" >&2; exit 2; }
+      shift 2 ;;
+    --window-days=*)
+      WINDOW_DAYS="${1#--window-days=}"
+      [[ "$WINDOW_DAYS" =~ ^[0-9]+$ ]] || { echo "error: --window-days needs a positive integer" >&2; exit 2; }
+      WINDOW_DAYS=$((10#$WINDOW_DAYS))
+      (( WINDOW_DAYS > 0 )) || { echo "error: --window-days needs a positive integer" >&2; exit 2; }
+      shift ;;
+    --help|-h) usage; exit 0 ;;
+    --) shift; break ;;
+    -*) echo "error: unknown flag $1" >&2; usage >&2; exit 2 ;;
+    *) REPOS+=("$1"); shift ;;
+  esac
+done
+# Collect any remaining positional args after --.
+while (( $# )); do REPOS+=("$1"); shift; done
+
+if (( ${#REPOS[@]} == 0 )); then
+  echo "error: owner/repo is required" >&2
+  usage >&2
+  exit 2
+fi
+for r in "${REPOS[@]}"; do
+  if ! [[ "$r" =~ ^[A-Za-z0-9_.\-]+/[A-Za-z0-9_.\-]+$ ]]; then
+    echo "error: owner/repo must match [A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+" >&2
+    exit 2
+  fi
+done
+
+if [[ -z "$SINCE" ]]; then
+  # Portable 90-days-ago: GNU date uses -d, BSD date uses -v.
+  if SINCE=$(date -u -d "90 days ago" +%Y-%m-%d 2>/dev/null); then
+    :
+  elif SINCE=$(date -u -v-90d +%Y-%m-%d 2>/dev/null); then
+    :
+  else
+    # Fallback via python3 when neither date flavour works.
+    SINCE=$(python3 -c 'import datetime; print((datetime.datetime.utcnow() - datetime.timedelta(days=90)).strftime("%Y-%m-%d"))')
+  fi
+fi
+
+command -v gh >/dev/null 2>&1 || { echo "error: gh CLI not found" >&2; exit 3; }
+command -v python3 >/dev/null 2>&1 || { echo "error: python3 not found" >&2; exit 3; }
+
+# All network goes through these functions so the test can stub gh on PATH.
+fetch_default_branch() {
+  local repo="$1"
+  # Do not swallow failures here: a gh auth/rate-limit/network error must abort
+  # the run, not be silently substituted with "main" for a repo whose actual
+  # default branch is something else.
+  gh api "repos/$repo" --jq '.default_branch // "main"'
+}
+
+fetch_merged_prs() {
+  local repo="$1"
+  # Fetch closed PRs and filter to merged. Use --paginate so >100 PRs are not truncated.
+  # Do not swallow failures here: a gh auth/rate-limit/network error must abort the
+  # run, not be mistaken for "this repo has no merged PRs".
+  gh api --paginate "repos/$repo/pulls?state=closed&per_page=100&sort=updated&direction=desc" \
+    --jq '[.[] | select(.merged_at != null) | {number: .number, title: .title, body: (.body // ""), mergedAt: .merged_at, baseRefName: .base.ref}]'
+}
+
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+
+# Collect PRs per repo and files.
+all_prs="$tmp/all_prs.json"
+echo "[]" > "$all_prs"
+
+for repo in "${REPOS[@]}"; do
+  branch=$(fetch_default_branch "$repo")
+  # Store branch per repo for later commit fetching. Nest by the repo's own
+  # "owner/repo" path components instead of substituting '/' with '_': repo
+  # names may themselves contain '_', so two different repos (e.g. "a_b/c" and
+  # "a/b_c") can otherwise collapse onto the same flattened filename.
+  mkdir -p "$tmp/repos/$repo"
+  echo "$branch" > "$tmp/repos/$repo/branch"
+
+  prs_raw="$tmp/prs_raw.json"
+  fetch_merged_prs "$repo" > "$prs_raw"
+  # Filter by --since and attach repo + branch label. Use python3 so we never
+  # grep JSON. Read the payload from a file rather than argv: a repo with many
+  # closed PRs (each with a full body) can produce JSON larger than the OS
+  # argument-size limit.
+  REPO="$repo" SINCE="$SINCE" BRANCH="$branch" python3 - "$tmp" "$prs_raw" <<'PY'
+import json, os, sys
+tmp = sys.argv[1]
+with open(sys.argv[2]) as f:
+    raw = f.read()
+repo = os.environ["REPO"]
+since = os.environ["SINCE"]
+branch = os.environ["BRANCH"]
+
+# `gh api --paginate` runs the --jq filter once per page, so a repo with more
+# than one page prints one JSON array per page back to back (e.g. "[...][...]"),
+# which is not valid as a single json.loads(). Decode each concatenated
+# top-level value in turn and flatten them instead of treating the whole
+# response as one document.
+def load_json_docs(text):
+    decoder = json.JSONDecoder()
+    docs = []
+    idx, n = 0, len(text)
+    while idx < n:
+        while idx < n and text[idx].isspace():
+            idx += 1
+        if idx >= n:
+            break
+        obj, end = decoder.raw_decode(text, idx)
+        docs.append(obj)
+        idx = end
+    return docs
+
+prs = []
+for doc in load_json_docs(raw):
+    if isinstance(doc, list):
+        prs.extend(doc)
+    elif isinstance(doc, dict):
+        prs.append(doc)
+# Keep only PRs merged on/after since (compare date prefix) and merged into
+# the repo's default branch: revert commits are only ever fetched from that
+# branch, so a PR merged elsewhere (e.g. a release branch) could never be
+# flagged as a defect and would just understate the rate by sitting in the
+# denominator.
+filtered = []
+for p in prs:
+    merged = p.get("mergedAt") or ""
+    # mergedAt is ISO8601; compare YYYY-MM-DD prefix.
+    if merged and merged[:10] >= since and p.get("baseRefName") == branch:
+        p["repo"] = repo
+        filtered.append(p)
+old_path = os.path.join(tmp, "all_prs.json")
+try:
+    with open(old_path) as f:
+        existing = json.load(f)
+except Exception:
+    existing = []
+existing.extend(filtered)
+with open(old_path, "w") as f:
+    json.dump(existing, f)
+PY
+
+done
+
+# Enrich each PR with its file list, then look for a revert or a fix inside the
+# window. This costs one API call per merged PR, so a wide --since is slow.
+python3 - "$tmp" "$WINDOW_DAYS" <<'PY'
+import json, os, subprocess, sys, datetime
+
+tmp = sys.argv[1]
+window_days = int(sys.argv[2])
+
+with open(os.path.join(tmp, "all_prs.json")) as f:
+    prs = json.load(f)
+
+# `gh api --paginate` runs a `[...]`-shaped --jq filter once per page, so a
+# response spanning more than one page prints one JSON array per page back to
+# back. Decode each concatenated top-level value and flatten instead of
+# assuming the whole response is a single JSON document.
+def load_json_docs(text):
+    decoder = json.JSONDecoder()
+    docs = []
+    idx, n = 0, len(text)
+    while idx < n:
+        while idx < n and text[idx].isspace():
+            idx += 1
+        if idx >= n:
+            break
+        obj, end = decoder.raw_decode(text, idx)
+        docs.append(obj)
+        idx = end
+    return docs
+
+def gh_json_lists(args):
+    # Run `gh api ... --jq '[...]'` and flatten the (possibly multi-page)
+    # arrays it prints. A gh failure (auth/rate-limit/network) must abort the
+    # run rather than be silently treated as "no data".
+    out = subprocess.check_output(["gh", "api"] + args, text=True)
+    items = []
+    for doc in load_json_docs(out) if out.strip() else []:
+        if isinstance(doc, list):
+            items.extend(doc)
+    return items
+
+for pr in prs:
+    repo = pr["repo"]
+    num = pr["number"]
+    # Shell out to gh rather than urllib, so the test's fake gh on PATH
+    # intercepts this call the same way it intercepts the others.
+    pr["files"] = gh_json_lists(
+        ["--paginate", f"repos/{repo}/pulls/{num}/files", "--jq", "[.[].filename]"]
+    )
+
+with open(os.path.join(tmp, "all_prs.json"), "w") as f:
+    json.dump(prs, f)
+
+# Fetch commits per repo covering the overall window needed.
+# For each repo, find earliest and latest mergedAt among its PRs, extend latest by window_days.
+from collections import defaultdict
+import datetime
+
+def parse_iso(s):
+    try:
+        return datetime.datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except Exception:
+        return None
+
+repos = defaultdict(list)
+for pr in prs:
+    repos[pr["repo"]].append(pr)
+
+all_commits = {}
+for repo, rprs in repos.items():
+    # Read branch. Nested by "owner/repo" path components to match how it was
+    # written, so distinct repos never collide on a flattened filename.
+    branch_file = os.path.join(tmp, "repos", repo, "branch")
+    try:
+        with open(branch_file) as f:
+            branch = f.read().strip() or "main"
+    except Exception:
+        branch = "main"
+    dates = [parse_iso(p["mergedAt"]) for p in rprs if parse_iso(p["mergedAt"])]
+    if not dates:
+        all_commits[repo] = []
+        continue
+    earliest = min(dates)
+    latest = max(dates) + datetime.timedelta(days=window_days)
+    since_iso = earliest.strftime("%Y-%m-%dT%H:%M:%SZ")
+    until_iso = latest.strftime("%Y-%m-%dT%H:%M:%SZ")
+    all_commits[repo] = gh_json_lists([
+        "--paginate",
+        f"repos/{repo}/commits?sha={branch}&since={since_iso}&until={until_iso}&per_page=100",
+        "--jq", "[.[] | {message: .commit.message, date: .commit.committer.date}]",
+    ])
+
+with open(os.path.join(tmp, "commits.json"), "w") as f:
+    json.dump(all_commits, f)
+PY
+
+# If no PRs, print empty report.
+empty_check=$(python3 -c 'import json; print(len(json.load(open("'"$tmp"'/all_prs.json"))))')
+if [[ "$empty_check" == "0" ]]; then
+  if (( JSON )); then
+    python3 - "$tmp" "$SINCE" "$WINDOW_DAYS" "${REPOS[@]}" <<'PY'
+import json, sys
+tmp = sys.argv[1]
+since = sys.argv[2]
+window_days = int(sys.argv[3])
+repos = sys.argv[4:]
+print(json.dumps({"since": since, "window_days": window_days, "repos": repos, "agents": [], "total": {"merged": 0, "defects": 0, "rate": 0.0}}, indent=2))
+PY
+  else
+    echo "no merged PRs since $SINCE"
+    printf "%-28s %6s %7s %7s  %s\n" "AGENT" "MERGED" "DEFECTS" "RATE" "DEFECT PRS"
+    printf "%-28s %6s %7s %7s  %s\n" "TOTAL" "0" "0" "0.0%" "-"
+  fi
+  exit 0
+fi
+
+# Compute defect rates and render output.
+REPOS_STR="${REPOS[*]}"
+python3 - "$tmp" "$SINCE" "$WINDOW_DAYS" "$JSON" "$REPOS_STR" <<'PY'
+import json, os, sys, re, datetime
+from collections import defaultdict
+
+tmp = sys.argv[1]
+since = sys.argv[2]
+window_days = int(sys.argv[3])
+as_json = sys.argv[4] == "1"
+repos_str = sys.argv[5]
+repos = repos_str.split() if repos_str.strip() else []
+
+with open(os.path.join(tmp, "all_prs.json")) as f:
+    prs = json.load(f)
+with open(os.path.join(tmp, "commits.json")) as f:
+    all_commits = json.load(f)
+
+def parse_iso(s):
+    return datetime.datetime.fromisoformat(s.replace("Z", "+00:00"))
+
+def parse_agent(body):
+    if not body:
+        return "unattributed"
+    m = re.search(r'Assisted-by:\s*(\S+)', body)
+    if m:
+        val = m.group(1).strip()
+        # Trim trailing punctuation that is not part of the agent name.
+        val = val.rstrip('.,;)]')
+        if val:
+            return val
+    return "unattributed"
+
+def closing_issue_numbers(body, repo):
+    # Extract issue numbers from GitHub closing keywords.
+    # Matches: Close, Closes, Closed, Fix, Fixes, Fixed, Resolve, Resolves, Resolved
+    # optionally with colon, optionally cross-repo.
+    # A cross-repo reference (e.g. "Closes other/repo#123") names a different
+    # repo's issue #123, not this repo's. Drop it instead of collapsing it onto
+    # bare "#123", which would otherwise let an unrelated same-numbered issue
+    # in this repo falsely match a later "Fixes #123".
+    nums = []
+    for m in re.finditer(r'(?i)(?:close|closes|closed|fix|fixes|fixed|resolve|resolves|resolved)\s*:?\s*(?:([A-Za-z0-9_.\-]+/[A-Za-z0-9_.\-]+)\#|\#)(\d+)', body or ""):
+        ref_repo = m.group(1)
+        if ref_repo and ref_repo != repo:
+            continue
+        try:
+            nums.append(int(m.group(2)))
+        except Exception:
+            pass
+    return nums
+
+# Enrich PRs with agent and linked issues.
+for pr in prs:
+    pr["agent"] = parse_agent(pr.get("body") or "")
+    pr["linkedIssues"] = closing_issue_numbers(pr.get("body") or "", pr["repo"])
+    pr["mergedAt_dt"] = parse_iso(pr["mergedAt"])
+
+# Sort PRs by merge time for later fix detection.
+prs_sorted = sorted(prs, key=lambda p: p["mergedAt_dt"] or datetime.datetime.min.replace(tzinfo=datetime.timezone.utc))
+
+# For each PR, check defect.
+# Build lookup: commits per repo already fetched covering needed windows.
+
+def is_revert_defect(pr, commits):
+    title = pr.get("title") or ""
+    num = pr["number"]
+    merged_dt = pr["mergedAt_dt"]
+    if not merged_dt:
+        return False
+    window_end = merged_dt + datetime.timedelta(days=window_days)
+    revert_subject = f'Revert "{title}"'
+    # GitHub's own "Revert" button produces `Revert "Title" (#123)`, appending
+    # the revert PR's own number (unrelated to this PR's number) when merged.
+    # Accept that optional suffix, not just an exact-string match.
+    revert_pattern = re.compile(r'^' + re.escape(revert_subject) + r'(?:\s*\(#\d+\))?$')
+    for c in commits:
+        msg = c.get("message") or ""
+        date_s = c.get("date") or ""
+        c_dt = parse_iso(date_s) if date_s else None
+        if c_dt is None:
+            continue
+        if c_dt <= merged_dt or c_dt > window_end:
+            continue
+        # Check subject match, with or without GitHub's "(#N)" suffix.
+        subject = msg.split("\n", 1)[0].strip()
+        if revert_pattern.match(subject):
+            return True
+        low = msg.lower()
+        # Plain substring matching would let PR #1 match inside "reverts #10"
+        # (the digits of #10 start with "1"), so require the number not be
+        # followed by another digit.
+        if re.search(rf'reverts #{num}(?!\d)', low) or re.search(rf'revert of #{num}(?!\d)', low):
+            return True
+    return False
+
+def is_hotfix_defect(pr, later_prs):
+    merged_dt = pr["mergedAt_dt"]
+    if not merged_dt:
+        return False
+    window_end = merged_dt + datetime.timedelta(days=window_days)
+    files = set(pr.get("files") or [])
+    if not files:
+        # If we have no file data, we cannot confirm overlap; skip fix check.
+        return False
+    num = pr["number"]
+    linked = set(pr.get("linkedIssues") or [])
+    # Also include the PR number itself for Fixes #<pr> matching.
+    candidates_fix_targets = linked | {num}
+    for lp in later_prs:
+        if lp["repo"] != pr["repo"]:
+            continue
+        if lp["number"] == pr["number"]:
+            continue
+        lp_dt = lp.get("mergedAt_dt")
+        if not lp_dt or lp_dt <= merged_dt or lp_dt > window_end:
+            continue
+        # Same base branch check: require same baseRefName if both present.
+        if pr.get("baseRefName") and lp.get("baseRefName") and pr["baseRefName"] != lp["baseRefName"]:
+            continue
+        lp_files = set(lp.get("files") or [])
+        if not lp_files or files.isdisjoint(lp_files):
+            continue
+        # Title begins fix/fixes/fixed/fixing or hotfix/... (case-insensitive).
+        # A plain startswith("fix") also matches unrelated words like "Fixture",
+        # so require a word boundary right after the matched form.
+        title = (lp.get("title") or "").lstrip()
+        low_title = title.lower()
+        is_fix_title = bool(re.match(r'(hot)?fix(e[sd]|ing)?\b', low_title))
+        # Body contains Fixes #<num> for linked issue or PR number.
+        body = lp.get("body") or ""
+        is_fix_body = False
+        for target in candidates_fix_targets:
+            # Match Fixes #<target> case-insensitively, allow any closing keyword variant?
+            # Spec says Fixes #<pr number>; be permissive: fixes/fix.
+            if re.search(rf'(?i)fixes\s*#\s*{target}\b', body):
+                is_fix_body = True
+                break
+            # Also accept generic fix keyword as in closing refs.
+            # Keep narrow to Fixes to match spec, but also handle fix/fixed.
+        if is_fix_title or is_fix_body:
+            return True
+    return False
+
+# Group.
+by_agent = defaultdict(list)
+for pr in prs:
+    by_agent[pr["agent"]].append(pr)
+
+# Compute defects per PR.
+defect_prs_by_agent = defaultdict(list)
+all_defect_prs = set()
+
+for agent, plist in by_agent.items():
+    for pr in plist:
+        repo = pr["repo"]
+        commits = all_commits.get(repo, [])
+        # For hotfix check, pass all PRs sorted.
+        defect = is_revert_defect(pr, commits) or is_hotfix_defect(pr, prs_sorted)
+        if defect:
+            # Key by (repo, number): PR numbers are only unique within a repo,
+            # so two repos each defaulting a "#5" would otherwise collapse
+            # into one entry when multiple repos are analyzed together.
+            defect_prs_by_agent[agent].append((pr["repo"], pr["number"]))
+            all_defect_prs.add((pr["repo"], pr["number"]))
+
+multi_repo = len({pr["repo"] for pr in prs}) > 1
+
+def fmt_defect_pr(repo, num):
+    return f"{repo}#{num}" if multi_repo else f"#{num}"
+
+# Build rows.
+rows = []
+for agent, plist in by_agent.items():
+    merged = len(plist)
+    defects = len(defect_prs_by_agent[agent])
+    rate = (defects / merged * 100) if merged else 0.0
+    # Sort defect PRs for display.
+    defect_nums = sorted(defect_prs_by_agent[agent])
+    rows.append({"agent": agent, "merged": merged, "defects": defects, "rate": rate, "defect_prs": defect_nums})
+
+# Sort worst rate first, then most defects, then agent name.
+rows.sort(key=lambda r: (-r["rate"], -r["defects"], r["agent"]))
+
+total_merged = len(prs)
+# Use the sum of per-agent defect counts, not len(all_defect_prs): the latter
+# is a set of (repo, number) pairs used only to render the TOTAL defect-PR list.
+total_defects_sum = sum(r["defects"] for r in rows)
+total_rate = (total_defects_sum / total_merged * 100) if total_merged else 0.0
+
+if as_json:
+    out = {
+        "since": since,
+        "window_days": window_days,
+        "repos": repos,
+        "agents": rows,
+        "total": {
+            "merged": total_merged,
+            "defects": total_defects_sum,
+            "rate": round(total_rate, 1),
+            "defect_prs": [{"repo": r, "number": n} for r, n in sorted(all_defect_prs)],
+        },
+    }
+    # Round rates to one decimal, and render defect_prs as repo/number pairs, for JSON too.
+    for r in out["agents"]:
+        r["rate"] = round(r["rate"], 1)
+        r["defect_prs"] = [{"repo": repo, "number": num} for repo, num in r["defect_prs"]]
+    print(json.dumps(out, indent=2))
+else:
+    # Human table. Show denominator next to every rate.
+    print(f"defect rate since {since} (window {window_days}d) — {', '.join(repos)}")
+    # Header
+    # An agent name is agent:model, and a real one runs past 38 characters. A
+    # fixed column pushed every later column out of line on the first real run.
+    width = max([28] + [len(r["agent"]) for r in rows])
+    print(f"{'AGENT':<{width}} {'MERGED':>6} {'DEFECTS':>7} {'RATE':>7}  DEFECT PRS")
+    print(f"{'-' * width} {'-' * 6:>6} {'-' * 7:>7} {'-' * 7:>7}  ----------")
+    for r in rows:
+        prs_str = " ".join(fmt_defect_pr(repo, n) for repo, n in r["defect_prs"]) if r["defect_prs"] else "-"
+        print(f"{r['agent']:<{width}} {r['merged']:>6} {r['defects']:>7} {r['rate']:>6.1f}%  {prs_str}")
+    total_prs_str = " ".join(fmt_defect_pr(repo, n) for repo, n in sorted(all_defect_prs)) if all_defect_prs else "-"
+    print(f"{'TOTAL':<{width}} {total_merged:>6} {total_defects_sum:>7} {total_rate:>6.1f}%  {total_prs_str}")
+PY
