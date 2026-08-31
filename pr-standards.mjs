@@ -371,6 +371,36 @@ function sentenceCount(text) {
 // a lazy body rather than a drifted regex.
 const PROOF_NA_LINE = /^\s*Proof:\s*n\/a\s*[—–-]\s*(\S.*)\s*$/i;
 
+// CommonMark closes a fence with a same-character run that is at least as
+// long as the opening run, not necessarily the same length -- a body quoting
+// a 3-backtick example inside a 4-backtick fence is valid Markdown, and a
+// backreference match (requiring the exact opening string again) left that
+// content, and its quoted N/A or TODO, unstripped.
+function stripFencedBlocks(text) {
+  const lines = String(text).split('\n');
+  const kept = [];
+  let fenceChar = null;
+  let fenceLen = 0;
+  for (const line of lines) {
+    if (fenceChar) {
+      const close = /^ {0,3}(`+|~+)[ \t]*$/.exec(line);
+      if (close && close[1][0] === fenceChar && close[1].length >= fenceLen) {
+        fenceChar = null;
+        fenceLen = 0;
+      }
+      continue;
+    }
+    const open = /^ {0,3}(`{3,}|~{3,})/.exec(line);
+    if (open) {
+      fenceChar = open[1][0];
+      fenceLen = open[1].length;
+      continue;
+    }
+    kept.push(line);
+  }
+  return kept.join('\n');
+}
+
 function hasCommandAndResult(text) {
   const lines = String(text).split('\n').map((line) => line.trim()).filter(Boolean);
   // The word boundary goes AFTER the command name, not before it. Without it
@@ -450,10 +480,12 @@ export function validateBody(body, issueNumber, config = DEFAULT_CONFIG) {
   // inline code before testing for a refusal to answer. Only this test is
   // affected: hasCommandAndResult still reads the raw section, because a command
   // and its output belong in a code block.
+  // Inline code spans may be delimited by more than one backtick (``N/A``) so a
+  // span can itself contain a literal backtick; a single-backtick-only pattern
+  // left one backtick behind on each side and the N/A inside unstripped.
   const claimed = verified === null ? null
-    : verified
-      .replace(/^ {0,3}(`{3,}|~{3,})[\s\S]*?^ {0,3}\1[ \t]*$/gm, '')
-      .replace(/`[^`\n]*`/g, '')
+    : stripFencedBlocks(verified)
+      .replace(/(`+)[^`\n]*?\1/g, '')
       .split('\n').map((line) => {
         const hatch = PROOF_NA_LINE.exec(line);
         return hatch ? hatch[1] : line;
