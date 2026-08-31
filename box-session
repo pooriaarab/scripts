@@ -39,29 +39,126 @@ case "$REMOTE" in
   *) exit 0 ;;
 esac
 NAME="$(basename -s .git "$REMOTE")"
+LOCK="$STATE/$NAME.warming.lock"
+SESSIONS="$STATE/$NAME.sessions"
+# One key per live session. There is no CLAUDE_CODE_SESSION_ID env var -- Claude Code
+# hooks pass the session id only via a `session_id` field in JSON piped to stdin. Read it
+# non-blocking: a manual `box-session status` run from a terminal has no piped stdin, and
+# reading from a tty here would hang forever waiting for input that never comes. The
+# worktree path is the fallback for a manual invocation with no hook payload, which is
+# right in practice because a session works in one worktree.
+HOOK_SESSION_ID=""
+if [[ ! -t 0 ]]; then
+  HOOK_SESSION_ID="$(python3 -c '
+import sys, json
+try: print(json.load(sys.stdin).get("session_id", ""))
+except Exception: print("")' 2>/dev/null)"
+fi
+SESSION_KEY="$(printf '%s' "${HOOK_SESSION_ID:-$ROOT}" | tr -c 'A-Za-z0-9._-' '_')"
+# Two locks, because they guard different lengths of time. WARM_LOCK ($LOCK) is held for the
+# ~100s of a detached warm so only one Box is created. LIFECYCLE_LOCK is held for
+# milliseconds around "register a session" and around "count sessions, then stop" — without
+# it a start can register after `end` counted zero and before it stops, and `end` then stops
+# the Box the new session just adopted.
+LIFECYCLE_LOCK="$STATE/$NAME.lifecycle.lock"
+lifecycle_acquire() {
+  local waited=0
+  mkdir -p "$STATE"
+  while ! mkdir "$LIFECYCLE_LOCK" 2>/dev/null; do
+    if [[ -n "$(find "$LIFECYCLE_LOCK" -maxdepth 0 -mmin +1 2>/dev/null)" ]]; then
+      rmdir "$LIFECYCLE_LOCK" 2>/dev/null || true   # holder died
+      continue
+    fi
+    sleep 0.2
+    waited=$((waited + 1))
+    [[ $waited -lt 50 ]] || return 1   # 10s: give up rather than hang a session hook
+  done
+  return 0
+}
+lifecycle_release() { rmdir "$LIFECYCLE_LOCK" 2>/dev/null || true; }
 
 case "${1:-status}" in
   start)
     [[ -f "$MAIN/.crabbox-default-on" || -f "$ROOT/.crabbox-default-on" ]] || exit 0
-    # Already have a live one? Say so and stop.
+    # Register this session BEFORE warming, so `end` can tell whether it is the last one
+    # out. Sessions on this machine run a dozen deep; without this, the first session to
+    # end stopped the Box the others were using.
+    # Only release if we actually own it: on a timed-out acquire, rmdir-ing the lock
+    # would tear it out from under whichever process legitimately still holds it.
+    if lifecycle_acquire; then
+      mkdir -p "$SESSIONS"
+      : > "$SESSIONS/$SESSION_KEY"
+      lifecycle_release
+    else
+      mkdir -p "$SESSIONS"
+      : > "$SESSIONS/$SESSION_KEY"
+    fi
+    # Already have a live one? Say so and stop -- before ever touching the warming lock.
+    # This has to run before the lock is acquired: the lock is never released on this
+    # early exit (see below), so if it ran after, every start call for the life of the
+    # Box would take the lock and leave it dangling, and any start that lands while it is
+    # held falsely reports "another start is warming" instead of checking the id file.
     if [[ -f "$STATE/$NAME.id" ]]; then
       id="$(tr -d '[:space:]' < "$STATE/$NAME.id")"
       st="$(box info "$id" --json 2>/dev/null | python3 -c '
 import sys,json
 try: print(json.load(sys.stdin)["box"].get("state",""))
 except Exception: print("")')"
-      case "$st" in ready|idle|running) echo "[box-session] $NAME already has Box $id ($st)"; exit 0 ;; esac
+      case "$st" in ready|idle|running) touch "$STATE/$NAME.id"; echo "[box-session] $NAME already has Box $id ($st)"; exit 0 ;; esac
     fi
+    # Only one warm per repo at a time. mkdir is atomic, so it serialises concurrent
+    # SessionStart hooks. Without it, two sessions starting inside the ~100s warm window
+    # both saw no id, both created a Box, and the second overwrote the first's id file —
+    # orphaning a Box that nothing would ever stop. Measured 2026-08-30: nine orphans for
+    # one repo in minutes, on track for a $287 credit overrun.
+    if ! mkdir "$LOCK" 2>/dev/null; then
+      if [[ -n "$(find "$LOCK" -maxdepth 0 -mmin +5 2>/dev/null)" ]]; then
+        rmdir "$LOCK" 2>/dev/null || true   # a start that died mid-warm
+        mkdir "$LOCK" 2>/dev/null || { echo "[box-session] another start is warming $NAME"; exit 0; }
+      else
+        echo "[box-session] another start is already warming $NAME"
+        exit 0
+      fi
+    fi
+    # NO trap to release the lock: `start` returns in milliseconds while the warm runs
+    # detached for ~100s, so releasing on exit would leave the window unguarded — which is
+    # the whole bug. The lock is cleared by `end`, or by the 5-minute staleness check above;
+    # a later start that finds the id file now exits above without ever touching it.
     echo "[box-session] warming a Box for $NAME in the background (~100s; reuse is ~4s)"
     # Detach fully: the hook must not hold the session open.
     nohup "$BOXWORK" "$ROOT" >"$STATE/$NAME.warm.log" 2>&1 </dev/null &
     disown 2>/dev/null || true
     exit 0 ;;
   end)
+    # The deregister, the count and the stop are one critical section: a start landing
+    # between the count and the stop would lose its Box immediately. If the lock can't be
+    # had, don't run any of this unlocked -- that recreates exactly the race the lock
+    # exists to close. Leave the Box running; the next `end` or the reaper cleans it up.
+    if ! lifecycle_acquire; then
+      echo "[box-session] could not get lifecycle lock for $NAME; leaving Box as-is" >&2
+      exit 0
+    fi
+    trap lifecycle_release EXIT
+    rm -f "$SESSIONS/$SESSION_KEY"
     [[ -f "$STATE/$NAME.id" ]] || exit 0
+    # Last one out stops the Box. Any other session still registered for this repo is
+    # using it, and stopping it under them costs them a resume for no reason.
+    others="$(find "$SESSIONS" -type f 2>/dev/null | wc -l | tr -d ' ')"
+    if [[ "${others:-0}" -gt 0 ]]; then
+      echo "[box-session] $others other session(s) still on $NAME; leaving Box up"
+      exit 0
+    fi
     id="$(tr -d '[:space:]' < "$STATE/$NAME.id")"
-    box stop "$id" >/dev/null 2>&1 && echo "[box-session] stopped $NAME Box $id"
-    rm -f "$STATE/$NAME.id"
+    # Keep the id if the stop failed. Dropping it strands a running Box: the next box-work
+    # cannot reuse what it cannot see, so it creates a duplicate.
+    if box stop "$id" >/dev/null 2>&1; then
+      echo "[box-session] stopped $NAME Box $id"
+      rm -f "$STATE/$NAME.id"
+      rmdir "$SESSIONS" 2>/dev/null || true
+      rmdir "$LOCK" 2>/dev/null || true
+    else
+      echo "[box-session] FAILED to stop $NAME Box $id -- keeping the id so it can be reused or reaped" >&2
+    fi
     exit 0 ;;
   status)
     if [[ -f "$STATE/$NAME.id" ]]; then

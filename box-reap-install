@@ -1,0 +1,109 @@
+#!/usr/bin/env bash
+# Install the periodic Box reaper on this Mac. Idempotent.
+#
+# WHY THIS EXISTS
+# ascii.dev has no idle timer, so nothing stops a Box for being unused. Every agent
+# session that warms a Box and exits without stopping it leaves one billing until its
+# archive deadline. Measured 2026-08-30: 14 running Boxes, 2 of them claimed by a session
+# — the credit check projected a $287 overrun inside a 15-day window.
+#
+# Running box-reap by hand does not fix that, because the problem is precisely that nobody
+# is looking. This installs the launchd agents that look.
+#
+# TCC: a launchd agent cannot read ~/Documents without Full Disk Access granted by hand,
+# and fails with "Operation not permitted". So the binaries are COPIED to ~/.local/bin
+# rather than symlinked into the repo, and the credential is read from ~/.config.
+set -euo pipefail
+
+repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+bin_dir="$HOME/.local/bin"
+agent_dir="$HOME/Library/LaunchAgents"
+interval="${BOX_REAP_INTERVAL:-900}"
+
+[[ "$(uname -s)" == "Darwin" ]] || { echo "launchd is macOS-only; on Linux use a systemd timer around box-reap-cron." >&2; exit 2; }
+
+# The reaper parses `box list --json` with python3. Without it the orphan sweep cannot
+# enumerate anything, so check before installing an agent that would fail every 15 minutes.
+command -v python3 >/dev/null 2>&1 || { echo "python3 not found; box-reap-cron needs it to parse box list output." >&2; exit 2; }
+
+mkdir -p "$bin_dir" "$agent_dir" "$HOME/.config/ascii-box"
+
+for f in box-reap box-reap-cron box-guard box-perf-check box-perf-cron; do
+  [[ -f "$repo_dir/$f" ]] || continue
+  install -m 0755 "$repo_dir/$f" "$bin_dir/$f"
+  echo "installed $bin_dir/$f"
+done
+
+# The reaper needs the API key, and cannot read the copy under ~/Documents.
+if [[ ! -r "$HOME/.config/ascii-box/env" ]]; then
+  if [[ -r "$HOME/Documents/Personal/.secrets/crabbox.env" ]]; then
+    install -m 0600 "$HOME/Documents/Personal/.secrets/crabbox.env" "$HOME/.config/ascii-box/env"
+    echo "copied credential to ~/.config/ascii-box/env (0600)"
+  else
+    echo "WARNING: no credential at ~/.config/ascii-box/env — the reaper will run and stop nothing." >&2
+  fi
+fi
+
+write_agent() { # label, program, interval
+  local label="$1" program="$2" every="$3" plist="$agent_dir/$1.plist"
+  cat > "$plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>$label</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/bin/bash</string>
+		<string>-lc</string>
+		<string>exec "\$HOME/.local/bin/$program"</string>
+	</array>
+	<key>StartInterval</key>
+	<integer>$every</integer>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>StandardOutPath</key>
+	<string>/tmp/$label.out.log</string>
+	<key>StandardErrorPath</key>
+	<string>/tmp/$label.err.log</string>
+</dict>
+</plist>
+PLIST
+  launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || true
+  launchctl bootstrap "gui/$(id -u)" "$plist"
+  echo "loaded $label (every ${every}s)"
+}
+
+write_agent com.pooriaarab.box-reap box-reap-cron "$interval"
+# box-perf-cron is a weekly sweep (its own header: "take one every week") that starts and
+# stops Boxes to time them -- scheduling it daily would run it 7x more often than intended
+# and burn Box-starts for no reason, exactly what this installer exists to prevent.
+[[ -x "$bin_dir/box-perf-cron" ]] && write_agent com.pooriaarab.box-perf box-perf-cron 604800
+
+# Verify rather than trust: `launchctl load` reports success for an agent that then dies.
+# `launchctl list` reports "-" for the exit-status column while the job is still running
+# (there is no exit code yet) — box-reap-cron routinely takes longer than the 2s below to
+# probe every running Box, so treat a live PID as healthy rather than falling through to
+# the generic failure case.
+launchctl kickstart -k "gui/$(id -u)/com.pooriaarab.box-reap" 2>/dev/null || true
+sleep 2
+line="$(launchctl list | awk '$3 == "com.pooriaarab.box-reap" {print $1, $2}')"
+pid="${line%% *}"
+status="${line#* }"
+if [[ "$pid" =~ ^[0-9]+$ ]]; then
+  echo "box-reap agent healthy (running, pid $pid)"
+elif [[ "$status" == "0" || "$status" == "3" ]]; then
+  echo "box-reap agent healthy (last exit $status; 3 is box-reap's credit warning)"
+elif [[ "$status" == "126" || "$status" == "127" ]]; then
+  echo "FAILED: exit $status — launchd cannot execute the reaper. Check TCC and that ~/.local/bin/box-reap-cron exists." >&2; exit 1
+elif [[ -z "$line" ]]; then
+  echo "FAILED: agent is not registered." >&2; exit 1
+else
+  echo "FAILED: box-reap agent exited $status — check ~/.local/state/box-reap/reap.log" >&2; exit 1
+fi
+
+echo
+echo "Reaping every ${interval}s. Claimed Boxes idle past \$BOX_REAP_AGE (default 45m) and"
+echo "unclaimed ones past \$BOX_REAP_ORPHAN_AGE (default 15m) are stopped, and only after"
+echo "box-reap's probe proves them quiet. Log: ~/.local/state/box-reap/reap.log"
