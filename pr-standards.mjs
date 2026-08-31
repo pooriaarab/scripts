@@ -1115,44 +1115,45 @@ async function runPrecheck(options) {
   return finish({ mode: 'precheck', prefix: config.prefix, provenance, failures, warnings: [], passes }, options.json);
 }
 
+// Paginate once for every override label at once. This endpoint defaults to 30
+// items, and label changes, reopens and `referenced` events from every commit
+// that mentions the issue all land here, so on a real PR the labelling event
+// is often not on page one. Missing it stripped a legitimate override and
+// failed a PR that should have passed. Fetching it once and sharing the result
+// across labels also means a PR carrying both the size and proof override
+// labels costs one paginated fetch, not one per label.
+async function fetchLabelEvents(repo, number) {
+  const events = [];
+  for (let page = 1; ; page += 1) {
+    const pageEvents = await apiRequest(`issues/${number}/events?per_page=100&page=${page}`, repo);
+    if (!Array.isArray(pageEvents)) break;
+    events.push(...pageEvents);
+    if (pageEvents.length < 100) break;
+  }
+  return events;
+}
+
+function findLabelApplier(events, labelName) {
+  let applier = null;
+  for (const event of events) {
+    if (event.event === 'labeled' && event.label?.name === labelName) {
+      applier = event.actor?.login || null;
+    }
+  }
+  return applier;
+}
+
 // The size override is the one deliberate escape hatch, and the standard says
 // the repo owner applies it. Nothing enforced that: any collaborator or token
 // with label-write could add the label and clear the cap, which is exactly the
 // actor the rule exists to stop. So find who applied it and honour it only from
 // the owner. If the events cannot be read, drop the override rather than trust
 // it: failing closed on an escape hatch is the safe direction.
-export async function resolveSingleLabel(repo, number, labels, labelName, config, warnings) {
+export async function resolveSingleLabel(repo, number, labels, labelName, config, warnings, events) {
   if (!labels.includes(labelName)) return labels;
   const owner = repo.split('/')[0];
   const allowed = new Set([owner, ...(config.overrideActors || [])].map((name) => name.toLowerCase()));
-  let applier = null;
-  try {
-    // Paginate. This endpoint defaults to 30 items, and label changes, reopens
-    // and `referenced` events from every commit that mentions the issue all
-    // land here, so on a real PR the labelling event is often not on page one.
-    // Missing it stripped a legitimate override and failed a PR that should
-    // have passed.
-    for (let page = 1; ; page += 1) {
-      const events = await apiRequest(`issues/${number}/events?per_page=100&page=${page}`, repo);
-      if (!Array.isArray(events)) break;
-      for (const event of events) {
-        if (event.event === 'labeled' && event.label?.name === labelName) {
-          applier = event.actor?.login || null;
-        }
-      }
-      if (events.length < 100) break;
-    }
-  } catch {
-    warnings.push(fail(
-      `${labelName} ignored`,
-      'the label events could not be read',
-      'a readable audit trail for the override',
-      labelName === config.overrideLabel
-        ? 'The size caps were applied. Re-run when the API is reachable.'
-        : 'The proof checks were applied. Re-run when the API is reachable.',
-    ));
-    return labels.filter((name) => name !== labelName);
-  }
+  const applier = findLabelApplier(events, labelName);
   if (applier && allowed.has(applier.toLowerCase())) return labels;
   // On an organization-owned repo the first path segment is the org slug, not
   // anyone's login, so the name comparison above can never match and the
@@ -1184,8 +1185,33 @@ export async function resolveOverrideLabels(repo, number, labels, config, warnin
   // Both the size and the proof escape hatches share the same ownership
   // check: the repo owner (or an admin) must have applied the label. An
   // agent cannot clear its own requirement.
-  let result = await resolveSingleLabel(repo, number, labels, config.overrideLabel, config, warnings);
-  result = await resolveSingleLabel(repo, number, result, config.proofOverrideLabel, config, warnings);
+  const labelNames = [config.overrideLabel, config.proofOverrideLabel];
+  const present = labelNames.filter((name) => labels.includes(name));
+  if (present.length === 0) return labels;
+
+  let events;
+  try {
+    events = await fetchLabelEvents(repo, number);
+  } catch {
+    let result = labels;
+    for (const labelName of present) {
+      warnings.push(fail(
+        `${labelName} ignored`,
+        'the label events could not be read',
+        'a readable audit trail for the override',
+        labelName === config.overrideLabel
+          ? 'The size caps were applied. Re-run when the API is reachable.'
+          : 'The proof checks were applied. Re-run when the API is reachable.',
+      ));
+      result = result.filter((name) => name !== labelName);
+    }
+    return result;
+  }
+
+  let result = labels;
+  for (const labelName of labelNames) {
+    result = await resolveSingleLabel(repo, number, result, labelName, config, warnings, events);
+  }
   return result;
 }
 
