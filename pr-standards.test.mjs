@@ -879,3 +879,93 @@ test('proof: an indented code block cannot smuggle attachment URLs as evidence',
   const realProof = [...head, `![before](${url('aaa')})`, `![after](${url('bbb')})`, ...tail].join('\n');
   assert.equal(failed(checkProof(realProof, uiFiles, [], config)), false);
 });
+
+test('proof: a stray comment marker in prose does not swallow real proof', () => {
+  const uiFiles = [{ filename: 'src/components/Button.tsx', status: 'modified' }];
+  const url = (id) => `https://github.com/user-attachments/assets/${id}`;
+  const failed = (r) => r.failures.some((f) => f.check === 'proof of a visible change');
+  const head = ['## What', 'x', '## Why', 'y', '## How I verified', 'ran it -> pass'];
+  const tail = ['Assisted-by: agent:model'];
+
+  // `\<!--` renders as literal visible text on GitHub. Reading it as a comment
+  // latched the scanner on and dropped every line after it, so a pull request
+  // with real screenshots failed for a reason invisible in the rendered body.
+  const escapedMarker = [
+    ...head, 'The template shows it as \\<!-- like this',
+    `![before](${url('aaa')})`, `![after](${url('bbb')})`,
+    ...tail,
+  ].join('\n');
+  assert.equal(failed(checkProof(escapedMarker, uiFiles, [], config)), false);
+
+  // An unterminated marker mid-sentence is prose, not a block comment. GitHub
+  // runs a comment to the end of the document only when the marker opens the
+  // line, so only that case may hide what follows.
+  const markerMidSentence = [
+    ...head, 'We removed the <!-- marker from the template',
+    `![before](${url('ccc')})`, `![after](${url('ddd')})`,
+    ...tail,
+  ].join('\n');
+  assert.equal(failed(checkProof(markerMidSentence, uiFiles, [], config)), false);
+
+  // A marker that DOES open the line still runs to the end, as GitHub does.
+  const markerOpensLine = [
+    ...head, '<!-- hidden from here on',
+    `![before](${url('eee')})`, `![after](${url('fff')})`,
+    ...tail,
+  ].join('\n');
+  assert.equal(failed(checkProof(markerOpensLine, uiFiles, [], config)), true);
+
+  // An inline comment is still stripped wherever it sits, because GitHub hides
+  // that too. Two attachments quoted inside one are not proof.
+  const inlineComment = [
+    ...head, `note <!-- ![before](${url('ggg')}) ![after](${url('hhh')}) --> end`,
+    ...tail,
+  ].join('\n');
+  assert.equal(failed(checkProof(inlineComment, uiFiles, [], config)), true);
+});
+
+test('an exempt branch is exempt from proof too', async () => {
+  // The proof check ran outside the `!branchResult.exempt` guard, so a release
+  // or refactor branch that happened to touch a .tsx file got an unsatisfiable
+  // "proof of a visible change" failure: the `Proof: n/a` escape hatch lives in
+  // a body template those branches are never asked to write.
+  const originalWrite = process.stdout.write;
+  const originalPath = process.env.PATH;
+  const originalToken = process.env.GITHUB_TOKEN;
+  const originalFetch = globalThis.fetch;
+  let output = '';
+  process.stdout.write = (chunk) => { output += chunk; return true; };
+  process.env.PATH = '';
+  process.env.GITHUB_TOKEN = 'test-token';
+  process.env.GITHUB_REPOSITORY = 'other/repo';
+
+  globalThis.fetch = async (url) => {
+    if (url.includes('contents/.github/pr-standards.json')) {
+      return { ok: true, json: async () => ({ content: Buffer.from(JSON.stringify({ prefix: 'cr' })).toString('base64'), encoding: 'base64' }) };
+    }
+    if (url.includes('pulls/13/commits')) {
+      return { ok: true, json: async () => ([{ sha: 'abc1234', commit: { message: 'Cut the release' } }]) };
+    }
+    // A visible file, and a body with no proof and no escape hatch.
+    if (url.includes('pulls/13/files')) {
+      return { ok: true, json: async () => ([{ filename: 'src/components/Button.tsx', status: 'modified', additions: 1, deletions: 0 }]) };
+    }
+    if (url.includes('pulls/13')) {
+      return { ok: true, json: async () => ({ head: { ref: 'release/2.1.0' }, base: { ref: 'main' }, title: 'Cut 2.1.0', body: 'Release notes.', labels: [] }) };
+    }
+    throw new Error(`Unexpected fetch URL: ${url}`);
+  };
+
+  try {
+    const exitCode = await main(['pr', '--repo', 'test/repo', '--number', '13', '--json']);
+    const result = JSON.parse(output);
+    assert.equal(result.failures.some((f) => f.check === 'proof of a visible change'), false);
+    assert.equal(exitCode, 0);
+  } finally {
+    process.stdout.write = originalWrite;
+    process.env.PATH = originalPath;
+    process.env.GITHUB_TOKEN = originalToken;
+    globalThis.fetch = originalFetch;
+    delete process.env.GITHUB_REPOSITORY;
+  }
+});
