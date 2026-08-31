@@ -771,3 +771,64 @@ test('a lockfile is excluded wherever a workspace keeps it', () => {
   // Still counts a real source file that merely lives near one.
   assert.equal(DEFAULT_CONFIG.excludeGlobs.some((glob) => matchesGlob('apps/website/src/lock-screen.ts', glob)), false);
 });
+
+test('proof: a fence inside a list item is a real fence', () => {
+  const uiFiles = [{ filename: 'src/components/Button.tsx', status: 'modified' }];
+  const url = (id) => `https://github.com/user-attachments/assets/${id}`;
+  const failed = (r) => r.failures.some((f) => f.check === 'proof of a visible change');
+  const warned = (r) => r.warnings.some((w) => w.check === 'proof of a visible change');
+  const head = ['## What', 'x', '## Why', 'y', '## How I verified', 'ran it -> pass'];
+  const tail = ['Assisted-by: agent:model'];
+
+  // GitHub reads ``` inside a list item as a real fence. The opener test was
+  // pinned to the start of the line, so it saw none — and every line the block
+  // was meant to hide was read as real text. That made the documented example
+  // itself a bypass: quote the escape hatch under a bullet and get a waiver.
+  const listItemProofNa = [
+    ...head, 'The syntax is:',
+    '- ```', '  Proof: n/a — quoting the documented escape hatch verbatim', '  ```',
+    ...tail,
+  ].join('\n');
+  assert.equal(failed(checkProof(listItemProofNa, uiFiles, [], config)), true);
+
+  // The same bypass in the other direction: two attachment URLs quoted under a
+  // bullet as documentation satisfied before-and-after without an upload.
+  const listItemAttachments = [
+    ...head, 'Embed them like this:',
+    '- ```', `  ![before](${url('aaa')})`, `  ![after](${url('bbb')})`, '  ```',
+    ...tail,
+  ].join('\n');
+  assert.equal(failed(checkProof(listItemAttachments, uiFiles, [], config)), true);
+  assert.equal(warned(checkProof(listItemAttachments, uiFiles, [], config)), false);
+
+  // A fence opened in a list closes at its own column, not at column zero. If
+  // the closer test stayed pinned to column zero, the block would run to the
+  // end of the body and swallow the real proof written after it.
+  const listItemThenRealProof = [
+    ...head, 'Embed them like this:',
+    '- ```', '  ![before](URL)', '  ![after](URL)', '  ```',
+    `![before](${url('ccc')})`, `![after](${url('ddd')})`,
+    ...tail,
+  ].join('\n');
+  assert.equal(failed(checkProof(listItemThenRealProof, uiFiles, [], config)), false);
+  assert.equal(warned(checkProof(listItemThenRealProof, uiFiles, [], config)), false);
+
+  // An ordered list marker opens a fence too.
+  const orderedListProofNa = [
+    ...head, 'The syntax is:',
+    '1. ```', '   Proof: n/a — quoting the documented escape hatch verbatim', '   ```',
+    ...tail,
+  ].join('\n');
+  assert.equal(failed(checkProof(orderedListProofNa, uiFiles, [], config)), true);
+
+  // A dash that is not a list marker must not be read as one. A line of text
+  // that merely starts with a hyphen still needs its own fence to hide anything.
+  const notAListMarker = [
+    ...head,
+    `![before](${url('eee')})`, `![after](${url('fff')})`,
+    '- see the two captures above',
+    ...tail,
+  ].join('\n');
+  assert.equal(failed(checkProof(notAListMarker, uiFiles, [], config)), false);
+  assert.equal(warned(checkProof(notAListMarker, uiFiles, [], config)), false);
+});
