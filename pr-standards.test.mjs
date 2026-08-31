@@ -662,6 +662,26 @@ test('proof: a stray unclosed HTML comment hides the rest of the body, like it d
   assert.equal(failed(checkProof(visibleNa, uiFiles, [], config)), true);
 });
 
+test('proof: an unclosed `<!--` inside a fenced code block is literal text, not a comment', () => {
+  const uiFiles = [{ filename: 'src/components/Button.tsx', status: 'modified' }];
+  const url = 'https://github.com/user-attachments/assets/abc0';
+  // GitHub does not parse HTML comments inside a fenced code block, so an
+  // unterminated `<!--` there must not swallow content that follows the
+  // fence — such as the attachment link in this pasted command output.
+  const withMarkerInFence = [
+    validBody,
+    '```',
+    '<!-- unterminated marker in pasted output',
+    '```',
+    `![shot](${url})`,
+  ].join('\n');
+
+  const failed = (r) => r.failures.some((f) => f.check === 'proof of a visible change');
+  const warned = (r) => r.warnings.some((w) => w.check === 'proof of a visible change');
+  assert.equal(failed(checkProof(withMarkerInFence, uiFiles, [], config)), false);
+  assert.equal(warned(checkProof(withMarkerInFence, uiFiles, [], config)), true);
+});
+
 test('proof: media belongs in user-attachments, not in the commit', () => {
   const flagged = [
     'screenshots/home.png', 'screenshot-123/demo.png', 'a/b/screenshots/x.jpg',

@@ -393,8 +393,17 @@ function hasCommandAndResult(text) {
 // regex that only strips *matched* `<!--...-->` pairs would leave content
 // after a stray unclosed comment looking "visible" to the checker while
 // GitHub renders none of it.
+// A fenced code block is literal text on GitHub: `<!--` inside one does not
+// start an HTML comment, so it must not feed the unclosed-comment truncation
+// below. Blank the fence bodies (keeping newlines, so line numbers and the
+// surrounding text are unaffected) before looking for comment markers.
+function blankFencedCode(text) {
+  return text.replace(/(^|\n)(`{3,}|~{3,})[^\n]*\n[\s\S]*?\n\2[ \t]*(?=\n|$)/g, (block) => block.replace(/[^\n]/g, ' '));
+}
+
 function stripComments(text) {
-  const closed = text.replace(/<!--[\s\S]*?-->/g, '');
+  const unfenced = blankFencedCode(text);
+  const closed = unfenced.replace(/<!--[\s\S]*?-->/g, '');
   const openIdx = closed.indexOf('<!--');
   return openIdx === -1 ? closed : closed.slice(0, openIdx);
 }
