@@ -52,6 +52,7 @@ check 0 'passes when the live SHA matches'          "$LIVE"       "$SHA"
 check 1 'fails when the live SHA never matches'     "$LIVE"       "2222222222222222222222222222222222222222"
 check 0 'checks only the URL without a shaPath'     "$NO_SHA_PATH" "$SHA"
 check 1 'fails when the site does not answer'       "$DEAD"       "$SHA"
+check 1 'fails on malformed JSON instead of passing as absent' '{not json'   "$SHA"
 
 # The failure report is what the issue body quotes. An empty one leaves a
 # person with an issue that says nothing.

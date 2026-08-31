@@ -321,9 +321,10 @@ Two failures to avoid:
 ## Post-merge verify
 
 Merged is not live. CI proves the change is good on a runner. This job proves
-the change reached production. It runs on `push` to the default branch and on
-`workflow_dispatch`. It uses the `ubicloud-standard-2` runner and one
-concurrency group per repo.
+the change reached production. It runs on every `push` and on
+`workflow_dispatch`, but the job itself skips unless the push landed on the
+repo's actual default branch — not every repo in the fleet defaults to `main`.
+It uses the `ubicloud-standard-2` runner and one concurrency group per repo.
 
 Add `postMergeVerify` to `.github/pr-standards.json` to enable it:
 
@@ -343,10 +344,15 @@ Add `postMergeVerify` to `.github/pr-standards.json` to enable it:
   the job skips the poll step.
 - `shaJsonKey` — JSON key that holds the SHA in the version response. Default
   is `sha`.
-- `timeoutSeconds` — how long to poll before the job fails. Default is `900`.
+- `timeoutSeconds` — how long to poll before the job fails. Default is `900`,
+  capped at `1000` regardless of the configured value so the check always
+  fails through its own logic before the job's 20-minute timeout cancels it
+  out from under the reporting step.
 
 When `postMergeVerify` is absent, every step is skipped and the job passes. A
-repo that does not deploy stays green.
+repo that does not deploy stays green. Malformed JSON in `pr-standards.json`
+is not treated as absent — the job fails so a broken config is never silently
+green.
 
 When the job fails, it opens an issue titled `Deploy did not go live: <short sha>`
 with the failing step, the expected SHA, what the endpoint returned, and a link
