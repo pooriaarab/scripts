@@ -545,3 +545,23 @@ test('the registry beats derivation, and a missing entry still derives', () => {
   assert.equal(derivePrefix('a-brand-new-repo'), 'abnr');
   assert.ok(/^[a-z]{2,4}$/.test(derivePrefix('a-brand-new-repo')));
 });
+
+test('an explicit config prefix wins even if this repo has an invalid registry entry', () => {
+  // resolveFallbackPrefix used to run unconditionally before fetchRemoteConfig
+  // even looked at the repo's own .github/pr-standards.json. A repo whose
+  // config already sets a valid prefix has no reason to consult the registry
+  // at all, but a malformed entry for that same repo in repo-prefixes.json
+  // threw anyway, failing a check that a correct config should have passed.
+  const source = readFileSync(new URL('./pr-standards.mjs', import.meta.url), 'utf8');
+  const fnMatch = source.match(/async function fetchRemoteConfig\(repo, repoName, ref\) \{\n([\s\S]*?)\n}\n\nasync function runPr/);
+  assert.ok(fnMatch, 'fetchRemoteConfig not found');
+  const body = fnMatch[1];
+  assert.ok(
+    !/^\s*const fallback = resolveFallbackPrefix\(repoName\);\n\s*try \{/m.test(body),
+    'the registry fallback must not be resolved before the repo config is checked for its own prefix',
+  );
+  assert.ok(
+    /if \(!overrides\.prefix\) \{\s*\n\s*const fallback = resolveFallbackPrefix\(repoName\);/.test(body),
+    'the registry fallback must be resolved only once the repo config is confirmed to leave the prefix unset',
+  );
+});
