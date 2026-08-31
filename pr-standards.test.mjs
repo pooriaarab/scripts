@@ -811,3 +811,35 @@ test('a quoted rule name is not a refusal to answer', () => {
   // raw section rather than the stripped one.
   assert.equal(fails('```\n$ node --test\nℹ pass 41\n```'), false);
 });
+
+test('a fence closed with more characters than it opened is still a fence', () => {
+  // Third appearance of one bug: a backreference to the captured fence run
+  // demands an EXACT length, but GitHub closes a 3-backtick fence on a
+  // 4-backtick line. Twice it shipped as fail-closed and swallowed real
+  // evidence; here it was fail-open and let a quoted example count as proof.
+  // Both directions are wrong, so the length rule is pinned rather than the
+  // symptom.
+  const uiFiles = [{ filename: 'src/components/Button.tsx', status: 'modified' }];
+  const a = 'https://github.com/user-attachments/assets/aaa';
+  const b = 'https://github.com/user-attachments/assets/bbb';
+  const failed = (body) => checkProof(body, uiFiles, [], config)
+    .failures.some((f) => f.check === 'proof of a visible change');
+  const head = ['## What', 'x', '## Why', 'y', '## How I verified', 'ran it -> pass'];
+
+  // Quoted inside a fence is not evidence, whichever valid closer is used.
+  for (const [open, close] of [['```', '```'], ['```', '````'], ['~~~', '~~~~~']]) {
+    assert.equal(failed([...head, open, `![before](${a})`, `![after](${b})`, close, 'Assisted-by: a:b'].join('\n')), true,
+      `a fence opened with ${open} and closed with ${close} must be recognised`);
+  }
+
+  // Real proof after a closed fence still counts. This is the case the bug
+  // broke when it ran the other way: the fence never closed, so everything
+  // below it vanished and a compliant pull request failed.
+  assert.equal(failed([...head, '```', '$ node --test', 'ok', '````',
+    `![before](${a})`, `![after](${b})`, 'Assisted-by: a:b'].join('\n')), false);
+
+  // An UNCLOSED fence is left alone on purpose. Stripping to end of document
+  // would let one stray backtick run swallow real links; counting a quoted URL
+  // is the safe direction to be wrong.
+  assert.equal(failed([...head, '```', `![before](${a})`, `![after](${b})`, 'Assisted-by: a:b'].join('\n')), false);
+});
