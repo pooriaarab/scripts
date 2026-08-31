@@ -1,0 +1,129 @@
+name: generated-drift
+
+# Agents hand-edit generated files. The edit reads correctly in review, and from
+# then on the file disagrees with its generator: the next regeneration either
+# reverts the change or keeps it and drifts further. Reading the diff cannot
+# catch this. Running the generator can.
+on:
+  pull_request:
+
+concurrency:
+  group: generated-drift-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  drift:
+    name: Generated file drift
+    runs-on: ubicloud-standard-4
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Regenerate and compare
+        id: regen
+        env:
+          REPORT: ${{ runner.temp }}/drift.md
+        run: |
+          set -euo pipefail
+          python3 <<'PY'
+          import json, os, pathlib, subprocess, sys
+
+          report = pathlib.Path(os.environ["REPORT"])
+
+          # A repo with no generators opts out by saying nothing. A check it
+          # cannot satisfy would leave it permanently red, which teaches
+          # everyone to ignore a red check.
+          try:
+              config_text = pathlib.Path(".github/pr-standards.json").read_text()
+          except (FileNotFoundError, NotADirectoryError):
+              print("No .github/pr-standards.json. Nothing to check.")
+              sys.exit(0)
+          try:
+              config = json.loads(config_text)
+          except ValueError as e:
+              sys.exit(f"Malformed .github/pr-standards.json: {e}")
+          if not isinstance(config, dict):
+              sys.exit("Malformed .github/pr-standards.json: expected a JSON object")
+          raw_generators = config.get("generators", [])
+          if not isinstance(raw_generators, list) or not all(isinstance(g, str) for g in raw_generators):
+              sys.exit('Malformed .github/pr-standards.json: "generators" must be a list of strings')
+          generators = [g for g in raw_generators if g.strip()]
+          if not generators:
+              print("No generators configured. Nothing to check.")
+              sys.exit(0)
+
+          def run(command):
+              print(f"::group::{command}")
+              result = subprocess.run(["bash", "-c", command])
+              print("::endgroup::")
+              if result.returncode:
+                  sys.exit(f"Generator failed: {command}")
+
+          setup = config.get("generatorSetup")
+          if setup is not None and not isinstance(setup, str):
+              sys.exit('Malformed .github/pr-standards.json: "generatorSetup" must be a string')
+          if setup:
+              run(setup)
+          for generator in generators:
+              run(generator)
+
+          status = subprocess.run(
+              ["git", "status", "--porcelain"], capture_output=True, text=True, check=True
+          ).stdout.strip()
+          if not status:
+              print("The generators changed nothing. No drift.")
+              sys.exit(0)
+
+          # A rename reads as "old -> new"; the new path is the one that drifted.
+          drifted = [line[3:].split(" -> ")[-1] for line in status.splitlines()]
+          print(subprocess.run(["git", "diff", "--stat"], capture_output=True, text=True).stdout)
+          report.write_text(
+              "Running the generators in this repo changed files this pull request did not commit.\n\n"
+              + "Drifted:\n" + "\n".join(f"- `{path}`" for path in drifted)
+              + "\n\nGenerators:\n" + "\n".join(f"- `{g}`" for g in generators)
+              + "\n\nRun them locally and commit the result. A generated file edited by hand "
+                "reverts on the next regeneration.\n"
+          )
+          sys.exit("Generated files drifted: " + ", ".join(drifted))
+          PY
+
+      # One comment per pull request, updated in place. A new comment on every
+      # push buries the PR under the same message.
+      - name: Comment on the drift
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          REPORT: ${{ runner.temp }}/drift.md
+          REGEN_OUTCOME: ${{ steps.regen.outcome }}
+        run: |
+          set -euo pipefail
+          MARKER="<!-- generated-drift -->"
+          # Paginated: a long-running PR can carry more issue comments than a
+          # single page, and the marker comment (posted on an earlier run) can
+          # fall outside the first page.
+          EXISTING=$(gh api --paginate "repos/$REPO/issues/$PR/comments" --jq \
+            "[.[] | select(.body | startswith(\"$MARKER\")) | .id] | first // empty")
+          if [ -f "$REPORT" ]; then
+            { echo "$MARKER"; echo "### Generated file drift"; echo; cat "$REPORT"; } > body.md
+          elif [ "$REGEN_OUTCOME" != "success" ]; then
+            # The regenerate step itself errored (a broken generator, not drift).
+            # Leave any existing drift comment alone rather than mislabel the
+            # failure as resolved.
+            exit 0
+          else
+            # Say nothing unless an earlier run already complained. A repo with
+            # no drift should carry no comment at all.
+            [ -n "$EXISTING" ] || exit 0
+            { echo "$MARKER"; echo "### Generated file drift — resolved"; echo;
+              echo "The generators now change nothing."; } > body.md
+          fi
+          if [ -n "$EXISTING" ]; then
+            gh api "repos/$REPO/issues/comments/$EXISTING" -X PATCH -F body=@body.md --silent
+          else
+            gh api "repos/$REPO/issues/$PR/comments" -X POST -F body=@body.md --silent
+          fi
