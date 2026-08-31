@@ -26,6 +26,7 @@ SHA=1111111111111111111111111111111111111111
 mkdir -p "$WORK/site"
 printf '{"sha": "%s"}' "$SHA" > "$WORK/site/version"
 printf '{"sha": null}' > "$WORK/site/version-null"
+printf '[1, 2, 3]' > "$WORK/site/version-list"
 printf 'ok' > "$WORK/site/index.html"
 (cd "$WORK/site" && exec python3 -m http.server 8731 >/dev/null 2>&1) &
 SERVER_PID=$!
@@ -54,6 +55,7 @@ check 1 'fails when the live SHA never matches'     "$LIVE"       "2222222222222
 check 0 'checks only the URL without a shaPath'     "$NO_SHA_PATH" "$SHA"
 check 1 'fails when the site does not answer'       "$DEAD"       "$SHA"
 check 1 'fails on malformed JSON instead of passing as absent' '{not json'   "$SHA"
+check 1 'fails on a postMergeVerify block with no url'  '{"postMergeVerify":{}}' "$SHA"
 
 # The failure report is what the issue body quotes. An empty one leaves a
 # person with an issue that says nothing.
@@ -74,6 +76,16 @@ rm -f "$WORK/report.md"
 got=$?
 if [ "$got" = 1 ] && [ -f "$WORK/report.md" ]; then printf 'ok    %s\n' 'keeps polling instead of crashing on a null SHA'
 else printf 'FAIL  %s (want exit 1 with a report, got exit %s)\n' 'keeps polling instead of crashing on a null SHA' "$got"; fails=$((fails + 1)); fi
+
+# A version endpoint answering with valid JSON that isn't an object (e.g. a
+# bare array) must not crash the poll loop via AttributeError on `.get()`.
+LIST_SHA='{"postMergeVerify":{"url":"http://127.0.0.1:8731","shaPath":"/version-list","timeoutSeconds":2}}'
+printf '%s' "$LIST_SHA" > "$WORK/repo/.github/pr-standards.json"
+rm -f "$WORK/report.md"
+( cd "$WORK/repo" && EXPECTED_SHA="$SHA" REPORT="$WORK/report.md" python3 "$WORK/check.py" ) >/dev/null 2>&1
+got=$?
+if [ "$got" = 1 ] && [ -f "$WORK/report.md" ]; then printf 'ok    %s\n' 'keeps polling instead of crashing on a non-object response'
+else printf 'FAIL  %s (want exit 1 with a report, got exit %s)\n' 'keeps polling instead of crashing on a non-object response' "$got"; fails=$((fails + 1)); fi
 
 [ "$fails" = 0 ] || { printf '\n%s failing\n' "$fails" >&2; exit 1; }
 printf '\nall passing\n'

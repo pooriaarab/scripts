@@ -9,7 +9,10 @@ on:
 
 concurrency:
   group: post-merge-verify-${{ github.repository }}
-  cancel-in-progress: false
+  # A newer push means a newer commit is what should be live now, so a stale
+  # run polling for a SHA the fleet already moved past gets cancelled instead
+  # of running out its clock and filing a false "did not go live" issue.
+  cancel-in-progress: true
 
 jobs:
   verify:
@@ -60,7 +63,11 @@ jobs:
               fail(f"- Failing step: parse `.github/pr-standards.json`\n"
                    f"- Error: `{type(error).__name__}: {error}`\n")
 
-          url = config["url"].rstrip("/")
+          url = config.get("url")
+          if not isinstance(url, str) or not url:
+              fail("- Failing step: read `postMergeVerify.url` from `.github/pr-standards.json`\n"
+                   "- Error: `url` is missing or not a string\n")
+          url = url.rstrip("/")
           sha_path = config.get("shaPath")
           sha_key = config.get("shaJsonKey", "sha")
           # Capped below the job's 20-minute timeout so a long-poll config still
@@ -81,7 +88,8 @@ jobs:
                   try:
                       _, body = get(url + sha_path)
                       last = body.strip()[:500]
-                      live_sha = json.loads(body).get(sha_key)
+                      parsed = json.loads(body)
+                      live_sha = parsed.get(sha_key) if isinstance(parsed, dict) else None
                       if isinstance(live_sha, str) and live_sha.strip() == expected:
                           print(f"Live SHA is {expected}.")
                           break
