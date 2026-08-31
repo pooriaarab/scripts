@@ -64,6 +64,7 @@ PATH="$PWD:$PATH" ./hooks/pr-standards-guard.test.sh
 python3 build-repo-prefixes.test.py
 python3 install-pr-hooks.test.py
 ./adopt-branch-pattern.test.sh
+./pr-standards-rollout-labels.test.sh
 ```
 
 ## pr-standards
