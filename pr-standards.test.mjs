@@ -832,3 +832,27 @@ test('proof: a fence inside a list item is a real fence', () => {
   assert.equal(failed(checkProof(notAListMarker, uiFiles, [], config)), false);
   assert.equal(warned(checkProof(notAListMarker, uiFiles, [], config)), false);
 });
+
+test('proof: an indented code block cannot smuggle attachment URLs as evidence', () => {
+  const uiFiles = [{ filename: 'src/components/Button.tsx', status: 'modified' }];
+  const url = (id) => `https://github.com/user-attachments/assets/${id}`;
+  const failed = (r) => r.failures.some((f) => f.check === 'proof of a visible change');
+  const warned = (r) => r.warnings.some((w) => w.check === 'proof of a visible change');
+  const head = ['## What', 'x', '## Why', 'y', '## How I verified', 'ran it -> pass'];
+  const tail = ['Assisted-by: agent:model'];
+
+  // Four spaces renders as an indented code block on GitHub: the URL shows as
+  // inert text, never as a clickable link or an embedded image, so it is not
+  // real before-and-after evidence.
+  const indentedUrls = [...head, `    ![before](${url('aaa')})`, `    ![after](${url('bbb')})`, ...tail].join('\n');
+  assert.equal(failed(checkProof(indentedUrls, uiFiles, [], config)), true);
+  assert.equal(warned(checkProof(indentedUrls, uiFiles, [], config)), false);
+
+  // A leading tab renders the same way.
+  const tabIndentedUrls = [...head, `\t![before](${url('aaa')})`, `\t![after](${url('bbb')})`, ...tail].join('\n');
+  assert.equal(failed(checkProof(tabIndentedUrls, uiFiles, [], config)), true);
+
+  // Unindented, the same two URLs are real evidence.
+  const realProof = [...head, `![before](${url('aaa')})`, `![after](${url('bbb')})`, ...tail].join('\n');
+  assert.equal(failed(checkProof(realProof, uiFiles, [], config)), false);
+});
