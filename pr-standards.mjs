@@ -517,8 +517,12 @@ function countUserAttachments(body) {
   // Backtick excluded along with the closing-paren/bracket/quote characters:
   // a URL wrapped in inline code (`` `https://...assets/abc` ``) is the same
   // asset as one linked as a Markdown image, and a backtick is never a real
-  // URL character, so it must never be captured as part of the id.
-  const matches = text.match(/https:\/\/github\.com\/user-attachments\/assets\/[^\s"'`\)\]]+/g);
+  // URL character, so it must never be captured as part of the id. Angle
+  // brackets excluded too: a real asset id is never `<before>` or `<after>` —
+  // that is the placeholder syntax this very convention's own docs use to
+  // show the pattern, and without the exclusion two copy-pasted placeholders
+  // counted as two distinct real attachments.
+  const matches = text.match(/https:\/\/github\.com\/user-attachments\/assets\/[^\s"'`\)\]<>]+/g);
   if (!matches) return 0;
   // Distinct assets, because the same image pasted twice is one image. The
   // threshold asks for before AND after, not for two links — and a query

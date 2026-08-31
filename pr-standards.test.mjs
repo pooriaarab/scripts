@@ -712,6 +712,13 @@ test('proof: a third council pass loopholes stay closed', () => {
     'Assisted-by: agent:model',
   ].join('\n');
   assert.equal(failed(checkProof(commentInsideFence, uiFiles, [], config)), true);
+
+  // `<before>` and `<after>` are the placeholder ids this convention's own
+  // docs use to show the URL pattern, not real asset ids. Two copy-pasted
+  // placeholders must not count as two real attachments.
+  const placeholders = `${validBody}\n![before](https://github.com/user-attachments/assets/<before>)\n![after](https://github.com/user-attachments/assets/<after>)`;
+  assert.equal(failed(checkProof(placeholders, uiFiles, [], config)), true);
+  assert.equal(warned(checkProof(placeholders, uiFiles, [], config)), false);
 });
 
 test('proof: a stray fence never swallows a screenshot, but never grants a waiver either', () => {
