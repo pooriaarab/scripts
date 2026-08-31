@@ -596,3 +596,33 @@ test('a lockfile is excluded wherever a workspace keeps it', () => {
   // Still counts a real source file that merely lives near one.
   assert.equal(DEFAULT_CONFIG.excludeGlobs.some((glob) => matchesGlob('apps/website/src/lock-screen.ts', glob)), false);
 });
+
+test('the proof escape hatch does not read as a refusal to answer', () => {
+  // `Proof: n/a — <reason>` is the documented escape hatch, and the docs say to
+  // write it under `## How I verified`. The N/A guard matched it there, so
+  // every pull request that used the hatch correctly failed the body check —
+  // with a message about lazy verification that never named the line. Two rules
+  // the standard defines, contradicting each other.
+  const body = (verified) => [
+    '## What', 'One sentence.',
+    '## Why', 'Because of the reason.',
+    '## How I verified', verified,
+    'Assisted-by: agent:model',
+  ].join('\n\n');
+  const verifiedFails = (text) => validateBody(body(text), 142, config)
+    .failures.some((f) => f.check === '## How I verified');
+
+  // A real command and result, plus the hatch, passes.
+  assert.equal(verifiedFails('`node --test` -> 40 passed\n\nProof: n/a — a CLI check with no visible surface at all.'), false);
+  // The hatch with no command and no result still fails: it waives the media,
+  // never the verification.
+  assert.equal(verifiedFails('Proof: n/a — a CLI check with no visible surface at all.'), true);
+  // A bare N/A is still a refusal.
+  assert.equal(verifiedFails('`node --test` -> 40 passed\n\nN/A'), true);
+  // So is a TODO, and so is "tested locally".
+  assert.equal(verifiedFails('`node --test` -> 40 passed\n\nTODO: check the rest'), true);
+  assert.equal(verifiedFails('`node --test` -> 40 passed\n\ntested locally'), true);
+  // A hatch with no reason after the dash is not a valid hatch, so the guard
+  // still sees the n/a.
+  assert.equal(verifiedFails('`node --test` -> 40 passed\n\nProof: n/a'), true);
+});
