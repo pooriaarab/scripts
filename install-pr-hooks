@@ -426,7 +426,15 @@ for root in "${ROOTS[@]}"; do
         # Without this branch the git-hook layer of the standard cannot exist on
         # any machine with a global hooksPath, which is the common setup and the
         # one it was written for: a rollout here reported 71 skips, 0 installs.
-        if [ "$resolved_hooks_path" = "$gitdir/hooks" ]; then
+        #
+        # Compared after normalize_path, not as raw strings: git's --path
+        # output preserves whatever the config value looked like (a trailing
+        # slash on "core.hooksPath = .git/hooks/", a "./" prefix, doubled
+        # slashes), so a lexical comparison against "$gitdir/hooks" would
+        # miss a hooksPath that spells out the default in any but the one
+        # exact form, and fall through to demanding a delegation marker for
+        # a directory that was never separate to begin with.
+        if [ "$(normalize_path "$resolved_hooks_path")" = "$(normalize_path "$gitdir/hooks")" ]; then
           # A relative hooksPath resolves against each repo's own working
           # tree, so a global or system value that happens to spell out the
           # plain default (e.g. "core.hooksPath = .git/hooks") resolves right
