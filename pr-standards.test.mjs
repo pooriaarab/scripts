@@ -1150,3 +1150,63 @@ test('the documented proof hatch is not a refusal to answer', () => {
   // form, so it is left in place and reads as the bare refusal it is.
   assert.equal(validateBody(section(evidence, '', 'Proof: n/a'), 64, config).ok, false);
 });
+
+test('a fence closed with more characters than it opened is still a fence', () => {
+  // An automated fix cycle on #66 replaced this scanner with a regex that
+  // backreferenced the opening fence's exact length, so a fence opened with
+  // three backticks and closed with four -- valid CommonMark, since a closer
+  // need only be AT LEAST as long -- was never recognised. A literal comment
+  // marker inside it then truncated the body and a pull request carrying real
+  // before-and-after links failed for a reason unrelated to its content.
+  // That code was reverted; these assertions keep this implementation honest.
+  const uiFiles = [{ filename: 'src/components/Button.tsx', status: 'modified' }];
+  const url = (id) => `![shot](https://github.com/user-attachments/assets/${id})`;
+  const failed = (r) => r.failures.some((f) => f.check === 'proof of a visible change');
+  const body = (open, close) => [
+    '## What', 'x', '## Why', 'y', '## How I verified', 'ran it -> pass',
+    open, 'a literal <!-- inside a code block', close,
+    url('aaa'), url('bbb'), 'Assisted-by: agent:model',
+  ].join('\n');
+
+  // Real proof sits after the block in every case, so none of these may fail.
+  for (const [open, close] of [['```', '```'], ['```', '````'], ['~~~', '~~~~~']]) {
+    assert.equal(failed(checkProof(body(open, close), uiFiles, [], config)), false,
+      `a fence opened with ${open} and closed with ${close} must be recognised`);
+  }
+
+  // A closer SHORTER than its opener does not close the fence, so the fence is
+  // unterminated. The two callers answer that case in OPPOSITE directions, and
+  // each direction is the safe one for what it decides:
+  //
+  //   - attachment counting does NOT hide what follows, so a broken fence
+  //     cannot swallow real proof and fail a pull request that complied;
+  //   - the escape hatch DOES treat it as hidden, so a quoted hatch inside a
+  //     broken fence cannot grant a waiver nobody wrote.
+  //
+  // Getting this backwards is how the reverted regex failed: it chose "hide"
+  // for both, which is the direction that rejects honest work.
+  const unterminated = body('````', '```');
+  assert.equal(failed(checkProof(unterminated, uiFiles, [], config)), false);
+
+  // Where the closer's LENGTH is actually observable. The attachment path
+  // deliberately fails open on an unterminated fence, so a wrong closer rule is
+  // invisible there -- which is why the reverted regex's bug needed a body with
+  // a literal comment marker to show itself at all. The hatch path is the one
+  // that hides, so it is the one that can tell a closed fence from an open one:
+  // a hatch AFTER a 3-open/4-close block is visible and grants the waiver, and
+  // only a closer rule that accepts a longer close gets that right.
+  const hatchAfterFence = [
+    '## What', 'x', '## Why', 'y', '## How I verified', 'ran it -> pass',
+    '```', 'a quoted example', '````',
+    'Proof: n/a — a checker with no user-visible surface at all',
+    'Assisted-by: agent:model',
+  ].join('\n');
+  assert.equal(failed(checkProof(hatchAfterFence, uiFiles, [], config)), false);
+
+  const quotedHatch = [
+    '## What', 'x', '## Why', 'y', '## How I verified', 'ran it -> pass',
+    '````', 'Proof: n/a — the documented escape hatch, quoted from the docs', '```',
+    'Assisted-by: agent:model',
+  ].join('\n');
+  assert.equal(failed(checkProof(quotedHatch, uiFiles, [], config)), true);
+});
