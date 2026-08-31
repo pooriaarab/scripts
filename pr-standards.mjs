@@ -389,7 +389,11 @@ function hasCommandAndResult(text) {
 function countUserAttachments(body) {
   const visible = String(body || '').replace(/<!--[\s\S]*?-->/g, '');
   const matches = visible.match(/https:\/\/github\.com\/user-attachments\/assets\/[^\s"'\)\]]+/g);
-  return matches ? matches.length : 0;
+  if (!matches) return 0;
+  // Distinct assets, not link count. The threshold asks for before AND after,
+  // so the same image pasted twice is one image and must not clear it -- and a
+  // query string or fragment on the same asset is still that asset.
+  return new Set(matches.map((url) => url.split(/[?#]/)[0])).size;
 }
 
 // The escape hatch, in the one form the checker accepts. It is shared with

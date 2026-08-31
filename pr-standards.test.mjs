@@ -692,3 +692,18 @@ test('the documented proof hatch is not a refusal to answer', () => {
     assert.equal(validateBody(section(evidence, '', refusal), 64, cfg).ok, false, `${refusal} should still fail`);
   }
 });
+
+test('proof: the same image pasted twice is one image', () => {
+  // The threshold asks for before AND after, not for two links. Counting raw
+  // matches let one screenshot pasted twice clear it, which is the loophole the
+  // whole check exists to close.
+  const uiFiles = [{ filename: 'src/components/Button.tsx', status: 'modified' }];
+  const url = (id) => `![shot](https://github.com/user-attachments/assets/${id})`;
+  const warned = (r) => r.warnings.some((w) => w.check === 'proof of a visible change');
+
+  assert.equal(warned(checkProof(`${validBody}\n${url('abc')}\n${url('abc')}`, uiFiles, [], config)), true);
+  // Nor does a query string on the same asset make it a second one.
+  assert.equal(warned(checkProof(`${validBody}\n${url('abc')}\n${url('abc?raw=1')}`, uiFiles, [], config)), true);
+  // Two genuinely different assets clear it.
+  assert.equal(warned(checkProof(`${validBody}\n${url('abc')}\n${url('def')}`, uiFiles, [], config)), false);
+});
