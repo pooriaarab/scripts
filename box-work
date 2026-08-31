@@ -108,7 +108,9 @@ if [[ "$MODE" == stop ]]; then
   [[ -f "$IDFILE" ]] || die "no Box recorded for $NAME"
   id="$(tr -d '[:space:]' < "$IDFILE")"
   if "$BOX" stop "$id" >/dev/null 2>&1; then
-    echo "stopped $NAME ($id)"; rm -f "$IDFILE"; exit 0
+    # Keep the id: the next start resumes this Box instead of creating another. Stopped
+    # Boxes are free, so a kept id costs nothing and saves a create.
+    echo "stopped $NAME ($id); id kept so the next start resumes it"; exit 0
   fi
   echo "FAILED to stop $NAME ($id) -- keeping the id so you can retry" >&2
   exit 1
@@ -125,8 +127,27 @@ try: print(json.load(sys.stdin)["box"].get("state",""))
 except Exception: print("")')"
   case "$st" in
     ready|idle|running) ID="$cand"; echo "[box-work] reusing $NAME box $ID ($st)" ;;
-    stopped|archived)   "$BOX" resume "$cand" >/dev/null 2>&1 && ID="$cand" && echo "[box-work] resumed $NAME box $ID" ;;
+    stopped|archived)
+      if "$BOX" resume "$cand" >/dev/null 2>&1; then
+        ID="$cand"; echo "[box-work] resumed $NAME box $ID"
+      else
+        # Keep the id: a resume can fail transiently (network blip, API hiccup), and
+        # forgetting it here would force a fresh ~100s create with no way back if that
+        # create also fails. Worst case we retry the resume next start.
+        echo "[box-work] $cand could not be resumed; will retry next start" >&2
+      fi ;;
+    *)
+      # Empty state means either the Box is gone from the account or `box info` itself
+      # failed transiently -- the exception handler above can't tell them apart. Don't
+      # guess: forgetting a live id on a false positive throws away a resumable Box
+      # forever, which is the exact bug this PR fixes. Leave it recorded; a start after
+      # the Box is truly gone just pays one extra `info` call.
+      echo "[box-work] could not confirm state of $cand; leaving it recorded" >&2 ;;
   esac
+  # A recorded id that we could not confirm or resume must not fall through to the
+  # create path below -- that would start a duplicate Box AND overwrite $IDFILE with
+  # its id, permanently losing the original instead of retrying it next start.
+  [[ -n "$ID" ]] || die "$NAME box $cand is not usable right now (see above); retry shortly instead of creating a duplicate"
 fi
 
 if [[ -z "$ID" ]]; then

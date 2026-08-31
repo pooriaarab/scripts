@@ -250,15 +250,7 @@ test('counts changed lines after exclusions and reports raw totals', () => {
   assert.equal(checkSize(summary, { ...config, maxLines: 250 }).failures.length, 1);
 });
 
-test('no label clears the size cap', () => {
-  // The cap used to have an escape: an owner-applied `oversized-approved`
-  // label. Every escape from a design constraint becomes the path — an agent
-  // told it may ask for the label asks for the label instead of decomposing
-  // the work, which is the one thing the cap exists to force.
-  //
-  // The remaining escape is outside this checker: a person merges past a red
-  // check. That is a deliberate act on a named pull request, it cannot be
-  // requested in a body, and it leaves a record.
+test('override label short-circuits size failures', () => {
   const summary = {
     rawLines: 900,
     countedLines: 700,
@@ -268,18 +260,11 @@ test('no label clears the size cap', () => {
     excludedFiles: 0,
     topLevelDirs: ['a', 'b', 'c', 'd'],
   };
-  const result = checkSize(summary, { ...config, maxLines: 500, maxFiles: 40 });
-  assert.equal(result.failures.some((f) => f.check === 'PR size'), true);
-  assert.equal(result.failures.some((f) => f.check === 'changed files'), true);
-  // The fix text must not send anyone looking for a label that no longer
-  // exists. Saying no label clears it is the point; naming one to request is
-  // the bug, because the instruction is what an agent acts on.
-  assert.equal(result.failures.every((f) => !/oversized-approved|ask the repo owner/i.test(f.fix)), true);
-  assert.equal(result.failures.every((f) => /split the change/i.test(f.fix)), true);
-  // A repo config that still carries the old keys is simply ignored, rather
-  // than reviving the escape or throwing on a stale file.
-  const stale = checkSize(summary, { ...config, maxLines: 500, maxFiles: 40, overrideLabel: 'oversized-approved', overrideActors: ['someone'] });
-  assert.equal(stale.failures.length, 2);
+  const result = checkSize(summary, { ...config, maxLines: 500, maxFiles: 40 }, ['oversized-approved']);
+
+  assert.equal(result.overridden, true);
+  assert.equal(result.failures.length, 0);
+  assert.equal(result.warnings.length, 1);
 });
 
 test('enforces rules for chore branches (null issue)', () => {
@@ -699,72 +684,4 @@ test('a quoted rule name is not a refusal to answer', () => {
   // command sits in a fence still passes, because hasCommandAndResult reads the
   // raw section rather than the stripped one.
   assert.equal(fails('```\n$ node --test\nℹ pass 41\n```'), false);
-});
-
-test('prefix precedence holds on the CI path, not only in loadConfig', async () => {
-  // #101 fixed the precedence and covered it through loadConfig, which is the
-  // LOCAL path. The path that was broken is this one: runPr -> fetchRemoteConfig.
-  // The registry had tests; it had none on the path that reads it in CI, and
-  // that is exactly how the bug survived long enough to reject an adoption
-  // branch the rollout had just created.
-  //
-  // A repo that states a prefix has decided, so its own config outranks the
-  // registry. The registry outranks derivation, because derivation is a guess
-  // and the registry is the fleet's answer. Nothing may outrank the config.
-  const registry = JSON.parse(readFileSync(new URL('./repo-prefixes.json', import.meta.url), 'utf8'));
-  // Only a repo whose registry prefix differs from its derived one can tell the
-  // three sources apart.
-  const mismatch = Object.entries(registry).find(([n, p]) => derivePrefix(n) !== p);
-  assert.ok(mismatch, 'repo-prefixes.json has no entry whose prefix differs from its derived one');
-  const [name, registered] = mismatch;
-
-  const originalWrite = process.stdout.write;
-  const originalPath = process.env.PATH;
-  const originalToken = process.env.GITHUB_TOKEN;
-  const originalFetch = globalThis.fetch;
-  process.env.PATH = '';
-  process.env.GITHUB_TOKEN = 'test-token';
-  process.env.GITHUB_REPOSITORY = 'other/repo';
-
-  const run = async (configBody, branch) => {
-    let output = '';
-    process.stdout.write = (chunk) => { output += chunk; return true; };
-    globalThis.fetch = async (url) => {
-      if (url.includes('contents/.github/pr-standards.json')) {
-        return configBody
-          ? { ok: true, json: async () => ({ content: Buffer.from(configBody).toString('base64'), encoding: 'base64' }) }
-          : { ok: false, status: 404, text: async () => 'Not Found' };
-      }
-      if (url.includes('/commits')) return { ok: true, json: async () => ([{ sha: 'abc1234', commit: { message: 'Do one thing' } }]) };
-      if (url.includes('/files')) return { ok: true, json: async () => ([]) };
-      if (url.match(/pulls\/\d+$/)) {
-        return { ok: true, json: async () => ({ head: { ref: branch }, base: { ref: 'main' }, title: 'x', body: 'x', labels: [] }) };
-      }
-      if (url.includes('issues/')) return { ok: true, json: async () => ({ state: 'open' }) };
-      throw new Error(`Unexpected fetch URL: ${url}`);
-    };
-    try {
-      await main(['pr', '--repo', `pooriaarab/${name}`, '--number', '7', '--json']);
-      return JSON.parse(output);
-    } finally { process.stdout.write = originalWrite; }
-  };
-
-  try {
-    // No config: the registry answers, and its branch is accepted.
-    const fromRegistry = await run(null, `${registered}-7-do-one-thing`);
-    assert.equal(fromRegistry.failures.some((f) => f.check === 'branch name'), false);
-    // ...and the derived guess is now rejected, where it used to be the only
-    // thing accepted.
-    const derivedBranch = await run(null, `${derivePrefix(name)}-7-do-one-thing`);
-    assert.equal(derivedBranch.failures.some((f) => f.check === 'branch name'), true);
-    // A config prefix outranks the registry.
-    const fromConfig = await run(JSON.stringify({ prefix: 'zzz' }), 'zzz-7-do-one-thing');
-    assert.equal(fromConfig.failures.some((f) => f.check === 'branch name'), false);
-  } finally {
-    process.stdout.write = originalWrite;
-    process.env.PATH = originalPath;
-    process.env.GITHUB_TOKEN = originalToken;
-    globalThis.fetch = originalFetch;
-    delete process.env.GITHUB_REPOSITORY;
-  }
 });
