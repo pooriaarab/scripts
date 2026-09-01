@@ -11,6 +11,8 @@ COMMAND = Path(__file__).parent / "worker-preview-artifact-intake"
 REPO = "pooriaarab/blogbat"
 BRANCH = "blo-142-worker-previews"
 SHA = "a" * 40
+BASE_SHA = "c" * 40
+WORKFLOW_PATH = ".github/workflows/worker-preview-build.yml"
 class ArtifactIntakeTest(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -23,8 +25,12 @@ import os, pathlib, sys
 root = pathlib.Path(os.environ["FAKE_GH_API"])
 endpoint = sys.argv[2]
 if endpoint.endswith("/pulls/146"): name = "pr.json"
-elif endpoint.endswith("/actions/runs"): name = "runs.json"
+elif endpoint.endswith("/actions/workflows"): name = "workflows.json"
+elif endpoint.endswith("/actions/workflows/17/runs"): name = "runs.json"
 elif endpoint.endswith("/runs/91/artifacts"): name = "artifacts.json"
+elif endpoint.endswith("/contents/.github/workflows/worker-preview-build.yml"):
+    ref = next(value.split("=", 1)[1] for value in sys.argv if value.startswith("ref="))
+    name = "head-workflow.json" if ref == "a" * 40 else "base-workflow.json"
 elif endpoint.endswith("/artifacts/81/zip"):
     sys.stdout.buffer.write((root / "bundle.zip").read_bytes())
     if os.environ.get("FAKE_GH_RACE"): (root / "pr.json").write_text((root / "moved-pr.json").read_text())
@@ -40,8 +46,8 @@ sys.stdout.write((root / name).read_text())
         self.temp.cleanup()
     def write_api(self, *, pr=None, runs=None, artifact=None):
         pr = pr or {"state": "open", "title": "[BLO-142] Add Worker Previews", "head": {"sha": SHA, "ref": BRANCH,
-                    "repo": {"full_name": REPO}}, "base": {"repo": {"full_name": REPO}}}
-        run = {"id": 91, "name": "Worker Preview Build", "event": "pull_request",
+                    "repo": {"full_name": REPO}}, "base": {"sha": BASE_SHA, "repo": {"full_name": REPO}}}
+        run = {"id": 91, "workflow_id": 17, "name": "Worker Preview Build", "event": "pull_request",
                "status": "completed", "conclusion": "success", "head_sha": SHA,
                "head_branch": BRANCH, "head_repository": {"full_name": REPO},
                "pull_requests": [{"number": 146}]}
@@ -53,6 +59,14 @@ sys.stdout.write((root / name).read_text())
                                 "digest": f"sha256:{digest}"}
         (self.api / "pr.json").write_text(json.dumps(pr))
         (self.api / "moved-pr.json").write_text(json.dumps({**pr, "head": {**pr["head"], "sha": "b" * 40}}))
+        (self.api / "workflows.json").write_text(json.dumps({"workflows": [
+            {"id": 17, "name": "Worker Preview Build", "path": WORKFLOW_PATH, "state": "active"},
+            {"id": 99, "name": "Worker Preview Build",
+             "path": ".github/workflows/hostile.yml", "state": "active"},
+        ]}))
+        blob = {"type": "file", "path": WORKFLOW_PATH, "sha": "d" * 40}
+        (self.api / "head-workflow.json").write_text(json.dumps(blob))
+        (self.api / "base-workflow.json").write_text(json.dumps(blob))
         (self.api / "runs.json").write_text(json.dumps({"workflow_runs": runs or [run]}))
         (self.api / "artifacts.json").write_text(json.dumps({"artifacts": [artifact]}))
     def write_bundle(self, files, *, record=None, mutate=None):
@@ -72,9 +86,10 @@ sys.stdout.write((root / name).read_text())
                  "digest": f"sha256:{hashlib.sha256(path.read_bytes()).hexdigest()}"}
         value.update(changes)
         (self.api / "artifacts.json").write_text(json.dumps({"artifacts": [value]}))
-    def run_intake(self):
+    def run_intake(self, workflow_path=WORKFLOW_PATH):
         output = self.root / "accepted"
-        result = subprocess.run([COMMAND, REPO, "146", "--prefix", "blo", output], env=self.env,
+        result = subprocess.run([COMMAND, REPO, "146", "--prefix", "blo",
+                                 "--workflow-path", workflow_path, output], env=self.env,
                                 text=True, capture_output=True)
         return result, output
     def test_accepts_current_verified_bundle_and_pins_it_atomically(self):
@@ -110,6 +125,32 @@ sys.stdout.write((root / name).read_text())
                 self.assertFalse(output.exists())
         pr_path.write_text(original_pr)
         runs_path.write_text(original_runs)
+    def test_pins_exact_workflow_path_and_stable_id(self):
+        workflows = self.api / "workflows.json"
+        runs = self.api / "runs.json"
+        exact = json.loads(workflows.read_text())["workflows"][0]
+        hostile = json.loads(workflows.read_text())["workflows"][1]
+        workflows.write_text(json.dumps({"workflows": [hostile]}))
+        result, output = self.run_intake()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(output.exists())
+        result, output = self.run_intake(".github/workflows/../hostile.yml")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(output.exists())
+        workflows.write_text(json.dumps({"workflows": [exact, hostile]}))
+        value = json.loads(runs.read_text())["workflow_runs"][0]
+        runs.write_text(json.dumps({"workflow_runs": [{**value, "workflow_id": 99}]}))
+        result, output = self.run_intake()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(output.exists())
+    def test_rejects_modified_workflow_blob(self):
+        path = self.api / "head-workflow.json"
+        value = json.loads(path.read_text())
+        path.write_text(json.dumps({**value, "sha": "e" * 40}))
+        result, output = self.run_intake()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("workflow differs from the base", result.stderr)
+        self.assertFalse(output.exists())
     def test_rejects_untrusted_artifact_metadata(self):
         original = (self.api / "artifacts.json").read_text()
         cases = ({"expired": True}, {"digest": "sha256:" + "0" * 64},
