@@ -822,6 +822,59 @@ test('proof: attachments only count inside How I verified', () => {
   assert.equal(failed(checkProof(section(`bun test -> 214 passed\n${embeds}`), uiFiles, config)), false);
 });
 
+test('proof: the body reader follows rendered Markdown fences', () => {
+  const uiFiles = [{ filename: 'src/components/Button.tsx', status: 'modified' }];
+  const url = (id) => `![shot](https://github.com/user-attachments/assets/${id})`;
+  const failed = (result) => result.failures.some((f) => f.check === 'proof of a visible change');
+  const warned = (result) => result.warnings.some((w) => w.check === 'proof of a visible change');
+  const body = (...lines) => [
+    '## What', 'x', '## Why', 'y', '## How I verified', 'bun test -> pass',
+    ...lines,
+  ].join('\n');
+  const hatch = 'Proof: n/a — a checker with no user-visible surface at all';
+
+  // A closer uses the same character and may be longer than its opener.
+  assert.equal(failed(checkProof(body('```', url('aaa'), url('bbb'), '````'), uiFiles, config)), true);
+  assert.equal(failed(checkProof(body('```', 'example', '````', hatch), uiFiles, config)), false);
+  // A different fence character does not close the block.
+  assert.equal(failed(checkProof(body('```', '~~~', hatch), uiFiles, config)), true);
+
+  // The two callers answer an unmatched fence in opposite directions.
+  assert.equal(failed(checkProof(body('```', url('aaa'), url('bbb')), uiFiles, config)), false);
+  assert.equal(failed(checkProof(body('```', hatch), uiFiles, config)), true);
+
+  // Fences opened after list markers and inside blockquotes hide quoted URLs.
+  assert.equal(failed(checkProof(body('- ```', `  ${url('aaa')}`, `  ${url('bbb')}`, '  ```'), uiFiles, config)), true);
+  assert.equal(failed(checkProof(body('> ```', `> ${url('aaa')}`, `> ${url('bbb')}`, '> ```'), uiFiles, config)), true);
+  // A quote container ending also ends its fence, so real proof below it stays visible.
+  assert.equal(failed(checkProof(body('> ```', '> quoted example', url('ccc'), url('ddd')), uiFiles, config)), false);
+
+  // CRLF must not make a valid closing fence look unterminated.
+  const crlfBody = body('```', url('eee'), url('fff'), '```', 'trailer').replaceAll('\n', '\r\n');
+  assert.equal(failed(checkProof(crlfBody, uiFiles, config)), true);
+
+  // Four spaces mark indented code, not a fenced block. This leaves one real URL,
+  // which warns instead of failing, and distinguishes the two interpretations.
+  const indented = body('    ```', url('ggg'), '    ```');
+  assert.equal(failed(checkProof(indented, uiFiles, config)), false);
+  assert.equal(warned(checkProof(indented, uiFiles, config)), true);
+});
+
+test('proof: the body reader keeps HTML comments separate from fences', () => {
+  const uiFiles = [{ filename: 'src/components/Button.tsx', status: 'modified' }];
+  const url = (id) => `![shot](https://github.com/user-attachments/assets/${id})`;
+  const failed = (result) => result.failures.some((f) => f.check === 'proof of a visible change');
+  const body = (...lines) => [
+    '## What', 'x', '## Why', 'y', '## How I verified', 'bun test -> pass',
+    ...lines,
+  ].join('\n');
+
+  // An escaped marker is visible Markdown, so its attachments count.
+  assert.equal(failed(checkProof(body(`\\<!-- ${url('aaa')} ${url('bbb')} -->`), uiFiles, config)), false);
+  // A fence marker inside a comment is comment text, not a real fence.
+  assert.equal(failed(checkProof(body('<!-- example:', '```', '-->', url('ccc'), url('ddd')), uiFiles, config)), false);
+});
+
 test('the proof escape hatch does not read as a refusal to answer', () => {
   // `Proof: n/a — <reason>` is the documented escape hatch, and the docs say to
   // write it under `## How I verified`. The N/A guard matched it there, so
