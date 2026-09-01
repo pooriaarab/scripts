@@ -126,11 +126,12 @@ The checker enforces only what it can cheaply and mechanically:
   belongs in user-attachments. A screenshot committed to a repo stays in its
   history forever, for a picture nobody opens twice. Media anywhere else (`public/**`, `**/assets/**`, and every other path) is a real
   asset and is not flagged.
-- **Owner label clears it.** `proof-not-applicable`, resolved through the same
-  ownership check as `oversized-approved`, skips both the UI attachment and the
-  committed media checks. A label the author applies to its own PR does not count.
+- **No label clears it.** There is no `proof-not-applicable`. The size cap's
+  override label was removed for the reason that an agent can apply its own
+  label, and a proof requirement an agent can waive is not a requirement.
 - `requireProof: false` turns off both proof checks for a repo with no
-  user-facing surface.
+  user-facing surface. That is a config decision: it lives in the repo, it shows
+  up in a diff, and it is reviewed like any other change.
 
 Escape hatch, when proof truly does not apply:
 
@@ -206,10 +207,17 @@ Not counted, an agent should never be penalised for a lockfile it did not write:
 
 **500 is a design constraint, not a nuisance.** It is roughly one reviewable
 sitting. An agent that must stay under it decomposes the work before it writes,
-which is the behaviour we actually want. If a change genuinely cannot be split,
-that is a fact worth stating out loud, so the only way past the cap is the
-`oversized-approved` label, applied by the repo owner. An agent cannot clear its
-own PR.
+which is the behaviour we actually want.
+
+**The cap has no escape.** There was one — an owner-applied `oversized-approved`
+label — and it is gone. Every escape from a design constraint becomes the path:
+an agent told it may ask for a label asks for the label instead of decomposing
+the work, which is the one thing the cap exists to force. A change that seems
+unsplittable almost always splits once you accept that it has to.
+
+One escape remains, and it is deliberately awkward: a person merges past a red
+check. That takes an act by a human on a named pull request. It cannot be
+requested in a body, and it leaves a record.
 
 **Atomic means one concern.** The mechanical proxies above catch the obvious
 cases. Whether a PR really does one thing is a judgement, and that judgement

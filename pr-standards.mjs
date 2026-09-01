@@ -60,14 +60,10 @@ export const DEFAULT_CONFIG = {
   maxFiles: 40,
   maxTopLevelDirs: 3,
   minBodyChars: 120,
-  overrideLabel: 'oversized-approved',
-  // Beyond the repo owner, who may clear the size caps. Empty means owner only.
-  overrideActors: [],
   bannedCommitTrailers: DEFAULT_BANNED_COMMIT_TRAILERS,
   exemptBranches: ['main', 'release', 'refactor', 'gh-pages'],
   excludeGlobs: DEFAULT_EXCLUDE_GLOBS,
   requireProof: true,
-  proofOverrideLabel: 'proof-not-applicable',
   uiGlobs: [
     '**/*.tsx', '**/*.jsx', '**/*.vue', '**/*.svelte', '**/*.css', '**/*.scss',
     '**/*.html', '**/components/**', '**/app/**/page.*', '**/pages/**',
@@ -475,11 +471,14 @@ export function isCommittedProofMedia(file) {
 // is one check, even though its evidence comes from three places: the body, the
 // files, and the labels. Splitting it across validateBody and checkSize made
 // each caller responsible for suppressing the other's half.
-export function checkProof(body, files, labels = [], config = DEFAULT_CONFIG) {
+export function checkProof(body, files, config = DEFAULT_CONFIG) {
   const failures = [];
   const warnings = [];
-  if (config.requireProof === false) return { failures, warnings, overridden: false };
-  if (labels.includes(config.proofOverrideLabel)) return { failures, warnings, overridden: true };
+  // No label clears this. #114 removed the size cap's override label because an
+  // agent can apply its own label, and that argument applies unchanged here --
+  // a proof requirement an agent can waive is not a requirement. The only
+  // escape is a stated reason in the body, which the review council judges.
+  if (config.requireProof === false) return { failures, warnings };
 
   for (const file of files || []) {
     if (!isCommittedProofMedia(file)) continue;
@@ -515,7 +514,7 @@ export function checkProof(body, files, labels = [], config = DEFAULT_CONFIG) {
       ));
     }
   }
-  return { failures, warnings, overridden: false };
+  return { failures, warnings };
 }
 
 export function validateBody(body, issueNumber, config = DEFAULT_CONFIG) {
@@ -710,27 +709,30 @@ export function summarizeFiles(files, config = DEFAULT_CONFIG) {
   };
 }
 
-export function checkSize(summary, config = DEFAULT_CONFIG, labels = []) {
+// The cap has no label escape. Every escape from a design constraint becomes
+// the path: an agent told it may ask for a label asks for the label, rather
+// than decomposing the work, which is the one thing the cap exists to force.
+//
+// The remaining escape is the right one and lives outside this checker: a
+// person merges past a red check. That takes a deliberate act by a human on a
+// named pull request. It cannot be requested in a body, and it leaves a record.
+export function checkSize(summary, config = DEFAULT_CONFIG) {
   const failures = [];
   const warnings = [];
-  // `labels` is what the CALLER decided counts. runPr passes the label through
-  // only when the repo owner applied it, because an override anyone can add is
-  // not an override. See resolveOverrideLabels.
-  const overridden = labels.includes(config.overrideLabel);
-  if (!overridden && summary.countedLines > config.maxLines) {
+  if (summary.countedLines > config.maxLines) {
     failures.push(fail(
       'PR size',
       `${summary.countedLines.toLocaleString()} counted lines`,
       `${config.maxLines.toLocaleString()} counted lines or fewer`,
-      `Split the change, or ask the repo owner to add the ${config.overrideLabel} label.`,
+      'Split the change. There is no label that clears this.',
     ));
   }
-  if (!overridden && summary.countedFiles > config.maxFiles) {
+  if (summary.countedFiles > config.maxFiles) {
     failures.push(fail(
       'changed files',
       `${summary.countedFiles} counted files`,
       `${config.maxFiles} counted files or fewer`,
-      `Split the change, or ask the repo owner to add the ${config.overrideLabel} label.`,
+      'Split the change. There is no label that clears this.',
     ));
   }
   if (summary.topLevelDirs.length > config.maxTopLevelDirs) {
@@ -741,8 +743,7 @@ export function checkSize(summary, config = DEFAULT_CONFIG, labels = []) {
       'Split unrelated directories into separate pull requests.',
     ));
   }
-
-  return { failures, warnings, overridden };
+  return { failures, warnings };
 }
 
 function repoRoot() {
@@ -760,13 +761,10 @@ export function validateConfig(config) {
   for (const field of ['maxLines', 'maxFiles', 'maxTopLevelDirs', 'minBodyChars']) {
     if (!Number.isInteger(config[field]) || config[field] < 0) throw new ConfigurationError(`${field} must be a non-negative integer`);
   }
-  if (typeof config.overrideLabel !== 'string' || !config.overrideLabel) throw new ConfigurationError('overrideLabel must be a non-empty string');
-  if (!Array.isArray(config.overrideActors) || !config.overrideActors.every((value) => typeof value === 'string')) throw new ConfigurationError('overrideActors must be an array of strings');
   if (!Array.isArray(config.bannedCommitTrailers) || !config.bannedCommitTrailers.every((value) => typeof value === 'string' && value.length > 0 && value === value.trim())) throw new ConfigurationError('bannedCommitTrailers must be an array of non-empty strings with no leading or trailing whitespace');
   if (!Array.isArray(config.exemptBranches) || !config.exemptBranches.every((value) => typeof value === 'string')) throw new ConfigurationError('exemptBranches must be an array of strings');
   if (!Array.isArray(config.excludeGlobs) || !config.excludeGlobs.every((value) => typeof value === 'string')) throw new ConfigurationError('excludeGlobs must be an array of strings');
   if (typeof config.requireProof !== 'boolean') throw new ConfigurationError('requireProof must be true or false');
-  if (typeof config.proofOverrideLabel !== 'string' || !config.proofOverrideLabel) throw new ConfigurationError('proofOverrideLabel must be a non-empty string');
   if (!Array.isArray(config.uiGlobs) || !config.uiGlobs.every((value) => typeof value === 'string')) throw new ConfigurationError('uiGlobs must be an array of strings');
   if (!Array.isArray(config.uiExcludeGlobs) || !config.uiExcludeGlobs.every((value) => typeof value === 'string')) throw new ConfigurationError('uiExcludeGlobs must be an array of strings');
   return config;
@@ -1148,106 +1146,6 @@ async function runPrecheck(options) {
   return finish({ mode: 'precheck', prefix: config.prefix, provenance, failures, warnings: [], passes }, options.json);
 }
 
-// Paginate once for every override label at once. This endpoint defaults to 30
-// items, and label changes, reopens and `referenced` events from every commit
-// that mentions the issue all land here, so on a real PR the labelling event
-// is often not on page one. Missing it stripped a legitimate override and
-// failed a PR that should have passed. Fetching it once and sharing the result
-// across labels also means a PR carrying both the size and proof override
-// labels costs one paginated fetch, not one per label.
-async function fetchLabelEvents(repo, number) {
-  const events = [];
-  for (let page = 1; ; page += 1) {
-    const pageEvents = await apiRequest(`issues/${number}/events?per_page=100&page=${page}`, repo);
-    if (!Array.isArray(pageEvents)) break;
-    events.push(...pageEvents);
-    if (pageEvents.length < 100) break;
-  }
-  return events;
-}
-
-function findLabelApplier(events, labelName) {
-  let applier = null;
-  for (const event of events) {
-    if (event.event === 'labeled' && event.label?.name === labelName) {
-      applier = event.actor?.login || null;
-    }
-  }
-  return applier;
-}
-
-// The size override is the one deliberate escape hatch, and the standard says
-// the repo owner applies it. Nothing enforced that: any collaborator or token
-// with label-write could add the label and clear the cap, which is exactly the
-// actor the rule exists to stop. So find who applied it and honour it only from
-// the owner. If the events cannot be read, drop the override rather than trust
-// it: failing closed on an escape hatch is the safe direction.
-export async function resolveSingleLabel(repo, number, labels, labelName, config, warnings, events) {
-  if (!labels.includes(labelName)) return labels;
-  const owner = repo.split('/')[0];
-  const allowed = new Set([owner, ...(config.overrideActors || [])].map((name) => name.toLowerCase()));
-  const applier = findLabelApplier(events, labelName);
-  if (applier && allowed.has(applier.toLowerCase())) return labels;
-  // On an organization-owned repo the first path segment is the org slug, not
-  // anyone's login, so the name comparison above can never match and the
-  // documented escape hatch would be dead for every org repo. Ask GitHub who
-  // actually administers the repo instead. Only reached when a label is present
-  // and the cheap check already failed, so it costs one request in a rare case.
-  if (applier) {
-    try {
-      const permission = await apiRequest(`collaborators/${encodeURIComponent(applier)}/permission`, repo);
-      if (permission?.permission === 'admin') return labels;
-    } catch {
-      // Fall through to the refusal below. An escape hatch fails closed.
-    }
-  }
-  const expected = `applied by ${owner} or a repo admin`;
-  const fix = labelName === config.overrideLabel
-    ? `Only ${owner} or a repo admin can clear the size caps. An agent cannot clear its own PR. On an organization repo, list the people who may in overrideActors.`
-    : `Only ${owner} or a repo admin can clear the proof requirement. An agent cannot clear its own PR.`;
-  warnings.push(fail(
-    `${labelName} ignored`,
-    applier ? `applied by ${applier}` : 'no labelling event found',
-    expected,
-    fix,
-  ));
-  return labels.filter((name) => name !== labelName);
-}
-
-export async function resolveOverrideLabels(repo, number, labels, config, warnings) {
-  // Both the size and the proof escape hatches share the same ownership
-  // check: the repo owner (or an admin) must have applied the label. An
-  // agent cannot clear its own requirement.
-  const labelNames = [config.overrideLabel, config.proofOverrideLabel];
-  const present = labelNames.filter((name) => labels.includes(name));
-  if (present.length === 0) return labels;
-
-  let events;
-  try {
-    events = await fetchLabelEvents(repo, number);
-  } catch {
-    let result = labels;
-    for (const labelName of present) {
-      warnings.push(fail(
-        `${labelName} ignored`,
-        'the label events could not be read',
-        'a readable audit trail for the override',
-        labelName === config.overrideLabel
-          ? 'The size caps were applied. Re-run when the API is reachable.'
-          : 'The proof checks were applied. Re-run when the API is reachable.',
-      ));
-      result = result.filter((name) => name !== labelName);
-    }
-    return result;
-  }
-
-  let result = labels;
-  for (const labelName of labelNames) {
-    result = await resolveSingleLabel(repo, number, result, labelName, config, warnings, events);
-  }
-  return result;
-}
-
 async function fetchRemoteConfig(repo, repoName, ref) {
   const fallback = resolveFallbackPrefix(repoName);
   try {
@@ -1376,8 +1274,6 @@ async function runPr(options) {
     ));
   }
   const summary = summarizeFiles(files, config);
-  const rawLabels = (pull.labels || []).map((label) => typeof label === 'string' ? label : label.name).filter(Boolean);
-  const labels = await resolveOverrideLabels(options.repo, number, rawLabels, config, warnings);
   if (!branchResult.exempt) {
     const titleResult = validateTitle(pull.title || '', config.prefix, branchResult.issueNumber);
     failures.push(...titleResult.failures);
@@ -1386,15 +1282,13 @@ async function runPr(options) {
     failures.push(...bodyResult.failures);
     if (bodyResult.ok) passes.push('PR body');
   }
-  const proofResult = checkProof(pull.body || '', files, labels, config);
+  const proofResult = checkProof(pull.body || '', files, config);
   failures.push(...proofResult.failures);
   warnings.push(...proofResult.warnings);
-  if (proofResult.overridden) passes.push(`proof waived by ${config.proofOverrideLabel}`);
-  else if (proofResult.failures.length === 0) passes.push('proof of work');
-  const sizeResult = checkSize(summary, config, labels);
+  if (proofResult.failures.length === 0) passes.push('proof of work');
+  const sizeResult = checkSize(summary, config);
   failures.push(...sizeResult.failures);
   warnings.push(...sizeResult.warnings);
-  if (sizeResult.overridden) passes.push(`size caps overridden by ${config.overrideLabel}`);
 
   return finish({
     mode: 'pr',
@@ -1408,7 +1302,6 @@ async function runPr(options) {
     warnings,
     passes,
     size: summary,
-    overrideLabel: config.overrideLabel,
   }, options.json);
 }
 

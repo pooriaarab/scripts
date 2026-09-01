@@ -254,7 +254,15 @@ test('counts changed lines after exclusions and reports raw totals', () => {
   assert.equal(checkSize(summary, { ...config, maxLines: 250 }).failures.length, 1);
 });
 
-test('override label short-circuits size failures', () => {
+test('no label clears the size cap', () => {
+  // The cap used to have an escape: an owner-applied `oversized-approved`
+  // label. Every escape from a design constraint becomes the path — an agent
+  // told it may ask for the label asks for the label instead of decomposing
+  // the work, which is the one thing the cap exists to force.
+  //
+  // The remaining escape is outside this checker: a person merges past a red
+  // check. That is a deliberate act on a named pull request, it cannot be
+  // requested in a body, and it leaves a record.
   const summary = {
     rawLines: 900,
     countedLines: 700,
@@ -264,11 +272,18 @@ test('override label short-circuits size failures', () => {
     excludedFiles: 0,
     topLevelDirs: ['a', 'b', 'c', 'd'],
   };
-  const result = checkSize(summary, { ...config, maxLines: 500, maxFiles: 40 }, ['oversized-approved']);
-
-  assert.equal(result.overridden, true);
-  assert.equal(result.failures.length, 0);
-  assert.equal(result.warnings.length, 1);
+  const result = checkSize(summary, { ...config, maxLines: 500, maxFiles: 40 });
+  assert.equal(result.failures.some((f) => f.check === 'PR size'), true);
+  assert.equal(result.failures.some((f) => f.check === 'changed files'), true);
+  // The fix text must not send anyone looking for a label that no longer
+  // exists. Saying no label clears it is the point; naming one to request is
+  // the bug, because the instruction is what an agent acts on.
+  assert.equal(result.failures.every((f) => !/oversized-approved|ask the repo owner/i.test(f.fix)), true);
+  assert.equal(result.failures.every((f) => /split the change/i.test(f.fix)), true);
+  // A repo config that still carries the old keys is simply ignored, rather
+  // than reviving the escape or throwing on a stale file.
+  const stale = checkSize(summary, { ...config, maxLines: 500, maxFiles: 40, overrideLabel: 'oversized-approved', overrideActors: ['someone'] });
+  assert.equal(stale.failures.length, 2);
 });
 
 test('enforces rules for chore branches (null issue)', () => {
@@ -573,6 +588,27 @@ test('the rollout template states a decision, never a copy of a default', () => 
   assert.equal(template.prefix, '__PREFIX__');
 });
 
+test('the managed AGENTS block has the spacing Prettier requires', () => {
+  // Prettier reads a comment followed immediately by content as one block and
+  // reformats it, so an AGENTS.md written by the rollout failed
+  // `prettier --check` and took a repo's whole verify job with it. The blank
+  // lines either side of the markers are what keep them separate.
+  //
+  // The assertions deliberately do not name the block's text. What has to hold
+  // is the shape at the two boundaries; pinning the last line of prose as well
+  // would fail this test for an edit that changes nothing Prettier cares about.
+  const block = readFileSync(new URL('./pr-standards-templates/agents-block.md', import.meta.url), 'utf8');
+  const lines = block.trimEnd().split('\n');
+
+  assert.equal(lines[0], '<!-- pr-standards:start -->');
+  assert.equal(lines[1], '', 'no blank line after the opening marker');
+  assert.notEqual(lines[2].trim(), '', 'the block should start right after one blank line');
+
+  assert.equal(lines.at(-1), '<!-- pr-standards:end -->');
+  assert.equal(lines.at(-2), '', 'no blank line before the closing marker');
+  assert.notEqual(lines.at(-3).trim(), '', 'the block should end right before one blank line');
+});
+
 test('the CI bundle includes the registry beside the checker', () => {
   // The checker reads repo-prefixes.json from its own directory, so the fetch
   // step has to put it there. Unpacking the whole tag does that for free; a
@@ -611,20 +647,20 @@ test('proof: a visible change needs before and after attachments', () => {
   const failed = (r) => r.failures.some((f) => f.check === 'proof of a visible change');
   const warned = (r) => r.warnings.some((w) => w.check === 'proof of a visible change');
 
-  assert.equal(failed(checkProof(validBody, uiFiles, [], config)), true);
-  assert.equal(warned(checkProof(withUrls(1), uiFiles, [], config)), true);
-  assert.equal(failed(checkProof(withUrls(1), uiFiles, [], config)), false);
-  assert.equal(failed(checkProof(withUrls(2), uiFiles, [], config)), false);
-  assert.equal(warned(checkProof(withUrls(2), uiFiles, [], config)), false);
+  assert.equal(failed(checkProof(validBody, uiFiles, config)), true);
+  assert.equal(warned(checkProof(withUrls(1), uiFiles, config)), true);
+  assert.equal(failed(checkProof(withUrls(1), uiFiles, config)), false);
+  assert.equal(failed(checkProof(withUrls(2), uiFiles, config)), false);
+  assert.equal(warned(checkProof(withUrls(2), uiFiles, config)), false);
 
   // A stated reason clears it; "n/a" on its own does not, or the escape hatch
   // becomes the default and the rule stops meaning anything.
-  assert.equal(failed(checkProof(proofNa, uiFiles, [], config)), false);
-  assert.equal(failed(checkProof(proofNaShort, uiFiles, [], config)), true);
+  assert.equal(failed(checkProof(proofNa, uiFiles, config)), false);
+  assert.equal(failed(checkProof(proofNaShort, uiFiles, config)), true);
 
   // Nothing visible changed, so nothing has to be shown.
-  assert.equal(failed(checkProof(validBody, [{ filename: 'src/server/api.ts', status: 'modified' }], [], config)), false);
-  assert.equal(failed(checkProof(validBody, [{ filename: 'src/components/Button.test.tsx', status: 'modified' }], [], config)), false);
+  assert.equal(failed(checkProof(validBody, [{ filename: 'src/server/api.ts', status: 'modified' }], config)), false);
+  assert.equal(failed(checkProof(validBody, [{ filename: 'src/components/Button.test.tsx', status: 'modified' }], config)), false);
 
   assert.equal(isUiFile('src/components/Button.tsx', config), true);
   assert.equal(isUiFile('src/components/Button.test.tsx', config), false);
@@ -641,7 +677,7 @@ test('proof: media belongs in user-attachments, not in the commit', () => {
   ].map((filename) => ({ filename, status: 'added' }));
   for (const file of flagged) {
     assert.equal(isCommittedProofMedia(file), true, `should flag ${file.filename}`);
-    const r = checkProof(validBody, [file], [], config);
+    const r = checkProof(validBody, [file], config);
     assert.equal(r.failures.some((f) => f.check === 'committed proof media'), true, `checkProof should flag ${file.filename}`);
   }
 
@@ -650,7 +686,7 @@ test('proof: media belongs in user-attachments, not in the commit', () => {
   for (const filename of ['public/logo.png', 'public/assets/bg.jpg', 'src/assets/icon.png', 'assets/image.png', 'src/app/logo.png']) {
     const file = { filename, status: 'added' };
     assert.equal(isCommittedProofMedia(file), false, `should not flag ${filename}`);
-    const r = checkProof(validBody, [file], [], config);
+    const r = checkProof(validBody, [file], config);
     assert.equal(r.failures.length + r.warnings.length, 0);
   }
 
@@ -660,16 +696,22 @@ test('proof: media belongs in user-attachments, not in the commit', () => {
   assert.equal(isCommittedProofMedia({ filename: 'screenshots/readme.txt', status: 'added' }), false);
 });
 
-test('proof: the owner label and requireProof clear the checks', () => {
+test('proof: only requireProof clears the checks, and no label can', () => {
+  // #114 removed the size cap's override label because an agent can apply its
+  // own label. The same argument applies here, so there is no proof label at
+  // all: a requirement an agent can waive is not a requirement. requireProof is
+  // a config decision that lives in the repo and shows up in a diff.
   const uiFiles = [{ filename: 'src/components/Button.tsx', status: 'modified' }];
   const media = [{ filename: 'screenshots/home.png', status: 'added' }];
 
-  const waived = checkProof(validBody, [...uiFiles, ...media], ['proof-not-applicable'], config);
-  assert.equal(waived.failures.length, 0);
-  assert.equal(waived.overridden, true);
+  assert.equal(checkProof(validBody, [...uiFiles, ...media], config).failures.length > 0, true);
 
   const off = { ...config, requireProof: false };
-  assert.equal(checkProof(validBody, [...uiFiles, ...media], [], off).failures.length, 0);
+  assert.equal(checkProof(validBody, [...uiFiles, ...media], off).failures.length, 0);
+
+  // A label named like the old escape hatch changes nothing, because nothing
+  // reads labels any more.
+  assert.equal(DEFAULT_CONFIG.proofOverrideLabel, undefined);
 });
 
 test('the documented proof hatch is not a refusal to answer', () => {
@@ -701,16 +743,16 @@ test('proof: the same image pasted twice is one image', () => {
   const url = (id) => `![shot](https://github.com/user-attachments/assets/${id})`;
   const warned = (r) => r.warnings.some((w) => w.check === 'proof of a visible change');
 
-  assert.equal(warned(checkProof(`${validBody}\n${url('abc')}\n${url('abc')}`, uiFiles, [], config)), true);
+  assert.equal(warned(checkProof(`${validBody}\n${url('abc')}\n${url('abc')}`, uiFiles, config)), true);
   // Nor does a query string on the same asset make it a second one.
-  assert.equal(warned(checkProof(`${validBody}\n${url('abc')}\n${url('abc?raw=1')}`, uiFiles, [], config)), true);
+  assert.equal(warned(checkProof(`${validBody}\n${url('abc')}\n${url('abc?raw=1')}`, uiFiles, config)), true);
   // Two genuinely different assets clear it.
-  assert.equal(warned(checkProof(`${validBody}\n${url('abc')}\n${url('def')}`, uiFiles, [], config)), false);
+  assert.equal(warned(checkProof(`${validBody}\n${url('abc')}\n${url('def')}`, uiFiles, config)), false);
   // Nor does trailing prose punctuation on a bare URL make it a second one:
   // the markdown embed stops at the closing paren, but a bare URL followed by
   // a period in a sentence keeps that period as part of the match.
   const bare = (id) => `https://github.com/user-attachments/assets/${id}`;
-  assert.equal(warned(checkProof(`${validBody}\nBefore: ${bare('abc')}. After: ${url('abc')}`, uiFiles, [], config)), true);
+  assert.equal(warned(checkProof(`${validBody}\nBefore: ${bare('abc')}. After: ${url('abc')}`, uiFiles, config)), true);
 });
 
 test('proof: attachments only count inside How I verified', () => {
@@ -729,8 +771,8 @@ test('proof: attachments only count inside How I verified', () => {
 
   // The docs say the embeds live under How I verified, so that is where the
   // check reads. Two real embeds pasted under What instead must not satisfy it.
-  assert.equal(failed(checkProof(section('bun test -> 214 passed', `\n${embeds}`), uiFiles, [], config)), true);
-  assert.equal(failed(checkProof(section(`bun test -> 214 passed\n${embeds}`), uiFiles, [], config)), false);
+  assert.equal(failed(checkProof(section('bun test -> 214 passed', `\n${embeds}`), uiFiles, config)), true);
+  assert.equal(failed(checkProof(section(`bun test -> 214 passed\n${embeds}`), uiFiles, config)), false);
 });
 
 test('the proof escape hatch does not read as a refusal to answer', () => {
@@ -799,4 +841,72 @@ test('a quoted rule name is not a refusal to answer', () => {
   // command sits in a fence still passes, because hasCommandAndResult reads the
   // raw section rather than the stripped one.
   assert.equal(fails('```\n$ node --test\nℹ pass 41\n```'), false);
+});
+
+test('prefix precedence holds on the CI path, not only in loadConfig', async () => {
+  // #101 fixed the precedence and covered it through loadConfig, which is the
+  // LOCAL path. The path that was broken is this one: runPr -> fetchRemoteConfig.
+  // The registry had tests; it had none on the path that reads it in CI, and
+  // that is exactly how the bug survived long enough to reject an adoption
+  // branch the rollout had just created.
+  //
+  // A repo that states a prefix has decided, so its own config outranks the
+  // registry. The registry outranks derivation, because derivation is a guess
+  // and the registry is the fleet's answer. Nothing may outrank the config.
+  const registry = JSON.parse(readFileSync(new URL('./repo-prefixes.json', import.meta.url), 'utf8'));
+  // Only a repo whose registry prefix differs from its derived one can tell the
+  // three sources apart.
+  const mismatch = Object.entries(registry).find(([n, p]) => derivePrefix(n) !== p);
+  assert.ok(mismatch, 'repo-prefixes.json has no entry whose prefix differs from its derived one');
+  const [name, registered] = mismatch;
+
+  const originalWrite = process.stdout.write;
+  const originalPath = process.env.PATH;
+  const originalToken = process.env.GITHUB_TOKEN;
+  const originalFetch = globalThis.fetch;
+  process.env.PATH = '';
+  process.env.GITHUB_TOKEN = 'test-token';
+  process.env.GITHUB_REPOSITORY = 'other/repo';
+
+  const run = async (configBody, branch) => {
+    let output = '';
+    process.stdout.write = (chunk) => { output += chunk; return true; };
+    globalThis.fetch = async (url) => {
+      if (url.includes('contents/.github/pr-standards.json')) {
+        return configBody
+          ? { ok: true, json: async () => ({ content: Buffer.from(configBody).toString('base64'), encoding: 'base64' }) }
+          : { ok: false, status: 404, text: async () => 'Not Found' };
+      }
+      if (url.includes('/commits')) return { ok: true, json: async () => ([{ sha: 'abc1234', commit: { message: 'Do one thing' } }]) };
+      if (url.includes('/files')) return { ok: true, json: async () => ([]) };
+      if (url.match(/pulls\/\d+$/)) {
+        return { ok: true, json: async () => ({ head: { ref: branch }, base: { ref: 'main' }, title: 'x', body: 'x', labels: [] }) };
+      }
+      if (url.includes('issues/')) return { ok: true, json: async () => ({ state: 'open' }) };
+      throw new Error(`Unexpected fetch URL: ${url}`);
+    };
+    try {
+      await main(['pr', '--repo', `pooriaarab/${name}`, '--number', '7', '--json']);
+      return JSON.parse(output);
+    } finally { process.stdout.write = originalWrite; }
+  };
+
+  try {
+    // No config: the registry answers, and its branch is accepted.
+    const fromRegistry = await run(null, `${registered}-7-do-one-thing`);
+    assert.equal(fromRegistry.failures.some((f) => f.check === 'branch name'), false);
+    // ...and the derived guess is now rejected, where it used to be the only
+    // thing accepted.
+    const derivedBranch = await run(null, `${derivePrefix(name)}-7-do-one-thing`);
+    assert.equal(derivedBranch.failures.some((f) => f.check === 'branch name'), true);
+    // A config prefix outranks the registry.
+    const fromConfig = await run(JSON.stringify({ prefix: 'zzz' }), 'zzz-7-do-one-thing');
+    assert.equal(fromConfig.failures.some((f) => f.check === 'branch name'), false);
+  } finally {
+    process.stdout.write = originalWrite;
+    process.env.PATH = originalPath;
+    process.env.GITHUB_TOKEN = originalToken;
+    globalThis.fetch = originalFetch;
+    delete process.env.GITHUB_REPOSITORY;
+  }
 });
