@@ -1029,6 +1029,12 @@ async function resolveOverrideLabels(repo, number, labels, config, warnings) {
       for (const event of events) {
         if (event.event === 'labeled' && event.label?.name === config.overrideLabel) {
           applier = event.actor?.login || null;
+        } else if (event.event === 'unlabeled' && event.label?.name === config.overrideLabel) {
+          // `labels` is a snapshot taken before this call. If the label was removed
+          // between that snapshot and this events read, the last `labeled` event is
+          // stale -- clear it so the removal wins and the override is not honoured
+          // on a label that no longer applies.
+          applier = null;
         }
       }
       if (events.length < 100) break;
