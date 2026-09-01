@@ -4,7 +4,7 @@ Print repeatable, read-only local evidence for one Content Rabbit publishing
 provider: the capability matrix contract, the production secret status, the
 focused handler tests, and (where they exist) the comment and DM adapter
 evidence. It never reads secret values, opens a browser, or calls a social
-provider.
+provider. The secret check calls Cloudflare to list secret names.
 
 ## Usage
 
@@ -15,6 +15,9 @@ export CONTENT_RABBIT_REPO=/path/to/content-rabbit
 
 Run `./qualification-matrix.sh` with no arguments to list the supported
 providers.
+
+Set `CONTENT_RABBIT_REPO` only to a trusted Content Rabbit checkout. The script
+runs repository-owned status and test commands from that checkout.
 
 The script only gathers evidence — a human still has to complete the live
 console and test-account gates before marking a provider READY.

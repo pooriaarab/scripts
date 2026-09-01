@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Print repeatable, read-only local evidence for one Content Rabbit provider.
 # It never reads secret values, opens a browser, or calls a social provider.
+# Run it only against a trusted checkout. Secret checks call Cloudflare.
 set -euo pipefail
 
 provider="${1:-}"
@@ -16,6 +17,10 @@ if [[ -z "${CONTENT_RABBIT_REPO:-}" ]]; then
   exit 2
 fi
 repo="$CONTENT_RABBIT_REPO"
+if [[ ! -d "$repo" || ! -f "$repo/package.json" || ! -d "$repo/apps/website" ]]; then
+  echo "CONTENT_RABBIT_REPO is not a valid Content Rabbit checkout: $repo" >&2
+  exit 2
+fi
 
 case "$provider" in
   x) provider="twitter" ;;
@@ -80,6 +85,12 @@ case "$provider" in
     adapter_file="$repo/apps/website/src/server/services/social-comments/platforms/${provider}.ts"
     if [[ ! -f "$adapter_file" ]]; then
       echo "missing comment adapter: $adapter_file" >&2
+      exit 1
+    fi
+    if ! rg -q "implements CommentPlatformService" "$adapter_file" ||
+      ! rg -q "async fetchComments\(" "$adapter_file" ||
+      ! rg -q "async sendReply\(" "$adapter_file"; then
+      echo "comment adapter does not implement the required interface: $adapter_file" >&2
       exit 1
     fi
     echo "$adapter_file"
