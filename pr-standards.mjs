@@ -1191,12 +1191,21 @@ function substituteTemplate(template, prefix) {
     .replaceAll('__PREFIX__', prefix);
 }
 
+const MALFORMED_BLOCK = Symbol('malformed-managed-block');
+
+// Extracting the first start/end pair and ignoring the rest would let a
+// correct block followed by a leftover stale one (a hand edit, or a rollout
+// repair appended after markers it wouldn't touch, see pr-standards-rollout)
+// PASS while the stale duplicate goes unreported. Require exactly one pair.
 function managedBlock(content) {
   const start = content.indexOf(AGENTS_BLOCK_START);
   if (start === -1) return null;
   const bodyStart = start + AGENTS_BLOCK_START.length;
+  if (content.indexOf(AGENTS_BLOCK_START, bodyStart) !== -1) return MALFORMED_BLOCK;
   const end = content.indexOf(AGENTS_BLOCK_END, bodyStart);
-  return end === -1 ? null : content.slice(bodyStart, end);
+  if (end === -1) return null;
+  if (content.indexOf(AGENTS_BLOCK_END, end + AGENTS_BLOCK_END.length) !== -1) return MALFORMED_BLOCK;
+  return content.slice(bodyStart, end);
 }
 
 function unifiedDiff(expected, actual, expectedLabel, actualLabel) {
@@ -1244,7 +1253,7 @@ async function runDrift(options) {
   const failures = [];
   const passes = [];
   const expectedAgents = managedBlock(substituteTemplate(readTemplate('agents-block.md'), config.prefix));
-  if (expectedAgents === null) {
+  if (expectedAgents === null || expectedAgents === MALFORMED_BLOCK) {
     throw new ConfigurationError('pr-standards-templates/agents-block.md has no managed block');
   }
   const agentsPath = path.join(root, 'AGENTS.md');
@@ -1255,6 +1264,13 @@ async function runDrift(options) {
       'missing',
       'a managed block between pr-standards markers',
       'Run pr-standards-rollout to install the managed block.',
+    ));
+  } else if (installedAgents === MALFORMED_BLOCK) {
+    failures.push(fail(
+      'managed AGENTS.md block',
+      'malformed',
+      'exactly one pr-standards:start/end marker pair',
+      'Remove the duplicate markers, then run pr-standards-rollout to reinstall the managed block.',
     ));
   } else if (installedAgents !== expectedAgents) {
     failures.push(staleFailure(
