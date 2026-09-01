@@ -8,7 +8,12 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: post-merge-verify-${{ github.repository }}
+  # Scoped by ref, not just repo: this is workflow-level concurrency, so it is
+  # assigned before the job's own branch check runs below. Without the ref, a
+  # push to any branch would join the same group as an in-progress
+  # default-branch run and cancel it, then skip itself -- silently dropping
+  # the verification instead of reporting it.
+  group: post-merge-verify-${{ github.repository }}-${{ github.ref }}
   # A newer push means a newer commit is what should be live now, so a stale
   # run polling for a SHA the fleet already moved past gets cancelled instead
   # of running out its clock and filing a false "did not go live" issue.
@@ -81,11 +86,21 @@ jobs:
                    "- Error: `url` is missing or not a string\n")
           url = url.rstrip("/")
           sha_path = config.get("shaPath")
+          if sha_path is not None and not isinstance(sha_path, str):
+              fail("- Failing step: read `postMergeVerify.shaPath` from `.github/pr-standards.json`\n"
+                   "- Error: `shaPath` is not a string\n")
           sha_key = config.get("shaJsonKey", "sha")
+          if not isinstance(sha_key, str):
+              fail("- Failing step: read `postMergeVerify.shaJsonKey` from `.github/pr-standards.json`\n"
+                   "- Error: `shaJsonKey` is not a string\n")
+          timeout_seconds = config.get("timeoutSeconds", 900)
+          if not isinstance(timeout_seconds, (int, float)):
+              fail("- Failing step: read `postMergeVerify.timeoutSeconds` from `.github/pr-standards.json`\n"
+                   "- Error: `timeoutSeconds` is not a number\n")
           # Capped below the job's 20-minute timeout so a long-poll config still
           # fails through this script instead of being cancelled by the runner,
           # which would skip the reporting step below entirely.
-          deadline = time.monotonic() + min(int(config.get("timeoutSeconds", 900)), 1000)
+          deadline = time.monotonic() + min(int(timeout_seconds), 1000)
 
           def get(target):
               request = urllib.request.Request(target, headers={"User-Agent": "post-merge-verify"})

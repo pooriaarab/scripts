@@ -58,6 +58,9 @@ check 1 'fails on malformed JSON instead of passing as absent' '{not json'   "$S
 check 1 'fails on a postMergeVerify block with no url'  '{"postMergeVerify":{}}' "$SHA"
 check 0 'passes when pr-standards.json is valid JSON but not an object' '[1, 2, 3]' "$SHA"
 check 1 'fails on a postMergeVerify value that is not an object' '{"postMergeVerify":"nope"}' "$SHA"
+check 1 'fails on a shaPath that is not a string' '{"postMergeVerify":{"url":"http://127.0.0.1:8731","shaPath":123}}' "$SHA"
+check 1 'fails on a shaJsonKey that is not a string' '{"postMergeVerify":{"url":"http://127.0.0.1:8731","shaJsonKey":123}}' "$SHA"
+check 1 'fails on a timeoutSeconds that is not a number' '{"postMergeVerify":{"url":"http://127.0.0.1:8731","timeoutSeconds":null}}' "$SHA"
 
 # The failure report is what the issue body quotes. An empty one leaves a
 # person with an issue that says nothing.
