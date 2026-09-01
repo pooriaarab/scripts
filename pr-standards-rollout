@@ -31,6 +31,18 @@ PREFIXES_FILE="$SCRIPT_DIR/repo-prefixes.json"
 TEMPLATES_DIR="$SCRIPT_DIR/pr-standards-templates"
 OWNER="pooriaarab"
 
+# Adding a path at most once. The flags used to be booleans, so repeating one
+# was harmless; appending to a list is not. A repeated flag looked up and wrote
+# the same file twice, which is a wasted API call and a second no-op commit on
+# the rollout branch.
+want_optional() {
+  local candidate="$1" existing
+  for existing in ${OPTIONAL_FILES[@]+"${OPTIONAL_FILES[@]}"}; do
+    [ "$existing" = "$candidate" ] && return 0
+  done
+  OPTIONAL_FILES+=("$candidate")
+}
+
 DRY=1; TARGET_REPO=""; OPTIONAL_FILES=()
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -38,8 +50,8 @@ while [ $# -gt 0 ]; do
     # Every optional workflow lands in one list. Each flag used to add its own
     # variable and its own copy of four separate blocks, and the fourth flag
     # would have added four more.
-    --with-generated-drift) OPTIONAL_FILES+=(".github/workflows/generated-drift.yml"); shift ;;
-    --with-post-merge-verify) OPTIONAL_FILES+=(".github/workflows/post-merge-verify.yml"); shift ;;
+    --with-generated-drift) want_optional ".github/workflows/generated-drift.yml"; shift ;;
+    --with-post-merge-verify) want_optional ".github/workflows/post-merge-verify.yml"; shift ;;
     --repo)
       [ $# -ge 2 ] || { echo "ERROR: --repo requires a value"; exit 1; }
       TARGET_REPO="$2"; shift 2 ;;
