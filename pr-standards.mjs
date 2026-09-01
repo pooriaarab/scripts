@@ -432,7 +432,13 @@ function hasCloser(lines, openIndex, fence, quoted) {
   for (let index = openIndex + 1; index < lines.length; index += 1) {
     const line = lines[index];
     if (quoted && !isQuoted(line)) return false;
-    if (closer.test(line.replace(/^(?:\s{0,3}>\s?)+/, ''))) return true;
+    // Only strip a blockquote prefix when the fence itself lives inside one.
+    // A fence opened outside any blockquote is not closed by a line that
+    // happens to start with `>` -- GitHub parses that line as quoted text
+    // sitting inert inside the still-open fence, not as a container the
+    // fence's closer could be found within.
+    const candidate = quoted ? line.replace(/^(?:\s{0,3}>\s?)+/, '') : line;
+    if (closer.test(candidate)) return true;
   }
   return false;
 }
@@ -456,7 +462,11 @@ function visibleBody(body, { unmatchedFenceHides }) {
       if (fence.quoted && !isQuoted(line)) {
         fence = null;
       } else {
-        if (fenceCloser(fence).test(unquoted(line))) fence = null;
+        // Same reasoning as hasCloser: an unquoted fence is only closed by
+        // an unquoted closer, so a `>`-prefixed line must not be unquoted
+        // before the test unless the fence itself opened inside a quote.
+        const candidate = fence.quoted ? unquoted(line) : line;
+        if (fenceCloser(fence).test(candidate)) fence = null;
         continue;
       }
     }
