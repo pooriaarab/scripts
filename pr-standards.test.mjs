@@ -917,6 +917,38 @@ test('bunx counts as a command, like npx already did', () => {
   assert.equal(fails('bunxx frobnicate -> 3 passed'), true);
 });
 
+test('python3 counts as a command, like pytest already did', () => {
+  // The checker itself shells to `python3`, three of its test suites are
+  // `python3` scripts, and the workflow templates parse JSON with `python3`,
+  // but the command list named none of that. A pull request whose evidence
+  // was a genuine `python3 build-repo-prefixes.test.py` run failed the rule,
+  // and the author answered by putting a pointless `node -e` in front of the
+  // command that had already run. A check easier to game than to satisfy
+  // trains everyone to game it.
+  const body = (verified) => [
+    '## What', 'One sentence.',
+    '## Why', 'Because of the reason.',
+    '## How I verified', verified,
+    'Assisted-by: agent:model',
+  ].join('\n\n');
+  const fails = (text) => validateBody(body(text), 142, config)
+    .failures.some((f) => f.check === '## How I verified');
+
+  // The workflow's own CI line, with unittest's real output under it.
+  assert.equal(fails('python3 build-repo-prefixes.test.py\nOK'), false);
+  // Same for the other spelling, and for a command the author actually ran.
+  assert.equal(fails('python install-pr-hooks.test.py\nOK'), false);
+  // The `$` prompt prefix is already stripped before the command check.
+  assert.equal(fails('$ python3 -c "import json, sys; json.load(open(\'repo-prefixes.json\')); print(\'OK\')"\nOK'), false);
+  // The rule is a command AND its result: a `python3` line with no result
+  // still fails, exactly like a bare `node --test` would.
+  assert.equal(fails('python3 build-repo-prefixes.test.py'), true);
+  // The word boundary still ends the command name: a sentence about pythonic
+  // style, even with a result beside it, names no command.
+  assert.equal(fails('Pythonic naming reads better -> 3 passed'), true);
+  assert.equal(fails('The pythonic idiom was verified'), true);
+});
+
 test('prefix precedence holds on the CI path, not only in loadConfig', async () => {
   // #101 fixed the precedence and covered it through loadConfig, which is the
   // LOCAL path. The path that was broken is this one: runPr -> fetchRemoteConfig.
