@@ -152,8 +152,11 @@ except Exception: print("")')"
     # Keep the id if the stop failed. Dropping it strands a running Box: the next box-work
     # cannot reuse what it cannot see, so it creates a duplicate.
     if box stop "$id" >/dev/null 2>&1; then
-      echo "[box-session] stopped $NAME Box $id"
-      rm -f "$STATE/$NAME.id"
+      # Keep the id. A stopped Box is free and keeps its snapshot, and box-work resumes it
+      # in ~4s where a fresh one costs ~100s and a creation slot. Deleting the id here is
+      # what turned every session cycle into a brand-new Box: box-work's resume branch can
+      # only fire while it can still see the id.
+      echo "[box-session] stopped $NAME Box $id (id kept so the next session resumes it)"
       rmdir "$SESSIONS" 2>/dev/null || true
       rmdir "$LOCK" 2>/dev/null || true
     else

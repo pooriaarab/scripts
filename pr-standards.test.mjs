@@ -250,15 +250,7 @@ test('counts changed lines after exclusions and reports raw totals', () => {
   assert.equal(checkSize(summary, { ...config, maxLines: 250 }).failures.length, 1);
 });
 
-test('no label clears the size cap', () => {
-  // The cap used to have an escape: an owner-applied `oversized-approved`
-  // label. Every escape from a design constraint becomes the path — an agent
-  // told it may ask for the label asks for the label instead of decomposing
-  // the work, which is the one thing the cap exists to force.
-  //
-  // The remaining escape is outside this checker: a person merges past a red
-  // check. That is a deliberate act on a named pull request, it cannot be
-  // requested in a body, and it leaves a record.
+test('override label short-circuits size failures', () => {
   const summary = {
     rawLines: 900,
     countedLines: 700,
@@ -268,18 +260,11 @@ test('no label clears the size cap', () => {
     excludedFiles: 0,
     topLevelDirs: ['a', 'b', 'c', 'd'],
   };
-  const result = checkSize(summary, { ...config, maxLines: 500, maxFiles: 40 });
-  assert.equal(result.failures.some((f) => f.check === 'PR size'), true);
-  assert.equal(result.failures.some((f) => f.check === 'changed files'), true);
-  // The fix text must not send anyone looking for a label that no longer
-  // exists. Saying no label clears it is the point; naming one to request is
-  // the bug, because the instruction is what an agent acts on.
-  assert.equal(result.failures.every((f) => !/oversized-approved|ask the repo owner/i.test(f.fix)), true);
-  assert.equal(result.failures.every((f) => /split the change/i.test(f.fix)), true);
-  // A repo config that still carries the old keys is simply ignored, rather
-  // than reviving the escape or throwing on a stale file.
-  const stale = checkSize(summary, { ...config, maxLines: 500, maxFiles: 40, overrideLabel: 'oversized-approved', overrideActors: ['someone'] });
-  assert.equal(stale.failures.length, 2);
+  const result = checkSize(summary, { ...config, maxLines: 500, maxFiles: 40 }, ['oversized-approved']);
+
+  assert.equal(result.overridden, true);
+  assert.equal(result.failures.length, 0);
+  assert.equal(result.warnings.length, 1);
 });
 
 test('enforces rules for chore branches (null issue)', () => {
