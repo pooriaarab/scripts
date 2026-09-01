@@ -29,7 +29,7 @@ def normalize(value):
     return value
 
 
-def jsonc(text):
+def strip_comments(text):
     out, quoted, escaped, i = [], False, False, 0
     while i < len(text):
         char, nxt = text[i], text[i + 1] if i + 1 < len(text) else ""
@@ -51,10 +51,34 @@ def jsonc(text):
             end = text.find("*/", i + 2)
             if end < 0: raise ValueError("unterminated JSONC comment")
             out.append("\n" * text[i:end + 2].count("\n")); i = end + 1
+        else:
+            out.append(char)
+        i += 1
+    return "".join(out)
+
+
+def strip_trailing_commas(text):
+    out, quoted, escaped, i = [], False, False, 0
+    while i < len(text):
+        char = text[i]
+        if quoted:
+            out.append(char)
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                quoted = False
+        elif char == '"':
+            quoted = True; out.append(char)
         elif char != "," or not text[i + 1:].lstrip().startswith(("}", "]")):
             out.append(char)
         i += 1
-    return json.loads("".join(out))
+    return "".join(out)
+
+
+def jsonc(text):
+    return json.loads(strip_trailing_commas(strip_comments(text)))
 
 
 def load_config(path):
@@ -113,7 +137,9 @@ def inspect_scope(label, scope, blockers, bindings, domains, enforce=True):
             missing = set(production) - set(preview)
             if missing: issues.append(f"{label}: {key} Preview bindings are missing: {', '.join(sorted(missing))}")
             preview_items = previews[key] if isinstance(previews[key], list) else []
-            if any(isinstance(item, dict) and any(not item.get(field) for field in fields) for item in preview_items):
+            incomplete = (lambda item: not any(item.get(field) for field in fields)) if key == "send_email" \
+                else (lambda item: any(not item.get(field) for field in fields))
+            if any(isinstance(item, dict) and incomplete(item) for item in preview_items):
                 issues.append(f"{label}: {key} has an incomplete Preview binding")
             if set(preview.values()) & set(production.values()):
                 issues.append(f"{label}: {key} shares a production resource")
@@ -195,7 +221,11 @@ def audit(root, repo):
                 package = json.loads(path.read_text())
             except (OSError, json.JSONDecodeError) as error:
                 blockers.append(f"{path.relative_to(root)}: cannot parse ({error})"); continue
-            version = package.get("devDependencies", {}).get("wrangler") or package.get("dependencies", {}).get("wrangler")
+            if not isinstance(package, dict):
+                blockers.append(f"{path.relative_to(root)}: package.json root must be an object"); continue
+            dev_deps, deps = package.get("devDependencies"), package.get("dependencies")
+            version = (dev_deps.get("wrangler") if isinstance(dev_deps, dict) else None) \
+                or (deps.get("wrangler") if isinstance(deps, dict) else None)
             if version:
                 packages.append(f"{path.relative_to(root)}={version}")
                 package_versions[path.parent] = version
@@ -221,7 +251,9 @@ def audit(root, repo):
             args = lambda text, flag: set(re.findall(rf"--{flag}[ =]+[\"']?([^\"'\s\\]+)", text))
             if args(deploy, "config") != args(cleanup, "config") or args(deploy, "env") != args(cleanup, "env"):
                 blockers.append("deploy and cleanup use different Wrangler config or environment")
-        if "cancel-in-progress: false" not in workflow_text: blockers.append("Preview lifecycle jobs are not serialized")
+        concurrency = re.search(r"(?ms)^concurrency:[ \t]*\n((?:[ \t]+.*\n?)*)", workflow_text)
+        if not concurrency or "cancel-in-progress: false" not in concurrency.group(1):
+            blockers.append("Preview lifecycle jobs are not serialized")
     secrets, variables = github_names(repo, "secrets"), github_names(repo, "variables")
     if repo and (secrets is None or variables is None): blockers.append("GitHub credential metadata could not be verified")
     if secrets is not None and "CLOUDFLARE_API_TOKEN" not in secrets: blockers.append("GitHub secret CLOUDFLARE_API_TOKEN is missing")
