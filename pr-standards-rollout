@@ -14,8 +14,18 @@
 #   ./pr-standards-rollout --with-generated-drift  # also deploy the drift check
 #
 set -u
-PREFIXES_FILE="$(dirname "$0")/repo-prefixes.json"
-TEMPLATES_DIR="$(dirname "$0")/pr-standards-templates"
+SCRIPT_DIR="$(dirname "$0")"
+# Stop rather than degrade. Without the helper, build_repair_labels is
+# undefined and every REPAIR line prints an empty reason -- the one thing
+# this file exists to prevent, and silent under `set -u`.
+LABELS_LIB="$SCRIPT_DIR/pr-standards-rollout-labels.sh"
+[ -r "$LABELS_LIB" ] || { echo "ERROR: cannot read $LABELS_LIB" >&2; exit 2; }
+source "$LABELS_LIB"
+# Readable is not the same as intact: a truncated or edited-wrong LABELS_LIB
+# can source cleanly without ever defining the function it exists to provide.
+declare -F build_repair_labels >/dev/null || { echo "ERROR: $LABELS_LIB did not define build_repair_labels" >&2; exit 2; }
+PREFIXES_FILE="$SCRIPT_DIR/repo-prefixes.json"
+TEMPLATES_DIR="$SCRIPT_DIR/pr-standards-templates"
 OWNER="pooriaarab"
 
 DRY=1; TARGET_REPO=""; WITH_GENERATED_DRIFT=0
@@ -179,12 +189,12 @@ print(str(d['isFork']).lower(), str(d['isArchived']).lower(), d['diskUsage'])
   fi
 
   # ── Check if already done ────────────────────────────────────────────
-  # A repo is "done" once the config prefix matches and the three companion
-  # files exist -- existence only, not content. A companion whose content has
-  # drifted from the current template (e.g. after a template update) is not
-  # detected here and will not be repaired; only a missing companion triggers
-  # REPAIR below.
+  # A repo is "done" once the config prefix matches, the companion files exist,
+  # and the managed AGENTS.md block matches the current template.
   REPAIR_MISSING=""
+  REPAIR_STALE=""
+  REPAIR_FILES=""
+  REPAIR_LABELS=""
   CONFIG_RESP=$(gh api "repos/$OWNER/$repo/contents/.github/pr-standards.json" 2>&1) && {
     CONFIG_PREFIX=$(echo "$CONFIG_RESP" | python3 -c "
 import json, base64, sys
@@ -219,9 +229,10 @@ print(p)
 
       # AGENTS.md needs its CONTENT checked, not just its existence. A repo with
       # a hand-written AGENTS.md that has no markers, or one carrying a block
-      # from an older template, would otherwise report OK and never be repaired,
-      # which silently defeats the point: the non-Claude fleet members read this
-      # file to learn the standard. Existence is not adoption.
+      # from a previous template needs the managed block refreshed.
+      # The managed block carries the standard to non-Claude fleet members, so
+      # its content must match the template instead of relying on file presence.
+      AGENTS_MISSING="no"
       AGENTS_RESP=$(gh api "repos/$OWNER/$repo/contents/AGENTS.md" --jq '.content' 2>&1) || {
         if ! echo "$AGENTS_RESP" | grep -q '"Not Found"'; then
           echo "WARN  $repo  (companion lookup failed for AGENTS.md)" >&2
@@ -229,6 +240,9 @@ print(p)
           continue
         fi
         AGENTS_RESP=""
+        # Preserve the 404 here because the same mismatch check handles stale
+        # content in a file that exists.
+        AGENTS_MISSING="yes"
       }
       EXPECTED_BLOCK=$(printf '%s' "$AGENTS_BLOCK_TPL" | sed "s|__PREFIX_UPPER__|$(printf '%s' "$PREFIX" | tr '[:lower:]' '[:upper:]')|g; s|__PREFIX__|$PREFIX|g")
       if ! CURRENT_AGENTS=$(printf '%s' "$AGENTS_RESP" | base64 -d 2>/dev/null); then
@@ -247,15 +261,20 @@ print('yes' if m and m.group(0).strip() == expected.strip() else 'no')
         continue
       fi
       if [ "$AGENTS_BLOCK_MATCHES" != "yes" ]; then
-        REPAIR_MISSING+="AGENTS.md "
+        if [ "$AGENTS_MISSING" = "yes" ]; then
+          REPAIR_MISSING+="AGENTS.md "
+        else
+          REPAIR_STALE+="AGENTS.md "
+        fi
       fi
-      if [ -z "$REPAIR_MISSING" ]; then
+      REPAIR_FILES="${REPAIR_MISSING}${REPAIR_STALE}"
+      if [ -z "$REPAIR_FILES" ]; then
         echo "OK    $repo  (already has prefix '$PREFIX')"
         already_c=$(( already_c + 1 ))
         continue
       fi
-      REPAIR_MISSING="${REPAIR_MISSING% }"
-      echo "REPAIR $repo  (missing: $REPAIR_MISSING)"
+      REPAIR_LABELS=$(build_repair_labels "$REPAIR_MISSING" "$REPAIR_STALE")
+      echo "REPAIR $repo  ($REPAIR_LABELS)"
     else
       echo "NOTE  $repo  (prefix changed from '$CONFIG_PREFIX' to '$PREFIX')"
     fi
@@ -283,8 +302,8 @@ print(json.dumps(cfg, indent=2))
 
   # ── Dry run ──────────────────────────────────────────────────────────
   if [ "$DRY" -eq 1 ]; then
-    if [ -n "$REPAIR_MISSING" ]; then
-      echo "WOULD  $repo  (repair: write missing $REPAIR_MISSING to the existing open-PR branch;"
+    if [ -n "$REPAIR_FILES" ]; then
+      echo "WOULD  $repo  (repair $REPAIR_LABELS on the existing open-PR branch;"
       echo "         falls back to a full rollout only if no repairable branch is found)"
     else
       echo "WOULD  $repo  (prefix=$PREFIX)"
@@ -295,9 +314,9 @@ print(json.dumps(cfg, indent=2))
   fi
 
   # ── APPLY ─────────────────────────────────────────────────────────────
-  if [ -n "$REPAIR_MISSING" ]; then
+  if [ -n "$REPAIR_FILES" ]; then
     # REPAIR: if the branch from the original rollout still exists, write
-    # only the missing files to it and skip issue creation and PR. If it
+    # only the files needing repair to it and skip issue creation and PR. If it
     # was deleted (e.g. auto-deleted after the original PR merged), there is
     # nothing to repair in place, so fall through to a full rollout below,
     # which opens a fresh issue/branch/PR and rewrites all four files.
@@ -340,7 +359,7 @@ print(json.dumps(cfg, indent=2))
     if [ -n "$BRANCH" ]; then
       DEFAULT_BRANCH=$(gh api "repos/$OWNER/$repo" --jq '.default_branch')
       AGENTS_MD=""
-      case "$REPAIR_MISSING" in
+      case "$REPAIR_FILES" in
         *AGENTS.md*)
           build_agents_md "$repo" "$BRANCH" || {
             echo "FAIL  $repo  (REPAIR: cannot read AGENTS.md)"
@@ -350,7 +369,7 @@ print(json.dumps(cfg, indent=2))
           ;;
       esac
       REPAIR_FAIL=0
-      for FP in $REPAIR_MISSING; do
+      for FP in $REPAIR_FILES; do
         case "$FP" in
           *.json)               FC="$CONFIG_JSON" ;;
           *_template.md)        FC="$PR_BODY" ;;
@@ -375,6 +394,12 @@ import json, sys
 raw = sys.stdin.read().strip()
 print(json.loads(raw).get('sha', '') if raw else '')
 " 2>/dev/null || echo "")
+        # Say what actually happened: a file already present with a stale
+        # managed block was refreshed, not added as missing.
+        FP_ACTION="add missing"
+        case " $REPAIR_STALE" in
+          *" $FP "*) FP_ACTION="update stale" ;;
+        esac
         # BRANCH comes from a GitHub API listing (line ~220), not from our own
         # trusted inputs -- anyone with push access to this one repo controls
         # its literal bytes. It must reach Python as data (env var), never
@@ -384,7 +409,7 @@ print(json.loads(raw).get('sha', '') if raw else '')
 import json, base64, os, sys
 content = sys.stdin.read()
 content_b64 = base64.b64encode(content.encode()).decode()
-payload = {'message': '[pr-standards] add missing $FP', 'branch': os.environ['BRANCH'], 'content': content_b64}
+payload = {'message': '[pr-standards] $FP_ACTION $FP', 'branch': os.environ['BRANCH'], 'content': content_b64}
 sha = os.environ.get('EXISTING_SHA', '')
 if sha:
     payload['sha'] = sha
@@ -400,7 +425,7 @@ print(json.dumps(payload))
         fail_c=$(( fail_c + 1 ))
         continue
       fi
-      echo "REPAIR $repo  (wrote missing: $REPAIR_MISSING)"
+      echo "REPAIR $repo  (repaired $REPAIR_LABELS)"
       repaired_c=$(( repaired_c + 1 ))
       continue
     fi
