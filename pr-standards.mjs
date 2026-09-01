@@ -1091,7 +1091,10 @@ async function checkRemoteBaseBranchAge(repo, pull, pullFiles, config) {
   if (!base || !headSha) throw new ApiError('GitHub returned a pull request without base or head refs');
   const compare = await apiRequest(`compare/${encodeURIComponent(base)}...${encodeURIComponent(headSha)}`, repo);
   const behind = compare?.behind_by;
-  if (Number.isInteger(behind) && behind >= 0 && behind <= config.maxBaseCommitsBehind) {
+  if (!Number.isInteger(behind) || behind < 0) {
+    throw new ApiError('GitHub returned an invalid branch comparison');
+  }
+  if (behind <= config.maxBaseCommitsBehind) {
     return { failures: [], warnings: [] };
   }
   const mergeBase = compare?.merge_base_commit?.sha;
