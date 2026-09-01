@@ -740,16 +740,28 @@ test('proof: media belongs in user-attachments, not in the commit', () => {
 
   // Everything else is a product asset. A repo full of real images must not
   // start failing because one of them is a png.
-  for (const filename of ['public/logo.png', 'public/assets/bg.jpg', 'src/assets/icon.png', 'assets/image.png', 'src/app/logo.png']) {
+  for (const filename of [
+    'public/logo.png', 'public/assets/bg.jpg', 'src/assets/icon.png', 'assets/image.png', 'src/app/logo.png',
+    'public/before.png', 'src/assets/after-signup.png',
+  ]) {
     const file = { filename, status: 'added' };
+    // Flagging an asset directory rejects honest product work. This is the
+    // only fix whose current failure direction is a false failure.
     assert.equal(isCommittedProofMedia(file), false, `should not flag ${filename}`);
     const r = checkProof(validBody, [file], config);
     assert.equal(r.failures.length + r.warnings.length, 0);
   }
+  // A proof-named directory UNDER an asset root stays exempt. The precedence is
+  // asserted on its own below; the short version is that a screenshot gallery
+  // served from public/ is ordinary product work.
+  assert.equal(isCommittedProofMedia({ filename: 'public/screenshots/home.png', status: 'added' }), false);
 
   // Only an added file is suspicious: editing a media file already in the repo
-  // is maintenance of a real asset.
+  // is maintenance of a real asset. Treating it as proof media rejects honest
+  // work, which is the failure direction fixed here.
   assert.equal(isCommittedProofMedia({ filename: 'screenshots/home.png', status: 'modified' }), false);
+  assert.equal(isCommittedProofMedia({ filename: 'screenshots/home.png', status: 'renamed' }), false);
+  assert.equal(isCommittedProofMedia({ filename: 'src/before.png' }), true);
   assert.equal(isCommittedProofMedia({ filename: 'screenshots/readme.txt', status: 'added' }), false);
 });
 
@@ -769,6 +781,16 @@ test('proof: only requireProof clears the checks, and no label can', () => {
   // A label named like the old escape hatch changes nothing, because nothing
   // reads labels any more.
   assert.equal(DEFAULT_CONFIG.proofOverrideLabel, undefined);
+});
+
+test('proof media path rules stay separated by kind', () => {
+  const source = readFileSync(new URL('./pr-standards.mjs', import.meta.url), 'utf8');
+
+  // Mixing directory and filename rules makes a future exemption easy to
+  // misapply. That can reject honest work or let weak evidence through.
+  assert.match(source, /const PROOF_MEDIA_DIR_GLOBS = \[/);
+  assert.match(source, /const PROOF_MEDIA_NAME_GLOBS = \[/);
+  assert.doesNotMatch(source, /const PROOF_MEDIA_GLOBS = \[/);
 });
 
 test('the documented proof hatch is not a refusal to answer', () => {
@@ -810,6 +832,34 @@ test('proof: the same image pasted twice is one image', () => {
   // a period in a sentence keeps that period as part of the match.
   const bare = (id) => `https://github.com/user-attachments/assets/${id}`;
   assert.equal(warned(checkProof(`${validBody}\nBefore: ${bare('abc')}. After: ${url('abc')}`, uiFiles, config)), true);
+});
+
+test('proof: documented placeholders are not attachments', () => {
+  const uiFiles = [{ filename: 'src/components/Button.tsx', status: 'modified' }];
+  const failed = (r) => r.failures.some((f) => f.check === 'proof of a visible change');
+  const body = validBody
+    + '\n![before](https://github.com/user-attachments/assets/<before>)'
+    + '\n![after](https://github.com/user-attachments/assets/<after>)';
+
+  // Counting angle-bracketed placeholders lets weak, copy-pasted evidence
+  // through. The failure direction is weak evidence accepted.
+  assert.equal(failed(checkProof(body, uiFiles, config)), true);
+});
+
+test('proof: inline-code URLs deduplicate with embedded URLs', () => {
+  const uiFiles = [{ filename: 'src/components/Button.tsx', status: 'modified' }];
+  const url = (id) => 'https://github.com/user-attachments/assets/' + id;
+  const backtick = String.fromCharCode(96);
+  const failed = (r) => r.failures.some((f) => f.check === 'proof of a visible change');
+  const warned = (r) => r.warnings.some((w) => w.check === 'proof of a visible change');
+  const body = validBody
+    + '\n![shot](' + url('abc') + ')'
+    + '\nAlso see ' + backtick + url('abc') + backtick + '.';
+
+  // Treating backticks as URL data turns one asset into two ids and lets weak
+  // evidence through. The failure direction is weak evidence accepted.
+  assert.equal(failed(checkProof(body, uiFiles, config)), false);
+  assert.equal(warned(checkProof(body, uiFiles, config)), true);
 });
 
 test('proof: attachments only count inside How I verified', () => {
@@ -1025,4 +1075,52 @@ test('prefix precedence holds on the CI path, not only in loadConfig', async () 
     globalThis.fetch = originalFetch;
     delete process.env.GITHUB_REPOSITORY;
   }
+});
+
+test('a served asset root is never committed proof media', () => {
+  // Precedence, not just membership. A screenshot gallery under public/ is an
+  // ordinary product pattern -- a docs site or a landing page -- so the asset
+  // root has to win over the proof-directory signal. Flagging one rejects
+  // honest work, and that is the direction this check must not be wrong in.
+  // Someone committing pull request media puts it at the repo root or in
+  // proof/, not under a directory the site serves.
+  const added = (filename) => isCommittedProofMedia({ filename, status: 'added' });
+
+  for (const path of [
+    'public/before.png', 'public/screenshots/hero-shot.png',
+    'public/images/screenshots/tour-1.png', 'apps/web/assets/screenshots/x.png',
+    'apps/web/assets/after.png',
+  ]) {
+    assert.equal(added(path), false, `${path} is a product asset`);
+  }
+
+  // Outside an asset root the signals still fire.
+  for (const path of ['screenshots/home.png', 'proof/before.png', 'before.png', 'docs/after.png']) {
+    assert.equal(added(path), true, `${path} looks like committed proof media`);
+  }
+});
+
+test('proof: an attachment under a bullet is not inert', () => {
+  // Four leading spaces mark an indented code block only OUTSIDE a list.
+  // Inside one they are continuation content that renders normally, so a
+  // line-start indentation test rejected an attachment written under a bullet
+  // -- an ordinary way to caption before and after, and honest work.
+  const uiFiles = [{ filename: 'src/components/Button.tsx', status: 'modified' }];
+  const url = (id) => `![shot](https://github.com/user-attachments/assets/${id})`;
+  const failed = (r) => r.failures.some((f) => f.check === 'proof of a visible change');
+  const warned = (r) => r.warnings.some((w) => w.check === 'proof of a visible change');
+  const body = (...lines) => [
+    '## What', 'x', '## Why', 'y', '## How I verified', 'bun test -> pass',
+    ...lines, 'Assisted-by: agent:model',
+  ].join('\n');
+
+  const underBullet = body('- captured both states:', '', `    ${url('aaa')}`, `    ${url('bbb')}`);
+  assert.equal(failed(checkProof(underBullet, uiFiles, config)), false);
+  assert.equal(warned(checkProof(underBullet, uiFiles, config)), false);
+
+  // An indented URL outside a list is inert on GitHub and still counts here.
+  // Telling the two apart needs real block containment, which belongs to the
+  // body reader; counting it is the fail-open direction and is deliberate.
+  const indented = body(`    ${url('ccc')}`, `    ${url('ddd')}`);
+  assert.equal(failed(checkProof(indented, uiFiles, config)), false);
 });
