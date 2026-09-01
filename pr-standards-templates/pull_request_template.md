@@ -23,5 +23,6 @@ Assisted-by: <agent>:<model>
 <!--
   One issue. One PR. One concern. Under 500 counted lines.
   Lockfiles, build output, snapshots, and migrations do not count against the cap.
-  There is no label that clears the cap. Split the change.
+  If the change genuinely cannot be split, say why here and ask for the
+  `oversized-approved` label. Do not add the label yourself.
 -->
