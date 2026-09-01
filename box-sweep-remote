@@ -36,7 +36,11 @@ USAGE
 
 while (( $# )); do
   case "$1" in
-    --max-age-hours) MAX_AGE_HOURS="${2:?--max-age-hours needs a value}"; shift 2 ;;
+    --max-age-hours)
+      [[ $# -ge 2 ]] || { echo "--max-age-hours requires a value" >&2; usage >&2; exit 2; }
+      MAX_AGE_HOURS="$2"
+      shift 2
+      ;;
     --execute) EXECUTE=1; shift ;;
     --json) JSON=1; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -44,10 +48,22 @@ while (( $# )); do
   esac
 done
 
-# A ceiling that is not a number would compare as a string and reap everything.
-case "$MAX_AGE_HOURS" in
-  ''|*[!0-9.]*) echo "FATAL: --max-age-hours must be a number, got '$MAX_AGE_HOURS'." >&2; exit 2 ;;
-esac
+# A non-finite ceiling is a loaded gun: NaN/inf makes every Box compare as "under", so
+# --execute silently stops nothing. A negative ceiling is nonsensical. The shell case glob
+# below is not enough on its own — it happily lets through "1.2.3" or "6." as "numbers",
+# which then blow up inside the Python report as an unhandled ValueError (exit 3, not the
+# documented usage-error exit 2) — so the real check is float() in Python.
+if ! MAX_AGE_HOURS="$MAX_AGE_HOURS" python3 -c '
+import os, sys
+try:
+    v = float(os.environ["MAX_AGE_HOURS"])
+except ValueError:
+    sys.exit(1)
+sys.exit(0 if 0 <= v < float("inf") else 1)
+'; then
+  echo "FATAL: --max-age-hours must be a non-negative, finite number, got '$MAX_AGE_HOURS'" >&2
+  exit 2
+fi
 
 [[ -n "${ASCII_BOX_API_KEY:-}" ]] || { echo "FATAL: ASCII_BOX_API_KEY is not set." >&2; exit 3; }
 
@@ -75,10 +91,12 @@ fi
 printf '%s\n' "$report"
 over_ids="$(sed -n 's/^OVER_IDS=//p' "$over_file" | tr -s ' ')"
 
-[[ -n "${over_ids// /}" ]] || { echo "Nothing over the ${MAX_AGE_HOURS}h ceiling."; exit 0; }
+# Status lines go to stderr, never stdout: with --json, stdout must stay a single valid
+# JSON document for machine consumers.
+[[ -n "${over_ids// /}" ]] || { echo "Nothing over the ${MAX_AGE_HOURS}h ceiling." >&2; exit 0; }
 
 if [[ "$EXECUTE" -ne 1 ]]; then
-  echo "Report only. Re-run with --execute to stop:$over_ids"
+  echo "Report only. Re-run with --execute to stop:$over_ids" >&2
   exit 1
 fi
 
@@ -87,7 +105,7 @@ failed=0
 for id in $over_ids; do
   if curl --silent --show-error --fail --max-time 60 -X POST -H @"$auth_header" \
       "$API_BASE/boxes/$id/stop" >/dev/null 2>&1; then
-    echo "stopped $id"
+    echo "stopped $id" >&2
   else
     echo "FAILED to stop $id" >&2
     failed=1
