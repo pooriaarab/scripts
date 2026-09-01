@@ -59,6 +59,7 @@ check 1 'fails on a postMergeVerify block with no url'  '{"postMergeVerify":{}}'
 check 0 'passes when pr-standards.json is valid JSON but not an object' '[1, 2, 3]' "$SHA"
 check 1 'fails on a postMergeVerify value that is not an object' '{"postMergeVerify":"nope"}' "$SHA"
 check 1 'fails on a shaPath that is not a string' '{"postMergeVerify":{"url":"http://127.0.0.1:8731","shaPath":123}}' "$SHA"
+check 1 'fails on an empty shaPath instead of silently skipping the poll' '{"postMergeVerify":{"url":"http://127.0.0.1:8731","shaPath":""}}' "$SHA"
 check 1 'fails on a shaJsonKey that is not a string' '{"postMergeVerify":{"url":"http://127.0.0.1:8731","shaJsonKey":123}}' "$SHA"
 check 1 'fails on a timeoutSeconds that is not a number' '{"postMergeVerify":{"url":"http://127.0.0.1:8731","timeoutSeconds":null}}' "$SHA"
 

@@ -86,9 +86,9 @@ jobs:
                    "- Error: `url` is missing or not a string\n")
           url = url.rstrip("/")
           sha_path = config.get("shaPath")
-          if sha_path is not None and not isinstance(sha_path, str):
+          if sha_path is not None and (not isinstance(sha_path, str) or not sha_path):
               fail("- Failing step: read `postMergeVerify.shaPath` from `.github/pr-standards.json`\n"
-                   "- Error: `shaPath` is not a string\n")
+                   "- Error: `shaPath` is present but not a non-empty string\n")
           sha_key = config.get("shaJsonKey", "sha")
           if not isinstance(sha_key, str):
               fail("- Failing step: read `postMergeVerify.shaJsonKey` from `.github/pr-standards.json`\n"
