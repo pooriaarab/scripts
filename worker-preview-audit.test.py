@@ -96,5 +96,16 @@ class WorkerPreviewAuditTest(unittest.TestCase):
                                          "package.json": '{"devDependencies": null}'})
         self.assertEqual(result.returncode, 1)
         self.assertNotEqual(report["blockers"], [])
+    def test_flags_mismatched_deploy_and_cleanup_env_expression(self):
+        guard = "head.repo.full_name == github.repository && github.repository_owner"
+        deploy = (f'  preview:\n    if: {guard}\n    run: GITHUB_HEAD_REF; wrangler preview --config x '
+                  '--env "${{ inputs.deploy_env }}" --name "$preview_name"; curl x\n')
+        cleanup = (f'  cleanup:\n    if: {guard}\n    run: GITHUB_HEAD_REF; wrangler preview delete --config x '
+                   '--env "${{ inputs.cleanup_env }}" --name "$preview_name"')
+        workflow = "cancel-in-progress: false\njobs:\n" + deploy + cleanup
+        result, report = self.run_audit({"wrangler.jsonc": "{}",
+                                         "package.json": '{"devDependencies":{"wrangler":"4.127.1"}}',
+                                         ".github/workflows/preview.yml": workflow})
+        self.assertIn("deploy and cleanup use different Wrangler config or environment", "\n".join(report["blockers"]))
 if __name__ == "__main__":
     unittest.main()

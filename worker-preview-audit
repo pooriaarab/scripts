@@ -110,7 +110,7 @@ def repo_name(root):
 def tracked_files(root):
     result = command("git", "ls-files", "--cached", "--others", "--exclude-standard", "-z", cwd=root)
     if result.returncode == 0:
-        return [root / name for name in result.stdout.split("\0") if name and (root / name).exists() and not (root / name).is_symlink()]
+        return [root / name for name in result.stdout.split("\0") if name and (root / name).is_file() and not (root / name).is_symlink()]
     return [path for path in root.rglob("*") if path.is_file() and ".git" not in path.parts]
 
 
@@ -248,7 +248,8 @@ def audit(root, repo):
             if "curl" not in deploy: blockers.append("workflow does not probe the live Preview")
             if "curl --location" in deploy: blockers.append("live verification follows redirects")
             if "tr '[:upper:]'" in deploy + cleanup or "cut -c1-63" in deploy + cleanup: blockers.append("workflow mutates the PR branch name")
-            args = lambda text, flag: set(re.findall(rf"--{flag}[ =]+[\"']?([^\"'\s\\]+)", text))
+            args = lambda text, flag: {match.group(1) or match.group(2) or match.group(3)
+                                        for match in re.finditer(rf'--{flag}[ =]+(?:"([^"]*)"|\'([^\']*)\'|([^"\'\s\\]+))', text)}
             if args(deploy, "config") != args(cleanup, "config") or args(deploy, "env") != args(cleanup, "env"):
                 blockers.append("deploy and cleanup use different Wrangler config or environment")
         concurrency = re.search(r"(?ms)^concurrency:[ \t]*\n((?:[ \t]+.*\n?)*)", workflow_text)
