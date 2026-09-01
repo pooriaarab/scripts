@@ -48,13 +48,23 @@ Not part of the diagnosis order above.
 | `claude-token-rotate` | Rotate a Claude OAuth token into every repo that runs the review action. Reads the token from a hidden prompt, never an argument, because an argument lands in shell history and the process list. |
 | `install-pr-hooks` | Installs the `pr-standards` pre-push hook into local pooriaarab checkouts that have adopted `.github/pr-standards.json`. Dry-run by default; `--apply` writes, `--uninstall --apply` removes. See [pr-standards.md](pr-standards.md). |
 | `fleet-digest` | One message a day that needs a person: owner-only label requests, failing default-branch CI, stale PRs and green PRs that wait for a human. Prints `Nothing needs you.` when empty. |
+| `worker-preview-audit` | Read-only Worker Preview readiness audit for a local checkout or private GitHub repo. |
+
+```bash
+./worker-preview-audit /path/to/repo
+./worker-preview-audit --repo pooriaarab/example
+```
+
+The audit is the rollout dry run. It never writes. Repository rollout remains
+manual because each Preview needs reviewed resources, secrets, and test users.
+
+The copyable workflow is in `worker-preview-templates/worker-preview.yml`. Replace
+every `__PLACEHOLDER__`, then require its `live-preview-verification` job on PRs.
 
 ## Tests
 
-`.github/workflows/tests.yml` runs every test in this repo on each pull request:
-the checker's `node --test` suite, the PreToolUse guard, the prefix builder, the
-hook installer, and the branch-pattern check. Each group runs even after an
-earlier one fails, so one run names every failure rather than only the first.
+`.github/workflows/tests.yml` runs every test listed below on each pull request.
+Each group runs after an earlier failure, so one run names every problem.
 
 Run them locally the same way:
 
@@ -65,6 +75,7 @@ python3 build-repo-prefixes.test.py
 python3 install-pr-hooks.test.py
 ./adopt-branch-pattern.test.sh
 ./pr-standards-rollout-labels.test.sh
+python3 worker-preview-audit.test.py
 ```
 
 ## pr-standards

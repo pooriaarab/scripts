@@ -76,6 +76,12 @@ jobs:
           set -euo pipefail
           ./pr-standards-rollout-labels.test.sh
 
+      - name: Run Worker Preview tests
+        id: worker-preview-tests
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        run: python3 worker-preview-audit.test.py
+
       # Every group above runs even after one fails, so one run names every
       # failure instead of only the first. This step turns the outcomes back
       # into a single verdict, and names the group that failed.
@@ -90,10 +96,11 @@ jobs:
           hook_install_tests: ${{ steps.hook-install-tests.outcome }}
           branch_pattern_tests: ${{ steps.branch-pattern-tests.outcome }}
           rollout_label_tests: ${{ steps.rollout-label-tests.outcome }}
+          worker_preview_tests: ${{ steps.worker-preview-tests.outcome }}
         run: |
           set -uo pipefail
           failed=0
-          for group in node_tests guard_tests prefix_tests hook_install_tests branch_pattern_tests rollout_label_tests; do
+          for group in node_tests guard_tests prefix_tests hook_install_tests branch_pattern_tests rollout_label_tests worker_preview_tests; do
             outcome="${!group}"
             printf '%-22s %s\n' "$group" "$outcome"
             [ "$outcome" = success ] || failed=1
