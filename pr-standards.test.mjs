@@ -868,6 +868,14 @@ test('proof: the body reader follows rendered Markdown fences', () => {
   // that line as plain text, never an opener, so an unrelated hatch below an
   // info string like this is not swallowed by a fence that was never real.
   assert.equal(failed(checkProof(body('```` `weird`', hatch), uiFiles, config)), false);
+
+  // A closer line that is itself quoted does not close a fence that opened
+  // outside any blockquote -- GitHub renders "> ```" as literal content
+  // inside the still-open fence, not as a container the fence closes within.
+  // The fence stays unterminated, so both callers answer it as they answer
+  // any other unmatched fence.
+  assert.equal(failed(checkProof(body('```', url('aaa'), url('bbb'), '> ```'), uiFiles, config)), false);
+  assert.equal(failed(checkProof(body('```', 'some code', '> ```', hatch), uiFiles, config)), true);
 });
 
 test('proof: the body reader keeps HTML comments separate from fences', () => {
