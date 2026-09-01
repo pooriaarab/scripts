@@ -1056,6 +1056,9 @@ function outputHuman(result) {
     ? `Using prefix: ${result.prefix} (${result.provenance})`
     : `Using prefix: ${result.prefix}`;
   const lines = result.prefix ? [prefixLine] : [];
+  if (result.mode === 'drift' && result.adopted === false) {
+    lines.push('SKIP  repo has not adopted pr-standards (no .github/pr-standards.json)');
+  }
   for (const pass of result.passes || []) lines.push(`PASS  ${pass}`);
   for (const item of result.failures || []) lines.push(`FAIL  ${item.check}\n${humanFailure(item)}`);
   for (const item of result.warnings || []) lines.push(`WARN  ${item.check}\n${humanFailure(item)}`);
