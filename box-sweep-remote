@@ -1,0 +1,115 @@
+#!/usr/bin/env bash
+# Cloud-side Box sweep: the layer that still runs when the laptop is asleep.
+#
+# The launchd reaper on the laptop decides with evidence — it probes each Box over SSH and
+# measures CPU and load. A CI runner cannot do that, so this sweeper knows strictly less
+# and must behave accordingly: it decides on AGE alone, defaults to reporting, and stops
+# nothing without --execute.
+#
+# It shells out to the `box` CLI rather than calling the HTTP API. The CLI is the supported
+# surface; hand-rolling the API means guessing a base URL and auth scheme, and a wrong guess
+# here looks exactly like "no Boxes running".
+set -euo pipefail
+
+MAX_AGE_HOURS="${BOX_SWEEP_MAX_AGE_HOURS:-6}"
+EXECUTE=0
+JSON=0
+
+usage() {
+  cat <<'USAGE'
+Usage: box-sweep-remote [--max-age-hours N] [--execute] [--json]
+
+  --max-age-hours N   age ceiling in hours (default 6)
+  --execute           stop Boxes over the ceiling (default: report only)
+  --json              machine-readable output
+
+Exit codes: 0 nothing over the ceiling, or a completed --execute sweep.
+            1 something is over the ceiling and was left running.
+            2 usage error.  3 the CLI or credential is unusable.
+USAGE
+}
+
+while (( $# )); do
+  case "$1" in
+    --max-age-hours)
+      [[ $# -ge 2 ]] || { echo "--max-age-hours requires a value" >&2; usage >&2; exit 2; }
+      MAX_AGE_HOURS="$2"
+      shift 2
+      ;;
+    --execute) EXECUTE=1; shift ;;
+    --json) JSON=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) usage >&2; exit 2 ;;
+  esac
+done
+
+# A non-finite ceiling is a loaded gun: NaN/inf makes every Box compare as "under", so
+# --execute silently stops nothing. A negative ceiling is nonsensical (no Box has negative
+# age). Zero is legitimate on purpose: it means "everything is over," and it stays safe
+# because --execute is still required to act on it (see the "How I verified" section).
+if ! MAX_AGE_HOURS="$MAX_AGE_HOURS" python3 -c '
+import os, sys
+try:
+    v = float(os.environ["MAX_AGE_HOURS"])
+except ValueError:
+    sys.exit(1)
+sys.exit(0 if 0 <= v < float("inf") else 1)
+'; then
+  echo "FATAL: --max-age-hours must be a non-negative, finite number, got '$MAX_AGE_HOURS'" >&2
+  exit 2
+fi
+
+command -v box >/dev/null 2>&1 || { echo "FATAL: the box CLI is not on PATH." >&2; exit 3; }
+[[ -n "${ASCII_BOX_API_KEY:-}" ]] || { echo "FATAL: ASCII_BOX_API_KEY is not set." >&2; exit 3; }
+
+# `box login` takes the key as a positional argument (see box-reap's "Run 'box login
+# <api-key>'"), so it is briefly visible in this process's argv (`ps`, /proc/<pid>/cmdline)
+# during the call. There is no confirmed stdin form for this CLI to fall back to; guessing
+# one risks a silent auth failure, which is worse than the brief argv exposure.
+box login "$ASCII_BOX_API_KEY" >/dev/null 2>&1 || { echo "FATAL: box login failed." >&2; exit 3; }
+
+# --filter r (same flag box-reap uses) restricts the list to Boxes that are actually
+# powered on. Without it, a stopped Box that has not been deleted stays in the account
+# and would be counted toward the burn rate and the age ceiling forever, and --execute
+# would keep "stopping" a Box that is already off.
+#
+# An enumeration failure must never look like an empty account: "no Boxes" and "cannot see
+# Boxes" lead to opposite conclusions, and only one of them is safe to act on.
+if ! raw="$(box list --json --filter r 2>&1)"; then
+  echo "FATAL: box list failed: ${raw:0:200}" >&2
+  exit 3
+fi
+
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+tmp_err="$(mktemp)"
+trap 'rm -f "$tmp_err"' EXIT
+
+if ! report="$(printf '%s' "$raw" | MAX_AGE_HOURS="$MAX_AGE_HOURS" JSON="$JSON" \
+    python3 "$here/box_sweep_report.py" 2>"$tmp_err")"; then
+  echo "FATAL: could not parse box list output: $(head -3 "$tmp_err")" >&2
+  exit 3
+fi
+
+printf '%s\n' "$report"
+over_ids="$(sed -n 's/^OVER_IDS=//p' "$tmp_err" | tr -s ' ')"
+
+# Status lines go to stderr, never stdout: with --json, stdout must stay a single valid
+# JSON document for machine consumers.
+[[ -n "${over_ids// /}" ]] || { echo "Nothing over the ${MAX_AGE_HOURS}h ceiling." >&2; exit 0; }
+
+if [[ "$EXECUTE" -ne 1 ]]; then
+  echo "Report only. Re-run with --execute to stop:$over_ids" >&2
+  exit 1
+fi
+
+# Stop, never delete. A stopped Box is free and keeps its snapshot; a deleted one is gone.
+failed=0
+for id in $over_ids; do
+  if box stop "$id" >/dev/null 2>&1; then
+    echo "stopped $id" >&2
+  else
+    echo "FAILED to stop $id" >&2
+    failed=1
+  fi
+done
+exit "$failed"

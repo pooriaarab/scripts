@@ -213,6 +213,30 @@ and any Box running with auto-stop disabled.
 
 `box` must be on `PATH`; cron does not read your shell profile.
 
+## The laptop reaper cannot run while the laptop sleeps
+
+`box-sweep-remote` is the same policy for a machine that is not this one: list Boxes, group
+them by age against a hard ceiling (default 6h), report, and stop the over-age ones only
+with `--execute`.
+
+It deliberately knows less than the laptop reaper. A CI runner cannot SSH into a Box, so it
+cannot measure CPU or load; deciding on age alone is cruder, which is exactly why the
+default is report-only and why the ceiling is six hours — no agent session legitimately
+holds a Box that long unattended. It stops, never deletes, and a Box with
+`archiveAfter: null` is called out separately, because nothing will ever stop that one on
+its own.
+
+It shells out to the `box` CLI rather than the HTTP API, on purpose. Hand-rolling the API
+means guessing a base URL, and a wrong guess makes an enumeration failure look identical to
+an empty account — the one wrong answer that looks calm. (`api.ascii.dev` does not resolve;
+that was the first attempt, and it "found" zero Boxes.)
+
+**Not yet wired to CI.** There is no verified way to install the `box` CLI on a runner:
+`https://ascii.dev/install.sh` redirects to `https://box.ascii.dev/install.sh`, which
+returns a 404 HTML page, and `https://get.ascii.dev` does not answer. Until an install path
+is confirmed, run it from any machine that already has the CLI. Wiring it to a scheduled
+Ubicloud job is a small change once that is known.
+
 ## The periodic reaper (added 2026-08-28, tightened 2026-08-30)
 
 Nothing was stopping Boxes. `com.pooriaarab.crabbox-sweep` existed but was
