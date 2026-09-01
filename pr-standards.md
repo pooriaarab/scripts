@@ -400,6 +400,7 @@ pr-standards branch cr-142-fix-onboard   # validate a specific name
 pr-standards precheck --branch X --title Y   # for the agent hook; no network
 pr-standards pr --repo pooriaarab/content-rabbit --number 88
 pr-standards pr --repo pooriaarab/content-rabbit --number 88 --json   # machine-readable
+pr-standards drift                       # check the managed AGENTS.md block and PR template for drift
 ```
 
 Exit 0 clean, exit 1 on any failure, exit 2 on a configuration problem.
