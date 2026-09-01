@@ -49,10 +49,10 @@ while (( $# )); do
 done
 
 # A non-finite ceiling is a loaded gun: NaN/inf makes every Box compare as "under", so
-# --execute silently stops nothing. A negative ceiling is nonsensical. The shell case glob
-# below is not enough on its own — it happily lets through "1.2.3" or "6." as "numbers",
-# which then blow up inside the Python report as an unhandled ValueError (exit 3, not the
-# documented usage-error exit 2) — so the real check is float() in Python.
+# --execute silently stops nothing. A negative ceiling is nonsensical. There is no shell-side
+# pre-check for "looks like a number" — anything that is not a valid float (including
+# garbage like "1.2.3") must be caught here, or it blows up inside the Python report as an
+# unhandled ValueError (exit 3, not the documented usage-error exit 2).
 if ! MAX_AGE_HOURS="$MAX_AGE_HOURS" python3 -c '
 import os, sys
 try:
