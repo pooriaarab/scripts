@@ -140,14 +140,24 @@ jobs:
         run: |
           set -euo pipefail
           TITLE="Deploy did not go live: ${SHORT_SHA:0:7}"
+          MARKER="<!-- post-merge-verify -->"
           {
             echo "The post-merge check failed."
             echo
             cat "$REPORT" 2>/dev/null || echo "- The check failed before it wrote a reason."
             echo "- Run: $RUN_URL"
+            echo
+            echo "$MARKER"
           } > "$RUNNER_TEMP/issue-body.md"
-          EXISTING=$(gh issue list --repo "$REPO" --state open --limit 1 \
-            --search '"Deploy did not go live" in:title' --json number --jq '.[0].number // empty')
+          # The title carries the short SHA, so it changes on every failing commit
+          # and can't be matched exactly across runs. A bare text search on
+          # "Deploy did not go live" would also happily match an unrelated,
+          # human-filed issue that just happens to share those words, and post
+          # this run's report as a comment there. The marker in the body is what
+          # actually identifies an issue this workflow opened.
+          EXISTING=$(gh issue list --repo "$REPO" --state open --limit 50 \
+            --search '"Deploy did not go live" in:title' --json number,body \
+            --jq "[.[] | select((.body // \"\") | contains(\"$MARKER\"))] | first.number // empty")
           if [ -n "$EXISTING" ]; then
             gh issue comment "$EXISTING" --repo "$REPO" --body-file "$RUNNER_TEMP/issue-body.md"
           else
