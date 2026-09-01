@@ -53,11 +53,13 @@ echo "Sync: paginate, deduplicate, retry, respect rate limits, and run on the pr
 echo
 
 echo "-- production secret names --"
+secret_status_implemented=1
 case "$provider" in
   twitter|facebook|instagram|threads|linkedin|tiktok|youtube|googlebusiness|pinterest|reddit|tumblr|vk|dribbble|snapchat|kick|twitch|whop|mastodon|discord|telegram|imessage)
     (cd "$repo" && bun run packages/cli/scripts/integrations/status.ts "$provider" --env production)
     ;;
   *)
+    secret_status_implemented=0
     echo "NOT_IMPLEMENTED: production secret status is not implemented for ${provider}."
     ;;
 esac
@@ -105,4 +107,8 @@ case "$provider" in
 esac
 
 echo
-echo "Local proof passed. Complete the live console and test-account gates before marking READY."
+if [[ "$secret_status_implemented" == "1" ]]; then
+  echo "Local proof passed. Complete the live console and test-account gates before marking READY."
+else
+  echo "Local proof passed for automated checks only. Production secret status is NOT_IMPLEMENTED for ${provider}; verify it manually, then complete the live console and test-account gates before marking READY."
+fi
