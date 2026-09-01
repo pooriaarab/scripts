@@ -356,6 +356,25 @@ test('drift reports a missing managed block as missing, not stale', () => {
   }
 });
 
+test('drift reports a duplicated managed block as malformed, not a false pass', () => {
+  const root = driftFixture();
+  try {
+    const agentsPath = path.join(root, 'AGENTS.md');
+    const current = readFileSync(agentsPath, 'utf8');
+    // A leftover stale block after a correct one (hand edit, or a rollout
+    // repair that appended fresh content past markers it wouldn't touch)
+    // must not be reported as a PASS just because the first pair matches.
+    fs.writeFileSync(agentsPath, current + '\n' + current);
+    const result = runDrift(root);
+    const failure = result.json.failures.find((item) => item.check === 'managed AGENTS.md block');
+    assert.equal(result.status, 1, result.stdout + result.stderr);
+    assert.equal(failure.got, 'malformed');
+    assert.equal(Object.hasOwn(failure, 'diff'), false);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('drift leaves a repository without config unadopted', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'prs-no-drift-config-'));
   try {
