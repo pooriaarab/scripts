@@ -254,7 +254,7 @@ test('counts changed lines after exclusions and reports raw totals', () => {
   assert.equal(checkSize(summary, { ...config, maxLines: 250 }).failures.length, 1);
 });
 
-test('override label short-circuits size failures', () => {
+test('enforces size failures without a label escape', () => {
   const summary = {
     rawLines: 900,
     countedLines: 700,
@@ -264,11 +264,21 @@ test('override label short-circuits size failures', () => {
     excludedFiles: 0,
     topLevelDirs: ['a', 'b', 'c', 'd'],
   };
-  const result = checkSize(summary, { ...config, maxLines: 500, maxFiles: 40 }, ['oversized-approved']);
+  const result = checkSize(summary, { ...config, maxLines: 500, maxFiles: 40 });
 
-  assert.equal(result.overridden, true);
-  assert.equal(result.failures.length, 0);
+  assert.equal(result.failures.length, 2);
   assert.equal(result.warnings.length, 1);
+});
+
+test('prevents size-cap escape resurrection', () => {
+  // A deletion is not self-enforcing. This keeps stale branches from restoring
+  // the escape while leaving every behavioral test green.
+  const source = readFileSync(fileURLToPath(new URL('./pr-standards.mjs', import.meta.url)), 'utf8');
+
+  assert.doesNotMatch(source, /oversized-approved/);
+  assert.equal(Object.hasOwn(DEFAULT_CONFIG, 'overrideLabel'), false);
+  assert.equal(Object.hasOwn(DEFAULT_CONFIG, 'overrideActors'), false);
+  assert.equal(checkSize.length, 2);
 });
 
 test('enforces rules for chore branches (null issue)', () => {
