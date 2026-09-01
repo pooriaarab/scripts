@@ -9,11 +9,15 @@ import { fileURLToPath } from 'node:url';
 import {
   ConfigurationError,
   DEFAULT_CONFIG,
+  checkProof,
   checkSize,
   countClosingReferences,
   validateCommits,
   validateConfig,
   derivePrefix,
+  hasUiDiff,
+  isCommittedProofMedia,
+  isUiFile,
   loadConfig,
   matchesGlob,
   summarizeFiles,
@@ -336,6 +340,51 @@ test('issues/{n} returning an object with a pull_request field fails', async () 
   }
 });
 
+test('an exempt branch skips proof of work along with title and body', async () => {
+  const originalWrite = process.stdout.write;
+  const originalPath = process.env.PATH;
+  const originalToken = process.env.GITHUB_TOKEN;
+  const originalFetch = globalThis.fetch;
+  let output = '';
+  process.stdout.write = (chunk) => { output += chunk; return true; };
+  process.env.PATH = ''; // disable gh
+  process.env.GITHUB_TOKEN = 'test-token';
+  process.env.GITHUB_REPOSITORY = 'other/repo'; // Ensure we don't hit the CI check
+
+  globalThis.fetch = async (url) => {
+    if (url.includes('contents/.github/pr-standards.json')) {
+      return { ok: true, json: async () => ({ content: Buffer.from(JSON.stringify({ prefix: 'cr' })).toString('base64'), encoding: 'base64' }) };
+    }
+    if (url.includes('pulls/13/commits')) {
+      return { ok: true, json: async () => ([{ sha: 'abc1234', commit: { message: 'Fix the thing' } }]) };
+    }
+    if (url.includes('pulls/13/files')) {
+      // A refactor branch is exempt from title/body, but it still moves real
+      // UI files -- that must not trigger the proof-of-work requirement, which
+      // depends on a `## How I verified` section this branch was never asked
+      // to write.
+      return { ok: true, json: async () => ([{ filename: 'src/components/Button.tsx', status: 'modified' }]) };
+    }
+    if (url.includes('pulls/13')) {
+      return { ok: true, json: async () => ({ head: { ref: 'refactor' }, title: 'Move things around', body: 'no structured body at all' }) };
+    }
+    throw new Error(`Unexpected fetch URL: ${url}`);
+  };
+
+  try {
+    const exitCode = await main(['pr', '--repo', 'test/repo', '--number', '13', '--json']);
+    const result = JSON.parse(output);
+    assert.equal(result.failures.some(f => f.check === 'proof of a visible change'), false);
+    assert.equal(exitCode, 0);
+  } finally {
+    process.stdout.write = originalWrite;
+    process.env.PATH = originalPath;
+    process.env.GITHUB_TOKEN = originalToken;
+    globalThis.fetch = originalFetch;
+    delete process.env.GITHUB_REPOSITORY;
+  }
+});
+
 test('config resolution prefers the target repo over the local checkout', async () => {
   const originalWrite = process.stdout.write;
   const originalPath = process.env.PATH;
@@ -616,6 +665,161 @@ test('a lockfile is excluded wherever a workspace keeps it', () => {
   }
   // Still counts a real source file that merely lives near one.
   assert.equal(DEFAULT_CONFIG.excludeGlobs.some((glob) => matchesGlob('apps/website/src/lock-screen.ts', glob)), false);
+});
+
+test('proof: a visible change needs before and after attachments', () => {
+  const uiFiles = [{ filename: 'src/components/Button.tsx', status: 'modified' }];
+  const withUrls = (n) => `${validBody}\n` + Array.from({ length: n }, (_, i) =>
+    `![shot](https://github.com/user-attachments/assets/abc${i})`).join('\n');
+  const proofNa = `${validBody}\nProof: n/a — a type-level refactor with no runtime path`;
+  const proofNaShort = `${validBody}\nProof: n/a — no ui`;
+
+  const failed = (r) => r.failures.some((f) => f.check === 'proof of a visible change');
+  const warned = (r) => r.warnings.some((w) => w.check === 'proof of a visible change');
+
+  assert.equal(failed(checkProof(validBody, uiFiles, config)), true);
+  assert.equal(warned(checkProof(withUrls(1), uiFiles, config)), true);
+  assert.equal(failed(checkProof(withUrls(1), uiFiles, config)), false);
+  assert.equal(failed(checkProof(withUrls(2), uiFiles, config)), false);
+  assert.equal(warned(checkProof(withUrls(2), uiFiles, config)), false);
+
+  // A stated reason clears it; "n/a" on its own does not, or the escape hatch
+  // becomes the default and the rule stops meaning anything.
+  assert.equal(failed(checkProof(proofNa, uiFiles, config)), false);
+  assert.equal(failed(checkProof(proofNaShort, uiFiles, config)), true);
+
+  // Nothing visible changed, so nothing has to be shown.
+  assert.equal(failed(checkProof(validBody, [{ filename: 'src/server/api.ts', status: 'modified' }], config)), false);
+  assert.equal(failed(checkProof(validBody, [{ filename: 'src/components/Button.test.tsx', status: 'modified' }], config)), false);
+
+  assert.equal(isUiFile('src/components/Button.tsx', config), true);
+  assert.equal(isUiFile('src/components/Button.test.tsx', config), false);
+  assert.equal(hasUiDiff(uiFiles, config), true);
+  assert.equal(hasUiDiff([{ filename: 'src/server/api.ts' }], config), false);
+});
+
+test('proof: a rename out of the UI globs still counts as a UI diff', () => {
+  // GitHub reports a rename as one file object with both names. Checking only
+  // the new name lets a rename that moves a UI file to a non-matching name
+  // (or extension) carry along a content change while silently clearing the
+  // proof requirement.
+  const renamed = [{
+    filename: 'src/archive/Home.txt',
+    previous_filename: 'src/pages/Home.tsx',
+    status: 'renamed',
+  }];
+  assert.equal(hasUiDiff(renamed, config), true);
+  assert.equal(checkProof(validBody, renamed, config).failures.some((f) => f.check === 'proof of a visible change'), true);
+
+  // A rename between two non-UI names is still not a UI diff.
+  assert.equal(hasUiDiff([{ filename: 'src/server/api2.ts', previous_filename: 'src/server/api.ts', status: 'renamed' }], config), false);
+});
+
+test('proof: media belongs in user-attachments, not in the commit', () => {
+  const flagged = [
+    'screenshots/home.png', 'screenshot-123/demo.png', 'a/b/screenshots/x.jpg',
+    'proof/demo.mp4', 'proof-v2/clip.webm', 'src/before.png',
+    'src/component-after.jpg', 'docs/demo-recording.mov',
+    'image.png', 'photo.jpeg', 'clip.gif', 'screen.webp',
+  ].map((filename) => ({ filename, status: 'added' }));
+  for (const file of flagged) {
+    assert.equal(isCommittedProofMedia(file), true, `should flag ${file.filename}`);
+    const r = checkProof(validBody, [file], config);
+    assert.equal(r.failures.some((f) => f.check === 'committed proof media'), true, `checkProof should flag ${file.filename}`);
+  }
+
+  // Everything else is a product asset. A repo full of real images must not
+  // start failing because one of them is a png.
+  for (const filename of ['public/logo.png', 'public/assets/bg.jpg', 'src/assets/icon.png', 'assets/image.png', 'src/app/logo.png']) {
+    const file = { filename, status: 'added' };
+    assert.equal(isCommittedProofMedia(file), false, `should not flag ${filename}`);
+    const r = checkProof(validBody, [file], config);
+    assert.equal(r.failures.length + r.warnings.length, 0);
+  }
+
+  // Only an added file is suspicious: editing a media file already in the repo
+  // is maintenance of a real asset.
+  assert.equal(isCommittedProofMedia({ filename: 'screenshots/home.png', status: 'modified' }), false);
+  assert.equal(isCommittedProofMedia({ filename: 'screenshots/readme.txt', status: 'added' }), false);
+});
+
+test('proof: only requireProof clears the checks, and no label can', () => {
+  // #114 removed the size cap's override label because an agent can apply its
+  // own label. The same argument applies here, so there is no proof label at
+  // all: a requirement an agent can waive is not a requirement. requireProof is
+  // a config decision that lives in the repo and shows up in a diff.
+  const uiFiles = [{ filename: 'src/components/Button.tsx', status: 'modified' }];
+  const media = [{ filename: 'screenshots/home.png', status: 'added' }];
+
+  assert.equal(checkProof(validBody, [...uiFiles, ...media], config).failures.length > 0, true);
+
+  const off = { ...config, requireProof: false };
+  assert.equal(checkProof(validBody, [...uiFiles, ...media], off).failures.length, 0);
+
+  // A label named like the old escape hatch changes nothing, because nothing
+  // reads labels any more.
+  assert.equal(DEFAULT_CONFIG.proofOverrideLabel, undefined);
+});
+
+test('the documented proof hatch is not a refusal to answer', () => {
+  // The two rules this feature adds contradicted each other. checkProof accepts
+  // `Proof: n/a — <reason>` and the docs say to write it under How I verified;
+  // validateBody rejected any N/A in that section. So a change with no visible
+  // surface could not pass at all, written exactly where it was told to write
+  // it. Found by hitting it on this feature's own pull request.
+  const section = (...lines) => [
+    'Closes #64', '', '## What', 'One sentence.', '', '## Why', 'Because.', '',
+    '## How I verified', ...lines, '', 'Assisted-by: agent:model',
+  ].join('\n');
+  const cfg = { ...DEFAULT_CONFIG, prefix: 'scr' };
+  const evidence = '$ node --test pr-standards.test.mjs\ntests 43 / pass 43 / fail 0';
+
+  assert.equal(validateBody(section(evidence, '', 'Proof: n/a — a checker with no user-visible surface'), 64, cfg).ok, true);
+
+  // A bare refusal still fails, which is what the guard is for.
+  for (const refusal of ['N/A', 'n/a', 'TODO', 'tested locally', 'Proof: n/a']) {
+    assert.equal(validateBody(section(evidence, '', refusal), 64, cfg).ok, false, `${refusal} should still fail`);
+  }
+});
+
+test('proof: the same image pasted twice is one image', () => {
+  // The threshold asks for before AND after, not for two links. Counting raw
+  // matches let one screenshot pasted twice clear it, which is the loophole the
+  // whole check exists to close.
+  const uiFiles = [{ filename: 'src/components/Button.tsx', status: 'modified' }];
+  const url = (id) => `![shot](https://github.com/user-attachments/assets/${id})`;
+  const warned = (r) => r.warnings.some((w) => w.check === 'proof of a visible change');
+
+  assert.equal(warned(checkProof(`${validBody}\n${url('abc')}\n${url('abc')}`, uiFiles, config)), true);
+  // Nor does a query string on the same asset make it a second one.
+  assert.equal(warned(checkProof(`${validBody}\n${url('abc')}\n${url('abc?raw=1')}`, uiFiles, config)), true);
+  // Two genuinely different assets clear it.
+  assert.equal(warned(checkProof(`${validBody}\n${url('abc')}\n${url('def')}`, uiFiles, config)), false);
+  // Nor does trailing prose punctuation on a bare URL make it a second one:
+  // the markdown embed stops at the closing paren, but a bare URL followed by
+  // a period in a sentence keeps that period as part of the match.
+  const bare = (id) => `https://github.com/user-attachments/assets/${id}`;
+  assert.equal(warned(checkProof(`${validBody}\nBefore: ${bare('abc')}. After: ${url('abc')}`, uiFiles, config)), true);
+});
+
+test('proof: attachments only count inside How I verified', () => {
+  const uiFiles = [{ filename: 'src/components/Button.tsx', status: 'modified' }];
+  const failed = (r) => r.failures.some((f) => f.check === 'proof of a visible change');
+  const embeds = [
+    '![before](https://github.com/user-attachments/assets/abc)',
+    '![after](https://github.com/user-attachments/assets/def)',
+  ].join('\n');
+  const section = (verified, extraWhat = '') => [
+    'Closes #142', '', '## What',
+    `Fixes the onboarding drop-off after step three.${extraWhat}`, '',
+    '## Why', 'Issue #142 reports that users lose their progress at this step. This change keeps the progress state.', '',
+    '## How I verified', verified, '', 'Assisted-by: claude-personal:claude-opus-5',
+  ].join('\n');
+
+  // The docs say the embeds live under How I verified, so that is where the
+  // check reads. Two real embeds pasted under What instead must not satisfy it.
+  assert.equal(failed(checkProof(section('bun test -> 214 passed', `\n${embeds}`), uiFiles, config)), true);
+  assert.equal(failed(checkProof(section(`bun test -> 214 passed\n${embeds}`), uiFiles, config)), false);
 });
 
 test('the proof escape hatch does not read as a refusal to answer', () => {
