@@ -1,0 +1,334 @@
+#!/usr/bin/env python3
+"""Read-only readiness audit for Cloudflare Worker Previews."""
+import argparse
+import json
+import re
+import subprocess
+import sys
+import tempfile
+import tomllib
+from pathlib import Path
+BINDINGS = {
+    "kv_namespaces": ("id",), "d1_databases": ("database_id",),
+    "r2_buckets": ("bucket_name",), "vectorize": ("index_name",),
+    "hyperdrive": ("id",), "analytics_engine_datasets": ("dataset",),
+    "pipelines": ("pipeline", "id"), "workflows": ("name",),
+    "secrets_store_secrets": ("store_id", "secret_name"),
+    "dispatch_namespaces": ("namespace",), "mtls_certificates": ("certificate_id",),
+    "vpc_services": ("service_id",), "ratelimits": ("namespace_id",),
+    "services": ("service",), "send_email": ("destination_address", "allowed_destination_addresses"),
+}
+MARKER = re.compile(r"(?:PREVIEW|E2E|TEST)_(?:USER|EMAIL|PASSWORD|TOKEN|SECRET|AUTH)[A-Z0-9_]*")
+def normalize(value):
+    if len(value) > 63 or not re.fullmatch(r"[a-z]{2,4}-[1-9][0-9]*-[a-z0-9]+(?:-[a-z0-9]+)*", value):
+        raise ValueError("name must be an unchanged PR-standard branch of at most 63 characters")
+    return value
+
+def strip_comments(text):
+    out, quoted, escaped, i = [], False, False, 0
+    while i < len(text):
+        char, nxt = text[i], text[i + 1] if i + 1 < len(text) else ""
+        if quoted:
+            out.append(char)
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                quoted = False
+        elif char == '"':
+            quoted = True; out.append(char)
+        elif char == "/" and nxt == "/":
+            i = text.find("\n", i)
+            if i < 0: break
+            out.append("\n")
+        elif char == "/" and nxt == "*":
+            end = text.find("*/", i + 2)
+            if end < 0: raise ValueError("unterminated JSONC comment")
+            out.append("\n" * text[i:end + 2].count("\n")); i = end + 1
+        else:
+            out.append(char)
+        i += 1
+    return "".join(out)
+def strip_trailing_commas(text):
+    out, quoted, escaped, i = [], False, False, 0
+    while i < len(text):
+        char = text[i]
+        if quoted:
+            out.append(char)
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                quoted = False
+        elif char == '"':
+            quoted = True; out.append(char)
+        elif char != "," or not text[i + 1:].lstrip().startswith(("}", "]")):
+            out.append(char)
+        i += 1
+    return "".join(out)
+
+def jsonc(text):
+    return json.loads(strip_trailing_commas(strip_comments(text)))
+def load_config(path):
+    text = path.read_text()
+    return tomllib.loads(text) if path.suffix == ".toml" else jsonc(text)
+def command(*args, cwd=None):
+    try:
+        return subprocess.run(args, cwd=cwd, text=True, capture_output=True)
+    except OSError as error:
+        return subprocess.CompletedProcess(args, 127, "", str(error))
+
+def passes_credential(block, name, source):
+    value = r'["\x27]?\$\{\{\s*' + source + r'\s*\}\}["\x27]?'
+    return re.search(rf"(?m)^[ \t]+{name}:\s*{value}\s*$", block) or re.search(rf"(?m){name}={value}(?:\s+\S+=\S+)*\s+wrangler[^\n]* preview", block) or re.search(rf"(?m)export\s+{name}={value}[^\n]*wrangler[^\n]* preview", block)
+def github_names(repo, endpoint):
+    if not repo:
+        return None
+    result = command("gh", "api", "--paginate", f"repos/{repo}/actions/{endpoint}",
+                     "--jq", f'.{endpoint}[].name')
+    return set(result.stdout.split()) if result.returncode == 0 else None
+
+def repo_name(root):
+    result = command("git", "remote", "get-url", "origin", cwd=root)
+    match = re.search(r"github\.com[/:]([^/]+/[^/]+?)(?:\.git)?$", result.stdout.strip())
+    return match.group(1) if match else None
+
+def tracked_files(root):
+    result = command("git", "ls-files", "--cached", "--others", "--exclude-standard", "-z", cwd=root)
+    if result.returncode == 0:
+        return [root / name for name in result.stdout.split("\0") if name and (root / name).is_file() and not (root / name).is_symlink()]
+    return [path for path in root.rglob("*") if path.is_file() and ".git" not in path.parts]
+
+def resource_map(items, fields):
+    return {str(item.get("binding") or item.get("name")): "|".join(str(item.get(field, "")) for field in fields)
+            for item in items if isinstance(item, dict) and (item.get("binding") or item.get("name"))} if isinstance(items, list) else {}
+
+def inspect_scope(label, scope, blockers, bindings, domains, enforce=True):
+    issues = blockers if enforce else []
+    previews = scope.get("previews", {}) if isinstance(scope.get("previews"), dict) else {}
+    missing_vars = set(scope.get("vars") if isinstance(scope.get("vars"), dict) else {}) - set(previews.get("vars") if isinstance(previews.get("vars"), dict) else {})
+    if missing_vars: issues.append(f"{label}: Preview vars are missing: {', '.join(sorted(missing_vars))}")
+    for key, fields in BINDINGS.items():
+        if key not in scope: continue
+        bindings.append(f"{label}:{key}")
+        if key == "services":
+            issues.append(f"{label}: service bindings resolve outside the Preview")
+        if key == "send_email": issues.append(f"{label}: email bindings need a non-production recipient audit")
+        if key not in previews:
+            issues.append(f"{label}: {key} has no Preview configuration")
+        else:
+            production, preview = resource_map(scope[key], fields), resource_map(previews[key], fields)
+            missing = set(production) - set(preview)
+            if missing: issues.append(f"{label}: {key} Preview bindings are missing: {', '.join(sorted(missing))}")
+            preview_items = previews[key] if isinstance(previews[key], list) else []
+            incomplete = (lambda item: not any(item.get(field) for field in fields)) if key == "send_email" \
+                else (lambda item: any(not item.get(field) for field in fields))
+            if any(isinstance(item, dict) and incomplete(item) for item in preview_items):
+                issues.append(f"{label}: {key} has an incomplete Preview binding")
+            if set(preview.values()) & set(production.values()):
+                issues.append(f"{label}: {key} shares a production resource")
+    durable_configs = scope.get("durable_objects", {}), previews.get("durable_objects", {})
+    if not all(isinstance(item, dict) for item in durable_configs): issues.append(f"{label}: Durable Object configuration must be an object")
+    durable, preview_durable = (item.get("bindings", []) if isinstance(item, dict) else [] for item in durable_configs)
+    if missing_durable := set(resource_map(durable, ("class_name",))) - set(resource_map(preview_durable, ("class_name",))): issues.append(f"{label}: Durable Object Preview bindings are missing: {', '.join(sorted(missing_durable))}")
+    if any(isinstance(item, dict) and not item.get("class_name") for item in preview_durable): issues.append(f"{label}: Durable Object has an incomplete Preview binding")
+    preview_scripts = {item.get("script_name") for item in preview_durable if isinstance(item, dict) and item.get("script_name")}
+    if preview_scripts: issues.append(f"{label}: Preview Durable Objects target an external production Worker")
+    if scope.get("containers") and not previews.get("containers"):
+        bindings.append(f"{label}:containers")
+        issues.append(f"{label}: Containers are missing from previews")
+    if scope.get("containers"): issues.append(f"{label}: Containers need explicit post-delete cleanup")
+    queue_configs = scope.get("queues", {}), previews.get("queues", {})
+    if not all(isinstance(item, dict) for item in queue_configs): issues.append(f"{label}: Queue configuration must be an object")
+    queues, preview_queues = (item if isinstance(item, dict) else {} for item in queue_configs)
+    producers = queues.get("producers", []) if isinstance(queues, dict) else []
+    if producers:
+        bindings.append(f"{label}:queues.producers")
+        preview_producers = preview_queues.get("producers", []) if isinstance(preview_queues, dict) else []
+        if missing_producers := set(resource_map(producers, ("queue",))) - set(resource_map(preview_producers, ("queue",))): issues.append(f"{label}: Queue Preview producers are missing: {', '.join(sorted(missing_producers))}")
+        elif set(resource_map(producers, ("queue",)).values()) & set(resource_map(preview_producers, ("queue",)).values()):
+            issues.append(f"{label}: Queue producers share a production Queue")
+        if any(isinstance(item, dict) and not item.get("queue") for item in preview_producers): issues.append(f"{label}: Queue producer has an incomplete Preview binding")
+    if isinstance(queues, dict) and queues.get("consumers"):
+        issues.append(f"{label}: Queue consumers cannot receive Preview events")
+    if (scope.get("triggers") if isinstance(scope.get("triggers"), dict) else {}).get("crons"):
+        issues.append(f"{label}: Cron Triggers cannot invoke Previews")
+    custom_routes, enabled_domains = [], []
+    for route in scope.get("routes", []) if isinstance(scope.get("routes"), list) else []:
+        if isinstance(route, dict) and route.get("custom_domain"):
+            domain = route.get("pattern", "<unknown>")
+            enabled = route.get("previews_enabled") is True
+            custom_routes.append(domain)
+            if enabled: enabled_domains.append(domain)
+            domains.append(f"{label}:{domain} ({'preview' if enabled else 'production only'})")
+    if custom_routes and not enabled_domains:
+        issues.append(f"{label}: custom domains have no Preview URL")
+    if enabled_domains and not all(re.match(r"^preview(?:\.staging)?\.", domain) for domain in enabled_domains):
+        issues.append(f"{label}: Preview custom domain must start with preview. or preview.staging.")
+    if scope.get("preview_urls") is False and not enabled_domains:
+        issues.append(f"{label}: workers.dev Preview URLs are disabled without a custom Preview domain")
+
+def audit(root, repo):
+    files = tracked_files(root)
+    configs = sorted(path for path in files if re.fullmatch(r"wrangler(?:[._-][^.]+)*\.(?:toml|jsonc?|ya?ml)", path.name))
+    workflows = [path for path in files if ".github/workflows" in path.as_posix()]
+    preview_workflows = [str(path.relative_to(root)) for path in workflows if re.search(r"wrangler[^\n]* preview", "\n".join(line for line in path.read_text(errors="ignore").splitlines() if not line.strip().startswith("#")))]
+    workflow_text = "\n".join("\n".join(line for line in (root / path).read_text(errors="ignore").splitlines() if not line.strip().startswith("#")) for path in preview_workflows)
+    preview_envs = set(re.findall(r"--env[ =]+[\"']?([A-Za-z0-9_-]+)", workflow_text))
+    blockers, bindings, domains, preview_scopes, configured_envs = [], [], [], [], set()
+    if len(preview_workflows) > 1: blockers.append("multiple Worker Preview workflows need manual review")
+    if len(configs) > 1 and preview_envs:
+        blockers.append("multiple Wrangler configs with Preview environments need manual mapping")
+    for path in configs:
+        if path.suffix in {".yaml", ".yml"}:
+            blockers.append(f"{path.relative_to(root)}: YAML Wrangler config needs manual review"); continue
+        try:
+            config = load_config(path)
+        except Exception as error:
+            blockers.append(f"{path.relative_to(root)}: cannot parse ({error})"); continue
+        if not isinstance(config, dict):
+            blockers.append(f"{path.relative_to(root)}: config root must be an object"); continue
+        inspect_scope(str(path.relative_to(root)), config, blockers, bindings, domains, not preview_envs)
+        if isinstance(config.get("previews"), dict): preview_scopes.append(str(path.relative_to(root)))
+        envs = config.get("env", {})
+        if not isinstance(envs, dict): blockers.append(f"{path.relative_to(root)}: env must be an object"); envs = {}
+        configured_envs.update(envs)
+        for env, scope in envs.items():
+            if isinstance(scope, dict):
+                label = f"{path.relative_to(root)} env.{env}"
+                inspect_scope(label, scope, blockers, bindings, domains,
+                              env in preview_envs or (not preview_envs and env != "production"))
+                if isinstance(scope.get("previews"), dict): preview_scopes.append(label)
+    if preview_envs - configured_envs: blockers.append("workflow names an unknown Wrangler environment: " + ", ".join(sorted(preview_envs - configured_envs)))
+    packages, package_versions = [], {}
+    for path in files:
+        if path.name == "package.json":
+            try:
+                package = json.loads(path.read_text())
+            except (OSError, json.JSONDecodeError) as error:
+                blockers.append(f"{path.relative_to(root)}: cannot parse ({error})"); continue
+            if not isinstance(package, dict):
+                blockers.append(f"{path.relative_to(root)}: package.json root must be an object"); continue
+            dev_deps, deps = package.get("devDependencies"), package.get("dependencies")
+            version = (dev_deps.get("wrangler") if isinstance(dev_deps, dict) else None) \
+                or (deps.get("wrangler") if isinstance(deps, dict) else None)
+            if version:
+                packages.append(f"{path.relative_to(root)}={version}")
+                package_versions[path.parent] = version
+    if not configs: blockers.append("no Wrangler configuration")
+    for config in configs:
+        version = next((package_versions[parent] for parent in [config.parent, *config.parents]
+                        if parent in package_versions), None)
+        if version != "4.127.1": blockers.append(f"{config.relative_to(root)}: Wrangler 4.127.1 is not pinned exactly")
+    if not preview_workflows: blockers.append("no Worker Preview workflow")
+    else:
+        blocks = re.findall(r"(?ms)^  [A-Za-z0-9_-]+:\s*\n(.*?)(?=^  [A-Za-z0-9_-]+:\s*\n|\Z)", workflow_text)
+        deploys = [block for block in blocks if re.search(r"wrangler[^\n]* preview(?! delete)", block)]
+        cleanups = [block for block in blocks if re.search(r"wrangler[^\n]* preview delete", block)]
+        if len(deploys) != 1 or len(cleanups) != 1: blockers.append("workflow needs one Preview deploy job and one cleanup job")
+        else:
+            deploy, cleanup = deploys[0], cleanups[0]
+            deploy_if = "\n".join(re.findall(r"(?m)^ {4}if:\s*(.*)$", deploy))
+            cleanup_if = "\n".join(re.findall(r"(?m)^ {4}if:\s*(.*)$", cleanup))
+            for needles, message, scope_pair in [(("head.repo.full_name == github.repository",), "fork guard", (deploy_if, cleanup_if)),
+                                                  (("github.repository_owner",), "owner guard", (deploy_if, cleanup_if)),
+                                                  (("GITHUB_HEAD_REF", "pull_request.head.ref"), "PR branch source", (deploy, cleanup)),
+                                                  (('--name "$preview_name"', '--name "$BRANCH_NAME"'), "exact Preview name", (deploy, cleanup))]:
+                deploy_scope, cleanup_scope = scope_pair
+                shared = {needle for needle in needles if needle in deploy_scope} & {needle for needle in needles if needle in cleanup_scope}
+                if not shared: blockers.append(f"deploy and cleanup need the same {message}")
+            deploy_action = re.search(r"action\s*(!=|==)\s*['\"]closed['\"]", deploy_if)
+            cleanup_action = re.search(r"action\s*(!=|==)\s*['\"]closed['\"]", cleanup_if)
+            if not (deploy_action and deploy_action.group(1) == "!=" and cleanup_action and cleanup_action.group(1) == "=="):
+                blockers.append("deploy and cleanup need mutually exclusive PR action conditions: deploy must exclude action == 'closed' and cleanup must require it")
+            if not re.search(r"(?m)^[ \t]+(?:run:\s*)?(?:[A-Za-z_][A-Za-z0-9_]*_)?curl(?:\s|$)", deploy): blockers.append("workflow does not probe the live Preview")
+            if "curl --location" in deploy: blockers.append("live verification follows redirects")
+            if "tr '[:upper:]'" in deploy + cleanup or "cut -c1-63" in deploy + cleanup: blockers.append("workflow mutates the PR branch name")
+            args = lambda text, flag: {match.group(1) or match.group(2) or match.group(3) or match.group(4)
+                                        for match in re.finditer(r'--' + flag + r'[ =]+(?:"([^"]*)"|\'([^\']*)\'|(\$\{\{[^}]*\}\})|([^"\'\s\\]+))', text)}
+            if args(deploy, "config") != args(cleanup, "config") or args(deploy, "env") != args(cleanup, "env"):
+                blockers.append("deploy and cleanup use different Wrangler config or environment")
+            if any("$" in value for value in args(deploy + cleanup, "env")):
+                blockers.append("dynamic Wrangler environments need manual Preview verification")
+            for job_name, block in (("deploy", deploy), ("cleanup", cleanup)):
+                if not passes_credential(block, "CLOUDFLARE_API_TOKEN", r"secrets\.CLOUDFLARE_API_TOKEN"):
+                    blockers.append(f"{job_name} does not pass CLOUDFLARE_API_TOKEN to Wrangler")
+                if not passes_credential(block, "CLOUDFLARE_ACCOUNT_ID", r"(?:secrets|vars)\.CLOUDFLARE_ACCOUNT_ID"):
+                    blockers.append(f"{job_name} does not pass CLOUDFLARE_ACCOUNT_ID to Wrangler")
+        concurrency = re.search(r"(?ms)^concurrency:[ \t]*\n((?:[ \t]+.*\n?)*)", workflow_text)
+        concurrency_body = concurrency.group(1) if concurrency else ""
+        if "cancel-in-progress: false" not in concurrency_body or not re.search(r"(?m)^\s*group:\s*\S", concurrency_body):
+            blockers.append("Preview lifecycle jobs are not serialized")
+    secrets, variables = github_names(repo, "secrets"), github_names(repo, "variables")
+    if repo and (secrets is None or variables is None): blockers.append("GitHub credential metadata could not be verified")
+    if secrets is not None and "CLOUDFLARE_API_TOKEN" not in secrets: blockers.append("GitHub secret CLOUDFLARE_API_TOKEN is missing")
+    account_variable = variables is not None and "CLOUDFLARE_ACCOUNT_ID" in variables
+    account_secret = secrets is not None and "CLOUDFLARE_ACCOUNT_ID" in secrets
+    if variables is not None and secrets is not None and not (account_variable or account_secret):
+        blockers.append("GitHub variable or secret CLOUDFLARE_ACCOUNT_ID is missing")
+    marker_files, markers, auth_used = [], set(), False
+    auth_roots = [path.parent.parent.parent if path.parent.name == "app-worker" and path.parent.parent.name == "cloudflare" else path.parent for path in configs]
+    for path in files:
+        if path.stat().st_size > 1_000_000: continue
+        in_worker = any(path.is_relative_to(candidate) for candidate in auth_roots)
+        relevant = in_worker or ".github/workflows" in path.as_posix()
+        if not relevant: continue
+        text = path.read_text(errors="ignore")
+        found = set(MARKER.findall(text)) if relevant else set()
+        if found: markers.update(found); marker_files.append(str(path.relative_to(root)))
+        if in_worker and path.suffix in {".ts", ".tsx", ".js", ".jsx", ".py", ".go", ".rs", ".json", ".jsonc", ".toml", ".yml", ".yaml"}:
+            if "docs" not in path.parts and re.search(r"better-auth|next-auth|firebase/auth|@clerk|auth0|supabase\.auth|request\.headers\.get\([\"']authorization", text, re.I): auth_used = True
+    if auth_used:
+        identity = any(re.search(r"_(?:USER|EMAIL)(?:_|$)", marker) for marker in markers)
+        credential = any(re.search(r"_(?:PASSWORD|TOKEN|SECRET)(?:_|$)", marker) for marker in markers)
+        if not identity or not credential:
+            blockers.append("authentication found without test-user identity and credential markers")
+        if identity and credential and (not any(re.search(r"_(?:USER|EMAIL)(?:_|$)", marker) and marker in workflow_text for marker in markers) or not any(re.search(r"_(?:PASSWORD|TOKEN|SECRET)(?:_|$)", marker) and marker in workflow_text for marker in markers)):
+            blockers.append("live verification does not consume the test-user values")
+        if secrets is not None:
+            missing_markers = markers - secrets - (variables or set())
+            if missing_markers: blockers.append("test-user GitHub values are missing: " + ", ".join(sorted(missing_markers)))
+    return {"repo": repo or "local-only", "wrangler_configs": [str(p.relative_to(root)) for p in configs],
+            "wrangler_versions": packages, "preview_scopes": preview_scopes, "custom_domains": domains,
+            "resource_bindings": bindings, "workflows": preview_workflows,
+            "live_previews": "not queryable: Wrangler 4.127.1 has no list command",
+            "credential_scope": "presence only: GitHub does not reveal token scopes",
+            "github_secret": "present" if secrets and "CLOUDFLARE_API_TOKEN" in secrets else "missing" if secrets is not None else "unknown",
+            "github_account_variable": "present" if account_variable else "missing" if variables is not None else "unknown",
+            "github_account_secret": "present" if account_secret else "missing" if secrets is not None else "unknown",
+            "test_user_markers": sorted(markers), "marker_files": sorted(set(marker_files)), "blockers": sorted(set(blockers))}
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("path", nargs="?", type=Path)
+    parser.add_argument("--repo", help="GitHub owner/name")
+    parser.add_argument("--normalize", metavar="BRANCH")
+    parser.add_argument("--json", action="store_true")
+    args = parser.parse_args()
+    if args.normalize:
+        try: print(normalize(args.normalize)); return 0
+        except ValueError as error: parser.error(str(error))
+    if args.path and args.repo: parser.error("pass one target")
+    if not args.path and not args.repo: parser.error("pass a local path or --repo owner/name")
+    with tempfile.TemporaryDirectory() as temp:
+        if args.repo:
+            if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", args.repo): parser.error("invalid owner/name")
+            result = command("gh", "repo", "clone", args.repo, temp, "--", "--depth=1")
+            if result.returncode: print(result.stderr, file=sys.stderr); return 2
+            root, repo = Path(temp), args.repo
+        elif Path(args.path).expanduser().is_dir():
+            root = Path(args.path).expanduser().resolve()
+            repo = repo_name(root)
+        else:
+            parser.error("local path is not a directory")
+        report = audit(root, repo)
+        if args.json: print(json.dumps(report, indent=2))
+        else:
+            for key, value in report.items():
+                print(f"{key}: {', '.join(map(str, value)) if isinstance(value, list) and value else value or 'none'}")
+        return 1 if report["blockers"] else 0
+
+if __name__ == "__main__":
+    raise SystemExit(main())
