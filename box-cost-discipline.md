@@ -121,6 +121,27 @@ It copies the reaper to `~/.local/bin`, copies the credential to `~/.config/asci
 writes and loads both agents, then verifies the agent is actually alive rather than
 trusting `launchctl load`. Idempotent, so re-run it after changing the scripts.
 
+### Stop keeps the id, so the next session resumes
+
+`box-work` has always known how to resume: if the recorded Box is `stopped` or `archived`
+it resumes it instead of creating one. That branch was **unreachable**, because both
+stoppers deleted the id file immediately after a successful stop. box-work cannot resume
+what it can no longer see, so every session cycle created a brand-new Box — which is where
+the creation storm came from, not from any single runaway caller.
+
+Both stoppers now keep the id. A stopped Box is free and keeps its snapshot, so a kept id
+costs nothing, and the next start resumes in ~4s instead of paying ~100s and a creation
+slot (the platform caps creations per minute and per day, so slots are a real resource).
+
+The id is never forgotten automatically. A failed resume or an unrecognized `info` state
+can mean the Box is truly gone, or just a transient hiccup talking to the account — and
+guessing wrong on the side of deleting throws away a resumable Box forever, which is the
+exact bug this section fixes. So box-work refuses to guess: it logs and exits rather than
+falling through to create. There is no code path that tells the two cases apart, so if the
+Box really is gone this is not self-healing — the next start hits the same unresolved state
+and refuses again. Run `box info <id>` yourself; if it confirms the Box is gone, `rm
+~/.local/state/box-work/<repo>.id` to let the next start create a fresh one.
+
 ### Unclaimed Boxes are the ones that actually accumulate
 
 `box-session` records the Box it warmed for a repo in
@@ -191,6 +212,30 @@ the billing period ends, the 100-Box concurrency cap, the creation rate limits,
 and any Box running with auto-stop disabled.
 
 `box` must be on `PATH`; cron does not read your shell profile.
+
+## The laptop reaper cannot run while the laptop sleeps
+
+`box-sweep-remote` is the same policy for a machine that is not this one: list Boxes, group
+them by age against a hard ceiling (default 6h), report, and stop the over-age ones only
+with `--execute`.
+
+It deliberately knows less than the laptop reaper. A CI runner cannot SSH into a Box, so it
+cannot measure CPU or load; deciding on age alone is cruder, which is exactly why the
+default is report-only and why the ceiling is six hours — no agent session legitimately
+holds a Box that long unattended. It stops, never deletes, and a Box with
+`archiveAfter: null` is called out separately, because nothing will ever stop that one on
+its own.
+
+It shells out to the `box` CLI rather than the HTTP API, on purpose. Hand-rolling the API
+means guessing a base URL, and a wrong guess makes an enumeration failure look identical to
+an empty account — the one wrong answer that looks calm. (`api.ascii.dev` does not resolve;
+that was the first attempt, and it "found" zero Boxes.)
+
+**Not yet wired to CI.** There is no verified way to install the `box` CLI on a runner:
+`https://ascii.dev/install.sh` redirects to `https://box.ascii.dev/install.sh`, which
+returns a 404 HTML page, and `https://get.ascii.dev` does not answer. Until an install path
+is confirmed, run it from any machine that already has the CLI. Wiring it to a scheduled
+Ubicloud job is a small change once that is known.
 
 ## The periodic reaper (added 2026-08-28, tightened 2026-08-30)
 
