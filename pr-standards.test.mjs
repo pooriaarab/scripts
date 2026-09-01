@@ -890,6 +890,33 @@ test('a quoted rule name is not a refusal to answer', () => {
   assert.equal(fails('```\n$ node --test\nℹ pass 41\n```'), false);
 });
 
+test('bunx counts as a command, like npx already did', () => {
+  // Alternation is first-match, so `bun` won on the string "bunx" and then the
+  // trailing \b failed against the `x`. The rule therefore rejected the default
+  // runner of every bun repo while accepting `npx`, and the failure message
+  // said only "a command and its result", naming nothing. A real pull request
+  // whose evidence was a genuine `bunx prettier --check` run was failed by it.
+  const body = (verified) => [
+    '## What', 'One sentence.',
+    '## Why', 'Because of the reason.',
+    '## How I verified', verified,
+    'Assisted-by: agent:model',
+  ].join('\n\n');
+  const fails = (text) => validateBody(body(text), 142, config)
+    .failures.some((f) => f.check === '## How I verified');
+
+  assert.equal(fails('bunx vitest run -> 214 passed'), false);
+  assert.equal(fails('bunx prettier --check docs/a.md -> clean'), false);
+  // npx kept working.
+  assert.equal(fails('npx prettier --check docs/a.md -> clean'), false);
+  // bun itself kept working.
+  assert.equal(fails('bun test -> 214 passed'), false);
+  // The word boundary still does its original job: a word that merely starts
+  // with a command name is not a command.
+  assert.equal(fails('Bundle was verified'), true);
+  assert.equal(fails('bunxx frobnicate -> 3 passed'), true);
+});
+
 test('prefix precedence holds on the CI path, not only in loadConfig', async () => {
   // #101 fixed the precedence and covered it through loadConfig, which is the
   // LOCAL path. The path that was broken is this one: runPr -> fetchRemoteConfig.
