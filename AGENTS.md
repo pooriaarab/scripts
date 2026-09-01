@@ -1,5 +1,9 @@
 # AGENTS.md
 
+Repository identity and interface rules live in
+[`.agents/brand.md`](.agents/brand.md) and
+[`.agents/design.md`](.agents/design.md).
+
 <!-- pr-standards:start -->
 
 ## Pull requests
