@@ -1,140 +1,156 @@
 #!/usr/bin/env bash
-# A Claude Code PreToolUse hook: reject a branch that does not meet the PR
-# standard before the branch exists. This is layer one of four, and the
-# earliest feedback available — the git pre-push hook (install-pr-hooks) and
-# the CI check both run later. See pr-standards.md.
-#
-# Install: in .claude/settings.json, under hooks.PreToolUse, matcher "Bash",
-#   { "type": "command", "command": "<path>/hooks/pr-standards-guard.sh" }
-#
-# A hook that cannot understand its own input lets the call through. Blocking
-# on its own bug would be worse than the branch name it is guarding against.
+# A Claude Code PreToolUse hook. It rejects non-conforming branch names before
+# they exist. A hook that cannot understand its input must let the call through.
 set -uo pipefail
 
-command -v pr-standards >/dev/null 2>&1 || exit 0
 command -v python3 >/dev/null 2>&1 || exit 0
 
 input=$(cat || true)
 [ -n "$input" ] || exit 0
 
-branches=$(INPUT="$input" python3 <<'PY' 2>/dev/null || true
-import json, os, re, shlex
+# Emit one base64 JSON record for each branch-creating git command and each
+# gh pr create call. Shell parsing errors produce no records, which fails open.
+records=$(INPUT="$input" python3 <<'PY' 2>/dev/null || true
+import base64, json, os, re, shlex
 
-data = json.loads(os.environ.get("INPUT", ""))
-if (data.get("tool_name") or data.get("tool") or "Bash") != "Bash":
+try:
+    data = json.loads(os.environ.get("INPUT", ""))
+    if (data.get("tool_name") or data.get("tool") or "Bash") != "Bash":
+        raise ValueError
+    command = (data.get("tool_input") or {}).get("command") or data.get("command") or ""
+except Exception:
     raise SystemExit(0)
-command = (data.get("tool_input") or {}).get("command") or data.get("command") or ""
 
-# Split the line into segments on the shell operators, so `cd x && git
-# checkout -b y` is still seen while `echo git checkout -b y` is not. A
-# segment is only a git invocation when its FIRST word is git; matching the
-# word anywhere blocked every command that merely mentioned a branch.
-#
-# Pad the operators before tokenising. shlex keeps `true&&git` as one token, so
-# an unspaced operator hid the git call from the whole guard.
-#
-# A newline separates commands exactly like `;` does, so a multi-line Bash
-# call is segmented one line at a time. Comments are enabled so `# ...; git
-# checkout -b x` is recognised as dead text instead of a second segment —
-# without that, a comment that merely mentions a branch got blocked.
-OPERATORS = {"&&", "||", ";", "|", "&"}
+operators = {"&&", "||", ";", "|", "&"}
 segments = []
-for line in command.split("\n"):
-    padded = re.sub(r"(\|\||&&|;|\||&)", r" \1 ", line)
-    current = []
-    try:
-        tokens = shlex.split(padded, comments=True)
-    except ValueError:
-        continue
-    for token in tokens:
-        if token in OPERATORS:
-            segments.append(current)
-            current = []
-        else:
-            current.append(token)
-    segments.append(current)
+try:
+    for line in command.split("\n"):
+        tokens = shlex.split(re.sub(r"(\|\||&&|;|\||&)", r" \1 ", line), comments=True)
+        current = []
+        for token in tokens:
+            if token in operators:
+                segments.append(current)
+                current = []
+            else:
+                current.append(token)
+        segments.append(current)
+except ValueError:
+    raise SystemExit(0)
 
-# A leading `FOO=bar` assignment is not the command word. Skipping it is what
-# lets `FOO=bar git checkout -b x` still be seen as a git invocation.
-ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+assignment = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+create_flags = {"-f", "--force", "-t", "--track", "--no-track", "-c", "-C", "--copy"}
+copy_flags = {"-c", "-C", "--copy"}
 
-# `git branch` is mostly a query. Only these flags can accompany a creation, so
-# any other flag means the line lists or inspects branches and creates nothing.
-# Validating a `--list` pattern made the guard block a harmless command, which
-# is the one failure this hook must never have.
-BRANCH_CREATE_FLAGS = {"-f", "--force", "-t", "--track", "--no-track", "-c", "-C", "--copy"}
-BRANCH_COPY_FLAGS = {"-c", "-C", "--copy"}
-
+def option_value(tokens, names):
+    for index, token in enumerate(tokens):
+        if token in names and index + 1 < len(tokens) and not tokens[index + 1].startswith("-"):
+            return tokens[index + 1]
+        for name in names:
+            if token.startswith(f"{name}="):
+                return token[len(name) + 1:]
+    return None
 
 def created_branch(tokens):
-    # Skip git's own global flags, so `git -C dir checkout -b x` still parses.
     index = 1
     while index < len(tokens) and tokens[index].startswith("-"):
         index += 2 if tokens[index] in {"-C", "-c", "--git-dir", "--work-tree"} else 1
     rest = tokens[index:]
     if not rest:
         return None
+    if rest[0] == "checkout": return option_value(rest, {"-b", "-B", "--orphan"})
+    if rest[0] == "switch": return option_value(rest, {"-c", "-C", "--orphan"})
+    if rest[0] == "worktree": return option_value(rest, {"-b", "-B"}) if len(rest) > 1 and rest[1] == "add" else None
+    if rest[0] != "branch": return None
+    args = rest[1:]
+    if "--" in args:
+        split = args.index("--")
+        flag_tokens, names = args[:split], args[split + 1:]
+    else:
+        flag_tokens = [token for token in args if token.startswith("-")]
+        names = [token for token in args if not token.startswith("-")]
+    flags = set(flag_tokens)
+    if not flags <= create_flags or not names: return None
+    return names[-1] if flags & copy_flags else names[0]
 
-    def value_after(candidates, flags):
-        for position, token in enumerate(candidates[:-1]):
-            if token in flags and not candidates[position + 1].startswith("-"):
-                return candidates[position + 1]
-        return None
-
-    # Only branch CREATION is checked. Deleting or renaming a branch is how you
-    # recover from a bad name, so a guard that blocked those would trap you.
-    if rest[0] == "checkout":
-        return value_after(rest, {"-b", "-B", "--orphan"})
-    if rest[0] == "switch":
-        return value_after(rest, {"-c", "-C", "--orphan"})
-    if rest[0] == "worktree":
-        # Only `add` creates a branch; `list`/`remove`/`prune`/`lock` do not.
-        if len(rest) > 1 and rest[1] == "add":
-            return value_after(rest, {"-b", "-B"})
-        return None
-    if rest[0] == "branch":
-        args = rest[1:]
-        # `--` ends option parsing, so a name after it is never mistaken for a flag.
-        if "--" in args:
-            split = args.index("--")
-            flag_tokens, names = args[:split], args[split + 1:]
-        else:
-            flag_tokens = [token for token in args if token.startswith("-")]
-            names = [token for token in args if not token.startswith("-")]
-        flags = {token for token in flag_tokens if token.startswith("-")}
-        if not flags <= BRANCH_CREATE_FLAGS:
-            return None
-        if not names:
-            return None
-        # `git branch -c <source> <new>` copies. The new name is the last one,
-        # and it is the only one this guard has any say over.
-        return names[-1] if flags & BRANCH_COPY_FLAGS else names[0]
-    return None
-
-
-# Every segment is checked. A chain that creates two branches used to have only
-# its first name validated, so the bad second name went through unseen.
 for tokens in segments:
-    start = 0
-    while start < len(tokens) and ASSIGNMENT.match(tokens[start]):
-        start += 1
-    tokens = tokens[start:]
-    if not tokens or os.path.basename(tokens[0]) != "git":
-        continue
-    name = created_branch(tokens)
-    if name:
-        print(name)
+    while tokens and assignment.match(tokens[0]): tokens = tokens[1:]
+    if not tokens: continue
+    if os.path.basename(tokens[0]) == "git":
+        branch = created_branch(tokens)
+        if branch: print(base64.b64encode(json.dumps({"kind": "git", "branch": branch}).encode()).decode())
+    if len(tokens) >= 3 and os.path.basename(tokens[0]) == "gh" and tokens[1:3] == ["pr", "create"]:
+        print(base64.b64encode(json.dumps({
+            "kind": "gh", "repo": option_value(tokens[3:], {"--repo", "-R"}),
+            "head": option_value(tokens[3:], {"--head", "-H"}),
+            "title": option_value(tokens[3:], {"--title", "-t"}),
+        }).encode()).decode())
 PY
 )
+[ -n "$records" ] || exit 0
 
-[ -n "$branches" ] || exit 0
+origin_repo() {
+  git remote get-url origin 2>/dev/null | sed -n 's#.*github\.com[:/]\([^/]*\/[^/]*\)\(.git\)\?$#\1#p'
+}
+
+local_prefix() {
+  case "$(git remote get-url origin 2>/dev/null || true)" in *github.com[:/]pooriaarab/*) ;; *) return 1;; esac
+  [ -f .github/pr-standards.json ] || return 1
+  python3 -c 'import json; print(json.load(open(".github/pr-standards.json")).get("prefix", ""))' 2>/dev/null
+}
+
+target_prefix() {
+  command -v gh >/dev/null 2>&1 || return 1
+  gh api "repos/$1/contents/.github/pr-standards.json" --jq .content 2>/dev/null |
+    base64 --decode 2>/dev/null |
+    python3 -c 'import json,sys; print(json.load(sys.stdin).get("prefix", ""))' 2>/dev/null
+}
+
+inline_check() {
+  local branch="$1" prefix="$2" title="$3" upper issues=""
+  case "$branch" in *'$'*|*'`'*) return 0;; main|master|release|refactor|gh-pages|HEAD|release/*|dependabot/*|renovate/*) return 0;; esac
+  if ! [[ "$branch" =~ ^${prefix}-[1-9][0-9]*-[a-z0-9]+(-[a-z0-9]+)*$ ]]; then
+    issues="Branch name does not meet the standard: ${prefix}-<issue>-<slug>"
+  fi
+  upper=$(printf %s "$prefix" | tr '[:lower:]' '[:upper:]')
+  if [ -n "$title" ] && ! [[ "$title" =~ ^\[$upper-[1-9][0-9]*\]\ .+ ]]; then
+    issues="${issues}${issues:+$'\n'}PR title does not meet the standard: [$upper-<issue>] <Imperative subject>"
+  fi
+  [ -z "$issues" ] || { printf '[PR Standards Guard] blocked\n%s\n' "$issues" >&2; return 2; }
+}
 
 status=0
-while IFS= read -r branch; do
-  [ -n "$branch" ] || continue
-  if ! output=$(pr-standards precheck --branch "$branch" 2>&1); then
-    printf 'Branch "%s" does not meet the PR standard:\n%s\n' "$branch" "$output" >&2
-    status=2
+while IFS= read -r encoded; do
+  record=$(printf %s "$encoded" | base64 --decode 2>/dev/null) || continue
+  kind=$(RECORD="$record" python3 -c 'import json,os; print(json.loads(os.environ["RECORD"])["kind"])' 2>/dev/null) || continue
+  branch=$(RECORD="$record" python3 -c 'import json,os; value=json.loads(os.environ["RECORD"]); print(value.get("branch") or value.get("head") or "")' 2>/dev/null) || continue
+  repo=$(RECORD="$record" python3 -c 'import json,os; print(json.loads(os.environ["RECORD"]).get("repo") or "")' 2>/dev/null) || continue
+  title=$(RECORD="$record" python3 -c 'import json,os; print(json.loads(os.environ["RECORD"]).get("title") or "")' 2>/dev/null) || continue
+
+  if [ "$kind" = gh ] && [ -n "$repo" ]; then
+    # A remote PR without --head has no safely knowable branch. Do not guess HEAD.
+    [ -n "$branch" ] || continue
+    case "$repo" in pooriaarab/*) ;; *) continue;; esac
+    prefix=$(target_prefix "$repo") || continue
+    [ -n "$prefix" ] || continue
+    # precheck reads the cwd config. Cross-repo calls use this resolved prefix
+    # inline, so the engine cannot restore the false positive this hook prevents.
+    if [ "$repo" != "$(origin_repo)" ]; then
+      inline_check "$branch" "$prefix" "$title" || status=2
+      continue
+    fi
+  else
+    [ -n "$branch" ] || branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)
+    prefix=$(local_prefix) || continue
+    [ -n "$prefix" ] || continue
   fi
-done <<< "$branches"
+
+  if command -v pr-standards >/dev/null 2>&1; then
+    if ! output=$(pr-standards precheck --branch "$branch" ${title:+--title "$title"} 2>&1); then
+      printf 'Branch "%s" does not meet the PR standard:\n%s\n' "$branch" "$output" >&2
+      status=2
+    fi
+  else
+    inline_check "$branch" "$prefix" "$title" || status=2
+  fi
+done <<< "$records"
 exit "$status"

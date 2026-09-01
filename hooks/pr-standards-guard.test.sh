@@ -4,14 +4,26 @@
 set -uo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
-GUARD="$HERE/pr-standards-guard.sh"
+GUARD="${GUARD:-$HERE/pr-standards-guard.sh}"
 REPO_ROOT="$(dirname "$HERE")"
 
-# The guard exits 0 when `pr-standards` is not on PATH, so put the real one there.
+# Put the real engine on PATH for the existing local branch-creation cases.
 BIN="$(mktemp -d)"
 trap 'rm -rf "$BIN"' EXIT
 ln -s "$REPO_ROOT/pr-standards" "$BIN/pr-standards"
 export PATH="$BIN:$PATH"
+
+# The target uses tar, not this checkout's scr prefix. This makes cross-repo
+# tests prove the guard reads the target settings through gh, without a network.
+gh() {
+  case " $* " in
+    *' repos/pooriaarab/target-standard/contents/.github/pr-standards.json '*)
+      printf '{"prefix":"tar"}' | base64
+      ;;
+    *) return 1 ;;
+  esac
+}
+export -f gh
 
 fails=0
 check() {
@@ -47,6 +59,9 @@ check 2 'sees a git call on the next line'             $'echo ready\ngit checkou
 check 2 'sees a git call after an env var assignment'  'FOO=bar git checkout -b my-cool-feature'
 check 2 'treats -- as end of options for git branch'   'git branch -- my-cool-feature'
 check 2 'sees a branch created via git worktree add'   'git worktree add -b my-cool-feature /tmp/tree'
+check 0 'allows a conforming cross-repo PR head'       'gh pr create --repo pooriaarab/target-standard --head tar-12-do-one-thing'
+check 2 'blocks a bad cross-repo PR head'              'gh pr create --repo pooriaarab/target-standard --head my-cool-feature'
+check 0 'ignores a non-pooriaarab PR target'           'gh pr create --repo acme/work --head my-cool-feature'
 
 [ "$fails" = 0 ] || { printf '\n%s failing\n' "$fails" >&2; exit 1; }
 printf '\nall passing\n'
