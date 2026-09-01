@@ -1,0 +1,61 @@
+# Stop ascii.dev Boxes that nothing else will stop.
+#
+# The laptop reaper (launchd, every 15 minutes) is the primary control and it decides with
+# evidence: it probes each Box over SSH and measures CPU and load. It cannot run while the
+# laptop is asleep, which is exactly when a forgotten Box bills unattended.
+#
+# This job is the backstop, and it knows strictly less: no SSH from a runner, so it decides
+# on age alone. Hence report-only on a schedule, and stopping only when a human dispatches
+# it. The 6h ceiling is deliberately generous — no agent session legitimately holds a Box
+# that long unattended.
+name: box-sweep
+
+on:
+  schedule:
+    # Every 30 minutes. Report only; a scheduled run never stops anything.
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+    inputs:
+      execute:
+        description: "Stop Boxes over the age ceiling (default: report only)"
+        type: boolean
+        default: false
+      max_age_hours:
+        description: "Age ceiling in hours"
+        type: string
+        default: "6"
+
+permissions:
+  contents: read
+
+concurrency:
+  # Two sweeps at once would both try to stop the same Boxes and log half the failures as
+  # real. One at a time, and a queued run is pointless once a newer one exists.
+  group: box-sweep
+  cancel-in-progress: true
+
+jobs:
+  sweep:
+    runs-on: ubicloud-standard-2
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Sweep
+        env:
+          # The sweeper reads this from the environment and writes it to a header file, so
+          # it never reaches a command line or the run log.
+          ASCII_BOX_API_KEY: ${{ secrets.ASCII_BOX_API_KEY }}
+          MAX_AGE: ${{ inputs.max_age_hours || '6' }}
+        run: |
+          set -uo pipefail
+          if [ -z "${ASCII_BOX_API_KEY:-}" ]; then
+            echo "ASCII_BOX_API_KEY is not set for this repository; nothing to sweep." >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          args="--max-age-hours $MAX_AGE"
+          if [ "${{ inputs.execute }}" = "true" ]; then args="$args --execute"; fi
+          # The report goes to the step summary so the result is readable without opening
+          # logs, and to stdout so a failure is greppable in the log.
+          ./box-sweep-remote $args 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
+          exit "${PIPESTATUS[0]}"
