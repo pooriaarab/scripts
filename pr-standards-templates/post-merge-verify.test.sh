@@ -56,6 +56,8 @@ check 0 'checks only the URL without a shaPath'     "$NO_SHA_PATH" "$SHA"
 check 1 'fails when the site does not answer'       "$DEAD"       "$SHA"
 check 1 'fails on malformed JSON instead of passing as absent' '{not json'   "$SHA"
 check 1 'fails on a postMergeVerify block with no url'  '{"postMergeVerify":{}}' "$SHA"
+check 0 'passes when pr-standards.json is valid JSON but not an object' '[1, 2, 3]' "$SHA"
+check 1 'fails on a postMergeVerify value that is not an object' '{"postMergeVerify":"nope"}' "$SHA"
 
 # The failure report is what the issue body quotes. An empty one leaves a
 # person with an issue that says nothing.

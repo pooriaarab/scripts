@@ -60,13 +60,20 @@ jobs:
               print("No pr-standards.json. Nothing to check.")
               sys.exit(0)
           try:
-              config = json.loads(raw)["postMergeVerify"]
-          except KeyError:
-              print("No postMergeVerify config. Nothing to check.")
-              sys.exit(0)
+              parsed = json.loads(raw)
           except ValueError as error:
               fail(f"- Failing step: parse `.github/pr-standards.json`\n"
                    f"- Error: `{type(error).__name__}: {error}`\n")
+          # Valid JSON that isn't the expected shape (a bare list, a string, a
+          # postMergeVerify value that isn't itself an object) must not crash
+          # with an unhandled traceback on the dict-only accesses below.
+          config = parsed.get("postMergeVerify") if isinstance(parsed, dict) else None
+          if config is None:
+              print("No postMergeVerify config. Nothing to check.")
+              sys.exit(0)
+          if not isinstance(config, dict):
+              fail("- Failing step: read `postMergeVerify` from `.github/pr-standards.json`\n"
+                   "- Error: `postMergeVerify` is not an object\n")
 
           url = config.get("url")
           if not isinstance(url, str) or not url:
