@@ -292,6 +292,115 @@ test('fails a chore branch with a Closes reference', () => {
 
 import { main } from './pr-standards.mjs';
 
+const checkerPath = fileURLToPath(new URL('./pr-standards', import.meta.url));
+const checkerRoot = path.dirname(checkerPath);
+
+function runDrift(root) {
+  const result = spawnSync(process.execPath, [checkerPath, 'drift', '--json'], {
+    cwd: root,
+    encoding: 'utf8',
+  });
+  return { ...result, json: JSON.parse(result.stdout) };
+}
+
+function driftFixture() {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'prs-drift-'));
+  fs.mkdirSync(path.join(root, '.github'));
+  fs.copyFileSync(path.join(checkerRoot, '.github', 'pr-standards.json'), path.join(root, '.github', 'pr-standards.json'));
+  fs.copyFileSync(path.join(checkerRoot, 'AGENTS.md'), path.join(root, 'AGENTS.md'));
+  fs.copyFileSync(path.join(checkerRoot, '.github', 'pull_request_template.md'), path.join(root, '.github', 'pull_request_template.md'));
+  return root;
+}
+
+test('drift accepts this repo’s substituted managed files', () => {
+  // The source AGENTS template uses __PREFIX__; the installed block uses scr.
+  // This proves the checker substitutes before comparing instead of flagging
+  // every adopted repository as stale.
+  const result = runDrift(checkerRoot);
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.equal(result.json.adopted, true);
+  assert.deepEqual(result.json.failures, []);
+});
+
+test('drift reports a hand-edited managed block as stale with its diff', () => {
+  const root = driftFixture();
+  try {
+    const agentsPath = path.join(root, 'AGENTS.md');
+    fs.writeFileSync(agentsPath, readFileSync(agentsPath, 'utf8').replace(
+      'One issue. One PR. One concern. Under 500 counted lines.',
+      'One issue can use two pull requests.',
+    ));
+    const result = runDrift(root);
+    const failure = result.json.failures.find((item) => item.check === 'managed AGENTS.md block');
+    assert.equal(result.status, 1, result.stdout + result.stderr);
+    assert.equal(failure.got, 'stale');
+    assert.match(failure.diff, /^--- pr-standards-templates\/agents-block\.md/m);
+    assert.match(failure.diff, /^\+\+\+ AGENTS\.md managed block/m);
+    assert.match(failure.diff, /\+One issue can use two pull requests\./);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('drift reports a missing managed block as missing, not stale', () => {
+  const root = driftFixture();
+  try {
+    fs.writeFileSync(path.join(root, 'AGENTS.md'), '# Local instructions\n');
+    const result = runDrift(root);
+    const failure = result.json.failures.find((item) => item.check === 'managed AGENTS.md block');
+    assert.equal(result.status, 1, result.stdout + result.stderr);
+    assert.equal(failure.got, 'missing');
+    assert.equal(Object.hasOwn(failure, 'diff'), false);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('drift leaves a repository without config unadopted', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'prs-no-drift-config-'));
+  try {
+    const result = runDrift(root);
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    assert.equal(result.json.adopted, false);
+    assert.deepEqual(result.json.failures, []);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('drift reports a missing pull request template as missing', () => {
+  const root = driftFixture();
+  try {
+    fs.rmSync(path.join(root, '.github', 'pull_request_template.md'));
+    const result = runDrift(root);
+    const failure = result.json.failures.find((item) => item.check === 'pull request template');
+    assert.equal(result.status, 1, result.stdout + result.stderr);
+    assert.equal(failure.got, 'missing');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('drift reports an edited pull request template as stale with its diff', () => {
+  const root = driftFixture();
+  try {
+    const templatePath = path.join(root, '.github', 'pull_request_template.md');
+    fs.writeFileSync(templatePath, readFileSync(templatePath, 'utf8').replace(
+      'Closes #',
+      'Fixes #',
+    ));
+    const result = runDrift(root);
+    const failure = result.json.failures.find((item) => item.check === 'pull request template');
+    assert.equal(result.status, 1, result.stdout + result.stderr);
+    assert.equal(failure.got, 'stale');
+    assert.match(failure.diff, /^--- pr-standards-templates\/pull_request_template\.md/m);
+    assert.match(failure.diff, /^\+\+\+ \.github\/pull_request_template\.md/m);
+    assert.match(failure.diff, /\+Fixes #/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('an exempt branch still skips title and body entirely', async () => {
   const originalWrite = process.stdout.write;
   let output = '';

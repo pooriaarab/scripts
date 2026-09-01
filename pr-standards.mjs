@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { execFile, execFileSync, spawnSync } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -6,6 +7,9 @@ import { fileURLToPath } from 'node:url';
 
 const execFileAsync = promisify(execFile);
 const PREFIX_REGISTRY_PATH = fileURLToPath(new URL('./repo-prefixes.json', import.meta.url));
+const TEMPLATES_DIR = fileURLToPath(new URL('./pr-standards-templates/', import.meta.url));
+const AGENTS_BLOCK_START = '<!-- pr-standards:start -->';
+const AGENTS_BLOCK_END = '<!-- pr-standards:end -->';
 
 // Banned AI attribution names in Co-authored-by trailers. These are matched as
 // whole words in the author name field so "Pia" does not match pi and "Gupta"
@@ -1043,14 +1047,15 @@ function formatNumber(value) {
 }
 
 function humanFailure(item, prefix = '      ') {
-  return `${prefix}got:      ${item.got}\n${prefix}expected: ${item.expected}\n${prefix}fix:      ${item.fix}`;
+  const diff = item.diff ? `\n${prefix}diff:\n${item.diff}` : '';
+  return `${prefix}got:      ${item.got}\n${prefix}expected: ${item.expected}\n${prefix}fix:      ${item.fix}${diff}`;
 }
 
 function outputHuman(result) {
   const prefixLine = result.provenance
     ? `Using prefix: ${result.prefix} (${result.provenance})`
     : `Using prefix: ${result.prefix}`;
-  const lines = [prefixLine];
+  const lines = result.prefix ? [prefixLine] : [];
   for (const pass of result.passes || []) lines.push(`PASS  ${pass}`);
   for (const item of result.failures || []) lines.push(`FAIL  ${item.check}\n${humanFailure(item)}`);
   for (const item of result.warnings || []) lines.push(`WARN  ${item.check}\n${humanFailure(item)}`);
@@ -1060,6 +1065,7 @@ function outputHuman(result) {
       : ` (${formatNumber(result.size.rawLines)} raw)`;
     lines.push(`SIZE  ${formatNumber(result.size.countedLines)} counted lines${excluded}; ${result.size.countedFiles} counted files`);
   }
+  if (lines.length === 0) return;
   process.stdout.write(`${lines.join('\n')}\n`);
 }
 
@@ -1081,7 +1087,7 @@ function parseArgs(argv) {
   if (filtered.includes('--help') || filtered.includes('-h')) return { help: true };
   if (filtered.includes('--selfcheck')) return { selfcheck: true };
   const mode = filtered.shift();
-  if (!mode || !['branch', 'precheck', 'pr'].includes(mode)) throw new ConfigurationError('usage: pr-standards branch [name], precheck --branch X, or pr --repo owner/name --number N');
+  if (!mode || !['branch', 'precheck', 'pr', 'drift'].includes(mode)) throw new ConfigurationError('usage: pr-standards branch [name], precheck --branch X, pr --repo owner/name --number N, or drift');
   const options = { mode, json, positional: [] };
   for (let index = 0; index < filtered.length; index += 1) {
     const arg = filtered[index];
@@ -1104,6 +1110,7 @@ function usage() {
   pr-standards branch [name]
   pr-standards precheck --branch X [--title Y]
   pr-standards pr --repo owner/name --number N
+  pr-standards drift
   pr-standards --selfcheck
 
 Add --json to any command for machine-readable output.`;
@@ -1164,6 +1171,118 @@ async function runPrecheck(options) {
     }
   }
   return finish({ mode: 'precheck', prefix: config.prefix, provenance, failures, warnings: [], passes }, options.json);
+}
+
+function readTemplate(filename) {
+  const templatePath = path.join(TEMPLATES_DIR, filename);
+  try {
+    return fs.readFileSync(templatePath, 'utf8');
+  } catch (error) {
+    throw new ConfigurationError(`cannot read pr-standards-templates/${filename}: ${error.message}`);
+  }
+}
+
+function substituteTemplate(template, prefix) {
+  return template
+    .replaceAll('__PREFIX_UPPER__', prefix.toUpperCase())
+    .replaceAll('__PREFIX__', prefix);
+}
+
+function managedBlock(content) {
+  const start = content.indexOf(AGENTS_BLOCK_START);
+  if (start === -1) return null;
+  const bodyStart = start + AGENTS_BLOCK_START.length;
+  const end = content.indexOf(AGENTS_BLOCK_END, bodyStart);
+  return end === -1 ? null : content.slice(bodyStart, end);
+}
+
+function unifiedDiff(expected, actual, expectedLabel, actualLabel) {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'pr-standards-drift-'));
+  const expectedPath = path.join(directory, 'expected');
+  const actualPath = path.join(directory, 'actual');
+  try {
+    fs.writeFileSync(expectedPath, expected);
+    fs.writeFileSync(actualPath, actual);
+    const result = spawnSync('diff', [
+      '-u', '--label', expectedLabel, '--label', actualLabel, expectedPath, actualPath,
+    ], { encoding: 'utf8' });
+    if (result.status === 1) return result.stdout.trimEnd();
+    if (result.status === 0) return '';
+    throw new ConfigurationError(`cannot create diff: ${result.error?.message || result.stderr.trim()}`);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+function staleFailure(check, expected, actual, expectedLabel, actualLabel) {
+  return {
+    ...fail(
+      check,
+      'stale',
+      `match ${expectedLabel}`,
+      `Replace it with ${expectedLabel}.`,
+    ),
+    diff: unifiedDiff(expected, actual, expectedLabel, actualLabel),
+  };
+}
+
+async function runDrift(options) {
+  if (options.positional.length > 0 || options.branch || options.title || options.repo || options.number) {
+    throw new ConfigurationError('drift accepts no options');
+  }
+  const root = repoRoot();
+  const configPath = path.join(root, '.github', 'pr-standards.json');
+  // A repository without the config has not adopted this standard. Do not make
+  // its unrelated AGENTS.md or pull request template look like drift.
+  if (!fs.existsSync(configPath)) {
+    return finish({ mode: 'drift', adopted: false, failures: [], warnings: [], passes: [] }, options.json);
+  }
+  const { config } = loadConfig(root);
+  const failures = [];
+  const passes = [];
+  const expectedAgents = managedBlock(substituteTemplate(readTemplate('agents-block.md'), config.prefix));
+  if (expectedAgents === null) {
+    throw new ConfigurationError('pr-standards-templates/agents-block.md has no managed block');
+  }
+  const agentsPath = path.join(root, 'AGENTS.md');
+  const installedAgents = fs.existsSync(agentsPath) ? managedBlock(fs.readFileSync(agentsPath, 'utf8')) : null;
+  if (installedAgents === null) {
+    failures.push(fail(
+      'managed AGENTS.md block',
+      'missing',
+      'a managed block between pr-standards markers',
+      'Run pr-standards-rollout to install the managed block.',
+    ));
+  } else if (installedAgents !== expectedAgents) {
+    failures.push(staleFailure(
+      'managed AGENTS.md block', expectedAgents, installedAgents,
+      'pr-standards-templates/agents-block.md', 'AGENTS.md managed block',
+    ));
+  } else {
+    passes.push('managed AGENTS.md block');
+  }
+
+  const templatePath = path.join(root, '.github', 'pull_request_template.md');
+  const expectedTemplate = substituteTemplate(readTemplate('pull_request_template.md'), config.prefix);
+  if (!fs.existsSync(templatePath)) {
+    failures.push(fail(
+      'pull request template',
+      'missing',
+      'match pr-standards-templates/pull_request_template.md',
+      'Run pr-standards-rollout to install the pull request template.',
+    ));
+  } else {
+    const installedTemplate = fs.readFileSync(templatePath, 'utf8');
+    if (installedTemplate !== expectedTemplate) {
+      failures.push(staleFailure(
+        'pull request template', expectedTemplate, installedTemplate,
+        'pr-standards-templates/pull_request_template.md', '.github/pull_request_template.md',
+      ));
+    } else {
+      passes.push('pull request template');
+    }
+  }
+  return finish({ mode: 'drift', adopted: true, prefix: config.prefix, failures, warnings: [], passes }, options.json);
 }
 
 async function fetchRemoteConfig(repo, repoName, ref) {
@@ -1344,6 +1463,7 @@ export async function main(argv = process.argv.slice(2)) {
     }
     if (options.mode === 'branch') return await runBranch(options);
     if (options.mode === 'precheck') return await runPrecheck(options);
+    if (options.mode === 'drift') return await runDrift(options);
     return await runPr(options);
   } catch (error) {
     const result = {
