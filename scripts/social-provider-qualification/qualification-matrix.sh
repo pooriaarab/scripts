@@ -47,8 +47,13 @@ echo "-- production secret names --"
 (cd "$repo" && bun run packages/cli/scripts/integrations/status.ts "$provider" --env production)
 echo
 
+test_args=("$test_file")
+if [[ ${#extra_tests[@]} -gt 0 ]]; then
+  test_args+=("${extra_tests[@]}")
+fi
+
 echo "-- focused handler tests --"
-(cd "$repo/apps/website" && bunx vitest run "$test_file" "${extra_tests[@]}" --reporter=dot)
+(cd "$repo/apps/website" && bunx vitest run "${test_args[@]}" --reporter=dot)
 echo
 
 case "$provider" in
