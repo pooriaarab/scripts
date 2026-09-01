@@ -384,7 +384,11 @@ function hasCommandAndResult(text) {
   // The word boundary goes AFTER the command name, not before it. Without it
   // `bun` matched inside `Bundle`, so "Bundle was verified" satisfied both the
   // command and the result check while naming no command at all.
-  const command = lines.some((line) => /^(?:[$>`]\s*|\*\s*)?(?:bun|npm|pnpm|yarn|node|deno|cargo|go|pytest|make|git|gh|npx|\.\/)\b[^\n]*/i.test(line));
+  // `bunx` must come BEFORE `bun` in the alternation. Regex alternation is
+  // first-match, so `bun` wins on the string "bunx" and then `\b` fails against
+  // the following `x` -- which rejected every pull request whose only evidence
+  // was a `bunx` command, in repos where `bunx` is the default runner.
+  const command = lines.some((line) => /^(?:[$>`]\s*|\*\s*)?(?:bunx|bun|npm|pnpm|yarn|node|deno|cargo|go|pytest|make|git|gh|npx|\.\/)\b[^\n]*/i.test(line));
   const result = /(?:->|\b(?:pass(?:ed)?|success(?:ful)?|clean|green|ok|verified|complete|no issues|exit(?:ed)?\s+0)\b|\d+\s+(?:tests?|checks?)\s+(?:pass|passed|successful))/i.test(text);
   return command && result;
 }
