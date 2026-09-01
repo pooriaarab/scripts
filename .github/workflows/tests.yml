@@ -52,6 +52,7 @@ jobs:
           set -euo pipefail
           python3 build-repo-prefixes.test.py
           python3 worker-preview-provision.test.py
+          python3 worker-preview-access.test.py
 
       - name: Run hook install tests
         id: hook-install-tests
