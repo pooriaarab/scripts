@@ -4,13 +4,18 @@
 set -euo pipefail
 
 provider="${1:-}"
-repo="${CONTENT_RABBIT_REPO:-/Users/parab/Documents/Personal/content-rabbit/code/Content Rabbit}"
 
 if [[ -z "$provider" ]]; then
   echo "usage: $0 <provider>" >&2
   echo "providers: x linkedin facebook instagram threads tiktok youtube pinterest bluesky mastodon reddit" >&2
   exit 2
 fi
+
+if [[ -z "${CONTENT_RABBIT_REPO:-}" ]]; then
+  echo "CONTENT_RABBIT_REPO is not set; export it to the Content Rabbit checkout path" >&2
+  exit 2
+fi
+repo="$CONTENT_RABBIT_REPO"
 
 case "$provider" in
   x) provider="twitter" ;;
@@ -49,7 +54,12 @@ echo
 case "$provider" in
   twitter|linkedin|facebook|instagram|threads|bluesky)
     echo "-- comment adapter evidence --"
-    find "$repo/apps/website/src/server/services/social-comments/platforms" -maxdepth 1 -name "${provider}.ts" -print
+    adapter_file="$repo/apps/website/src/server/services/social-comments/platforms/${provider}.ts"
+    if [[ ! -f "$adapter_file" ]]; then
+      echo "missing comment adapter: $adapter_file" >&2
+      exit 1
+    fi
+    echo "$adapter_file"
     ;;
 esac
 
