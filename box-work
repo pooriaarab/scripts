@@ -140,14 +140,16 @@ except Exception: print("")')"
       # Empty state means either the Box is gone from the account or `box info` itself
       # failed transiently -- the exception handler above can't tell them apart. Don't
       # guess: forgetting a live id on a false positive throws away a resumable Box
-      # forever, which is the exact bug this PR fixes. Leave it recorded; a start after
-      # the Box is truly gone just pays one extra `info` call.
+      # forever, which is the exact bug this PR fixes. Leave it recorded. This is NOT
+      # self-healing if the Box really is gone: nothing here distinguishes that from a
+      # transient hiccup, so every future start hits the same unresolved state and
+      # refuses the same way -- see the die message below for the manual way out.
       echo "[box-work] could not confirm state of $cand; leaving it recorded" >&2 ;;
   esac
   # A recorded id that we could not confirm or resume must not fall through to the
   # create path below -- that would start a duplicate Box AND overwrite $IDFILE with
   # its id, permanently losing the original instead of retrying it next start.
-  [[ -n "$ID" ]] || die "$NAME box $cand is not usable right now (see above); retry shortly instead of creating a duplicate"
+  [[ -n "$ID" ]] || die "$NAME box $cand is not usable right now (see above). If a retry keeps failing, confirm with 'box info $cand' -- if it's really gone, 'rm $IDFILE' to let the next start create a fresh one."
 fi
 
 if [[ -z "$ID" ]]; then

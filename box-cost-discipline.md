@@ -136,8 +136,11 @@ slot (the platform caps creations per minute and per day, so slots are a real re
 The id is never forgotten automatically. A failed resume or an unrecognized `info` state
 can mean the Box is truly gone, or just a transient hiccup talking to the account — and
 guessing wrong on the side of deleting throws away a resumable Box forever, which is the
-exact bug this section fixes. So box-work only logs and retries; the cost of being wrong
-the other way is one extra `info` call on a future start.
+exact bug this section fixes. So box-work refuses to guess: it logs and exits rather than
+falling through to create. There is no code path that tells the two cases apart, so if the
+Box really is gone this is not self-healing — the next start hits the same unresolved state
+and refuses again. Run `box info <id>` yourself; if it confirms the Box is gone, `rm
+~/.local/state/box-work/<repo>.id` to let the next start create a fresh one.
 
 ### Unclaimed Boxes are the ones that actually accumulate
 
