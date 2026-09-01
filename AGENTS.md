@@ -1,6 +1,7 @@
 # AGENTS.md
 
 <!-- pr-standards:start -->
+
 ## Pull requests
 
 One issue. One PR. One concern. Under 500 counted lines.
@@ -26,4 +27,5 @@ no one to ask for one. Split the change.
 
 Settings for this repo are in `.github/pr-standards.json`. The standard is at
 https://github.com/pooriaarab/scripts/blob/main/pr-standards.md
+
 <!-- pr-standards:end -->
