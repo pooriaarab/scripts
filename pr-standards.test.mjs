@@ -340,6 +340,51 @@ test('issues/{n} returning an object with a pull_request field fails', async () 
   }
 });
 
+test('an exempt branch skips proof of work along with title and body', async () => {
+  const originalWrite = process.stdout.write;
+  const originalPath = process.env.PATH;
+  const originalToken = process.env.GITHUB_TOKEN;
+  const originalFetch = globalThis.fetch;
+  let output = '';
+  process.stdout.write = (chunk) => { output += chunk; return true; };
+  process.env.PATH = ''; // disable gh
+  process.env.GITHUB_TOKEN = 'test-token';
+  process.env.GITHUB_REPOSITORY = 'other/repo'; // Ensure we don't hit the CI check
+
+  globalThis.fetch = async (url) => {
+    if (url.includes('contents/.github/pr-standards.json')) {
+      return { ok: true, json: async () => ({ content: Buffer.from(JSON.stringify({ prefix: 'cr' })).toString('base64'), encoding: 'base64' }) };
+    }
+    if (url.includes('pulls/13/commits')) {
+      return { ok: true, json: async () => ([{ sha: 'abc1234', commit: { message: 'Fix the thing' } }]) };
+    }
+    if (url.includes('pulls/13/files')) {
+      // A refactor branch is exempt from title/body, but it still moves real
+      // UI files -- that must not trigger the proof-of-work requirement, which
+      // depends on a `## How I verified` section this branch was never asked
+      // to write.
+      return { ok: true, json: async () => ([{ filename: 'src/components/Button.tsx', status: 'modified' }]) };
+    }
+    if (url.includes('pulls/13')) {
+      return { ok: true, json: async () => ({ head: { ref: 'refactor' }, title: 'Move things around', body: 'no structured body at all' }) };
+    }
+    throw new Error(`Unexpected fetch URL: ${url}`);
+  };
+
+  try {
+    const exitCode = await main(['pr', '--repo', 'test/repo', '--number', '13', '--json']);
+    const result = JSON.parse(output);
+    assert.equal(result.failures.some(f => f.check === 'proof of a visible change'), false);
+    assert.equal(exitCode, 0);
+  } finally {
+    process.stdout.write = originalWrite;
+    process.env.PATH = originalPath;
+    process.env.GITHUB_TOKEN = originalToken;
+    globalThis.fetch = originalFetch;
+    delete process.env.GITHUB_REPOSITORY;
+  }
+});
+
 test('config resolution prefers the target repo over the local checkout', async () => {
   const originalWrite = process.stdout.write;
   const originalPath = process.env.PATH;

@@ -1356,11 +1356,15 @@ async function runPr(options) {
     const bodyResult = validateBody(pull.body || '', branchResult.issueNumber, config);
     failures.push(...bodyResult.failures);
     if (bodyResult.ok) passes.push('PR body');
+    // Same exemption as title and body: a branch exempt from the `## How I
+    // verified` convention (release, refactor, gh-pages, dependabot/*,
+    // renovate/*) has no reason to carry a section it was never asked to
+    // write, so proof of work rides with the checks it depends on.
+    const proofResult = checkProof(pull.body || '', files, config);
+    failures.push(...proofResult.failures);
+    warnings.push(...proofResult.warnings);
+    if (proofResult.failures.length === 0) passes.push('proof of work');
   }
-  const proofResult = checkProof(pull.body || '', files, config);
-  failures.push(...proofResult.failures);
-  warnings.push(...proofResult.warnings);
-  if (proofResult.failures.length === 0) passes.push('proof of work');
   // Size keeps whatever shape main has. #114 removed the override label and
   // #119 put it back while changing Box scripts, so the size escape is live
   // again against a decision nobody revisited -- tracked separately. A proof
