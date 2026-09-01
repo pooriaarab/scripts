@@ -836,34 +836,6 @@ test('proof: documented placeholders are not attachments', () => {
   assert.equal(failed(checkProof(body, uiFiles, config)), true);
 });
 
-test('proof: indented attachment URLs are inert', () => {
-  const uiFiles = [{ filename: 'src/components/Button.tsx', status: 'modified' }];
-  const url = (id) => 'https://github.com/user-attachments/assets/' + id;
-  const failed = (r) => r.failures.some((f) => f.check === 'proof of a visible change');
-  const body = validBody + '\n    ![before](' + url('aaa') + ')\n\t![after](' + url('bbb') + ')';
-  const realBody = validBody + '\n![before](' + url('aaa') + ')\n![after](' + url('bbb') + ')';
-
-  // Counting indented code lets weak, non-rendered evidence through. The
-  // failure direction is weak evidence accepted.
-  assert.equal(failed(checkProof(body, uiFiles, config)), true);
-  assert.equal(failed(checkProof(realBody, uiFiles, config)), false);
-});
-
-test('proof: mixed space-then-tab indentation is still inert', () => {
-  const uiFiles = [{ filename: 'src/components/Button.tsx', status: 'modified' }];
-  const url = (id) => 'https://github.com/user-attachments/assets/' + id;
-  const failed = (r) => r.failures.some((f) => f.check === 'proof of a visible change');
-
-  // A tab expands to the next 4-column stop, so " \t" (one space then a tab)
-  // reaches the same indented-code threshold as four leading spaces, even
-  // though neither alternative of a naive "4 spaces or a leading tab" check
-  // matches it on its own.
-  for (const indent of [' \t', '  \t', '   \t']) {
-    const body = validBody + `\n${indent}![before](${url('aaa')})\n${indent}![after](${url('bbb')})`;
-    assert.equal(failed(checkProof(body, uiFiles, config)), true, JSON.stringify(indent));
-  }
-});
-
 test('proof: inline-code URLs deduplicate with embedded URLs', () => {
   const uiFiles = [{ filename: 'src/components/Button.tsx', status: 'modified' }];
   const url = (id) => 'https://github.com/user-attachments/assets/' + id;
@@ -1084,4 +1056,29 @@ test('a served asset root is never committed proof media', () => {
   for (const path of ['screenshots/home.png', 'proof/before.png', 'before.png', 'docs/after.png']) {
     assert.equal(added(path), true, `${path} looks like committed proof media`);
   }
+});
+
+test('proof: an attachment under a bullet is not inert', () => {
+  // Four leading spaces mark an indented code block only OUTSIDE a list.
+  // Inside one they are continuation content that renders normally, so a
+  // line-start indentation test rejected an attachment written under a bullet
+  // -- an ordinary way to caption before and after, and honest work.
+  const uiFiles = [{ filename: 'src/components/Button.tsx', status: 'modified' }];
+  const url = (id) => `![shot](https://github.com/user-attachments/assets/${id})`;
+  const failed = (r) => r.failures.some((f) => f.check === 'proof of a visible change');
+  const warned = (r) => r.warnings.some((w) => w.check === 'proof of a visible change');
+  const body = (...lines) => [
+    '## What', 'x', '## Why', 'y', '## How I verified', 'bun test -> pass',
+    ...lines, 'Assisted-by: agent:model',
+  ].join('\n');
+
+  const underBullet = body('- captured both states:', '', `    ${url('aaa')}`, `    ${url('bbb')}`);
+  assert.equal(failed(checkProof(underBullet, uiFiles, config)), false);
+  assert.equal(warned(checkProof(underBullet, uiFiles, config)), false);
+
+  // An indented URL outside a list is inert on GitHub and still counts here.
+  // Telling the two apart needs real block containment, which belongs to the
+  // body reader; counting it is the fail-open direction and is deliberate.
+  const indented = body(`    ${url('ccc')}`, `    ${url('ddd')}`);
+  assert.equal(failed(checkProof(indented, uiFiles, config)), false);
 });
