@@ -147,6 +147,7 @@ def inspect_scope(label, scope, blockers, bindings, domains, enforce=True):
     if not all(isinstance(item, dict) for item in durable_configs): issues.append(f"{label}: Durable Object configuration must be an object")
     durable, preview_durable = (item.get("bindings", []) if isinstance(item, dict) else [] for item in durable_configs)
     if missing_durable := set(resource_map(durable, ("class_name",))) - set(resource_map(preview_durable, ("class_name",))): issues.append(f"{label}: Durable Object Preview bindings are missing: {', '.join(sorted(missing_durable))}")
+    if any(isinstance(item, dict) and not item.get("class_name") for item in preview_durable): issues.append(f"{label}: Durable Object has an incomplete Preview binding")
     preview_scripts = {item.get("script_name") for item in preview_durable if isinstance(item, dict) and item.get("script_name")}
     if preview_scripts: issues.append(f"{label}: Preview Durable Objects target an external production Worker")
     if scope.get("containers") and not previews.get("containers"):
@@ -159,9 +160,11 @@ def inspect_scope(label, scope, blockers, bindings, domains, enforce=True):
     producers = queues.get("producers", []) if isinstance(queues, dict) else []
     if producers:
         bindings.append(f"{label}:queues.producers")
-        if missing_producers := set(resource_map(producers, ("queue",))) - set(resource_map(preview_queues.get("producers", []), ("queue",))): issues.append(f"{label}: Queue Preview producers are missing: {', '.join(sorted(missing_producers))}")
-        elif set(resource_map(producers, ("queue",)).values()) & set(resource_map(preview_queues.get("producers", []), ("queue",)).values()):
+        preview_producers = preview_queues.get("producers", []) if isinstance(preview_queues, dict) else []
+        if missing_producers := set(resource_map(producers, ("queue",))) - set(resource_map(preview_producers, ("queue",))): issues.append(f"{label}: Queue Preview producers are missing: {', '.join(sorted(missing_producers))}")
+        elif set(resource_map(producers, ("queue",)).values()) & set(resource_map(preview_producers, ("queue",)).values()):
             issues.append(f"{label}: Queue producers share a production Queue")
+        if any(isinstance(item, dict) and not item.get("queue") for item in preview_producers): issues.append(f"{label}: Queue producer has an incomplete Preview binding")
     if isinstance(queues, dict) and queues.get("consumers"):
         issues.append(f"{label}: Queue consumers cannot receive Preview events")
     if (scope.get("triggers") if isinstance(scope.get("triggers"), dict) else {}).get("crons"):
@@ -242,18 +245,25 @@ def audit(root, repo):
         if len(deploys) != 1 or len(cleanups) != 1: blockers.append("workflow needs one Preview deploy job and one cleanup job")
         else:
             deploy, cleanup = deploys[0], cleanups[0]
-            for needles, message in [(("head.repo.full_name == github.repository",), "fork guard"), (("github.repository_owner",), "owner guard"), (("GITHUB_HEAD_REF", "pull_request.head.ref"), "PR branch source"), (('--name "$preview_name"', '--name "$BRANCH_NAME"'), "exact Preview name")]:
-                shared = {needle for needle in needles if needle in deploy} & {needle for needle in needles if needle in cleanup}
+            deploy_if = "\n".join(re.findall(r"(?m)^\s*if:\s*(.*)$", deploy))
+            cleanup_if = "\n".join(re.findall(r"(?m)^\s*if:\s*(.*)$", cleanup))
+            for needles, message, scope_pair in [(("head.repo.full_name == github.repository",), "fork guard", (deploy_if, cleanup_if)),
+                                                  (("github.repository_owner",), "owner guard", (deploy_if, cleanup_if)),
+                                                  (("GITHUB_HEAD_REF", "pull_request.head.ref"), "PR branch source", (deploy, cleanup)),
+                                                  (('--name "$preview_name"', '--name "$BRANCH_NAME"'), "exact Preview name", (deploy, cleanup))]:
+                deploy_scope, cleanup_scope = scope_pair
+                shared = {needle for needle in needles if needle in deploy_scope} & {needle for needle in needles if needle in cleanup_scope}
                 if not shared: blockers.append(f"deploy and cleanup need the same {message}")
             if "curl" not in deploy: blockers.append("workflow does not probe the live Preview")
             if "curl --location" in deploy: blockers.append("live verification follows redirects")
             if "tr '[:upper:]'" in deploy + cleanup or "cut -c1-63" in deploy + cleanup: blockers.append("workflow mutates the PR branch name")
-            args = lambda text, flag: {match.group(1) or match.group(2) or match.group(3)
-                                        for match in re.finditer(rf'--{flag}[ =]+(?:"([^"]*)"|\'([^\']*)\'|([^"\'\s\\]+))', text)}
+            args = lambda text, flag: {match.group(1) or match.group(2) or match.group(3) or match.group(4)
+                                        for match in re.finditer(r'--' + flag + r'[ =]+(?:"([^"]*)"|\'([^\']*)\'|(\$\{\{[^}]*\}\})|([^"\'\s\\]+))', text)}
             if args(deploy, "config") != args(cleanup, "config") or args(deploy, "env") != args(cleanup, "env"):
                 blockers.append("deploy and cleanup use different Wrangler config or environment")
         concurrency = re.search(r"(?ms)^concurrency:[ \t]*\n((?:[ \t]+.*\n?)*)", workflow_text)
-        if not concurrency or "cancel-in-progress: false" not in concurrency.group(1):
+        concurrency_body = concurrency.group(1) if concurrency else ""
+        if "cancel-in-progress: false" not in concurrency_body or not re.search(r"(?m)^\s*group:\s*\S", concurrency_body):
             blockers.append("Preview lifecycle jobs are not serialized")
     secrets, variables = github_names(repo, "secrets"), github_names(repo, "variables")
     if repo and (secrets is None or variables is None): blockers.append("GitHub credential metadata could not be verified")
