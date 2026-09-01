@@ -849,6 +849,21 @@ test('proof: indented attachment URLs are inert', () => {
   assert.equal(failed(checkProof(realBody, uiFiles, config)), false);
 });
 
+test('proof: mixed space-then-tab indentation is still inert', () => {
+  const uiFiles = [{ filename: 'src/components/Button.tsx', status: 'modified' }];
+  const url = (id) => 'https://github.com/user-attachments/assets/' + id;
+  const failed = (r) => r.failures.some((f) => f.check === 'proof of a visible change');
+
+  // A tab expands to the next 4-column stop, so " \t" (one space then a tab)
+  // reaches the same indented-code threshold as four leading spaces, even
+  // though neither alternative of a naive "4 spaces or a leading tab" check
+  // matches it on its own.
+  for (const indent of [' \t', '  \t', '   \t']) {
+    const body = validBody + `\n${indent}![before](${url('aaa')})\n${indent}![after](${url('bbb')})`;
+    assert.equal(failed(checkProof(body, uiFiles, config)), true, JSON.stringify(indent));
+  }
+});
+
 test('proof: inline-code URLs deduplicate with embedded URLs', () => {
   const uiFiles = [{ filename: 'src/components/Button.tsx', status: 'modified' }];
   const url = (id) => 'https://github.com/user-attachments/assets/' + id;

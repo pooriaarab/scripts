@@ -402,8 +402,10 @@ function hasCommandAndResult(text) {
 function countUserAttachments(body) {
   const visible = String(body || '').replace(/<!--[\s\S]*?-->/g, '');
   // Indented code is inert on GitHub. Counting it would let weak evidence
-  // through because its URLs never render as links or embedded images.
-  const text = visible.split('\n').filter((line) => !/^(?: {4,}|\t)/.test(line)).join('\n');
+  // through because its URLs never render as links or embedded images. A tab
+  // expands to the next 4-column stop, so up to three leading spaces before
+  // it still reach the indented-code threshold -- not just a bare leading tab.
+  const text = visible.split('\n').filter((line) => !/^(?: {4,}| {0,3}\t)/.test(line)).join('\n');
   // Backticks are Markdown syntax, not URL characters. Angle brackets mark
   // the before/after placeholders in this convention's own docs; counting
   // them would let copied examples through as real assets.
