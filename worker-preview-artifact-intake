@@ -1,0 +1,315 @@
+#!/usr/bin/env python3
+"""Accept one hostile Worker Preview artifact as verified data."""
+import argparse
+import hashlib
+import json
+import os
+import re
+import shutil
+import stat
+import struct
+import subprocess
+import sys
+import tempfile
+import unicodedata
+import zipfile
+import zlib
+from pathlib import Path, PurePosixPath
+WORKFLOW, ARTIFACT, MANIFEST = "Worker Preview Build", "worker-preview-bundle", "artifact-manifest.json"
+MAX_ARCHIVE, MAX_EXPANDED, MAX_FILE = 512 * 1024**2, 1024**3, 256 * 1024**2
+MAX_FILES, MAX_MANIFEST = 50_000, 1024**2
+REPOSITORY = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
+DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
+MIGRATION = re.compile(r"[0-9]{4}_[a-z0-9_]+\.sql")
+class IntakeError(Exception):
+    pass
+def gh_json(endpoint, **fields):
+    command = ["gh", "api", endpoint, "--method", "GET"]
+    for key, value in fields.items():
+        command.extend(("-f", f"{key}={value}"))
+    result = subprocess.run(command, text=True, capture_output=True)
+    if result.returncode:
+        raise IntakeError(f"GitHub request failed for {endpoint}: {result.stderr.strip()}")
+    try:
+        return json.loads(result.stdout)
+    except json.JSONDecodeError as error:
+        raise IntakeError(f"GitHub returned invalid JSON for {endpoint}") from error
+def require_one(items, label):
+    if len(items) != 1:
+        raise IntakeError(f"expected one {label}; found {len(items)}")
+    return items[0]
+def gh_items(endpoint, key, **fields):
+    result, page = [], 1
+    while True:
+        batch = gh_json(endpoint, **fields, per_page=100, page=page).get(key)
+        if not isinstance(batch, list):
+            raise IntakeError(f"GitHub response has no {key} list for {endpoint}")
+        result.extend(batch)
+        if len(batch) < 100:
+            return result
+        page += 1
+
+def sha256(path):
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        while chunk := source.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+def validate_pr(repo, number, prefix):
+    value = gh_json(f"repos/{repo}/pulls/{number}")
+    head, base = value.get("head", {}), value.get("base", {})
+    if value.get("state") != "open":
+        raise IntakeError("pull request is not open")
+    if head.get("repo", {}).get("full_name") != repo or base.get("repo", {}).get("full_name") != repo:
+        raise IntakeError("pull request is not from the same repository")
+    sha, branch = head.get("sha"), head.get("ref")
+    if not isinstance(sha, str) or not re.fullmatch(r"[0-9a-f]{40}", sha):
+        raise IntakeError("pull request has an invalid head SHA")
+    pattern = rf"{re.escape(prefix)}-([1-9][0-9]*)-([a-z0-9]+(?:-[a-z0-9]+)*)"
+    match = re.fullmatch(pattern, branch) if isinstance(branch, str) else None
+    if (not match or len(branch) > 63 or not 3 <= len(match.group(2)) <= 48
+            or not isinstance(value.get("title"), str) or not value["title"].startswith(
+                f"[{prefix.upper()}-{match.group(1)}] ")):
+        raise IntakeError("pull request branch does not meet the PR standard")
+    return sha, branch
+
+def select_artifact(repo, number, sha, branch):
+    runs = gh_items(f"repos/{repo}/actions/runs", "workflow_runs", event="pull_request",
+                    head_sha=sha, status="completed")
+    matches = [run for run in runs if run.get("name") == WORKFLOW
+               and run.get("event") == "pull_request" and run.get("status") == "completed"
+               and run.get("conclusion") == "success" and run.get("head_sha") == sha
+               and run.get("head_branch") == branch
+               and run.get("head_repository", {}).get("full_name") == repo
+               and any(item.get("number") == number for item in run.get("pull_requests", []))]
+    run = require_one(matches, f"successful {WORKFLOW} pull-request run")
+    if type(run.get("id")) is not int:
+        raise IntakeError("workflow run has no valid ID")
+    artifacts = gh_items(f"repos/{repo}/actions/runs/{run['id']}/artifacts", "artifacts")
+    artifact = require_one([item for item in artifacts if item.get("name") == ARTIFACT], ARTIFACT)
+    if type(artifact.get("id")) is not int:
+        raise IntakeError("artifact has no valid ID")
+    if artifact.get("expired") is not False:
+        raise IntakeError("artifact is expired")
+    size, digest = artifact.get("size_in_bytes"), artifact.get("digest")
+    if type(size) is not int or size < 1 or size > MAX_ARCHIVE:
+        raise IntakeError("artifact archive exceeds the size limit")
+    if not isinstance(digest, str) or not DIGEST.fullmatch(digest):
+        raise IntakeError("artifact has no valid GitHub SHA-256 digest")
+    return run, artifact
+
+def download(repo, artifact, path):
+    with path.open("xb") as output, tempfile.TemporaryFile() as errors:
+        process = subprocess.Popen(["gh", "api", f"repos/{repo}/actions/artifacts/{artifact['id']}/zip",
+                                    "--method", "GET"], stdout=subprocess.PIPE, stderr=errors)
+        while chunk := process.stdout.read(1024 * 1024):
+            if output.tell() + len(chunk) > MAX_ARCHIVE:
+                process.kill()
+                process.wait()
+                raise IntakeError("artifact download exceeds the size limit")
+            output.write(chunk)
+        status = process.wait()
+        errors.seek(0)
+        error = errors.read().decode(errors="replace").strip()
+    if status:
+        raise IntakeError(f"artifact download failed: {error}")
+    if path.stat().st_size != artifact["size_in_bytes"] or path.stat().st_size > MAX_ARCHIVE:
+        raise IntakeError("downloaded archive size does not match GitHub")
+    actual = f"sha256:{sha256(path)}"
+    if actual != artifact["digest"]:
+        raise IntakeError("downloaded archive does not match GitHub SHA-256 digest")
+
+def preflight_zip(path):
+    size = path.stat().st_size
+    with path.open("rb") as source:
+        source.seek(max(0, size - 65_557))
+        tail = source.read()
+        position = len(tail)
+        while True:
+            position = tail.rfind(b"PK\x05\x06", 0, position)
+            if position < 0:
+                raise IntakeError("artifact has no valid ZIP end record")
+            if (position + 22 <= len(tail) and position + 22 +
+                    struct.unpack_from("<H", tail, position + 20)[0] == len(tail)):
+                break
+        disk, central_disk, entries_disk, entries = struct.unpack_from("<HHHH", tail, position + 4)
+        central_size, central_offset = struct.unpack_from("<II", tail, position + 12)
+        if (disk or central_disk or entries_disk != entries or entries > MAX_FILES
+                or 0xFFFF in {entries_disk, entries}
+                or 0xFFFFFFFF in {central_size, central_offset}):
+            raise IntakeError("split or ZIP64 archives are not supported")
+        if central_size > MAX_FILES * 46 or central_offset + central_size > size:
+            raise IntakeError("artifact ZIP directory exceeds the safety limit")
+
+def safe_name(info):
+    name = info.filename
+    if (not name or "\\" in name or name.startswith("/")
+            or any(unicodedata.category(char).startswith("C") for char in name)):
+        raise IntakeError(f"unsafe archive path: {name!r}")
+    path = PurePosixPath(name.rstrip("/"))
+    if (not path.parts or path.as_posix() != name.rstrip("/")
+            or any(part in {"", ".", ".."} for part in path.parts)):
+        raise IntakeError(f"unsafe archive path: {name!r}")
+    mode = info.external_attr >> 16
+    kind = stat.S_IFMT(mode)
+    if kind not in {0, stat.S_IFREG, stat.S_IFDIR}:
+        raise IntakeError(f"linked or special archive entry: {name}")
+    if (kind == stat.S_IFDIR) != info.is_dir() and kind != 0:
+        raise IntakeError(f"archive entry type does not match its path: {name}")
+    return path.as_posix()
+
+def allowed(name, directory=False):
+    parts = PurePosixPath(name).parts
+    if directory:
+        return parts[0] in {"worker", "assets", "migrations"}
+    if name == MANIFEST:
+        return True
+    if len(parts) > 1 and parts[0] in {"worker", "assets"}:
+        return True
+    return len(parts) == 2 and parts[0] == "migrations" and bool(MIGRATION.fullmatch(parts[1]))
+
+def validate_archive(archive, repo, number, sha, branch):
+    infos = archive.infolist()
+    if len(infos) > MAX_FILES:
+        raise IntakeError("archive has too many entries")
+    files, identities, expanded = {}, set(), 0
+    for info in infos:
+        name = safe_name(info)
+        identity = unicodedata.normalize("NFC", name).casefold()
+        if identity in identities:
+            raise IntakeError(f"duplicate archive path: {name}")
+        identities.add(identity)
+        if not allowed(name, info.is_dir()):
+            raise IntakeError(f"archive path is not allowlisted: {name}")
+        if info.is_dir():
+            continue
+        if info.flag_bits & 1:
+            raise IntakeError(f"encrypted archive entry: {name}")
+        if info.compress_type not in {zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED}:
+            raise IntakeError(f"unsupported archive compression: {name}")
+        if info.file_size > MAX_FILE:
+            raise IntakeError(f"archive entry exceeds the size limit: {name}")
+        expanded += info.file_size
+        if expanded > MAX_EXPANDED:
+            raise IntakeError("expanded archive exceeds the size limit")
+        files[name] = info
+    if "worker/worker.js" not in files or MANIFEST not in files:
+        raise IntakeError("archive needs artifact-manifest.json and worker/worker.js")
+    if files[MANIFEST].file_size > MAX_MANIFEST:
+        raise IntakeError("artifact manifest exceeds the size limit")
+    def unique(pairs):
+        value = {}
+        for key, item in pairs:
+            if key in value:
+                raise IntakeError(f"duplicate manifest key: {key}")
+            value[key] = item
+        return value
+    try:
+        record = json.loads(archive.read(files[MANIFEST]), object_pairs_hook=unique)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise IntakeError("artifact manifest is not valid UTF-8 JSON") from error
+    keys = {"schema", "repository", "pull_request", "head_sha", "branch", "files"}
+    if not isinstance(record, dict) or set(record) != keys:
+        raise IntakeError("artifact manifest has an unexpected schema")
+    expected = {"schema": 1, "repository": repo, "pull_request": number,
+                "head_sha": sha, "branch": branch}
+    if any(type(record.get(key)) is not int for key in ("schema", "pull_request")) or any(
+            record.get(key) != value for key, value in expected.items()):
+        raise IntakeError("artifact manifest does not match the current pull request")
+    digests = record["files"]
+    if not isinstance(digests, dict) or set(digests) != set(files) - {MANIFEST}:
+        raise IntakeError("artifact manifest does not record every payload file exactly")
+    if any(not isinstance(value, str) or not DIGEST.fullmatch(value) for value in digests.values()):
+        raise IntakeError("artifact manifest contains an invalid file digest")
+    return files, digests
+
+def extract(archive, files, digests, destination):
+    bundle = destination / "bundle"
+    expanded = 0
+    for name, info in files.items():
+        target = bundle / name
+        target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        digest, size = hashlib.sha256(), 0
+        with archive.open(info) as source, target.open("xb") as output:
+            while chunk := source.read(1024 * 1024):
+                size += len(chunk)
+                expanded += len(chunk)
+                if size > MAX_FILE:
+                    raise IntakeError(f"archive entry exceeds the size limit: {name}")
+                if expanded > MAX_EXPANDED:
+                    raise IntakeError("expanded archive exceeds the size limit")
+                digest.update(chunk)
+                output.write(chunk)
+        target.chmod(0o600)
+        if name != MANIFEST and f"sha256:{digest.hexdigest()}" != digests[name]:
+            raise IntakeError(f"payload digest mismatch: {name}")
+
+def accept(repo, number, prefix, output):
+    sha, branch = validate_pr(repo, number, prefix)
+    run, artifact = select_artifact(repo, number, sha, branch)
+    if output.exists() or not output.parent.is_dir():
+        raise IntakeError("output must not exist and its parent must be a directory")
+    staging = Path(tempfile.mkdtemp(prefix=f".{output.name}.", dir=output.parent))
+    try:
+        archive_path = staging / "artifact.zip"
+        download(repo, artifact, archive_path)
+        preflight_zip(archive_path)
+        with zipfile.ZipFile(archive_path) as archive:
+            files, digests = validate_archive(archive, repo, number, sha, branch)
+            extract(archive, files, digests, staging)
+        archive_path.unlink()
+        pin = {"schema": 1, "repository": repo, "pull_request": number, "branch": branch,
+               "head_sha": sha, "workflow": WORKFLOW, "run_id": run["id"],
+               "artifact": ARTIFACT, "artifact_id": artifact["id"],
+               "artifact_digest": artifact["digest"]}
+        pin_path = staging / "intake.json"
+        pin_path.write_text(json.dumps(pin, sort_keys=True, separators=(",", ":")) + "\n")
+        pin_path.chmod(0o600)
+        current_sha, current_branch = validate_pr(repo, number, prefix)
+        current_run, current_artifact = select_artifact(repo, number, current_sha, current_branch)
+        expected = (sha, branch, run["id"], artifact["id"], artifact["digest"])
+        current = (current_sha, current_branch, current_run["id"], current_artifact["id"],
+                   current_artifact["digest"])
+        if current != expected:
+            raise IntakeError("pull request, workflow run, or artifact changed during intake")
+        output.mkdir(mode=0o700)
+        try:
+            os.rename(staging / "bundle", output / "bundle")
+            os.rename(staging / "intake.json", output / "intake.json")
+            staging.rmdir()
+        except Exception:
+            shutil.rmtree(output, ignore_errors=True)
+            raise
+        return pin
+    except Exception:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__, epilog=(
+        "Requires an authenticated gh CLI. OUTPUT's parent must exist. "
+        "Publishes intake.json last and prints the verified pin as JSON."))
+    parser.add_argument("repository", help="GitHub owner/repository")
+    parser.add_argument("pull_request", type=int)
+    parser.add_argument("--prefix", required=True, help="trusted 2-4 letter repository prefix")
+    parser.add_argument("output", type=Path)
+    args = parser.parse_args()
+    if (not REPOSITORY.fullmatch(args.repository) or args.pull_request < 1
+            or not re.fullmatch(r"[a-z]{2,4}", args.prefix)):
+        parser.error("repository, pull-request number, or trusted prefix is invalid")
+    try:
+        raw_output = args.output.expanduser()
+        if raw_output.is_symlink():
+            raise IntakeError("output must not be a symbolic link")
+        output = raw_output.parent.resolve() / raw_output.name
+        pin = accept(args.repository, args.pull_request, args.prefix, output)
+    except (IntakeError, OSError, EOFError, RuntimeError, zipfile.BadZipFile,
+            zipfile.LargeZipFile, zlib.error) as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+    print(json.dumps(pin, sort_keys=True))
+    return 0
+
+if __name__ == "__main__":
+    raise SystemExit(main())
