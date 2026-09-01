@@ -1197,15 +1197,31 @@ const MALFORMED_BLOCK = Symbol('malformed-managed-block');
 // correct block followed by a leftover stale one (a hand edit, or a rollout
 // repair appended after markers it wouldn't touch, see pr-standards-rollout)
 // PASS while the stale duplicate goes unreported. Require exactly one pair.
+// Count every marker before looking at any of them. Two rounds of review found
+// a new ordering the previous check missed -- a duplicate start, then a trailing
+// duplicate end, then a stray end BEFORE the real start -- because each fix
+// asked "is there another marker after this one", which can only see forward.
+// The guarantee wanted is a property of the whole file: exactly one start and
+// exactly one end, in that order. Stating it that way has no next case.
+function markerOffsets(content, marker) {
+  const offsets = [];
+  for (let at = content.indexOf(marker); at !== -1; at = content.indexOf(marker, at + marker.length)) {
+    offsets.push(at);
+  }
+  return offsets;
+}
+
 function managedBlock(content) {
-  const start = content.indexOf(AGENTS_BLOCK_START);
-  if (start === -1) return null;
-  const bodyStart = start + AGENTS_BLOCK_START.length;
-  if (content.indexOf(AGENTS_BLOCK_START, bodyStart) !== -1) return MALFORMED_BLOCK;
-  const end = content.indexOf(AGENTS_BLOCK_END, bodyStart);
-  if (end === -1) return null;
-  if (content.indexOf(AGENTS_BLOCK_END, end + AGENTS_BLOCK_END.length) !== -1) return MALFORMED_BLOCK;
-  return content.slice(bodyStart, end);
+  const starts = markerOffsets(content, AGENTS_BLOCK_START);
+  const ends = markerOffsets(content, AGENTS_BLOCK_END);
+  // No markers at all is a file that never had the block, which is missing
+  // rather than malformed -- the rollout has simply not run here.
+  if (starts.length === 0 && ends.length === 0) return null;
+  if (starts.length !== 1 || ends.length !== 1) return MALFORMED_BLOCK;
+  // An end before its start is malformed, not missing: the markers are present
+  // and wrong, which is a different thing to answer than absent.
+  if (ends[0] < starts[0] + AGENTS_BLOCK_START.length) return MALFORMED_BLOCK;
+  return content.slice(starts[0] + AGENTS_BLOCK_START.length, ends[0]);
 }
 
 function unifiedDiff(expected, actual, expectedLabel, actualLabel) {
