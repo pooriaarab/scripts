@@ -69,6 +69,11 @@ check 2 'blocks a host-qualified cross-repo PR head'   'gh pr create --repo gith
 check 0 'strips the owner: fork qualifier from a head' 'gh pr create --repo pooriaarab/target-standard --head alice:tar-12-do-one-thing'
 check 2 'routes an explicit same-repo target through the real engine, not the master exemption' \
                                                         'gh pr create --repo pooriaarab/scripts --head master'
+check 2 'does not exempt master on a cross-repo target' \
+                                                        'gh pr create --repo pooriaarab/target-standard --head master'
+check 2 'parses a glued short -R/-H option value'      'gh pr create -Rpooriaarab/target-standard -Hmy-cool-feature'
+check 2 'uses the last of a repeated --head, not the first' \
+                                                        'gh pr create --repo pooriaarab/target-standard --head tar-12-good --head my-cool-feature'
 
 [ "$fails" = 0 ] || { printf '\n%s failing\n' "$fails" >&2; exit 1; }
 printf '\nall passing\n'

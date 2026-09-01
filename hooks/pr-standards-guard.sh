@@ -42,13 +42,29 @@ create_flags = {"-f", "--force", "-t", "--track", "--no-track", "-c", "-C", "--c
 copy_flags = {"-c", "-C", "--copy"}
 
 def option_value(tokens, names):
+    # gh/cobra flags: a repeated flag has the LAST occurrence win, and a
+    # single-letter shorthand may glue its value directly (-Rowner/repo)
+    # with no "=" or space. Scanning the whole token list and keeping the
+    # last match (rather than returning on the first) matches that.
+    short_names = [name for name in names if len(name) == 2 and name[0] == "-" and name[1] != "-"]
+    result = None
     for index, token in enumerate(tokens):
         if token in names and index + 1 < len(tokens) and not tokens[index + 1].startswith("-"):
-            return tokens[index + 1]
+            result = tokens[index + 1]
+            continue
+        matched = False
         for name in names:
             if token.startswith(f"{name}="):
-                return token[len(name) + 1:]
-    return None
+                result = token[len(name) + 1:]
+                matched = True
+                break
+        if matched:
+            continue
+        for name in short_names:
+            if token != name and token.startswith(name):
+                result = token[len(name):]
+                break
+    return result
 
 def created_branch(tokens):
     index = 1
@@ -130,7 +146,12 @@ target_prefix() {
 
 inline_check() {
   local branch="$1" prefix="$2" title="$3" upper issues=""
-  case "$branch" in *'$'*|*'`'*) return 0;; main|master|release|refactor|gh-pages|HEAD|release/*|dependabot/*|renovate/*) return 0;; esac
+  # Mirrors pr-standards.mjs's ALWAYS_EXEMPT_BRANCHES/EXEMPT_BRANCH_PREFIXES.
+  # "master" and "HEAD" are deliberately absent: the real engine does not
+  # exempt them, so exempting them here would let a cross-repo PR (which
+  # only ever runs this inline check, never the engine) through when the
+  # same head would be rejected for a same-repo target.
+  case "$branch" in *'$'*|*'`'*) return 0;; main|release|refactor|gh-pages|release/*|dependabot/*|renovate/*) return 0;; esac
   if ! [[ "$branch" =~ ^${prefix}-[1-9][0-9]*-[a-z0-9]+(-[a-z0-9]+)*$ ]]; then
     issues="Branch name does not meet the standard: ${prefix}-<issue>-<slug>"
   fi
