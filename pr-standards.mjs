@@ -401,23 +401,30 @@ function hasCommandAndResult(text) {
 // or a real command output costs work, so proof is the part worth checking.
 // A user-attachments URL is the only proof that does not bloat the repo.
 //
-// Known gap: neither this nor hasValidProofNa strips fenced or inline code, so
-// a URL or `Proof: n/a` line quoted inside a code block -- for instance an
-// agent quoting the upload command's own example URL -- currently counts as
-// real proof. A fence-stripping fix was attempted and reverted twice for
-// breaking on a longer closing fence; it is tracked separately on
-// scr-64-hardening-wip rather than carried here at the risk of a third
-// regression.
+// Fenced code remains outside this check's scope. Inline code is allowed to
+// carry a real URL, so its backticks must not become part of the asset id.
 function countUserAttachments(body) {
   const visible = String(body || '').replace(/<!--[\s\S]*?-->/g, '');
-  const matches = visible.match(/https:\/\/github\.com\/user-attachments\/assets\/[^\s"'\)\]]+/g);
+  // No indentation filter here, deliberately. Four leading spaces mark an
+  // indented code block only OUTSIDE a list; inside one they are continuation
+  // content that renders normally, and a line-start test cannot tell the two
+  // apart. Filtering on indentation alone rejected an attachment written under
+  // a bullet -- an ordinary way to caption before and after -- which is a false
+  // failure on honest work. Answering it needs real block containment, which is
+  // the body reader's job (#143), not a second implementation here. Until then
+  // an inert URL counts, and that is the safe direction to be wrong.
+  const text = visible;
+  // Backticks are Markdown syntax, not URL characters. Angle brackets mark
+  // the before/after placeholders in this convention's own docs; counting
+  // them would let copied examples through as real assets.
+  const matches = text.match(/https:\/\/github\.com\/user-attachments\/assets\/[^\s"'\x60\)\]<>]+/g);
   if (!matches) return 0;
   // Distinct assets, not link count. The threshold asks for before AND after,
   // so the same image pasted twice is one image and must not clear it -- and a
   // query string or fragment on the same asset is still that asset. The match
-  // itself excludes `)`, `]`, quotes and whitespace, but not sentence
-  // punctuation, so a bare URL followed by a period or comma in prose keeps
-  // that character; strip it too or the same asset pasted once inside
+  // itself excludes Markdown delimiters, quotes and whitespace, but not
+  // sentence punctuation, so a bare URL followed by a period or comma in prose
+  // keeps that character; strip it too or the same asset pasted once inside
   // markdown and once in prose counts as two.
   return new Set(matches.map((url) => url.split(/[?#]/)[0].replace(/[.,;:!?]+$/, ''))).size;
 }
@@ -455,28 +462,43 @@ export function hasUiDiff(files, config = DEFAULT_CONFIG) {
 }
 
 const PROOF_MEDIA_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'mp4', 'mov', 'webm']);
-const PROOF_MEDIA_GLOBS = [
+// Keep directory signals separate from filename signals. Mixing them makes a
+// future exemption easy to apply to the wrong kind of path rule.
+const PROOF_MEDIA_DIR_GLOBS = [
   'screenshot*/**',
   '**/screenshots/**',
   'proof*/**',
+];
+const PROOF_MEDIA_NAME_GLOBS = [
   '**/*before*',
   '**/*after*',
   '**/*demo-recording*',
 ];
+const PROOF_MEDIA_ASSET_DIR_GLOBS = ['public/**', '**/assets/**'];
 
 function isProofMediaPath(filename) {
   const normalized = String(filename).replaceAll('\\', '/').replace(/^\.\//, '');
   if (!normalized.includes('/')) return true;
-  return PROOF_MEDIA_GLOBS.some((pattern) => matchesGlob(normalized, pattern));
+  // The asset-root exemption wins over every other signal, including a
+  // proof-named directory. `public/screenshots/` is a completely ordinary
+  // product pattern -- a docs site or a landing page serving a screenshot
+  // gallery -- and flagging it rejects honest work, which is the one direction
+  // this check must not be wrong in. Someone committing pull request media
+  // puts it at the repo root or in `proof/`, not under a served asset root.
+  if (PROOF_MEDIA_ASSET_DIR_GLOBS.some((pattern) => matchesGlob(normalized, pattern))) return false;
+  if (PROOF_MEDIA_DIR_GLOBS.some((pattern) => matchesGlob(normalized, pattern))) return true;
+  return PROOF_MEDIA_NAME_GLOBS.some((pattern) => matchesGlob(normalized, pattern));
 }
 
 export function isCommittedProofMedia(file) {
   const filename = String(file.filename || '');
   if (!filename) return false;
-  // Only files ADDED by the diff are proof media committed by mistake. A
-  // modified or renamed media file could be a real product asset. When the
-  // caller does not provide a status (unit tests without GitHub payloads),
-  // treat it as added so the glob and extension rules remain testable.
+  // Only files ADDED by the diff are proof media committed by mistake. Treating
+  // modified or renamed files as added rejects honest product-asset changes.
+  // Treating a missing status as non-added lets committed media through when a
+  // caller lacks a GitHub payload.
+  // When no status is supplied, treat the file as added so unit tests can still
+  // exercise the glob and extension rules without a GitHub payload.
   if (Object.prototype.hasOwnProperty.call(file, 'status') && file.status !== 'added') return false;
   const lower = filename.toLowerCase();
   const dot = lower.lastIndexOf('.');
