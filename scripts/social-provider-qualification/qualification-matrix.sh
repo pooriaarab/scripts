@@ -43,6 +43,15 @@ echo "Delete every live test post and reply immediately after verification."
 echo "Stop if cleanup fails."
 echo
 
+echo "-- capability matrix contract --"
+echo "Record each operation as VERIFIED, UNSUPPORTED_BY_PROVIDER, NOT_IMPLEMENTED, or BLOCKED."
+echo "Posts: create, read status, update, delete, schedule, and each supported media shape."
+echo "Comments: list, read thread, reply, like or react, hide or moderate, mark read, and delete."
+echo "Messages: list, read, send, reply, attach media, delete, and use group conversations."
+echo "Authentication: connect, refresh, reconnect, disconnect, and handle revoked scopes."
+echo "Sync: paginate, deduplicate, retry, respect rate limits, and run on the production schedule."
+echo
+
 echo "-- production secret names --"
 (cd "$repo" && bun run packages/cli/scripts/integrations/status.ts "$provider" --env production)
 echo
@@ -78,7 +87,7 @@ if [[ "$provider" == "twitter" ]]; then
   echo "Use one bounded comment sync, then disable recurring sync."
   echo "Stop on credit depletion. Do not retry paid recent-search calls."
   echo "Test new-account OAuth separately from an existing connection."
-  echo "Record X DMs as unsupported by Content Rabbit."
+  echo "Record X DMs as NOT_IMPLEMENTED until the adapter ships."
 fi
 
 case "$provider" in
