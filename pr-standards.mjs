@@ -388,7 +388,12 @@ function hasCommandAndResult(text) {
   // first-match, so `bun` wins on the string "bunx" and then `\b` fails against
   // the following `x` -- which rejected every pull request whose only evidence
   // was a `bunx` command, in repos where `bunx` is the default runner.
-  const command = lines.some((line) => /^(?:[$>`]\s*|\*\s*)?(?:bunx|bun|npm|pnpm|yarn|node|deno|cargo|go|pytest|make|git|gh|npx|\.\/)\b[^\n]*/i.test(line));
+  // `python3` precedes `python`, same convention as `bunx` before `bun`. The
+  // checker itself shells to `python3` and three of its test suites are
+  // `python3` scripts, yet the list named none of that: a pull request whose
+  // evidence was a real `python3` run failed the rule, and the author met the
+  // regex by prefixing a pointless `node -e` to the command that had run.
+  const command = lines.some((line) => /^(?:[$>`]\s*|\*\s*)?(?:bunx|bun|npm|pnpm|yarn|node|deno|cargo|go|pytest|python3|python|make|git|gh|npx|\.\/)\b[^\n]*/i.test(line));
   const result = /(?:->|\b(?:pass(?:ed)?|success(?:ful)?|clean|green|ok|verified|complete|no issues|exit(?:ed)?\s+0)\b|\d+\s+(?:tests?|checks?)\s+(?:pass|passed|successful))/i.test(text);
   return command && result;
 }
