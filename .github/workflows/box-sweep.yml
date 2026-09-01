@@ -30,9 +30,11 @@ permissions:
 
 concurrency:
   # Two sweeps at once would both try to stop the same Boxes and log half the failures as
-  # real. One at a time, and a queued run is pointless once a newer one exists.
+  # real, so they queue. They do NOT cancel: a scheduled report landing while a dispatched
+  # --execute run is mid-loop would kill it partway, leaving some Boxes stopped and others
+  # not, with no failure to point at. A redundant queued report costs seconds.
   group: box-sweep
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   sweep:
@@ -53,9 +55,13 @@ jobs:
             echo "ASCII_BOX_API_KEY is not set for this repository; nothing to sweep." >> "$GITHUB_STEP_SUMMARY"
             exit 1
           fi
-          args="--max-age-hours $MAX_AGE"
-          if [ "${{ inputs.execute }}" = "true" ]; then args="$args --execute"; fi
+          # An array, not a string. max_age_hours is free text from workflow_dispatch, so an
+          # unquoted $args would word-split "6 --execute" into a second flag and stop Boxes
+          # on a run where the execute input was left false — defeating the entire
+          # report-only-unless-a-human-asks contract.
+          args=(--max-age-hours "$MAX_AGE")
+          if [ "${{ inputs.execute }}" = "true" ]; then args+=(--execute); fi
           # The report goes to the step summary so the result is readable without opening
           # logs, and to stdout so a failure is greppable in the log.
-          ./box-sweep-remote $args 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
+          ./box-sweep-remote "${args[@]}" 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
           exit "${PIPESTATUS[0]}"
