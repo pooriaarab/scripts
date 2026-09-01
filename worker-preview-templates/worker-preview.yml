@@ -6,7 +6,6 @@ on:
 
 concurrency:
   group: worker-preview-${{ github.event.pull_request.number }}
-  # Serialize deployment, deletion, and reopening for this PR.
   cancel-in-progress: false
 
 permissions:

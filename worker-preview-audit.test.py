@@ -4,10 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-ROOT = Path(__file__).parent
-AUDIT = ROOT / "worker-preview-audit"
-
-
+AUDIT = Path(__file__).parent / "worker-preview-audit"
 class WorkerPreviewAuditTest(unittest.TestCase):
     def run_audit(self, files):
         with tempfile.TemporaryDirectory() as temp:
@@ -18,7 +15,6 @@ class WorkerPreviewAuditTest(unittest.TestCase):
                 path.write_text(content)
             result = subprocess.run([AUDIT, "--json", root], text=True, capture_output=True)
             return result, json.loads(result.stdout)
-
     def test_normalizes_pr_standard_branch_names(self):
         result = subprocess.run([AUDIT, "--normalize", "scr-130-add-worker-preview"], text=True, capture_output=True)
         self.assertEqual(result.stdout.strip(), "scr-130-add-worker-preview")
@@ -26,7 +22,6 @@ class WorkerPreviewAuditTest(unittest.TestCase):
         self.assertEqual(invalid.returncode, 2)
         long = subprocess.run([AUDIT, "--normalize", "scr-130-" + "feature-" * 20], capture_output=True)
         self.assertEqual(long.returncode, 2)
-
     def test_blocks_shared_resources_and_unsafe_workflow(self):
         config = {"preview_urls": False, "containers": [{"class_name": "App"}],
                   "vars": {"API_ORIGIN": "https://production.example"},
@@ -40,14 +35,10 @@ class WorkerPreviewAuditTest(unittest.TestCase):
                                          ".github/workflows/preview.yml": "jobs:\n  preview:\n    run: wrangler preview\n  cleanup:\n    run: wrangler preview delete"})
         self.assertEqual(result.returncode, 1)
         joined = "\n".join(report["blockers"])
-        self.assertIn("shares a production resource", joined)
-        self.assertIn("same fork guard", joined)
-        self.assertIn("without a custom Preview domain", joined)
-        self.assertIn("Preview vars are missing", joined)
-        self.assertIn("Containers are missing", joined)
-        self.assertIn("target an external production Worker", joined)
-        self.assertTrue(all(message in joined for message in ("Durable Object Preview bindings are missing: MISSING", "Queue Preview producers are missing: MISSING_QUEUE")))
-
+        expected = ("shares a production resource", "same fork guard", "without a custom Preview domain",
+                    "Preview vars are missing", "Containers are missing", "target an external production Worker",
+                    "Durable Object Preview bindings are missing: MISSING", "Queue Preview producers are missing: MISSING_QUEUE")
+        self.assertTrue(all(message in joined for message in expected))
     def test_accepts_isolated_preview_configuration(self):
         config = {"preview_urls": True, "vars": {"MESSAGE": 'quote: prod,}'},
                   "d1_databases": [{"binding": "DB", "database_id": "prod"}],
@@ -59,7 +50,6 @@ class WorkerPreviewAuditTest(unittest.TestCase):
                                          "package.json": '{"devDependencies":{"wrangler":"4.127.1"}}',
                                          ".github/workflows/preview.yml": workflow})
         self.assertEqual(result.returncode, 0, report["blockers"])
-
     def test_flags_mismatched_deploy_and_cleanup_name_source(self):
         guard = "head.repo.full_name == github.repository && github.repository_owner"
         workflow = (
@@ -73,14 +63,11 @@ class WorkerPreviewAuditTest(unittest.TestCase):
         joined = "\n".join(report["blockers"])
         self.assertIn("deploy and cleanup need the same PR branch source", joined)
         self.assertIn("deploy and cleanup need the same exact Preview name", joined)
-
     def test_flags_incomplete_multi_field_preview_binding(self):
         config = {"send_email": [{"binding": "EMAIL", "destination_address": "prod@example.com"}],
                   "previews": {"send_email": [{"binding": "EMAIL", "destination_address": "preview@example.com"}]}}
         result, report = self.run_audit({"wrangler.json": json.dumps(config),
                                          "package.json": '{"devDependencies":{"wrangler":"4.127.1"}}'})
         self.assertIn("send_email has an incomplete Preview binding", "\n".join(report["blockers"]))
-
-
 if __name__ == "__main__":
     unittest.main()
