@@ -21,6 +21,7 @@ MAX_FILES, MAX_MANIFEST = 50_000, 1024**2
 REPOSITORY = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
 MIGRATION = re.compile(r"[0-9]{4}_[a-z0-9_]+\.sql")
+WORKFLOW_FILE = re.compile(r"\.github/workflows/[A-Za-z0-9_.-]+\.ya?ml")
 class IntakeError(Exception):
     pass
 def gh_json(endpoint, **fields):
@@ -63,21 +64,51 @@ def validate_pr(repo, number, prefix):
         raise IntakeError("pull request is not open")
     if head.get("repo", {}).get("full_name") != repo or base.get("repo", {}).get("full_name") != repo:
         raise IntakeError("pull request is not from the same repository")
-    sha, branch = head.get("sha"), head.get("ref")
-    if not isinstance(sha, str) or not re.fullmatch(r"[0-9a-f]{40}", sha):
-        raise IntakeError("pull request has an invalid head SHA")
+    sha, branch, base_sha = head.get("sha"), head.get("ref"), base.get("sha")
+    if any(not isinstance(item, str) or not re.fullmatch(r"[0-9a-f]{40}", item)
+           for item in (sha, base_sha)):
+        raise IntakeError("pull request has an invalid head or base SHA")
     pattern = rf"{re.escape(prefix)}-([1-9][0-9]*)-([a-z0-9]+(?:-[a-z0-9]+)*)"
     match = re.fullmatch(pattern, branch) if isinstance(branch, str) else None
     if (not match or len(branch) > 63 or not 3 <= len(match.group(2)) <= 48
             or not isinstance(value.get("title"), str) or not value["title"].startswith(
                 f"[{prefix.upper()}-{match.group(1)}] ")):
         raise IntakeError("pull request branch does not meet the PR standard")
-    return sha, branch
+    return sha, branch, base_sha
 
-def select_artifact(repo, number, sha, branch):
-    runs = gh_items(f"repos/{repo}/actions/runs", "workflow_runs", event="pull_request",
+def resolve_workflow(repo, path):
+    workflows = gh_items(f"repos/{repo}/actions/workflows", "workflows")
+    workflow = require_one([item for item in workflows if item.get("path") == path],
+                           f"trusted workflow at {path}")
+    if (type(workflow.get("id")) is not int or workflow["id"] < 1
+            or workflow.get("name") != WORKFLOW or workflow.get("state") != "active"):
+        raise IntakeError("trusted workflow has invalid identity or state")
+    return workflow["id"]
+
+def validate_workflow_blobs(repo, path, head_sha, base_sha):
+    endpoint = f"repos/{repo}/contents/{path}"
+    head = gh_json(endpoint, ref=head_sha)
+    base = gh_json(endpoint, ref=base_sha)
+    for value in (head, base):
+        if (not isinstance(value, dict) or value.get("type") != "file"
+                or value.get("path") != path or not isinstance(value.get("sha"), str)
+                or not re.fullmatch(r"[0-9a-f]{40}", value["sha"])):
+            raise IntakeError("trusted workflow blob has an invalid identity")
+    if head["sha"] != base["sha"]:
+        raise IntakeError("pull-request workflow differs from the base workflow")
+
+def trusted_pr(repo, number, prefix, workflow_path):
+    sha, branch, base_sha = validate_pr(repo, number, prefix)
+    workflow_id = resolve_workflow(repo, workflow_path)
+    validate_workflow_blobs(repo, workflow_path, sha, base_sha)
+    return sha, branch, workflow_id
+
+def select_artifact(repo, number, sha, branch, workflow_id):
+    runs = gh_items(f"repos/{repo}/actions/workflows/{workflow_id}/runs", "workflow_runs",
+                    event="pull_request",
                     head_sha=sha, status="completed")
-    matches = [run for run in runs if run.get("name") == WORKFLOW
+    matches = [run for run in runs if run.get("workflow_id") == workflow_id
+               and run.get("name") == WORKFLOW
                and run.get("event") == "pull_request" and run.get("status") == "completed"
                and run.get("conclusion") == "success" and run.get("head_sha") == sha
                and run.get("head_branch") == branch
@@ -245,9 +276,9 @@ def extract(archive, files, digests, destination):
         if name != MANIFEST and f"sha256:{digest.hexdigest()}" != digests[name]:
             raise IntakeError(f"payload digest mismatch: {name}")
 
-def accept(repo, number, prefix, output):
-    sha, branch = validate_pr(repo, number, prefix)
-    run, artifact = select_artifact(repo, number, sha, branch)
+def accept(repo, number, prefix, workflow_path, output):
+    sha, branch, workflow_id = trusted_pr(repo, number, prefix, workflow_path)
+    run, artifact = select_artifact(repo, number, sha, branch, workflow_id)
     if output.exists() or not output.parent.is_dir():
         raise IntakeError("output must not exist and its parent must be a directory")
     staging = Path(tempfile.mkdtemp(prefix=f".{output.name}.", dir=output.parent))
@@ -266,11 +297,13 @@ def accept(repo, number, prefix, output):
         pin_path = staging / "intake.json"
         pin_path.write_text(json.dumps(pin, sort_keys=True, separators=(",", ":")) + "\n")
         pin_path.chmod(0o600)
-        current_sha, current_branch = validate_pr(repo, number, prefix)
-        current_run, current_artifact = select_artifact(repo, number, current_sha, current_branch)
-        expected = (sha, branch, run["id"], artifact["id"], artifact["digest"])
-        current = (current_sha, current_branch, current_run["id"], current_artifact["id"],
-                   current_artifact["digest"])
+        current_sha, current_branch, current_workflow = trusted_pr(
+            repo, number, prefix, workflow_path)
+        current_run, current_artifact = select_artifact(
+            repo, number, current_sha, current_branch, current_workflow)
+        expected = (sha, branch, workflow_id, run["id"], artifact["id"], artifact["digest"])
+        current = (current_sha, current_branch, current_workflow, current_run["id"],
+                   current_artifact["id"], current_artifact["digest"])
         if current != expected:
             raise IntakeError("pull request, workflow run, or artifact changed during intake")
         output.mkdir(mode=0o700)
@@ -293,17 +326,19 @@ def main():
     parser.add_argument("repository", help="GitHub owner/repository")
     parser.add_argument("pull_request", type=int)
     parser.add_argument("--prefix", required=True, help="trusted 2-4 letter repository prefix")
+    parser.add_argument("--workflow-path", required=True, help="trusted workflow file path")
     parser.add_argument("output", type=Path)
     args = parser.parse_args()
     if (not REPOSITORY.fullmatch(args.repository) or args.pull_request < 1
-            or not re.fullmatch(r"[a-z]{2,4}", args.prefix)):
-        parser.error("repository, pull-request number, or trusted prefix is invalid")
+            or not re.fullmatch(r"[a-z]{2,4}", args.prefix)
+            or not WORKFLOW_FILE.fullmatch(args.workflow_path)):
+        parser.error("repository, pull-request number, prefix, or workflow path is invalid")
     try:
         raw_output = args.output.expanduser()
         if raw_output.is_symlink():
             raise IntakeError("output must not be a symbolic link")
         output = raw_output.parent.resolve() / raw_output.name
-        pin = accept(args.repository, args.pull_request, args.prefix, output)
+        pin = accept(args.repository, args.pull_request, args.prefix, args.workflow_path, output)
     except (IntakeError, OSError, EOFError, RuntimeError, zipfile.BadZipFile,
             zipfile.LargeZipFile, zlib.error) as error:
         print(f"error: {error}", file=sys.stderr)
