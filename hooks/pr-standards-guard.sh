@@ -110,16 +110,21 @@ origin_repo() {
   # The trailing (\.git)? in a single sed pass never fires: greedy [^/]* already
   # consumes ".git" before the optional group gets a chance to match it, so a
   # remote with a .git suffix used to compare unequal to a --repo without one.
-  printf '%s' "${slug%.git}"
+  # GitHub owners are case-insensitive, so lowercase here too: this is compared
+  # directly against normalize_repo's output below.
+  printf '%s' "${slug%.git}" | tr '[:upper:]' '[:lower:]'
 }
 
 # gh accepts [HOST/]OWNER/REPO for --repo. Without stripping the host, a
 # host-qualified same-org target never matched the pooriaarab/* check below
-# and silently skipped validation entirely.
+# and silently skipped validation entirely. GitHub owner names are
+# case-insensitive, so a mixed-case --repo (PoOrIaArAb/target) must still
+# match the lowercase "pooriaarab/*" check downstream instead of silently
+# skipping validation.
 normalize_repo() {
   case "$1" in
-    */*/*) printf '%s' "${1#*/}" ;;
-    *) printf '%s' "$1" ;;
+    */*/*) printf '%s' "${1#*/}" | tr '[:upper:]' '[:lower:]' ;;
+    *) printf '%s' "$1" | tr '[:upper:]' '[:lower:]' ;;
   esac
 }
 

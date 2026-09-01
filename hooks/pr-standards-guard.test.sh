@@ -74,6 +74,8 @@ check 2 'does not exempt master on a cross-repo target' \
 check 2 'parses a glued short -R/-H option value'      'gh pr create -Rpooriaarab/target-standard -Hmy-cool-feature'
 check 2 'uses the last of a repeated --head, not the first' \
                                                         'gh pr create --repo pooriaarab/target-standard --head tar-12-good --head my-cool-feature'
+check 2 'blocks a mixed-case cross-repo owner, not skips it' \
+                                                        'gh pr create --repo PoOrIaArAb/target-standard --head my-cool-feature'
 
 [ "$fails" = 0 ] || { printf '\n%s failing\n' "$fails" >&2; exit 1; }
 printf '\nall passing\n'
