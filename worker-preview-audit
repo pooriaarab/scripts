@@ -89,13 +89,13 @@ def tracked_files(root):
 
 def resource_map(items, fields):
     return {str(item.get("binding") or item.get("name")): "|".join(str(item.get(field, "")) for field in fields)
-            for item in items if isinstance(item, dict) and (item.get("binding") or item.get("name"))}
+            for item in items if isinstance(item, dict) and (item.get("binding") or item.get("name"))} if isinstance(items, list) else {}
 
 
 def inspect_scope(label, scope, blockers, bindings, domains, enforce=True):
     issues = blockers if enforce else []
     previews = scope.get("previews", {}) if isinstance(scope.get("previews"), dict) else {}
-    missing_vars = set(scope.get("vars", {})) - set(previews.get("vars", {}))
+    missing_vars = set(scope.get("vars") if isinstance(scope.get("vars"), dict) else {}) - set(previews.get("vars") if isinstance(previews.get("vars"), dict) else {})
     if missing_vars: issues.append(f"{label}: Preview vars are missing: {', '.join(sorted(missing_vars))}")
     for key, fields in BINDINGS.items():
         if key not in scope: continue
@@ -133,7 +133,7 @@ def inspect_scope(label, scope, blockers, bindings, domains, enforce=True):
             issues.append(f"{label}: Queue producers share a production Queue")
     if isinstance(queues, dict) and queues.get("consumers"):
         issues.append(f"{label}: Queue consumers cannot receive Preview events")
-    if scope.get("triggers", {}).get("crons"):
+    if (scope.get("triggers") if isinstance(scope.get("triggers"), dict) else {}).get("crons"):
         issues.append(f"{label}: Cron Triggers cannot invoke Previews")
     custom_routes, enabled_domains = [], []
     for route in scope.get("routes", []) if isinstance(scope.get("routes"), list) else []:
@@ -155,8 +155,8 @@ def audit(root, repo):
     files = tracked_files(root)
     configs = sorted(path for path in files if re.fullmatch(r"wrangler(?:[._-][^.]+)*\.(?:toml|jsonc?|ya?ml)", path.name))
     workflows = [path for path in files if ".github/workflows" in path.as_posix()]
-    preview_workflows = [str(path.relative_to(root)) for path in workflows if re.search(r"wrangler[^\n]* preview", path.read_text(errors="ignore"))]
-    workflow_text = "\n".join((root / path).read_text(errors="ignore") for path in preview_workflows)
+    preview_workflows = [str(path.relative_to(root)) for path in workflows if re.search(r"wrangler[^\n]* preview", "\n".join(line for line in path.read_text(errors="ignore").splitlines() if not line.strip().startswith("#")))]
+    workflow_text = "\n".join("\n".join(line for line in (root / path).read_text(errors="ignore").splitlines() if not line.strip().startswith("#")) for path in preview_workflows)
     preview_envs = set(re.findall(r"--env[ =]+[\"']?([A-Za-z0-9_-]+)", workflow_text))
     blockers, bindings, domains, preview_scopes, configured_envs = [], [], [], [], set()
     if len(preview_workflows) > 1: blockers.append("multiple Worker Preview workflows need manual review")
@@ -169,6 +169,8 @@ def audit(root, repo):
             config = load_config(path)
         except Exception as error:
             blockers.append(f"{path.relative_to(root)}: cannot parse ({error})"); continue
+        if not isinstance(config, dict):
+            blockers.append(f"{path.relative_to(root)}: config root must be an object"); continue
         inspect_scope(str(path.relative_to(root)), config, blockers, bindings, domains, not preview_envs)
         if isinstance(config.get("previews"), dict): preview_scopes.append(str(path.relative_to(root)))
         envs = config.get("env", {})
@@ -266,16 +268,14 @@ def main():
     if args.path and args.repo: parser.error("pass one target")
     if not args.path and not args.repo: parser.error("pass a local path or --repo owner/name")
     with tempfile.TemporaryDirectory() as temp:
-        target = args.repo or str(args.path)
-        candidate = Path(target).expanduser()
-        if candidate.is_dir():
-            root = candidate.resolve()
-            repo = repo_name(root)
-        elif args.repo:
+        if args.repo:
             if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", args.repo): parser.error("invalid owner/name")
             result = command("gh", "repo", "clone", args.repo, temp, "--", "--depth=1")
             if result.returncode: print(result.stderr, file=sys.stderr); return 2
             root, repo = Path(temp), args.repo
+        elif Path(args.path).expanduser().is_dir():
+            root = Path(args.path).expanduser().resolve()
+            repo = repo_name(root)
         else:
             parser.error("local path is not a directory")
         report = audit(root, repo)
