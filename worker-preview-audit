@@ -82,7 +82,7 @@ def command(*args, cwd=None):
 
 def passes_credential(block, name, source):
     value = r'["\x27]?\$\{\{\s*' + source + r'\s*\}\}["\x27]?'
-    return re.search(rf"(?m)^[ \t]+{name}:\s*{value}\s*$", block) or re.search(rf"(?m){name}={value}[^\n]*wrangler[^\n]* preview", block)
+    return re.search(rf"(?m)^[ \t]+{name}:\s*{value}\s*$", block) or re.search(rf"(?m){name}={value}(?:\s+\S+=\S+)*\s+wrangler[^\n]* preview", block) or re.search(rf"(?m)export\s+{name}={value}[^\n]*wrangler[^\n]* preview", block)
 def github_names(repo, endpoint):
     if not repo:
         return None
