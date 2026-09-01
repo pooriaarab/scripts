@@ -43,18 +43,19 @@ while (( $# )); do
   esac
 done
 
-# A non-finite or non-positive ceiling is a loaded gun either way: NaN/inf makes every Box
-# compare as "under", so --execute silently stops nothing; zero or negative makes every Box
-# compare as "over", so --execute stops the whole fleet.
+# A non-finite ceiling is a loaded gun: NaN/inf makes every Box compare as "under", so
+# --execute silently stops nothing. A negative ceiling is nonsensical (no Box has negative
+# age). Zero is legitimate on purpose: it means "everything is over," and it stays safe
+# because --execute is still required to act on it (see the "How I verified" section).
 if ! MAX_AGE_HOURS="$MAX_AGE_HOURS" python3 -c '
 import os, sys
 try:
     v = float(os.environ["MAX_AGE_HOURS"])
 except ValueError:
     sys.exit(1)
-sys.exit(0 if 0 < v < float("inf") else 1)
+sys.exit(0 if 0 <= v < float("inf") else 1)
 '; then
-  echo "FATAL: --max-age-hours must be a positive, finite number, got '$MAX_AGE_HOURS'" >&2
+  echo "FATAL: --max-age-hours must be a non-negative, finite number, got '$MAX_AGE_HOURS'" >&2
   exit 2
 fi
 
