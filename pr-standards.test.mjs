@@ -858,6 +858,16 @@ test('proof: the body reader follows rendered Markdown fences', () => {
   const indented = body('    ```', url('ggg'), '    ```');
   assert.equal(failed(checkProof(indented, uiFiles, config)), false);
   assert.equal(warned(checkProof(indented, uiFiles, config)), true);
+
+  // A closer's indentation tolerance is always <=3 outside a list item, not
+  // <=3 beyond the opener's own indentation -- a 6-space line never closes a
+  // 3-space fence, so the hatch below it stays hidden inside it.
+  assert.equal(failed(checkProof(body('   ```', '      ```', hatch), uiFiles, config)), true);
+
+  // A backtick fence cannot carry a backtick in its info string; GitHub reads
+  // that line as plain text, never an opener, so an unrelated hatch below an
+  // info string like this is not swallowed by a fence that was never real.
+  assert.equal(failed(checkProof(body('```` `weird`', hatch), uiFiles, config)), false);
 });
 
 test('proof: the body reader keeps HTML comments separate from fences', () => {
@@ -873,6 +883,9 @@ test('proof: the body reader keeps HTML comments separate from fences', () => {
   assert.equal(failed(checkProof(body(`\\<!-- ${url('aaa')} ${url('bbb')} -->`), uiFiles, config)), false);
   // A fence marker inside a comment is comment text, not a real fence.
   assert.equal(failed(checkProof(body('<!-- example:', '```', '-->', url('ccc'), url('ddd')), uiFiles, config)), false);
+  // Backslashes escape in pairs -- two of them render as one literal
+  // backslash, leaving the marker live, so the comment still hides its URLs.
+  assert.equal(failed(checkProof(body(`\\\\<!-- ${url('eee')} ${url('fff')} -->`), uiFiles, config)), true);
 });
 
 test('the proof escape hatch does not read as a refusal to answer', () => {
