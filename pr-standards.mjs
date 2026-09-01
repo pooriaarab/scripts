@@ -405,13 +405,26 @@ function isQuoted(line) {
 }
 
 function fenceOpener(line) {
-  const match = /^( {0,3})((?:[-*+]|\d{1,9}[.)])[ \t]+)?(`{3,}|~{3,})/.exec(line);
+  const match = /^( {0,3})((?:[-*+]|\d{1,9}[.)])[ \t]+)?(`{3,}|~{3,})(.*)$/.exec(line);
   if (!match) return null;
-  return { char: match[3][0], len: match[3].length, indent: match[1].length + (match[2] || '').length };
+  // A backtick fence cannot carry a backtick in its info string -- GitHub
+  // reads that line as plain text, never a fence opener, to stay unambiguous
+  // with an inline code span.
+  if (match[3][0] === '`' && match[4].includes('`')) return null;
+  return {
+    char: match[3][0],
+    len: match[3].length,
+    indent: match[1].length + (match[2] || '').length,
+    hasMarker: Boolean(match[2]),
+  };
 }
 
 function fenceCloser(fence) {
-  return new RegExp(`^ {0,${fence.indent + 3}}[${fence.char}]{${fence.len},}[ \t]*$`);
+  // The closing fence's indentation tolerance is always <=3, except inside a
+  // list item, where it is relative to the item's own content column rather
+  // than the document root.
+  const cap = fence.hasMarker ? fence.indent + 3 : 3;
+  return new RegExp(`^ {0,${cap}}[${fence.char}]{${fence.len},}[ \t]*$`);
 }
 
 function hasCloser(lines, openIndex, fence, quoted) {
@@ -452,7 +465,11 @@ function visibleBody(body, { unmatchedFenceHides }) {
     while (true) {
       const openIndex = line.indexOf('<!--', cursor);
       if (openIndex === -1) break;
-      if (line[openIndex - 1] === '\\') {
+      // Backslashes escape in pairs -- `\\<!--` is one literal backslash
+      // followed by a live marker, so only an odd run escapes it.
+      let backslashes = 0;
+      while (line[openIndex - 1 - backslashes] === '\\') backslashes += 1;
+      if (backslashes % 2 === 1) {
         cursor = openIndex + 4;
         continue;
       }
