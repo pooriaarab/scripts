@@ -45,6 +45,7 @@ check() {
 }
 
 LIVE='{"postMergeVerify":{"url":"http://127.0.0.1:8731","shaPath":"/version","timeoutSeconds":3}}'
+LIVE_NO_LEADING_SLASH='{"postMergeVerify":{"url":"http://127.0.0.1:8731","shaPath":"version","timeoutSeconds":3}}'
 NO_SHA_PATH='{"postMergeVerify":{"url":"http://127.0.0.1:8731"}}'
 DEAD='{"postMergeVerify":{"url":"http://127.0.0.1:8732","timeoutSeconds":3}}'
 
@@ -52,6 +53,7 @@ check 0 'passes when the repo has no config'        none          "$SHA"
 check 0 'passes when the config has no verify key'  '{"prefix":"scr"}' "$SHA"
 check 0 'passes when the live SHA matches'          "$LIVE"       "$SHA"
 check 1 'fails when the live SHA never matches'     "$LIVE"       "2222222222222222222222222222222222222222"
+check 0 'joins a shaPath configured without its leading slash' "$LIVE_NO_LEADING_SLASH" "$SHA"
 check 0 'checks only the URL without a shaPath'     "$NO_SHA_PATH" "$SHA"
 check 1 'fails when the site does not answer'       "$DEAD"       "$SHA"
 check 1 'fails on malformed JSON instead of passing as absent' '{not json'   "$SHA"
