@@ -397,15 +397,103 @@ function hasCommandAndResult(text) {
 // or a real command output costs work, so proof is the part worth checking.
 // A user-attachments URL is the only proof that does not bloat the repo.
 //
-// Known gap: neither this nor hasValidProofNa strips fenced or inline code, so
-// a URL or `Proof: n/a` line quoted inside a code block -- for instance an
-// agent quoting the upload command's own example URL -- currently counts as
-// real proof. A fence-stripping fix was attempted and reverted twice for
-// breaking on a longer closing fence; it is tracked separately on
-// scr-64-hardening-wip rather than carried here at the risk of a third
-// regression.
+// A comment is not visible text, and neither is a fenced code block. A body
+// that documents this checker quotes its own escape hatch, and a quoted rule
+// must not satisfy the rule it quotes.
+function isQuoted(line) {
+  return /^(?:\s{0,3}>\s?)+/.test(line);
+}
+
+function fenceOpener(line) {
+  const match = /^( {0,3})((?:[-*+]|\d{1,9}[.)])[ \t]+)?(`{3,}|~{3,})/.exec(line);
+  if (!match) return null;
+  return { char: match[3][0], len: match[3].length, indent: match[1].length + (match[2] || '').length };
+}
+
+function fenceCloser(fence) {
+  return new RegExp(`^ {0,${fence.indent + 3}}[${fence.char}]{${fence.len},}[ \t]*$`);
+}
+
+function hasCloser(lines, openIndex, fence, quoted) {
+  const closer = fenceCloser(fence);
+  for (let index = openIndex + 1; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (quoted && !isQuoted(line)) return false;
+    if (closer.test(line.replace(/^(?:\s{0,3}>\s?)+/, ''))) return true;
+  }
+  return false;
+}
+
+function visibleBody(body, { unmatchedFenceHides }) {
+  const lines = String(body || '').replace(/\r\n/g, '\n').split('\n');
+  const visible = [];
+  let fence = null;
+  let inComment = false;
+  const unquoted = (line) => line.replace(/^(?:\s{0,3}>\s?)+/, '');
+
+  for (let [index, line] of lines.entries()) {
+    if (inComment) {
+      const close = line.indexOf('-->');
+      if (close === -1) continue;
+      line = line.slice(close + 3);
+      inComment = false;
+    }
+
+    if (fence) {
+      if (fence.quoted && !isQuoted(line)) {
+        fence = null;
+      } else {
+        if (fenceCloser(fence).test(unquoted(line))) fence = null;
+        continue;
+      }
+    }
+
+    let cursor = 0;
+    while (true) {
+      const openIndex = line.indexOf('<!--', cursor);
+      if (openIndex === -1) break;
+      if (line[openIndex - 1] === '\\') {
+        cursor = openIndex + 4;
+        continue;
+      }
+      const closeIndex = line.indexOf('-->', openIndex + 4);
+      if (closeIndex === -1) {
+        const prefix = line.slice(0, openIndex).replace(/^(?:\s{0,3}>\s?)+/, '');
+        if (prefix.trim() !== '') {
+          let closesInParagraph = false;
+          for (let ahead = index + 1; ahead < lines.length; ahead += 1) {
+            if (lines[ahead].trim() === '') break;
+            if (lines[ahead].includes('-->')) {
+              closesInParagraph = true;
+              break;
+            }
+          }
+          if (!closesInParagraph) break;
+        }
+        line = line.slice(0, openIndex);
+        inComment = true;
+        break;
+      }
+      line = line.slice(0, openIndex) + line.slice(closeIndex + 3);
+      cursor = openIndex;
+    }
+
+    const open = fenceOpener(unquoted(line));
+    if (open && (unmatchedFenceHides || hasCloser(lines, index, open, isQuoted(line)))) {
+      fence = { ...open, quoted: isQuoted(line) };
+      continue;
+    }
+    visible.push(line);
+  }
+  return visible.join('\n');
+}
+
+function verificationSection(body, { unmatchedFenceHides }) {
+  return sectionBody(visibleBody(body, { unmatchedFenceHides }), 'How I verified') || '';
+}
+
 function countUserAttachments(body) {
-  const visible = String(body || '').replace(/<!--[\s\S]*?-->/g, '');
+  const visible = verificationSection(body, { unmatchedFenceHides: false });
   const matches = visible.match(/https:\/\/github\.com\/user-attachments\/assets\/[^\s"'\)\]]+/g);
   if (!matches) return 0;
   // Distinct assets, not link count. The threshold asks for before AND after,
@@ -419,8 +507,7 @@ function countUserAttachments(body) {
 }
 
 function hasValidProofNa(body) {
-  const visible = String(body || '').replace(/<!--[\s\S]*?-->/g, '');
-  const lines = visible.split('\n');
+  const lines = verificationSection(body, { unmatchedFenceHides: true }).split('\n');
   for (const line of lines) {
     const match = PROOF_NA_LINE.exec(line);
     if (match && match[1].trim().length >= 20) return true;
@@ -510,9 +597,8 @@ export function checkProof(body, files, config = DEFAULT_CONFIG) {
   // cannot tell a real one from "n/a". Both live under ## How I verified per
   // the docs, so an attachment or hatch line pasted under ## What or ## Why
   // does not count: the evidence belongs where the reviewer is told to look.
-  const verifiedSection = sectionBody(body, 'How I verified') || '';
-  if (hasUiDiff(files || [], config) && !hasValidProofNa(verifiedSection)) {
-    const count = countUserAttachments(verifiedSection);
+  if (hasUiDiff(files || [], config) && !hasValidProofNa(body)) {
+    const count = countUserAttachments(body);
     if (count === 0) {
       failures.push(fail(
         'proof of a visible change',
