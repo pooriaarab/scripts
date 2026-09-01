@@ -45,11 +45,44 @@ class WorkerPreviewAuditTest(unittest.TestCase):
                   "previews": {"vars": {"MESSAGE": "preview"},
                                "d1_databases": [{"binding": "DB", "database_id": "preview"}]}}
         guard = "head.repo.full_name == github.repository && github.repository_owner"
-        workflow = f"concurrency:\n  group: worker-preview\n  cancel-in-progress: false\njobs:\n  preview:\n    if: {guard}\n    run: GITHUB_HEAD_REF; wrangler preview --config x --name \"$preview_name\"; curl x\n  cleanup:\n    if: {guard}\n    run: GITHUB_HEAD_REF; wrangler preview delete --config x --name \"$preview_name\""
+        env = 'CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}\n      CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}'
+        workflow = (
+            f"concurrency:\n  group: worker-preview\n  cancel-in-progress: false\njobs:\n"
+            f'  preview:\n    if: {guard} && github.event.action != \'closed\'\n    env:\n      {env}\n'
+            f'    run: GITHUB_HEAD_REF; wrangler preview --config x --name "$preview_name"; curl x\n'
+            f'  cleanup:\n    if: {guard} && github.event.action == \'closed\'\n    env:\n      {env}\n'
+            f'    run: GITHUB_HEAD_REF; wrangler preview delete --config x --name "$preview_name"'
+        )
         result, report = self.run_audit({"wrangler.preview.jsonc": "// safe\n" + json.dumps(config),
                                          "package.json": '{"devDependencies":{"wrangler":"4.127.1"}}',
                                          ".github/workflows/preview.yml": workflow})
         self.assertEqual(result.returncode, 0, report["blockers"])
+    def test_flags_deploy_and_cleanup_without_mutually_exclusive_pr_actions(self):
+        guard = "head.repo.full_name == github.repository && github.repository_owner"
+        workflow = (
+            f"cancel-in-progress: false\njobs:\n"
+            f'  preview:\n    if: {guard}\n    run: GITHUB_HEAD_REF; wrangler preview --config x --name "$preview_name"; curl x\n'
+            f'  cleanup:\n    if: {guard}\n    run: GITHUB_HEAD_REF; wrangler preview delete --config x --name "$preview_name"'
+        )
+        result, report = self.run_audit({"wrangler.jsonc": "{}",
+                                         "package.json": '{"devDependencies":{"wrangler":"4.127.1"}}',
+                                         ".github/workflows/preview.yml": workflow})
+        self.assertIn("deploy and cleanup need mutually exclusive PR action conditions", "\n".join(report["blockers"]))
+    def test_flags_missing_cloudflare_credential_passthrough(self):
+        guard = "head.repo.full_name == github.repository && github.repository_owner"
+        workflow = (
+            f"cancel-in-progress: false\njobs:\n"
+            f"  preview:\n    if: {guard} && github.event.action != 'closed'\n"
+            f'    run: GITHUB_HEAD_REF; wrangler preview --config x --name "$preview_name"; curl x\n'
+            f"  cleanup:\n    if: {guard} && github.event.action == 'closed'\n"
+            f'    run: GITHUB_HEAD_REF; wrangler preview delete --config x --name "$preview_name"'
+        )
+        result, report = self.run_audit({"wrangler.jsonc": "{}",
+                                         "package.json": '{"devDependencies":{"wrangler":"4.127.1"}}',
+                                         ".github/workflows/preview.yml": workflow})
+        joined = "\n".join(report["blockers"])
+        self.assertIn("deploy does not pass CLOUDFLARE_API_TOKEN to Wrangler", joined)
+        self.assertIn("cleanup does not pass CLOUDFLARE_ACCOUNT_ID to Wrangler", joined)
     def test_rejects_workflow_faking_serialization_in_a_run_step(self):
         guard = "head.repo.full_name == github.repository && github.repository_owner"
         workflow = (

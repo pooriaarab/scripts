@@ -254,6 +254,10 @@ def audit(root, repo):
                 deploy_scope, cleanup_scope = scope_pair
                 shared = {needle for needle in needles if needle in deploy_scope} & {needle for needle in needles if needle in cleanup_scope}
                 if not shared: blockers.append(f"deploy and cleanup need the same {message}")
+            deploy_action = re.search(r"action\s*(!=|==)\s*['\"]closed['\"]", deploy_if)
+            cleanup_action = re.search(r"action\s*(!=|==)\s*['\"]closed['\"]", cleanup_if)
+            if not (deploy_action and deploy_action.group(1) == "!=" and cleanup_action and cleanup_action.group(1) == "=="):
+                blockers.append("deploy and cleanup need mutually exclusive PR action conditions: deploy must exclude action == 'closed' and cleanup must require it")
             if "curl" not in deploy: blockers.append("workflow does not probe the live Preview")
             if "curl --location" in deploy: blockers.append("live verification follows redirects")
             if "tr '[:upper:]'" in deploy + cleanup or "cut -c1-63" in deploy + cleanup: blockers.append("workflow mutates the PR branch name")
@@ -261,6 +265,11 @@ def audit(root, repo):
                                         for match in re.finditer(r'--' + flag + r'[ =]+(?:"([^"]*)"|\'([^\']*)\'|(\$\{\{[^}]*\}\})|([^"\'\s\\]+))', text)}
             if args(deploy, "config") != args(cleanup, "config") or args(deploy, "env") != args(cleanup, "env"):
                 blockers.append("deploy and cleanup use different Wrangler config or environment")
+            for job_name, block in (("deploy", deploy), ("cleanup", cleanup)):
+                if not re.search(r"secrets\.CLOUDFLARE_API_TOKEN\b", block):
+                    blockers.append(f"{job_name} does not pass CLOUDFLARE_API_TOKEN to Wrangler")
+                if not re.search(r"(?:secrets|vars)\.CLOUDFLARE_ACCOUNT_ID\b", block):
+                    blockers.append(f"{job_name} does not pass CLOUDFLARE_ACCOUNT_ID to Wrangler")
         concurrency = re.search(r"(?ms)^concurrency:[ \t]*\n((?:[ \t]+.*\n?)*)", workflow_text)
         concurrency_body = concurrency.group(1) if concurrency else ""
         if "cancel-in-progress: false" not in concurrency_body or not re.search(r"(?m)^\s*group:\s*\S", concurrency_body):
