@@ -1082,10 +1082,18 @@ export function checkBaseBranchAge(compare, baseChanges, pullFiles, config = DEF
 
 async function checkRemoteBaseBranchAge(repo, pull, pullFiles, config) {
   const base = pull.base?.ref;
-  const head = pull.head?.ref;
-  if (!base || !head) throw new ApiError('GitHub returned a pull request without base or head refs');
-  const compare = await apiRequest(`compare/${encodeURIComponent(base)}...${encodeURIComponent(head)}`, repo);
-  if (compare?.behind_by <= config.maxBaseCommitsBehind) return { failures: [], warnings: [] };
+  // The head ref name only resolves inside the base repo's own branches. A
+  // fork PR's branch lives in the fork, so comparing by name here either
+  // 404s or, worse, silently matches an unrelated same-named branch in the
+  // base repo. The head SHA is unambiguous and GitHub mirrors it into the
+  // base repo's object database via the pull request's refs.
+  const headSha = pull.head?.sha;
+  if (!base || !headSha) throw new ApiError('GitHub returned a pull request without base or head refs');
+  const compare = await apiRequest(`compare/${encodeURIComponent(base)}...${encodeURIComponent(headSha)}`, repo);
+  const behind = compare?.behind_by;
+  if (Number.isInteger(behind) && behind >= 0 && behind <= config.maxBaseCommitsBehind) {
+    return { failures: [], warnings: [] };
+  }
   const mergeBase = compare?.merge_base_commit?.sha;
   if (typeof mergeBase !== 'string' || !mergeBase) throw new ApiError('GitHub returned no merge base for the branch comparison');
   const baseChanges = await apiRequest(`compare/${encodeURIComponent(mergeBase)}...${encodeURIComponent(base)}`, repo);

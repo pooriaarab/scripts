@@ -361,7 +361,7 @@ test('issues/{n} returning an object with a pull_request field fails', async () 
       return { ok: true, json: async () => ({ behind_by: 0, merge_base_commit: { sha: '1234567' } }) };
     }
     if (url.includes('pulls/12')) {
-      return { ok: true, json: async () => ({ head: { ref: 'cr-12-test' }, base: { ref: 'main' }, title: '[CR-12] Test PR', body: validBody.replace('142', '12').replace('142', '12').replace('142', '12') }) };
+      return { ok: true, json: async () => ({ head: { ref: 'cr-12-test', sha: 'deadbee' }, base: { ref: 'main' }, title: '[CR-12] Test PR', body: validBody.replace('142', '12').replace('142', '12').replace('142', '12') }) };
     }
     if (url.includes('issues/12')) {
       return { ok: true, json: async () => ({ state: 'open', pull_request: {} }) };
@@ -412,7 +412,7 @@ test('an exempt branch skips proof of work along with title and body', async () 
       return { ok: true, json: async () => ({ behind_by: 0, merge_base_commit: { sha: '1234567' } }) };
     }
     if (url.includes('pulls/13')) {
-      return { ok: true, json: async () => ({ head: { ref: 'refactor' }, base: { ref: 'main' }, title: 'Move things around', body: 'no structured body at all' }) };
+      return { ok: true, json: async () => ({ head: { ref: 'refactor', sha: 'deadbee' }, base: { ref: 'main' }, title: 'Move things around', body: 'no structured body at all' }) };
     }
     throw new Error(`Unexpected fetch URL: ${url}`);
   };
@@ -456,7 +456,7 @@ test('config resolution prefers the target repo over the local checkout', async 
       return { ok: true, json: async () => ({ behind_by: 0, merge_base_commit: { sha: '1234567' } }) };
     }
     if (url.includes('pulls/12')) {
-      return { ok: true, json: async () => ({ head: { ref: 'rmt-12-test' }, base: { ref: 'main' }, title: '[RMT-12] Test PR that works', body: validBody.replace('142', '12').replace('142', '12').replace('142', '12') }) };
+      return { ok: true, json: async () => ({ head: { ref: 'rmt-12-test', sha: 'deadbee' }, base: { ref: 'main' }, title: '[RMT-12] Test PR that works', body: validBody.replace('142', '12').replace('142', '12').replace('142', '12') }) };
     }
     if (url.includes('issues/12')) {
       return { ok: true, json: async () => ({ state: 'open' }) };
@@ -470,6 +470,109 @@ test('config resolution prefers the target repo over the local checkout', async 
     const result = JSON.parse(output);
     assert.equal(result.prefix, 'rmt');
     assert.equal(result.provenance, 'from test/repo .github/pr-standards.json @ main');
+  } finally {
+    process.stdout.write = originalWrite;
+    process.env.PATH = originalPath;
+    process.env.GITHUB_TOKEN = originalToken;
+    globalThis.fetch = originalFetch;
+    delete process.env.GITHUB_REPOSITORY;
+  }
+});
+
+test('compares a fork PR by head sha, not by a head branch name the base repo may not have', async () => {
+  const originalWrite = process.stdout.write;
+  const originalPath = process.env.PATH;
+  const originalToken = process.env.GITHUB_TOKEN;
+  const originalFetch = globalThis.fetch;
+  let output = '';
+  process.stdout.write = (chunk) => { output += chunk; return true; };
+  process.env.PATH = '';
+  process.env.GITHUB_TOKEN = 'test-token';
+  process.env.GITHUB_REPOSITORY = 'other/repo';
+
+  globalThis.fetch = async (url) => {
+    if (url.includes('contents/.github/pr-standards.json')) {
+      return { ok: true, json: async () => ({ content: Buffer.from(JSON.stringify({ prefix: 'cr' })).toString('base64'), encoding: 'base64' }) };
+    }
+    if (url.includes('pulls/12/commits')) {
+      return { ok: true, json: async () => ([{ sha: 'abc1234', commit: { message: 'Fix the thing' } }]) };
+    }
+    if (url.includes('pulls/12/files')) {
+      return { ok: true, json: async () => ([]) };
+    }
+    // A fork PR's head sha does not exist as a branch name in the base repo.
+    // Only a compare keyed on the sha can succeed here; one keyed on the
+    // ref would 404 or match an unrelated same-named branch in the base repo.
+    if (url.includes('/compare/main...forksha123')) {
+      return { ok: true, json: async () => ({ behind_by: 0, merge_base_commit: { sha: '1234567' } }) };
+    }
+    if (url.includes('pulls/12')) {
+      return { ok: true, json: async () => ({ head: { ref: 'cr-12-test', sha: 'forksha123' }, base: { ref: 'main' }, title: '[CR-12] Test PR', body: validBody.replace('142', '12').replace('142', '12').replace('142', '12') }) };
+    }
+    if (url.includes('issues/12')) {
+      return { ok: true, json: async () => ({ state: 'open' }) };
+    }
+    throw new Error(`Unexpected fetch URL: ${url}`);
+  };
+
+  try {
+    const exitCode = await main(['pr', '--repo', 'test/repo', '--number', '12', '--json']);
+    assert.equal(exitCode, 0);
+  } finally {
+    process.stdout.write = originalWrite;
+    process.env.PATH = originalPath;
+    process.env.GITHUB_TOKEN = originalToken;
+    globalThis.fetch = originalFetch;
+    delete process.env.GITHUB_REPOSITORY;
+  }
+});
+
+test('a malformed behind_by does not silently skip the branch-age check', async () => {
+  const originalWrite = process.stdout.write;
+  const originalPath = process.env.PATH;
+  const originalToken = process.env.GITHUB_TOKEN;
+  const originalFetch = globalThis.fetch;
+  let output = '';
+  process.stdout.write = (chunk) => { output += chunk; return true; };
+  process.env.PATH = '';
+  process.env.GITHUB_TOKEN = 'test-token';
+  process.env.GITHUB_REPOSITORY = 'other/repo';
+
+  globalThis.fetch = async (url) => {
+    if (url.includes('contents/.github/pr-standards.json')) {
+      return { ok: true, json: async () => ({ content: Buffer.from(JSON.stringify({ prefix: 'cr' })).toString('base64'), encoding: 'base64' }) };
+    }
+    if (url.includes('pulls/12/commits')) {
+      return { ok: true, json: async () => ([{ sha: 'abc1234', commit: { message: 'Fix the thing' } }]) };
+    }
+    if (url.includes('pulls/12/files')) {
+      return { ok: true, json: async () => ([]) };
+    }
+    // -1 is not a value GitHub should ever send, but a naive `behind_by <=
+    // threshold` early return would treat it as "up to date" and skip the
+    // check entirely instead of surfacing the bad data.
+    if (url.includes('/compare/main...deadbee')) {
+      return { ok: true, json: async () => ({ behind_by: -1, merge_base_commit: { sha: '1234567' } }) };
+    }
+    // Reached only if the malformed behind_by above is mistakenly treated
+    // as "in range" and never re-validated.
+    if (url.includes('/compare/1234567...main')) {
+      return { ok: true, json: async () => ({ commits: [], files: [] }) };
+    }
+    if (url.includes('pulls/12')) {
+      return { ok: true, json: async () => ({ head: { ref: 'cr-12-test', sha: 'deadbee' }, base: { ref: 'main' }, title: '[CR-12] Test PR', body: validBody.replace('142', '12').replace('142', '12').replace('142', '12') }) };
+    }
+    if (url.includes('issues/12')) {
+      return { ok: true, json: async () => ({ state: 'open' }) };
+    }
+    throw new Error(`Unexpected fetch URL: ${url}`);
+  };
+
+  try {
+    const exitCode = await main(['pr', '--repo', 'test/repo', '--number', '12', '--json']);
+    assert.equal(exitCode, 1);
+    const result = JSON.parse(output);
+    assert.equal(result.failures.some((f) => /invalid branch comparison/.test(f.got)), true);
   } finally {
     process.stdout.write = originalWrite;
     process.env.PATH = originalPath;
@@ -1086,7 +1189,7 @@ test('prefix precedence holds on the CI path, not only in loadConfig', async () 
       if (url.includes('/files')) return { ok: true, json: async () => ([]) };
       if (url.includes('/compare/')) return { ok: true, json: async () => ({ behind_by: 0, merge_base_commit: { sha: '1234567' } }) };
       if (url.match(/pulls\/\d+$/)) {
-        return { ok: true, json: async () => ({ head: { ref: branch }, base: { ref: 'main' }, title: 'x', body: 'x', labels: [] }) };
+        return { ok: true, json: async () => ({ head: { ref: branch, sha: 'deadbee' }, base: { ref: 'main' }, title: 'x', body: 'x', labels: [] }) };
       }
       if (url.includes('issues/')) return { ok: true, json: async () => ({ state: 'open' }) };
       throw new Error(`Unexpected fetch URL: ${url}`);
