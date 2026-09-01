@@ -462,6 +462,13 @@ Write "Explicitly not this" last, and write it from requests you have already
 turned down. Every other section tells a reviewer what to accept. Only that one
 tells it what to reject, and a vision that rejects nothing changes no review.
 
+The council must actually read it. Every code repo's `vibecodereview.yml` skips
+markdown, for a good reason — a README typo does not need a five-model council —
+and that skip covered `VISION.md` too. So the one file the council consults to
+judge every other pull request was the one file it never reviewed, and a docs-only
+vision could never be approved. Re-include it: `paths-ignore: ["**.md", "docs/**",
+"!VISION.md"]`.
+
 Two failures to avoid:
 
 - **A template left as prompts.** The council judges against whatever text is
