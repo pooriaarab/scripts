@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 """Read-only readiness audit for Cloudflare Worker Previews."""
-
 import argparse
 import json
 import re
@@ -9,7 +8,6 @@ import sys
 import tempfile
 import tomllib
 from pathlib import Path
-
 BINDINGS = {
     "kv_namespaces": ("id",), "d1_databases": ("database_id",),
     "r2_buckets": ("bucket_name",), "vectorize": ("index_name",),
@@ -21,13 +19,10 @@ BINDINGS = {
     "services": ("service",), "send_email": ("destination_address", "allowed_destination_addresses"),
 }
 MARKER = re.compile(r"(?:PREVIEW|E2E|TEST)_(?:USER|EMAIL|PASSWORD|TOKEN|SECRET|AUTH)[A-Z0-9_]*")
-
-
 def normalize(value):
     if len(value) > 63 or not re.fullmatch(r"[a-z]{2,4}-[1-9][0-9]*-[a-z0-9]+(?:-[a-z0-9]+)*", value):
         raise ValueError("name must be an unchanged PR-standard branch of at most 63 characters")
     return value
-
 
 def strip_comments(text):
     out, quoted, escaped, i = [], False, False, 0
@@ -55,8 +50,6 @@ def strip_comments(text):
             out.append(char)
         i += 1
     return "".join(out)
-
-
 def strip_trailing_commas(text):
     out, quoted, escaped, i = [], False, False, 0
     while i < len(text):
@@ -76,23 +69,20 @@ def strip_trailing_commas(text):
         i += 1
     return "".join(out)
 
-
 def jsonc(text):
     return json.loads(strip_trailing_commas(strip_comments(text)))
-
-
 def load_config(path):
     text = path.read_text()
     return tomllib.loads(text) if path.suffix == ".toml" else jsonc(text)
-
-
 def command(*args, cwd=None):
     try:
         return subprocess.run(args, cwd=cwd, text=True, capture_output=True)
     except OSError as error:
         return subprocess.CompletedProcess(args, 127, "", str(error))
 
-
+def passes_credential(block, name, source):
+    value = r'["\x27]?\$\{\{\s*' + source + r'\s*\}\}["\x27]?'
+    return re.search(rf"(?m)^[ \t]+{name}:\s*{value}\s*$", block) or re.search(rf"(?m){name}={value}[^\n]*wrangler[^\n]* preview", block)
 def github_names(repo, endpoint):
     if not repo:
         return None
@@ -100,12 +90,10 @@ def github_names(repo, endpoint):
                      "--jq", f'.{endpoint}[].name')
     return set(result.stdout.split()) if result.returncode == 0 else None
 
-
 def repo_name(root):
     result = command("git", "remote", "get-url", "origin", cwd=root)
     match = re.search(r"github\.com[/:]([^/]+/[^/]+?)(?:\.git)?$", result.stdout.strip())
     return match.group(1) if match else None
-
 
 def tracked_files(root):
     result = command("git", "ls-files", "--cached", "--others", "--exclude-standard", "-z", cwd=root)
@@ -113,11 +101,9 @@ def tracked_files(root):
         return [root / name for name in result.stdout.split("\0") if name and (root / name).is_file() and not (root / name).is_symlink()]
     return [path for path in root.rglob("*") if path.is_file() and ".git" not in path.parts]
 
-
 def resource_map(items, fields):
     return {str(item.get("binding") or item.get("name")): "|".join(str(item.get(field, "")) for field in fields)
             for item in items if isinstance(item, dict) and (item.get("binding") or item.get("name"))} if isinstance(items, list) else {}
-
 
 def inspect_scope(label, scope, blockers, bindings, domains, enforce=True):
     issues = blockers if enforce else []
@@ -184,7 +170,6 @@ def inspect_scope(label, scope, blockers, bindings, domains, enforce=True):
     if scope.get("preview_urls") is False and not enabled_domains:
         issues.append(f"{label}: workers.dev Preview URLs are disabled without a custom Preview domain")
 
-
 def audit(root, repo):
     files = tracked_files(root)
     configs = sorted(path for path in files if re.fullmatch(r"wrangler(?:[._-][^.]+)*\.(?:toml|jsonc?|ya?ml)", path.name))
@@ -245,8 +230,8 @@ def audit(root, repo):
         if len(deploys) != 1 or len(cleanups) != 1: blockers.append("workflow needs one Preview deploy job and one cleanup job")
         else:
             deploy, cleanup = deploys[0], cleanups[0]
-            deploy_if = "\n".join(re.findall(r"(?m)^\s*if:\s*(.*)$", deploy))
-            cleanup_if = "\n".join(re.findall(r"(?m)^\s*if:\s*(.*)$", cleanup))
+            deploy_if = "\n".join(re.findall(r"(?m)^ {4}if:\s*(.*)$", deploy))
+            cleanup_if = "\n".join(re.findall(r"(?m)^ {4}if:\s*(.*)$", cleanup))
             for needles, message, scope_pair in [(("head.repo.full_name == github.repository",), "fork guard", (deploy_if, cleanup_if)),
                                                   (("github.repository_owner",), "owner guard", (deploy_if, cleanup_if)),
                                                   (("GITHUB_HEAD_REF", "pull_request.head.ref"), "PR branch source", (deploy, cleanup)),
@@ -258,17 +243,19 @@ def audit(root, repo):
             cleanup_action = re.search(r"action\s*(!=|==)\s*['\"]closed['\"]", cleanup_if)
             if not (deploy_action and deploy_action.group(1) == "!=" and cleanup_action and cleanup_action.group(1) == "=="):
                 blockers.append("deploy and cleanup need mutually exclusive PR action conditions: deploy must exclude action == 'closed' and cleanup must require it")
-            if "curl" not in deploy: blockers.append("workflow does not probe the live Preview")
+            if not re.search(r"(?m)^[ \t]+(?:run:\s*)?(?:[A-Za-z_][A-Za-z0-9_]*_)?curl(?:\s|$)", deploy): blockers.append("workflow does not probe the live Preview")
             if "curl --location" in deploy: blockers.append("live verification follows redirects")
             if "tr '[:upper:]'" in deploy + cleanup or "cut -c1-63" in deploy + cleanup: blockers.append("workflow mutates the PR branch name")
             args = lambda text, flag: {match.group(1) or match.group(2) or match.group(3) or match.group(4)
                                         for match in re.finditer(r'--' + flag + r'[ =]+(?:"([^"]*)"|\'([^\']*)\'|(\$\{\{[^}]*\}\})|([^"\'\s\\]+))', text)}
             if args(deploy, "config") != args(cleanup, "config") or args(deploy, "env") != args(cleanup, "env"):
                 blockers.append("deploy and cleanup use different Wrangler config or environment")
+            if any("$" in value for value in args(deploy + cleanup, "env")):
+                blockers.append("dynamic Wrangler environments need manual Preview verification")
             for job_name, block in (("deploy", deploy), ("cleanup", cleanup)):
-                if not re.search(r"secrets\.CLOUDFLARE_API_TOKEN\b", block):
+                if not passes_credential(block, "CLOUDFLARE_API_TOKEN", r"secrets\.CLOUDFLARE_API_TOKEN"):
                     blockers.append(f"{job_name} does not pass CLOUDFLARE_API_TOKEN to Wrangler")
-                if not re.search(r"(?:secrets|vars)\.CLOUDFLARE_ACCOUNT_ID\b", block):
+                if not passes_credential(block, "CLOUDFLARE_ACCOUNT_ID", r"(?:secrets|vars)\.CLOUDFLARE_ACCOUNT_ID"):
                     blockers.append(f"{job_name} does not pass CLOUDFLARE_ACCOUNT_ID to Wrangler")
         concurrency = re.search(r"(?ms)^concurrency:[ \t]*\n((?:[ \t]+.*\n?)*)", workflow_text)
         concurrency_body = concurrency.group(1) if concurrency else ""
@@ -313,7 +300,6 @@ def audit(root, repo):
             "github_account_secret": "present" if account_secret else "missing" if secrets is not None else "unknown",
             "test_user_markers": sorted(markers), "marker_files": sorted(set(marker_files)), "blockers": sorted(set(blockers))}
 
-
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("path", nargs="?", type=Path)
@@ -343,7 +329,6 @@ def main():
             for key, value in report.items():
                 print(f"{key}: {', '.join(map(str, value)) if isinstance(value, list) and value else value or 'none'}")
         return 1 if report["blockers"] else 0
-
 
 if __name__ == "__main__":
     raise SystemExit(main())

@@ -5,6 +5,18 @@ import unittest
 from pathlib import Path
 
 AUDIT = Path(__file__).parent / "worker-preview-audit"
+GUARD = "head.repo.full_name == github.repository && github.repository_owner"
+PACKAGE = '{"devDependencies":{"wrangler":"4.127.1"}}'
+
+
+def workflow(deploy, cleanup, deploy_if=None, cleanup_if=None, concurrent=True):
+    prefix = "concurrency:\n  group: g\n  cancel-in-progress: false\n" if concurrent else ""
+    deploy_if = f"    if: {deploy_if}\n" if deploy_if else ""
+    cleanup_if = f"    if: {cleanup_if}\n" if cleanup_if else ""
+    return (f"{prefix}jobs:\n  preview:\n{deploy_if}    run: {deploy}\n"
+            f"  cleanup:\n{cleanup_if}    run: {cleanup}")
+
+
 class WorkerPreviewAuditTest(unittest.TestCase):
     def run_audit(self, files):
         with tempfile.TemporaryDirectory() as temp:
@@ -49,7 +61,7 @@ class WorkerPreviewAuditTest(unittest.TestCase):
         workflow = (
             f"concurrency:\n  group: worker-preview\n  cancel-in-progress: false\njobs:\n"
             f'  preview:\n    if: {guard} && github.event.action != \'closed\'\n    env:\n      {env}\n'
-            f'    run: GITHUB_HEAD_REF; wrangler preview --config x --name "$preview_name"; curl x\n'
+            f'    run: curl x; GITHUB_HEAD_REF; wrangler preview --config x --name "$preview_name"\n'
             f'  cleanup:\n    if: {guard} && github.event.action == \'closed\'\n    env:\n      {env}\n'
             f'    run: GITHUB_HEAD_REF; wrangler preview delete --config x --name "$preview_name"'
         )
@@ -58,52 +70,42 @@ class WorkerPreviewAuditTest(unittest.TestCase):
                                          ".github/workflows/preview.yml": workflow})
         self.assertEqual(result.returncode, 0, report["blockers"])
     def test_flags_deploy_and_cleanup_without_mutually_exclusive_pr_actions(self):
-        guard = "head.repo.full_name == github.repository && github.repository_owner"
-        workflow = (
-            f"cancel-in-progress: false\njobs:\n"
-            f'  preview:\n    if: {guard}\n    run: GITHUB_HEAD_REF; wrangler preview --config x --name "$preview_name"; curl x\n'
-            f'  cleanup:\n    if: {guard}\n    run: GITHUB_HEAD_REF; wrangler preview delete --config x --name "$preview_name"'
-        )
+        contents = workflow('GITHUB_HEAD_REF; wrangler preview --config x --name "$preview_name"; curl x',
+                            'GITHUB_HEAD_REF; wrangler preview delete --config x --name "$preview_name"',
+                            GUARD, GUARD)
         result, report = self.run_audit({"wrangler.jsonc": "{}",
-                                         "package.json": '{"devDependencies":{"wrangler":"4.127.1"}}',
-                                         ".github/workflows/preview.yml": workflow})
+                                         "package.json": PACKAGE,
+                                         ".github/workflows/preview.yml": contents})
         self.assertIn("deploy and cleanup need mutually exclusive PR action conditions", "\n".join(report["blockers"]))
     def test_flags_missing_cloudflare_credential_passthrough(self):
-        guard = "head.repo.full_name == github.repository && github.repository_owner"
-        workflow = (
-            f"cancel-in-progress: false\njobs:\n"
-            f"  preview:\n    if: {guard} && github.event.action != 'closed'\n"
-            f'    run: GITHUB_HEAD_REF; wrangler preview --config x --name "$preview_name"; curl x\n'
-            f"  cleanup:\n    if: {guard} && github.event.action == 'closed'\n"
-            f'    run: GITHUB_HEAD_REF; wrangler preview delete --config x --name "$preview_name"'
-        )
+        contents = workflow('echo secrets.CLOUDFLARE_API_TOKEN vars.CLOUDFLARE_ACCOUNT_ID; GITHUB_HEAD_REF; '
+                            'wrangler preview --config x --name "$preview_name"; curl x',
+                            'echo secrets.CLOUDFLARE_API_TOKEN vars.CLOUDFLARE_ACCOUNT_ID; GITHUB_HEAD_REF; '
+                            'wrangler preview delete --config x --name "$preview_name"',
+                            f"{GUARD} && github.event.action != 'closed'",
+                            f"{GUARD} && github.event.action == 'closed'")
         result, report = self.run_audit({"wrangler.jsonc": "{}",
-                                         "package.json": '{"devDependencies":{"wrangler":"4.127.1"}}',
-                                         ".github/workflows/preview.yml": workflow})
+                                         "package.json": PACKAGE,
+                                         ".github/workflows/preview.yml": contents})
         joined = "\n".join(report["blockers"])
         self.assertIn("deploy does not pass CLOUDFLARE_API_TOKEN to Wrangler", joined)
         self.assertIn("cleanup does not pass CLOUDFLARE_ACCOUNT_ID to Wrangler", joined)
     def test_rejects_workflow_faking_serialization_in_a_run_step(self):
-        guard = "head.repo.full_name == github.repository && github.repository_owner"
-        workflow = (
-            f"jobs:\n"
-            f'  preview:\n    if: {guard}\n    run: echo "cancel-in-progress: false"; GITHUB_HEAD_REF; wrangler preview --config x --name "$preview_name"; curl x\n'
-            f'  cleanup:\n    if: {guard}\n    run: GITHUB_HEAD_REF; wrangler preview delete --config x --name "$preview_name"'
-        )
+        contents = workflow('echo "cancel-in-progress: false"; GITHUB_HEAD_REF; wrangler preview --config x --name "$preview_name"; curl x',
+                            'GITHUB_HEAD_REF; wrangler preview delete --config x --name "$preview_name"',
+                            GUARD, GUARD, concurrent=False)
         result, report = self.run_audit({"wrangler.jsonc": "{}",
-                                         "package.json": '{"devDependencies":{"wrangler":"4.127.1"}}',
-                                         ".github/workflows/preview.yml": workflow})
+                                         "package.json": PACKAGE,
+                                         ".github/workflows/preview.yml": contents})
         self.assertIn("Preview lifecycle jobs are not serialized", "\n".join(report["blockers"]))
+        self.assertIn("workflow does not probe the live Preview", "\n".join(report["blockers"]))
     def test_flags_mismatched_deploy_and_cleanup_name_source(self):
-        guard = "head.repo.full_name == github.repository && github.repository_owner"
-        workflow = (
-            f"cancel-in-progress: false\njobs:\n"
-            f'  preview:\n    if: {guard}\n    run: GITHUB_HEAD_REF; wrangler preview --config x --name "$preview_name"; curl x\n'
-            f'  cleanup:\n    if: {guard}\n    run: pull_request.head.ref; wrangler preview delete --config x --name "$BRANCH_NAME"'
-        )
+        contents = workflow('GITHUB_HEAD_REF; wrangler preview --config x --name "$preview_name"; curl x',
+                            'pull_request.head.ref; wrangler preview delete --config x --name "$BRANCH_NAME"',
+                            GUARD, GUARD)
         result, report = self.run_audit({"wrangler.jsonc": "{}",
-                                         "package.json": '{"devDependencies":{"wrangler":"4.127.1"}}',
-                                         ".github/workflows/preview.yml": workflow})
+                                         "package.json": PACKAGE,
+                                         ".github/workflows/preview.yml": contents})
         joined = "\n".join(report["blockers"])
         self.assertIn("deploy and cleanup need the same PR branch source", joined)
         self.assertIn("deploy and cleanup need the same exact Preview name", joined)
@@ -130,35 +132,30 @@ class WorkerPreviewAuditTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertNotEqual(report["blockers"], [])
     def test_flags_mismatched_deploy_and_cleanup_env_expression(self):
-        guard = "head.repo.full_name == github.repository && github.repository_owner"
-        deploy = (f'  preview:\n    if: {guard}\n    run: GITHUB_HEAD_REF; wrangler preview --config x '
-                  '--env "${{ inputs.deploy_env }}" --name "$preview_name"; curl x\n')
-        cleanup = (f'  cleanup:\n    if: {guard}\n    run: GITHUB_HEAD_REF; wrangler preview delete --config x '
-                   '--env "${{ inputs.cleanup_env }}" --name "$preview_name"')
-        workflow = "cancel-in-progress: false\njobs:\n" + deploy + cleanup
+        contents = workflow('GITHUB_HEAD_REF; wrangler preview --config x --env "${{ inputs.deploy_env }}" '
+                            '--name "$preview_name"; curl x',
+                            'GITHUB_HEAD_REF; wrangler preview delete --config x --env "${{ inputs.deploy_env }}" '
+                            '--name "$preview_name"', GUARD, GUARD)
         result, report = self.run_audit({"wrangler.jsonc": "{}",
-                                         "package.json": '{"devDependencies":{"wrangler":"4.127.1"}}',
-                                         ".github/workflows/preview.yml": workflow})
-        self.assertIn("deploy and cleanup use different Wrangler config or environment", "\n".join(report["blockers"]))
+                                         "package.json": PACKAGE,
+                                         ".github/workflows/preview.yml": contents})
+        self.assertIn("dynamic Wrangler environments need manual Preview verification", "\n".join(report["blockers"]))
     def test_flags_mismatched_unquoted_env_expression(self):
-        guard = "head.repo.full_name == github.repository && github.repository_owner"
-        deploy = (f'  preview:\n    if: {guard}\n    run: GITHUB_HEAD_REF; wrangler preview --config x '
-                  '--env ${{ inputs.deploy_env }} --name "$preview_name"; curl x\n')
-        cleanup = (f'  cleanup:\n    if: {guard}\n    run: GITHUB_HEAD_REF; wrangler preview delete --config x '
-                   '--env ${{ inputs.cleanup_env }} --name "$preview_name"')
-        workflow = "concurrency:\n  group: g\n  cancel-in-progress: false\njobs:\n" + deploy + cleanup
+        contents = workflow('GITHUB_HEAD_REF; wrangler preview --config x --env ${{ inputs.deploy_env }} '
+                            '--name "$preview_name"; curl x',
+                            'GITHUB_HEAD_REF; wrangler preview delete --config x --env ${{ inputs.cleanup_env }} '
+                            '--name "$preview_name"', GUARD, GUARD)
         result, report = self.run_audit({"wrangler.jsonc": "{}",
-                                         "package.json": '{"devDependencies":{"wrangler":"4.127.1"}}',
-                                         ".github/workflows/preview.yml": workflow})
+                                         "package.json": PACKAGE,
+                                         ".github/workflows/preview.yml": contents})
         self.assertIn("deploy and cleanup use different Wrangler config or environment", "\n".join(report["blockers"]))
     def test_rejects_fork_guard_only_present_in_a_run_step(self):
-        deploy = ('  preview:\n    run: echo "head.repo.full_name == github.repository '
-                   'github.repository_owner"; GITHUB_HEAD_REF; wrangler preview --config x --name "$preview_name"; curl x\n')
-        cleanup = ('  cleanup:\n    run: GITHUB_HEAD_REF; wrangler preview delete --config x --name "$preview_name"')
-        workflow = "concurrency:\n  group: g\n  cancel-in-progress: false\njobs:\n" + deploy + cleanup
+        contents = workflow('echo "head.repo.full_name == github.repository github.repository_owner"; '
+                            'GITHUB_HEAD_REF; wrangler preview --config x --name "$preview_name"; curl x',
+                            'GITHUB_HEAD_REF; wrangler preview delete --config x --name "$preview_name"')
         result, report = self.run_audit({"wrangler.jsonc": "{}",
-                                         "package.json": '{"devDependencies":{"wrangler":"4.127.1"}}',
-                                         ".github/workflows/preview.yml": workflow})
+                                         "package.json": PACKAGE,
+                                         ".github/workflows/preview.yml": contents})
         joined = "\n".join(report["blockers"])
         self.assertIn("deploy and cleanup need the same fork guard", joined)
         self.assertIn("deploy and cleanup need the same owner guard", joined)
