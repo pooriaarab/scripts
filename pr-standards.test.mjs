@@ -1165,3 +1165,52 @@ test('prefix precedence holds on the CI path, not only in loadConfig', async () 
     delete process.env.GITHUB_REPOSITORY;
   }
 });
+
+test('drift requires exactly one marker pair, in order', () => {
+  // Two review rounds each found a new ordering the previous check missed,
+  // because every fix asked "is there another marker AFTER this one" and that
+  // can only see forward. The stray `end` before the real `start` is the case
+  // that slipped through twice. The rule is a property of the whole file, so
+  // these cases are one table rather than three patches.
+  const START = '<!-- pr-standards:start -->';
+  const END = '<!-- pr-standards:end -->';
+  const cases = [
+    ['a stray end before the real start', (block) => `${END}\n${block}`],
+    ['a stray start before the real start', (block) => `${START}\n${block}`],
+    ['a duplicate pair after the real one', (block) => `${block}\n${block}`],
+    ['a start with no end at all', () => `${START}\ncontent that never closes\n`],
+    ['an end with no start at all', () => `${END}\n`],
+    ['the pair inverted', (block) => `${END}\n${block.split(START)[1].split(END)[0]}\n${START}\n`],
+  ];
+
+  for (const [name, mangle] of cases) {
+    const root = driftFixture();
+    try {
+      const agentsPath = path.join(root, 'AGENTS.md');
+      fs.writeFileSync(agentsPath, mangle(readFileSync(agentsPath, 'utf8')));
+      const result = runDrift(root);
+      const failure = result.json.failures.find((item) => item.check === 'managed AGENTS.md block');
+      assert.equal(result.status, 1, `${name}: ${result.stdout}${result.stderr}`);
+      assert.equal(failure.got, 'malformed', name);
+      // A malformed block gets no diff. Diffing against a block whose extent
+      // cannot be determined would print noise and imply the extent was known.
+      assert.equal(Object.hasOwn(failure, 'diff'), false, name);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  }
+
+  // A file with no markers at all is missing, not malformed. The rollout has
+  // not run there, which is a different thing to answer.
+  const root = driftFixture();
+  try {
+    const agentsPath = path.join(root, 'AGENTS.md');
+    const stripped = readFileSync(agentsPath, 'utf8').split(START)[0];
+    fs.writeFileSync(agentsPath, stripped);
+    const result = runDrift(root);
+    const failure = result.json.failures.find((item) => item.check === 'managed AGENTS.md block');
+    assert.equal(failure.got, 'missing');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
