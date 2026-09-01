@@ -384,11 +384,18 @@ function hasCommandAndResult(text) {
   // The word boundary goes AFTER the command name, not before it. Without it
   // `bun` matched inside `Bundle`, so "Bundle was verified" satisfied both the
   // command and the result check while naming no command at all.
-  // `bunx` must come BEFORE `bun` in the alternation. Regex alternation is
-  // first-match, so `bun` wins on the string "bunx" and then `\b` fails against
-  // the following `x` -- which rejected every pull request whose only evidence
-  // was a `bunx` command, in repos where `bunx` is the default runner.
-  const command = lines.some((line) => /^(?:[$>`]\s*|\*\s*)?(?:bunx|bun|npm|pnpm|yarn|node|deno|cargo|go|pytest|make|git|gh|npx|\.\/)\b[^\n]*/i.test(line));
+  // Order in the alternation does NOT matter, despite what an earlier comment
+  // here claimed: a failed `\b` makes the engine backtrack and try the other
+  // branches, so `bun|bunx` matches "bunx" exactly as `bunx|bun` does. What
+  // fixed the `bunx` failure was adding the name, not moving it. The longer
+  // names are still written first, because that reads as intent.
+  //
+  // `python3` and `python` are here because the checker itself shells to
+  // `python3` and three of its test suites are `python3` scripts, yet the list
+  // named neither: a pull request whose evidence was a real `python3` run
+  // failed the rule, and the author met the regex by prefixing a pointless
+  // `node -e` to the command that had already run.
+  const command = lines.some((line) => /^(?:[$>`]\s*|\*\s*)?(?:bunx|bun|npm|pnpm|yarn|node|deno|cargo|go|pytest|python3|python|make|git|gh|npx|\.\/)\b[^\n]*/i.test(line));
   const result = /(?:->|\b(?:pass(?:ed)?|success(?:ful)?|clean|green|ok|verified|complete|no issues|exit(?:ed)?\s+0)\b|\d+\s+(?:tests?|checks?)\s+(?:pass|passed|successful))/i.test(text);
   return command && result;
 }
