@@ -112,7 +112,9 @@ def inspect_scope(label, scope, blockers, bindings, domains, enforce=True):
             production, preview = resource_map(scope[key], fields), resource_map(previews[key], fields)
             missing = set(production) - set(preview)
             if missing: issues.append(f"{label}: {key} Preview bindings are missing: {', '.join(sorted(missing))}")
-            if any(not value.strip("|") for value in preview.values()): issues.append(f"{label}: {key} has an incomplete Preview binding")
+            preview_items = previews[key] if isinstance(previews[key], list) else []
+            if any(isinstance(item, dict) and any(not item.get(field) for field in fields) for item in preview_items):
+                issues.append(f"{label}: {key} has an incomplete Preview binding")
             if set(preview.values()) & set(production.values()):
                 issues.append(f"{label}: {key} shares a production resource")
     durable_configs = scope.get("durable_objects", {}), previews.get("durable_objects", {})
@@ -211,7 +213,8 @@ def audit(root, repo):
         else:
             deploy, cleanup = deploys[0], cleanups[0]
             for needles, message in [(("head.repo.full_name == github.repository",), "fork guard"), (("github.repository_owner",), "owner guard"), (("GITHUB_HEAD_REF", "pull_request.head.ref"), "PR branch source"), (('--name "$preview_name"', '--name "$BRANCH_NAME"'), "exact Preview name")]:
-                if not any(needle in deploy for needle in needles) or not any(needle in cleanup for needle in needles): blockers.append(f"deploy and cleanup need the same {message}")
+                shared = {needle for needle in needles if needle in deploy} & {needle for needle in needles if needle in cleanup}
+                if not shared: blockers.append(f"deploy and cleanup need the same {message}")
             if "curl" not in deploy: blockers.append("workflow does not probe the live Preview")
             if "curl --location" in deploy: blockers.append("live verification follows redirects")
             if "tr '[:upper:]'" in deploy + cleanup or "cut -c1-63" in deploy + cleanup: blockers.append("workflow mutates the PR branch name")

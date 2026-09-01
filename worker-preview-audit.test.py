@@ -60,6 +60,27 @@ class WorkerPreviewAuditTest(unittest.TestCase):
                                          ".github/workflows/preview.yml": workflow})
         self.assertEqual(result.returncode, 0, report["blockers"])
 
+    def test_flags_mismatched_deploy_and_cleanup_name_source(self):
+        guard = "head.repo.full_name == github.repository && github.repository_owner"
+        workflow = (
+            f"cancel-in-progress: false\njobs:\n"
+            f'  preview:\n    if: {guard}\n    run: GITHUB_HEAD_REF; wrangler preview --config x --name "$preview_name"; curl x\n'
+            f'  cleanup:\n    if: {guard}\n    run: pull_request.head.ref; wrangler preview delete --config x --name "$BRANCH_NAME"'
+        )
+        result, report = self.run_audit({"wrangler.jsonc": "{}",
+                                         "package.json": '{"devDependencies":{"wrangler":"4.127.1"}}',
+                                         ".github/workflows/preview.yml": workflow})
+        joined = "\n".join(report["blockers"])
+        self.assertIn("deploy and cleanup need the same PR branch source", joined)
+        self.assertIn("deploy and cleanup need the same exact Preview name", joined)
+
+    def test_flags_incomplete_multi_field_preview_binding(self):
+        config = {"send_email": [{"binding": "EMAIL", "destination_address": "prod@example.com"}],
+                  "previews": {"send_email": [{"binding": "EMAIL", "destination_address": "preview@example.com"}]}}
+        result, report = self.run_audit({"wrangler.json": json.dumps(config),
+                                         "package.json": '{"devDependencies":{"wrangler":"4.127.1"}}'})
+        self.assertIn("send_email has an incomplete Preview binding", "\n".join(report["blockers"]))
+
 
 if __name__ == "__main__":
     unittest.main()
