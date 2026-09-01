@@ -368,6 +368,17 @@ test('drift leaves a repository without config unadopted', () => {
   }
 });
 
+test('drift prints a human-readable status for a repository without config', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'prs-no-drift-config-human-'));
+  try {
+    const result = spawnSync(process.execPath, [checkerPath, 'drift'], { cwd: root, encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    assert.match(result.stdout, /not adopted/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('drift reports a missing pull request template as missing', () => {
   const root = driftFixture();
   try {
