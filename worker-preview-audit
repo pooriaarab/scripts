@@ -63,7 +63,10 @@ def load_config(path):
 
 
 def command(*args, cwd=None):
-    return subprocess.run(args, cwd=cwd, text=True, capture_output=True)
+    try:
+        return subprocess.run(args, cwd=cwd, text=True, capture_output=True)
+    except OSError as error:
+        return subprocess.CompletedProcess(args, 127, "", str(error))
 
 
 def github_names(repo, endpoint):
@@ -129,7 +132,7 @@ def inspect_scope(label, scope, blockers, bindings, domains, enforce=True):
     if producers:
         bindings.append(f"{label}:queues.producers")
         if missing_producers := set(resource_map(producers, ("queue",))) - set(resource_map(preview_queues.get("producers", []), ("queue",))): issues.append(f"{label}: Queue Preview producers are missing: {', '.join(sorted(missing_producers))}")
-        elif set(resource_map(producers, ("queue",)).values()) & set(resource_map(preview_queues["producers"], ("queue",)).values()):
+        elif set(resource_map(producers, ("queue",)).values()) & set(resource_map(preview_queues.get("producers", []), ("queue",)).values()):
             issues.append(f"{label}: Queue producers share a production Queue")
     if isinstance(queues, dict) and queues.get("consumers"):
         issues.append(f"{label}: Queue consumers cannot receive Preview events")
@@ -188,11 +191,12 @@ def audit(root, repo):
         if path.name == "package.json":
             try:
                 package = json.loads(path.read_text())
-                version = package.get("devDependencies", {}).get("wrangler") or package.get("dependencies", {}).get("wrangler")
-                if version:
-                    packages.append(f"{path.relative_to(root)}={version}")
-                    package_versions[path.parent] = version
-            except (OSError, json.JSONDecodeError): pass
+            except (OSError, json.JSONDecodeError) as error:
+                blockers.append(f"{path.relative_to(root)}: cannot parse ({error})"); continue
+            version = package.get("devDependencies", {}).get("wrangler") or package.get("dependencies", {}).get("wrangler")
+            if version:
+                packages.append(f"{path.relative_to(root)}={version}")
+                package_versions[path.parent] = version
     if not configs: blockers.append("no Wrangler configuration")
     for config in configs:
         version = next((package_versions[parent] for parent in [config.parent, *config.parents]
