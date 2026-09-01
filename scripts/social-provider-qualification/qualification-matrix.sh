@@ -7,7 +7,7 @@ provider="${1:-}"
 
 if [[ -z "$provider" ]]; then
   echo "usage: $0 <provider>" >&2
-  echo "providers: x linkedin facebook instagram threads tiktok youtube pinterest bluesky mastodon reddit" >&2
+  echo "providers: bluesky devto discord dribbble facebook farcaster ghost googlebusiness hashnode imessage instagram kick lemmy linkedin listmonk mastodon medium mewe moltbook nostr pinterest reddit skool slack snapchat telegram threads tiktok tumblr twitch vk whatsapp whop wordpress x youtube" >&2
   exit 2
 fi
 
@@ -19,7 +19,7 @@ repo="$CONTENT_RABBIT_REPO"
 
 case "$provider" in
   x) provider="twitter" ;;
-  twitter|linkedin|facebook|instagram|threads|tiktok|youtube|pinterest|bluesky|mastodon|reddit) ;;
+  bluesky|devto|discord|dribbble|facebook|farcaster|ghost|googlebusiness|hashnode|imessage|instagram|kick|lemmy|linkedin|listmonk|mastodon|medium|mewe|moltbook|nostr|pinterest|reddit|skool|slack|snapchat|telegram|threads|tiktok|tumblr|twitch|twitter|vk|whatsapp|whop|wordpress|youtube) ;;
   *) echo "unsupported provider: $provider" >&2; exit 2 ;;
 esac
 
@@ -53,7 +53,14 @@ echo "Sync: paginate, deduplicate, retry, respect rate limits, and run on the pr
 echo
 
 echo "-- production secret names --"
-(cd "$repo" && bun run packages/cli/scripts/integrations/status.ts "$provider" --env production)
+case "$provider" in
+  twitter|facebook|instagram|threads|linkedin|tiktok|youtube|googlebusiness|pinterest|reddit|tumblr|vk|dribbble|snapchat|kick|twitch|whop|mastodon|discord|telegram|imessage)
+    (cd "$repo" && bun run packages/cli/scripts/integrations/status.ts "$provider" --env production)
+    ;;
+  *)
+    echo "NOT_IMPLEMENTED: production secret status is not implemented for ${provider}."
+    ;;
+esac
 echo
 
 test_args=("$test_file")
