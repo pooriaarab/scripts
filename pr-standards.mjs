@@ -66,6 +66,14 @@ export const DEFAULT_CONFIG = {
   bannedCommitTrailers: DEFAULT_BANNED_COMMIT_TRAILERS,
   exemptBranches: ['main', 'release', 'refactor', 'gh-pages'],
   excludeGlobs: DEFAULT_EXCLUDE_GLOBS,
+  requireProof: true,
+  uiGlobs: [
+    '**/*.tsx', '**/*.jsx', '**/*.vue', '**/*.svelte', '**/*.css', '**/*.scss',
+    '**/*.html', '**/components/**', '**/app/**/page.*', '**/pages/**',
+  ],
+  uiExcludeGlobs: [
+    '**/*.test.*', '**/*.spec.*', '**/__tests__/**', '**/*.stories.*',
+  ],
 };
 
 const ALWAYS_EXEMPT_BRANCHES = ['main', 'release', 'refactor', 'gh-pages'];
@@ -381,6 +389,145 @@ function hasCommandAndResult(text) {
   return command && result;
 }
 
+// Proof helpers — an agent can type "tested locally" for free; a screenshot
+// or a real command output costs work, so proof is the part worth checking.
+// A user-attachments URL is the only proof that does not bloat the repo.
+//
+// Known gap: neither this nor hasValidProofNa strips fenced or inline code, so
+// a URL or `Proof: n/a` line quoted inside a code block -- for instance an
+// agent quoting the upload command's own example URL -- currently counts as
+// real proof. A fence-stripping fix was attempted and reverted twice for
+// breaking on a longer closing fence; it is tracked separately on
+// scr-64-hardening-wip rather than carried here at the risk of a third
+// regression.
+function countUserAttachments(body) {
+  const visible = String(body || '').replace(/<!--[\s\S]*?-->/g, '');
+  const matches = visible.match(/https:\/\/github\.com\/user-attachments\/assets\/[^\s"'\)\]]+/g);
+  if (!matches) return 0;
+  // Distinct assets, not link count. The threshold asks for before AND after,
+  // so the same image pasted twice is one image and must not clear it -- and a
+  // query string or fragment on the same asset is still that asset. The match
+  // itself excludes `)`, `]`, quotes and whitespace, but not sentence
+  // punctuation, so a bare URL followed by a period or comma in prose keeps
+  // that character; strip it too or the same asset pasted once inside
+  // markdown and once in prose counts as two.
+  return new Set(matches.map((url) => url.split(/[?#]/)[0].replace(/[.,;:!?]+$/, ''))).size;
+}
+
+function hasValidProofNa(body) {
+  const visible = String(body || '').replace(/<!--[\s\S]*?-->/g, '');
+  const lines = visible.split('\n');
+  for (const line of lines) {
+    const match = PROOF_NA_LINE.exec(line);
+    if (match && match[1].trim().length >= 20) return true;
+  }
+  return false;
+}
+
+export function isUiFile(filename, config = DEFAULT_CONFIG) {
+  const uiGlobs = config.uiGlobs || [];
+  const uiExcludeGlobs = config.uiExcludeGlobs || [];
+  const matchesUi = uiGlobs.some((pattern) => matchesGlob(filename, pattern));
+  if (!matchesUi) return false;
+  const excluded = uiExcludeGlobs.some((pattern) => matchesGlob(filename, pattern));
+  return !excluded;
+}
+
+export function hasUiDiff(files, config = DEFAULT_CONFIG) {
+  if (!Array.isArray(files) || files.length === 0) return false;
+  // A rename that moves a UI file to a name the globs no longer match (an
+  // extension swap, or out of components/**) still ships whatever content
+  // change rode along with the rename. The pre-rename name is UI evidence
+  // GitHub already gives us on the same file object; checking only the new
+  // name would let a rename silently clear the proof requirement.
+  return files.some((file) => {
+    if (typeof file !== 'object' || file === null) return isUiFile(String(file || ''), config);
+    return isUiFile(String(file.filename || ''), config) || isUiFile(String(file.previous_filename || ''), config);
+  });
+}
+
+const PROOF_MEDIA_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'mp4', 'mov', 'webm']);
+const PROOF_MEDIA_GLOBS = [
+  'screenshot*/**',
+  '**/screenshots/**',
+  'proof*/**',
+  '**/*before*',
+  '**/*after*',
+  '**/*demo-recording*',
+];
+
+function isProofMediaPath(filename) {
+  const normalized = String(filename).replaceAll('\\', '/').replace(/^\.\//, '');
+  if (!normalized.includes('/')) return true;
+  return PROOF_MEDIA_GLOBS.some((pattern) => matchesGlob(normalized, pattern));
+}
+
+export function isCommittedProofMedia(file) {
+  const filename = String(file.filename || '');
+  if (!filename) return false;
+  // Only files ADDED by the diff are proof media committed by mistake. A
+  // modified or renamed media file could be a real product asset. When the
+  // caller does not provide a status (unit tests without GitHub payloads),
+  // treat it as added so the glob and extension rules remain testable.
+  if (Object.prototype.hasOwnProperty.call(file, 'status') && file.status !== 'added') return false;
+  const lower = filename.toLowerCase();
+  const dot = lower.lastIndexOf('.');
+  if (dot === -1) return false;
+  const ext = lower.slice(dot + 1);
+  if (!PROOF_MEDIA_EXTENSIONS.has(ext)) return false;
+  return isProofMediaPath(filename);
+}
+
+// Proof is one question — does this pull request show the work it did — so it
+// is one check, even though its evidence comes from three places: the body, the
+// files, and the labels. Splitting it across validateBody and checkSize made
+// each caller responsible for suppressing the other's half.
+export function checkProof(body, files, config = DEFAULT_CONFIG) {
+  const failures = [];
+  const warnings = [];
+  // No label clears this. #114 removed the size cap's override label because an
+  // agent can apply its own label, and that argument applies unchanged here --
+  // a proof requirement an agent can waive is not a requirement. The only
+  // escape is a stated reason in the body, which the review council judges.
+  if (config.requireProof === false) return { failures, warnings };
+
+  for (const file of files || []) {
+    if (!isCommittedProofMedia(file)) continue;
+    failures.push(fail(
+      'committed proof media',
+      String(file.filename || ''),
+      'proof media uploaded to GitHub user-attachments, not committed',
+      'Remove it from the commit and upload it to https://uploads.github.com/user-attachments/assets instead. A screenshot lives in the repo history forever; a link does not.',
+    ));
+  }
+
+  // A visual change reviewed only as code is reviewed only half. The escape
+  // hatch is a stated reason, which the review council judges — the checker
+  // cannot tell a real one from "n/a". Both live under ## How I verified per
+  // the docs, so an attachment or hatch line pasted under ## What or ## Why
+  // does not count: the evidence belongs where the reviewer is told to look.
+  const verifiedSection = sectionBody(body, 'How I verified') || '';
+  if (hasUiDiff(files || [], config) && !hasValidProofNa(verifiedSection)) {
+    const count = countUserAttachments(verifiedSection);
+    if (count === 0) {
+      failures.push(fail(
+        'proof of a visible change',
+        'no user-attachments URL in the body',
+        'before and after media, or `Proof: n/a — <reason>`',
+        'Capture the screen before and after, upload both to GitHub user-attachments, and embed them under "How I verified".',
+      ));
+    } else if (count === 1) {
+      warnings.push(fail(
+        'proof of a visible change',
+        'one user-attachments URL',
+        'before and after',
+        'One image shows the result, not the change. Add the other side.',
+      ));
+    }
+  }
+  return { failures, warnings };
+}
+
 export function validateBody(body, issueNumber, config = DEFAULT_CONFIG) {
   const source = String(body || '');
   const visibleSource = source.replace(/<!--[\s\S]*?-->/g, '');
@@ -627,6 +774,9 @@ export function validateConfig(config) {
   if (!Array.isArray(config.bannedCommitTrailers) || !config.bannedCommitTrailers.every((value) => typeof value === 'string' && value.length > 0 && value === value.trim())) throw new ConfigurationError('bannedCommitTrailers must be an array of non-empty strings with no leading or trailing whitespace');
   if (!Array.isArray(config.exemptBranches) || !config.exemptBranches.every((value) => typeof value === 'string')) throw new ConfigurationError('exemptBranches must be an array of strings');
   if (!Array.isArray(config.excludeGlobs) || !config.excludeGlobs.every((value) => typeof value === 'string')) throw new ConfigurationError('excludeGlobs must be an array of strings');
+  if (typeof config.requireProof !== 'boolean') throw new ConfigurationError('requireProof must be true or false');
+  if (!Array.isArray(config.uiGlobs) || !config.uiGlobs.every((value) => typeof value === 'string')) throw new ConfigurationError('uiGlobs must be an array of strings');
+  if (!Array.isArray(config.uiExcludeGlobs) || !config.uiExcludeGlobs.every((value) => typeof value === 'string')) throw new ConfigurationError('uiExcludeGlobs must be an array of strings');
   return config;
 }
 
@@ -1164,15 +1314,8 @@ async function runPr(options) {
       }
     }
   }
-  if (!branchResult.exempt) {
-    const titleResult = validateTitle(pull.title || '', config.prefix, branchResult.issueNumber);
-    failures.push(...titleResult.failures);
-    if (titleResult.ok) passes.push('PR title');
-    const bodyResult = validateBody(pull.body || '', branchResult.issueNumber, config);
-    failures.push(...bodyResult.failures);
-    if (bodyResult.ok) passes.push('PR body');
-  }
-
+  // Files are needed before the body check so proof can be verified against
+  // the actual diff. There is no proof override label -- see checkProof.
   const [commits, files] = await Promise.all([
     fetchPullCommits(options.repo, number),
     fetchPullFiles(options.repo, number),
@@ -1181,7 +1324,6 @@ async function runPr(options) {
   const commitResult = validateCommits(commits, config, commitsTruncated);
   failures.push(...commitResult.failures);
   if (commitResult.ok) passes.push(`${commits.length} commit messages`);
-
   // GitHub's pull-request files endpoint stops at 3000 entries and gives no
   // signal that it did. Comparing against the count the pull request itself
   // reports is the only way to notice, and a size check that silently measured
@@ -1207,6 +1349,26 @@ async function runPr(options) {
     ));
   }
   const summary = summarizeFiles(files, config);
+  if (!branchResult.exempt) {
+    const titleResult = validateTitle(pull.title || '', config.prefix, branchResult.issueNumber);
+    failures.push(...titleResult.failures);
+    if (titleResult.ok) passes.push('PR title');
+    const bodyResult = validateBody(pull.body || '', branchResult.issueNumber, config);
+    failures.push(...bodyResult.failures);
+    if (bodyResult.ok) passes.push('PR body');
+    // Same exemption as title and body: a branch exempt from the `## How I
+    // verified` convention (release, refactor, gh-pages, dependabot/*,
+    // renovate/*) has no reason to carry a section it was never asked to
+    // write, so proof of work rides with the checks it depends on.
+    const proofResult = checkProof(pull.body || '', files, config);
+    failures.push(...proofResult.failures);
+    warnings.push(...proofResult.warnings);
+    if (proofResult.failures.length === 0) passes.push('proof of work');
+  }
+  // Size keeps whatever shape main has. #114 removed the override label and
+  // #119 put it back while changing Box scripts, so the size escape is live
+  // again against a decision nobody revisited -- tracked separately. A proof
+  // pull request is the wrong place to take a side on it.
   const rawLabels = (pull.labels || []).map((label) => typeof label === 'string' ? label : label.name).filter(Boolean);
   const labels = await resolveOverrideLabels(options.repo, number, rawLabels, config, warnings);
   const sizeResult = checkSize(summary, config, labels);
