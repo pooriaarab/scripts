@@ -89,7 +89,22 @@ PY
 [ -n "$records" ] || exit 0
 
 origin_repo() {
-  git remote get-url origin 2>/dev/null | sed -n 's#.*github\.com[:/]\([^/]*\/[^/]*\)\(.git\)\?$#\1#p'
+  local slug
+  slug=$(git remote get-url origin 2>/dev/null | sed -n 's#.*github\.com[:/]\([^/]*\/[^/]*\)$#\1#p')
+  # The trailing (\.git)? in a single sed pass never fires: greedy [^/]* already
+  # consumes ".git" before the optional group gets a chance to match it, so a
+  # remote with a .git suffix used to compare unequal to a --repo without one.
+  printf '%s' "${slug%.git}"
+}
+
+# gh accepts [HOST/]OWNER/REPO for --repo. Without stripping the host, a
+# host-qualified same-org target never matched the pooriaarab/* check below
+# and silently skipped validation entirely.
+normalize_repo() {
+  case "$1" in
+    */*/*) printf '%s' "${1#*/}" ;;
+    *) printf '%s' "$1" ;;
+  esac
 }
 
 local_prefix() {
@@ -98,11 +113,19 @@ local_prefix() {
   python3 -c 'import json; print(json.load(open(".github/pr-standards.json")).get("prefix", ""))' 2>/dev/null
 }
 
+# GNU base64 decodes with -d; BSD/macOS base64 only accepts -D. Retrying from
+# the same captured string (rather than a live pipe) means the first attempt
+# failing can't leave the second reading an already-drained stdin.
+decode_base64() {
+  printf '%s' "$1" | base64 -d 2>/dev/null || printf '%s' "$1" | base64 -D 2>/dev/null
+}
+
 target_prefix() {
   command -v gh >/dev/null 2>&1 || return 1
-  gh api "repos/$1/contents/.github/pr-standards.json" --jq .content 2>/dev/null |
-    base64 --decode 2>/dev/null |
-    python3 -c 'import json,sys; print(json.load(sys.stdin).get("prefix", ""))' 2>/dev/null
+  local encoded content
+  encoded=$(gh api "repos/$1/contents/.github/pr-standards.json" --jq .content 2>/dev/null) || return 1
+  content=$(decode_base64 "$encoded") || return 1
+  RECORD="$content" python3 -c 'import json,os; print(json.loads(os.environ["RECORD"]).get("prefix", ""))' 2>/dev/null
 }
 
 inline_check() {
@@ -120,11 +143,15 @@ inline_check() {
 
 status=0
 while IFS= read -r encoded; do
-  record=$(printf %s "$encoded" | base64 --decode 2>/dev/null) || continue
+  record=$(decode_base64 "$encoded") || continue
   kind=$(RECORD="$record" python3 -c 'import json,os; print(json.loads(os.environ["RECORD"])["kind"])' 2>/dev/null) || continue
   branch=$(RECORD="$record" python3 -c 'import json,os; value=json.loads(os.environ["RECORD"]); print(value.get("branch") or value.get("head") or "")' 2>/dev/null) || continue
   repo=$(RECORD="$record" python3 -c 'import json,os; print(json.loads(os.environ["RECORD"]).get("repo") or "")' 2>/dev/null) || continue
   title=$(RECORD="$record" python3 -c 'import json,os; print(json.loads(os.environ["RECORD"]).get("title") or "")' 2>/dev/null) || continue
+  repo=$(normalize_repo "$repo")
+  # `owner:branch` names a fork-qualified head. Git ref names cannot contain
+  # ":", so stripping up to the first one is safe for plain branches too.
+  branch="${branch#*:}"
 
   if [ "$kind" = gh ] && [ -n "$repo" ]; then
     # A remote PR without --head has no safely knowable branch. Do not guess HEAD.

@@ -20,6 +20,9 @@ gh() {
     *' repos/pooriaarab/target-standard/contents/.github/pr-standards.json '*)
       printf '{"prefix":"tar"}' | base64
       ;;
+    *' repos/pooriaarab/scripts/contents/.github/pr-standards.json '*)
+      printf '{"prefix":"scr"}' | base64
+      ;;
     *) return 1 ;;
   esac
 }
@@ -62,6 +65,10 @@ check 2 'sees a branch created via git worktree add'   'git worktree add -b my-c
 check 0 'allows a conforming cross-repo PR head'       'gh pr create --repo pooriaarab/target-standard --head tar-12-do-one-thing'
 check 2 'blocks a bad cross-repo PR head'              'gh pr create --repo pooriaarab/target-standard --head my-cool-feature'
 check 0 'ignores a non-pooriaarab PR target'           'gh pr create --repo acme/work --head my-cool-feature'
+check 2 'blocks a host-qualified cross-repo PR head'   'gh pr create --repo github.com/pooriaarab/target-standard --head my-cool-feature'
+check 0 'strips the owner: fork qualifier from a head' 'gh pr create --repo pooriaarab/target-standard --head alice:tar-12-do-one-thing'
+check 2 'routes an explicit same-repo target through the real engine, not the master exemption' \
+                                                        'gh pr create --repo pooriaarab/scripts --head master'
 
 [ "$fails" = 0 ] || { printf '\n%s failing\n' "$fails" >&2; exit 1; }
 printf '\nall passing\n'
