@@ -1314,8 +1314,8 @@ async function runPr(options) {
       }
     }
   }
-  // Files and labels are needed before the body check so proof can be
-  // verified against the actual diff and the resolved proof override label.
+  // Files are needed before the body check so proof can be verified against
+  // the actual diff. There is no proof override label -- see checkProof.
   const [commits, files] = await Promise.all([
     fetchPullCommits(options.repo, number),
     fetchPullFiles(options.repo, number),
