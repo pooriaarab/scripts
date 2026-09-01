@@ -653,6 +653,23 @@ test('proof: a visible change needs before and after attachments', () => {
   assert.equal(hasUiDiff([{ filename: 'src/server/api.ts' }], config), false);
 });
 
+test('proof: a rename out of the UI globs still counts as a UI diff', () => {
+  // GitHub reports a rename as one file object with both names. Checking only
+  // the new name lets a rename that moves a UI file to a non-matching name
+  // (or extension) carry along a content change while silently clearing the
+  // proof requirement.
+  const renamed = [{
+    filename: 'src/archive/Home.txt',
+    previous_filename: 'src/pages/Home.tsx',
+    status: 'renamed',
+  }];
+  assert.equal(hasUiDiff(renamed, config), true);
+  assert.equal(checkProof(validBody, renamed, config).failures.some((f) => f.check === 'proof of a visible change'), true);
+
+  // A rename between two non-UI names is still not a UI diff.
+  assert.equal(hasUiDiff([{ filename: 'src/server/api2.ts', previous_filename: 'src/server/api.ts', status: 'renamed' }], config), false);
+});
+
 test('proof: media belongs in user-attachments, not in the commit', () => {
   const flagged = [
     'screenshots/home.png', 'screenshot-123/demo.png', 'a/b/screenshots/x.jpg',

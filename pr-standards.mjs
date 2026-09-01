@@ -435,7 +435,15 @@ export function isUiFile(filename, config = DEFAULT_CONFIG) {
 
 export function hasUiDiff(files, config = DEFAULT_CONFIG) {
   if (!Array.isArray(files) || files.length === 0) return false;
-  return files.some((file) => isUiFile(String(file.filename || file || ''), config));
+  // A rename that moves a UI file to a name the globs no longer match (an
+  // extension swap, or out of components/**) still ships whatever content
+  // change rode along with the rename. The pre-rename name is UI evidence
+  // GitHub already gives us on the same file object; checking only the new
+  // name would let a rename silently clear the proof requirement.
+  return files.some((file) => {
+    if (typeof file !== 'object' || file === null) return isUiFile(String(file || ''), config);
+    return isUiFile(String(file.filename || ''), config) || isUiFile(String(file.previous_filename || ''), config);
+  });
 }
 
 const PROOF_MEDIA_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'mp4', 'mov', 'webm']);
