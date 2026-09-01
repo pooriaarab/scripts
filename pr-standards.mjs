@@ -60,6 +60,7 @@ export const DEFAULT_CONFIG = {
   maxFiles: 40,
   maxTopLevelDirs: 3,
   minBodyChars: 120,
+  maxBaseCommitsBehind: 10,
   bannedCommitTrailers: DEFAULT_BANNED_COMMIT_TRAILERS,
   exemptBranches: ['main', 'release', 'refactor', 'gh-pages'],
   excludeGlobs: DEFAULT_EXCLUDE_GLOBS,
@@ -800,7 +801,7 @@ export function validateConfig(config) {
   if (!isValidPrefix(config.prefix)) throw new ConfigurationError('prefix must be 2-4 lowercase letters');
   if (typeof config.requireIssue !== 'boolean') throw new ConfigurationError('requireIssue must be true or false');
   if (typeof config.allowChoreEscape !== 'boolean') throw new ConfigurationError('allowChoreEscape must be true or false');
-  for (const field of ['maxLines', 'maxFiles', 'maxTopLevelDirs', 'minBodyChars']) {
+  for (const field of ['maxLines', 'maxFiles', 'maxTopLevelDirs', 'minBodyChars', 'maxBaseCommitsBehind']) {
     if (!Number.isInteger(config[field]) || config[field] < 0) throw new ConfigurationError(`${field} must be a non-negative integer`);
   }
   if (!Array.isArray(config.bannedCommitTrailers) || !config.bannedCommitTrailers.every((value) => typeof value === 'string' && value.length > 0 && value === value.trim())) throw new ConfigurationError('bannedCommitTrailers must be an array of non-empty strings with no leading or trailing whitespace');
@@ -1020,6 +1021,75 @@ async function fetchPullFiles(repo, number) {
     files.push(...pageFiles);
     if (pageFiles.length < 100) return files;
   }
+}
+
+function changedNames(files) {
+  return new Set(files.flatMap((file) => [file.filename, file.previous_filename]).filter(Boolean));
+}
+
+function commitNames(commits) {
+  return commits.map((commit) => {
+    const subject = String(commit.commit?.message || '(no commit message)').split('\n')[0];
+    return `${String(commit.sha || '').slice(0, 7)} ${subject}`;
+  });
+}
+
+// A stale branch with no shared files is useful review context, but rebasing it
+// on every busy repository adds work without reducing resurrection risk. When
+// a stale branch and the base both touch a file, however, a squash merge can
+// restore deleted code without a conflict. That case fails deliberately.
+export function checkBaseBranchAge(compare, baseChanges, pullFiles, config = DEFAULT_CONFIG) {
+  const behind = compare?.behind_by;
+  if (!Number.isInteger(behind) || behind < 0) {
+    throw new ApiError('GitHub returned an invalid branch comparison');
+  }
+  if (behind <= config.maxBaseCommitsBehind) return { failures: [], warnings: [] };
+
+  const mergeBase = compare.merge_base_commit?.sha;
+  if (typeof mergeBase !== 'string' || !mergeBase) {
+    throw new ApiError('GitHub returned no merge base for the branch comparison');
+  }
+  if (!Array.isArray(baseChanges?.commits) || !Array.isArray(baseChanges?.files)) {
+    throw new ApiError('GitHub returned an invalid base branch comparison');
+  }
+  const commits = commitNames(baseChanges.commits);
+  const names = commits.length ? commits.join('; ') : '(GitHub returned no commit names)';
+  const baseFiles = changedNames(baseChanges.files);
+  const overlaps = [...changedNames(pullFiles)].filter((name) => baseFiles.has(name));
+  const got = `${behind} commits behind since ${mergeBase.slice(0, 7)}: ${names}`;
+
+  if (overlaps.length) {
+    return {
+      failures: [fail(
+        'branch point overlaps base changes',
+        `${got}; overlapping files: ${overlaps.join(', ')}`,
+        'a branch rebased onto the base branch before merge',
+        'Rebase this branch, then review the overlapping changes again.',
+      )],
+      warnings: [],
+    };
+  }
+  return {
+    failures: [],
+    warnings: [fail(
+      'branch point is behind base',
+      got,
+      `${config.maxBaseCommitsBehind} base commits behind or fewer`,
+      'Rebase before merge if the listed base changes affect this work.',
+    )],
+  };
+}
+
+async function checkRemoteBaseBranchAge(repo, pull, pullFiles, config) {
+  const base = pull.base?.ref;
+  const head = pull.head?.ref;
+  if (!base || !head) throw new ApiError('GitHub returned a pull request without base or head refs');
+  const compare = await apiRequest(`compare/${encodeURIComponent(base)}...${encodeURIComponent(head)}`, repo);
+  if (compare?.behind_by <= config.maxBaseCommitsBehind) return { failures: [], warnings: [] };
+  const mergeBase = compare?.merge_base_commit?.sha;
+  if (typeof mergeBase !== 'string' || !mergeBase) throw new ApiError('GitHub returned no merge base for the branch comparison');
+  const baseChanges = await apiRequest(`compare/${encodeURIComponent(mergeBase)}...${encodeURIComponent(base)}`, repo);
+  return checkBaseBranchAge(compare, baseChanges, pullFiles, config);
 }
 
 function currentBranch() {
@@ -1349,6 +1419,9 @@ async function runPr(options) {
   const sizeResult = checkSize(summary, config);
   failures.push(...sizeResult.failures);
   warnings.push(...sizeResult.warnings);
+  const baseAgeResult = await checkRemoteBaseBranchAge(options.repo, pull, files, config);
+  failures.push(...baseAgeResult.failures);
+  warnings.push(...baseAgeResult.warnings);
 
   return finish({
     mode: 'pr',

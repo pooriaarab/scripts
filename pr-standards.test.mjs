@@ -10,6 +10,7 @@ import {
   ConfigurationError,
   DEFAULT_CONFIG,
   checkProof,
+  checkBaseBranchAge,
   checkSize,
   countClosingReferences,
   validateCommits,
@@ -270,6 +271,35 @@ test('enforces size failures without a label escape', () => {
   assert.equal(result.warnings.length, 1);
 });
 
+test('reports stale branch points at the configured threshold', () => {
+  const compare = { behind_by: 11, merge_base_commit: { sha: '1234567890' } };
+  const baseChanges = {
+    commits: [{ sha: 'abcdef123', commit: { message: 'Remove the escape hatch\n\nDetails' } }],
+    files: [{ filename: 'pr-standards.mjs' }],
+  };
+
+  assert.deepEqual(checkBaseBranchAge({ ...compare, behind_by: 0 }, baseChanges, [], config), {
+    failures: [], warnings: [],
+  }, 'an up-to-date branch is silent');
+
+  const stale = checkBaseBranchAge(compare, baseChanges, [{ filename: 'README.md' }], config);
+  assert.equal(stale.failures.length, 0);
+  assert.equal(stale.warnings.length, 1);
+  assert.match(stale.warnings[0].got, /abcdef1 Remove the escape hatch/);
+
+  const overlap = checkBaseBranchAge(compare, baseChanges, [{ filename: 'pr-standards.mjs' }], config);
+  assert.equal(overlap.failures.length, 1, 'overlap must fail, not warn');
+  assert.match(overlap.failures[0].got, /pr-standards\.mjs/);
+
+  const raised = checkBaseBranchAge(compare, baseChanges, [], { ...config, maxBaseCommitsBehind: 11 });
+  assert.deepEqual(raised, { failures: [], warnings: [] }, 'the threshold is configurable');
+  assert.throws(
+    () => validateConfig({ ...config, maxBaseCommitsBehind: -1 }),
+    ConfigurationError,
+    'the configured threshold must be a non-negative integer',
+  );
+});
+
 test('prevents size-cap escape resurrection', () => {
   // A deletion is not self-enforcing. This keeps stale branches from restoring
   // the escape while leaving every behavioral test green.
@@ -327,8 +357,11 @@ test('issues/{n} returning an object with a pull_request field fails', async () 
     if (url.includes('pulls/12/files')) {
       return { ok: true, json: async () => ([]) };
     }
+    if (url.includes('/compare/')) {
+      return { ok: true, json: async () => ({ behind_by: 0, merge_base_commit: { sha: '1234567' } }) };
+    }
     if (url.includes('pulls/12')) {
-      return { ok: true, json: async () => ({ head: { ref: 'cr-12-test' }, title: '[CR-12] Test PR', body: validBody.replace('142', '12').replace('142', '12').replace('142', '12') }) };
+      return { ok: true, json: async () => ({ head: { ref: 'cr-12-test' }, base: { ref: 'main' }, title: '[CR-12] Test PR', body: validBody.replace('142', '12').replace('142', '12').replace('142', '12') }) };
     }
     if (url.includes('issues/12')) {
       return { ok: true, json: async () => ({ state: 'open', pull_request: {} }) };
@@ -375,8 +408,11 @@ test('an exempt branch skips proof of work along with title and body', async () 
       // to write.
       return { ok: true, json: async () => ([{ filename: 'src/components/Button.tsx', status: 'modified' }]) };
     }
+    if (url.includes('/compare/')) {
+      return { ok: true, json: async () => ({ behind_by: 0, merge_base_commit: { sha: '1234567' } }) };
+    }
     if (url.includes('pulls/13')) {
-      return { ok: true, json: async () => ({ head: { ref: 'refactor' }, title: 'Move things around', body: 'no structured body at all' }) };
+      return { ok: true, json: async () => ({ head: { ref: 'refactor' }, base: { ref: 'main' }, title: 'Move things around', body: 'no structured body at all' }) };
     }
     throw new Error(`Unexpected fetch URL: ${url}`);
   };
@@ -416,8 +452,11 @@ test('config resolution prefers the target repo over the local checkout', async 
     if (url.includes('pulls/12/files')) {
       return { ok: true, json: async () => ([]) };
     }
+    if (url.includes('/compare/')) {
+      return { ok: true, json: async () => ({ behind_by: 0, merge_base_commit: { sha: '1234567' } }) };
+    }
     if (url.includes('pulls/12')) {
-      return { ok: true, json: async () => ({ head: { ref: 'rmt-12-test' }, title: '[RMT-12] Test PR that works', body: validBody.replace('142', '12').replace('142', '12').replace('142', '12') }) };
+      return { ok: true, json: async () => ({ head: { ref: 'rmt-12-test' }, base: { ref: 'main' }, title: '[RMT-12] Test PR that works', body: validBody.replace('142', '12').replace('142', '12').replace('142', '12') }) };
     }
     if (url.includes('issues/12')) {
       return { ok: true, json: async () => ({ state: 'open' }) };
@@ -430,7 +469,7 @@ test('config resolution prefers the target repo over the local checkout', async 
     assert.equal(exitCode, 0);
     const result = JSON.parse(output);
     assert.equal(result.prefix, 'rmt');
-    assert.equal(result.provenance, 'from test/repo .github/pr-standards.json');
+    assert.equal(result.provenance, 'from test/repo .github/pr-standards.json @ main');
   } finally {
     process.stdout.write = originalWrite;
     process.env.PATH = originalPath;
@@ -1045,6 +1084,7 @@ test('prefix precedence holds on the CI path, not only in loadConfig', async () 
       }
       if (url.includes('/commits')) return { ok: true, json: async () => ([{ sha: 'abc1234', commit: { message: 'Do one thing' } }]) };
       if (url.includes('/files')) return { ok: true, json: async () => ([]) };
+      if (url.includes('/compare/')) return { ok: true, json: async () => ({ behind_by: 0, merge_base_commit: { sha: '1234567' } }) };
       if (url.match(/pulls\/\d+$/)) {
         return { ok: true, json: async () => ({ head: { ref: branch }, base: { ref: 'main' }, title: 'x', body: 'x', labels: [] }) };
       }
