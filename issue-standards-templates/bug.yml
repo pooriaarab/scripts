@@ -105,4 +105,5 @@ body:
       label: Edge cases, logs, or a failing test
       description: >-
         Optional. Add edge cases only when more than one non-obvious case exists.
-        Logs from `d3k errors` are useful here.
+        Logs from this repo's error-reporting tool, named in `.agents/issues.md`,
+        are useful here.
