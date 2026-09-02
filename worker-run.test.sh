@@ -131,6 +131,21 @@ test_edited_tracked_file_is_work() {
   fi
 }
 
+# Case 3b. `git diff --stat` puts the per-file line before the aggregate
+# summary line. A receipt that keeps only the last line of that output names
+# no file at all when a single tracked file changed — the exact case the
+# receipt exists to report.
+test_edited_tracked_file_names_it_in_receipt() {
+  local fix
+  fix=$(new_repo)
+  run_worker "$fix" -- bash -c 'echo edited > tracked.txt'
+  if (( rc == 0 )) && echo "$out" | grep -q "tracked.txt"; then
+    pass "a worker that edits a tracked file names it in the receipt"
+  else
+    fail "a worker that edits a tracked file names it in the receipt" "rc=$rc out=$out"
+  fi
+}
+
 # Case 4. The subtle one. `git status --porcelain` prints " M" for the file
 # before AND after the run, so any check based on the file list alone would
 # call a worker that only edited an already-dirty file "no change". The
@@ -201,6 +216,21 @@ test_verify_fail_on_real_change_is_exit_3() {
   fi
 }
 
+# Case 8b. A worker that both fails on its own AND leaves a broken change
+# behind must report exit 1, not 3: the command's own failure is the more
+# fundamental problem, and 3 is reserved for a worker that reported success
+# but left broken work.
+test_verify_fail_and_worker_fail_is_exit_1() {
+  local fix
+  fix=$(new_repo)
+  run_worker "$fix" --verify 'test -f /nonexistent-verify-target' -- bash -c 'echo half-done > tracked.txt; exit 1'
+  if (( rc == 1 )) && echo "$out" | grep -q "changed files but exited 1"; then
+    pass "a worker that fails and also fails verify exits 1, not 3"
+  else
+    fail "a worker that fails and also fails verify exits 1, not 3" "rc=$rc out=$out"
+  fi
+}
+
 # Case 9a. Usage errors must fail loudly with 4 before any worker runs — a
 # missing --dir would otherwise look like "the worker did nothing".
 test_usage_missing_dir_is_exit_4() {
@@ -237,6 +267,21 @@ test_usage_not_a_git_checkout_is_exit_4() {
   fi
 }
 
+# Case 9d. A --dir with no commits has no HEAD to diff against, so the
+# fingerprint could not tell a staged new file from no change at all. Reject
+# it up front instead of silently misreporting real work as nothing.
+test_usage_no_commits_is_exit_4() {
+  local d
+  d=$(newtd)
+  git init -q "$d" 2>/dev/null
+  run_worker_x --dir "$d" -- bash -c 'true'
+  if (( rc == 4 )) && echo "$out" | grep -q "no commits"; then
+    pass "--dir with no commits is a usage error, exit 4"
+  else
+    fail "--dir with no commits is a usage error, exit 4" "rc=$rc out=$out"
+  fi
+}
+
 # Case 10. Ignored files are not work. Hashing them would make every run look
 # productive on a repo with a build directory: the worker writes build output,
 # the fingerprint moves, and a worker that never ran reads as a pass. The
@@ -265,14 +310,17 @@ test_help() {
 test_no_change_is_a_failure
 test_new_file_is_work
 test_edited_tracked_file_is_work
+test_edited_tracked_file_names_it_in_receipt
 test_edit_of_already_dirty_file_is_work
 test_failed_worker_no_change_is_exit_1
 test_failed_worker_with_change_is_exit_1
 test_verify_pass_on_real_change_is_exit_0
 test_verify_fail_on_real_change_is_exit_3
+test_verify_fail_and_worker_fail_is_exit_1
 test_usage_missing_dir_is_exit_4
 test_usage_no_command_is_exit_4
 test_usage_not_a_git_checkout_is_exit_4
+test_usage_no_commits_is_exit_4
 test_ignored_files_are_not_work
 test_help
 

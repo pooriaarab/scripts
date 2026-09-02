@@ -50,6 +50,7 @@ done
 [ "${#CMD[@]}" -gt 0 ] || { echo "worker-run: no command after --" >&2; exit 4; }
 [ -d "$DIR" ] || { echo "worker-run: not a directory: $DIR" >&2; exit 4; }
 git -C "$DIR" rev-parse --git-dir >/dev/null 2>&1 || { echo "worker-run: not a git checkout: $DIR" >&2; exit 4; }
+git -C "$DIR" rev-parse HEAD >/dev/null 2>&1 || { echo "worker-run: $DIR has no commits to diff against" >&2; exit 4; }
 
 # A fingerprint, not a file list. `status --porcelain` reports an already-dirty
 # file as " M" before and after, so a worker that edits a file someone else had
@@ -75,8 +76,8 @@ after=$(fingerprint "$DIR")
 
 receipt() {
   local stat
-  stat=$(git -C "$DIR" diff --stat HEAD 2>/dev/null | tail -1)
-  [ -n "$stat" ] && echo "  tracked:   $stat"
+  stat=$(git -C "$DIR" diff --stat HEAD 2>/dev/null)
+  [ -n "$stat" ] && echo "$stat" | sed 's/^/  tracked:  /'
   local untracked
   untracked=$(git -C "$DIR" ls-files --others --exclude-standard 2>/dev/null | head -20)
   [ -n "$untracked" ] && echo "$untracked" | sed 's/^/  new file: /'
@@ -114,6 +115,10 @@ if [ -n "$VERIFY" ]; then
     echo "worker-run: verify passed."
   else
     verify_status=$?
+    if [ "$worker_status" -ne 0 ]; then
+      echo "worker-run: the command changed files but exited $worker_status (verify also failed, exit $verify_status)." >&2
+      exit 1
+    fi
     echo "worker-run: the worker changed files but verify failed (exit $verify_status)." >&2
     exit 3
   fi
