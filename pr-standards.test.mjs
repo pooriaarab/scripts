@@ -507,7 +507,7 @@ test('compares a fork PR by head sha, not by a head branch name the base repo ma
       return { ok: true, json: async () => ({ behind_by: 0, merge_base_commit: { sha: '1234567' } }) };
     }
     if (url.includes('pulls/12')) {
-      return { ok: true, json: async () => ({ head: { ref: 'cr-12-test', sha: 'forksha123' }, base: { ref: 'main' }, title: '[CR-12] Test PR', body: validBody.replace('142', '12').replace('142', '12').replace('142', '12') }) };
+      return { ok: true, json: async () => ({ head: { ref: 'cr-12-test', sha: 'forksha123' }, base: { ref: 'main' }, title: '[CR-12] Compare a fork by its head sha', body: validBody.replace('142', '12').replace('142', '12').replace('142', '12') }) };
     }
     if (url.includes('issues/12')) {
       return { ok: true, json: async () => ({ state: 'open' }) };
