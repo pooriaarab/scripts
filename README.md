@@ -17,8 +17,7 @@ The [`agents`](https://github.com/pooriaarab/agents) repo is the hub — a porta
 
 ## fleet-ci-census
 
-Wall-time CI census across the fleet. JSON default; `--markdown` ranks by total minutes.
-Repos that hit the page cap are marked `(floor)`. Run `./fleet-ci-census --help`.
+Fleet CI wall-time census. `./fleet-ci-census --help`.
 
 ## Diagnose CI in this order
 
