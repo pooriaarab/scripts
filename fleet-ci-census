@@ -81,10 +81,7 @@ fi
 
 command -v gh >/dev/null 2>&1 || { echo "error: gh CLI not found" >&2; exit 3; }
 command -v python3 >/dev/null 2>&1 || { echo "error: python3 not found" >&2; exit 3; }
-
-if (( TIMING )); then
-  echo "warning: --timing costs one API request per run" >&2
-fi
+if (( TIMING )); then echo "warning: --timing costs one API request per run" >&2; fi
 
 # A cancelled job that never finished can keep updating for hours. 6h is past any
 # runner-queue tail the census is meant to see.
