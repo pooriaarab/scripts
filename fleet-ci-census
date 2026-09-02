@@ -263,8 +263,7 @@ def render_markdown(report):
     if report["timing"]:
         cols.append("billable min")
     lines = [
-        "# Fleet CI census",
-        "",
+# Fleet CI census
         f"Window: {report['days']} days from {report['since']}. "
         f"Page cap: {report['page_cap']} runs/repo.",
         "",
