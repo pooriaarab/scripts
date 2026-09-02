@@ -1,0 +1,8 @@
+evals/PROMPT.txt
+Ask Ori to measure whether this factory routes mechanical vs scoped vs judgement work to the right model tier.
+
+Surface: agent-routing.json and the Assisted-by trailers on merged PRs.
+Success: a cheaper model that fails the same acceptance checks as the default should score lower; a swap that exits 0 while changing nothing must fail.
+Real data: agent-routing.json tiers, and sample PR briefs from this repo.
+Cost limit: $2 per scheduled run.
+Baseline: the current default worker listed for each tier in agent-routing.json.

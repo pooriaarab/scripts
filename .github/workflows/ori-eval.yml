@@ -1,0 +1,45 @@
+name: ori-eval
+
+# Phase 2 of scripts#198. Runs committed *.eval.ts files on a schedule.
+# Authoring (phase 1) is attended — do not invent the eval interview answers.
+# Needs repository secret OPENROUTER_API_KEY. Spend-capped in the eval files.
+
+on:
+  workflow_dispatch:
+  schedule:
+    # First Monday of each month, 09:00 UTC
+    - cron: "0 9 1-7 * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  eval:
+    if: github.repository == 'pooriaarab/scripts'
+    runs-on: ubicloud-standard-2
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - name: Install Ori
+        run: |
+          curl -fsSL https://openrouter.ai/labs/ori/install.sh | bash
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: List eval files
+        run: |
+          if ! ori eval --list --allow-no-key; then
+            echo "No *.eval.ts files yet — author one with the Ori interview (scripts#198)."
+            exit 0
+          fi
+      - name: Run evals
+        if: hashFiles('evals/**/*.eval.ts') != ''
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        run: ori eval --report eval-report.md --baseline last
+      - name: Job summary
+        if: always()
+        run: |
+          if [ -f eval-report.md ]; then
+            cat eval-report.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "No eval report produced." >> "$GITHUB_STEP_SUMMARY"
+          fi
