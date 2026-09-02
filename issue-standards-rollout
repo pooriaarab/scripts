@@ -1,13 +1,16 @@
 #!/usr/bin/env bash
 # issue-standards-rollout — adopt the issue standard across the fleet.
 #
-#   issue-standards-rollout [--apply] [--repo owner/name]
+#   issue-standards-rollout [--apply] [--labels-only] [--repo owner/name]
 #
 # Dry by default, like pr-standards-rollout. Without --apply it prints the plan
 # and writes nothing, locally or remotely.
 #
 # What it plans per repo: the four issue forms and config.yml, the 13 labels,
 # the AGENTS.md marker block, and a .agents/issues.md stub.
+#
+# --labels-only plans only the 13 labels. Labels need no branch and no prefix,
+# so this reaches repos the full rollout skips for lacking pr-standards.json.
 #
 # What it does NOT do: fill in that stub. The stub names the repo's analytics
 # helper and its high-stakes paths, and neither can be derived from outside the
@@ -22,14 +25,15 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 TEMPLATES_DIR="$SCRIPT_DIR/issue-standards-templates"
 OWNER="pooriaarab"
 
-DRY=1; TARGET_REPO=""
+DRY=1; TARGET_REPO=""; LABELS_ONLY=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --apply) DRY=0; shift ;;
+    --labels-only) LABELS_ONLY=1; shift ;;
     --repo)
       [ $# -ge 2 ] || { echo "ERROR: --repo requires a value" >&2; exit 1; }
       TARGET_REPO="$2"; shift 2 ;;
-    --help|-h) sed -n '2,17p' "$0"; exit 0 ;;
+    --help|-h) sed -n '2,20p' "$0"; exit 0 ;;
     *) echo "unknown flag: $1" >&2; exit 1 ;;
   esac
 done
@@ -119,28 +123,36 @@ plan_repo() {
     say "SKIP    $repo — issues are disabled, so there is nothing to standardise"
     return
   fi
-  adopted=$(repo_already_adopted "$repo")
-  if [ "$adopted" = "yes" ]; then
-    say "SKIP    $repo — already has .github/ISSUE_TEMPLATE"
-    return
-  fi
-  if [ "$adopted" = "unknown" ]; then
-    say "SKIP    $repo — cannot confirm whether the issue standard is already adopted"
-    return
-  fi
 
-  prefix=$(repo_prefix "$repo")
-  if [ -z "$prefix" ]; then
-    say "SKIP    $repo — no .github/pr-standards.json, so the branch name cannot be derived"
-    return
-  fi
+  # Labels need no branch and no prefix, so --labels-only skips only a repo
+  # whose issues are disabled. Full mode still needs pr-standards.json and
+  # still skips a repo that already has ISSUE_TEMPLATE.
+  if [ "$LABELS_ONLY" -eq 0 ]; then
+    adopted=$(repo_already_adopted "$repo")
+    if [ "$adopted" = "yes" ]; then
+      say "SKIP    $repo — already has .github/ISSUE_TEMPLATE"
+      return
+    fi
+    if [ "$adopted" = "unknown" ]; then
+      say "SKIP    $repo — cannot confirm whether the issue standard is already adopted"
+      return
+    fi
 
-  say "ADOPT   $repo"
-  say "          branch  ${prefix}-<issue>-adopt-the-issue-standard"
-  say "          forms   bug.yml feature.yml chore.yml epic.yml config.yml"
-  say "          labels  13, created with --force so a rerun changes nothing"
-  say "          block   AGENTS.md issue-standards marker block"
-  say "          stub    .agents/issues.md, with TODOs for a human to fill in"
+    prefix=$(repo_prefix "$repo")
+    if [ -z "$prefix" ]; then
+      say "SKIP    $repo — no .github/pr-standards.json, so the branch name cannot be derived"
+      return
+    fi
+
+    say "ADOPT   $repo"
+    say "          branch  ${prefix}-<issue>-adopt-the-issue-standard"
+    say "          forms   bug.yml feature.yml chore.yml epic.yml config.yml"
+    say "          labels  13, created with --force so a rerun changes nothing"
+    say "          block   AGENTS.md issue-standards marker block"
+    say "          stub    .agents/issues.md, with TODOs for a human to fill in"
+  else
+    say "LABELS  $repo"
+  fi
 
   [ "$DRY" -eq 1 ] && return
 
@@ -151,6 +163,7 @@ plan_repo() {
   #
   # Read via process substitution, not a pipe: a pipe would run this loop in a
   # subshell, and label_failures set there would never reach the tally below.
+  # gh label create --force is what makes a rerun a no-op on labels that exist.
   label_failures=0
   while IFS='|' read -r name color description; do
     [ -n "$name" ] || continue
@@ -168,9 +181,11 @@ plan_repo() {
     ANY_LABEL_FAILURE=1
   fi
 
-  say "          NOTE    forms, block and stub are not written by this script."
-  say "                  Open the issue, branch, copy $TEMPLATES_DIR, fill the"
-  say "                  stub, and open one pull request under the caps."
+  if [ "$LABELS_ONLY" -eq 0 ]; then
+    say "          NOTE    forms, block and stub are not written by this script."
+    say "                  Open the issue, branch, copy $TEMPLATES_DIR, fill the"
+    say "                  stub, and open one pull request under the caps."
+  fi
 }
 
 REPOS=$(target_repos) || { echo "ERROR: could not list repos for $OWNER" >&2; exit 2; }
@@ -186,11 +201,18 @@ $REPOS
 EOF
 
 say ""
+# The tally counts repos, not labels, in both modes. Saying "label(s)" here
+# would report 13 labels across one repo as "1 label(s)".
+if [ "$LABELS_ONLY" -eq 1 ]; then
+  scope="repo(s), labels only"
+else
+  scope="repo(s)"
+fi
 if [ "$DRY" -eq 1 ]; then
-  say "$count repo(s) considered. Dry run: nothing was written. Re-run with --apply."
+  say "$count $scope considered. Dry run: nothing was written. Re-run with --apply."
 elif [ "$ANY_LABEL_FAILURE" -eq 1 ]; then
-  say "$count repo(s) considered. Some labels FAILED — see FAILED lines above."
+  say "$count $scope considered. Some labels FAILED — see FAILED lines above."
   exit 1
 else
-  say "$count repo(s) considered. Labels applied where planned."
+  say "$count $scope considered. Labels applied where planned."
 fi
