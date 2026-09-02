@@ -451,12 +451,17 @@ function hasValidProofNa(body) {
 // documented `Proof: n/a` hatch counts too, because it already carries its own
 // burden (a stated reason, judged by the review council) that a bare command
 // claim does not.
-// The negative lookahead after \d+ matters: without it, a run ID followed
-// directly by more letters/digits -- `runs/123not-a-run` -- still matches,
-// because \d+ simply stops at "123" and the trailing character class happily
-// swallows "not-a-run" as if it were a valid path/query suffix. A real GitHub
-// Actions URL never puts a word character immediately after the numeric ID.
-const ACTIONS_RUN_URL = /https:\/\/github\.com\/[^\s\/]+\/[^\s\/]+\/actions\/runs\/\d+(?![a-zA-Z0-9])[^\s"'\x60\)\]<>]*/;
+// The lookahead after \d+ names what CAN follow a real run ID, rather than
+// denying one more character at a time. A deny-list already failed once here:
+// the first version excluded only letters and digits, so `runs/123not-a-run`
+// was closed but `runs/123_not-a-run` and `runs/123-not-a-run` still matched,
+// because `_` and `-` are neither (#210). GitHub only ever follows the numeric
+// ID with end-of-string, a nested path (`/job/987`), a query string (`?...`),
+// a fragment (`#...`), whitespace, or ordinary sentence/markdown-closing
+// punctuation -- never a bare word character or a hyphen, which is why an
+// allow-list closes every shape of this bypass at once instead of the one
+// shape someone thought to test.
+const ACTIONS_RUN_URL = /https:\/\/github\.com\/[^\s\/]+\/[^\s\/]+\/actions\/runs\/\d+(?=$|[\/?#.,;:!\s"'\x60\)\]<>])[^\s"'\x60\)\]<>]*/;
 
 function hasExternalProofEvidence(verifiedSection) {
   if (countUserAttachments(verifiedSection) > 0) return true;

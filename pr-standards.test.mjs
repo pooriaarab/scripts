@@ -744,6 +744,28 @@ test('proof: a bare command claim warns that it lives only in the body', () => {
   const withFakeRun = `${validBody}\nhttps://github.com/pooriaarab/scripts/actions/runs/123not-a-run`;
   assert.equal(warned(checkProof(withFakeRun, nonUiFiles, config)), true);
 
+  // `_` and `-` are neither letters nor digits, so the first boundary fix
+  // (excluding only [a-zA-Z0-9]) missed both of these (#210). The fix moved to
+  // naming what CAN follow a real run ID instead of denying one more character
+  // at a time, which closes every shape of this bypass at once.
+  const withUnderscoreRun = `${validBody}\nhttps://github.com/pooriaarab/scripts/actions/runs/123_not-a-run`;
+  assert.equal(warned(checkProof(withUnderscoreRun, nonUiFiles, config)), true);
+  const withHyphenRun = `${validBody}\nhttps://github.com/pooriaarab/scripts/actions/runs/123-not-a-run`;
+  assert.equal(warned(checkProof(withHyphenRun, nonUiFiles, config)), true);
+
+  // A real run URL still clears the warning in every shape GitHub actually
+  // produces: nested under a job, with a query string, inside a markdown link,
+  // and followed by ordinary sentence punctuation.
+  const realShapes = [
+    'https://github.com/pooriaarab/scripts/actions/runs/123456789/job/987654321',
+    'https://github.com/pooriaarab/scripts/actions/runs/123456789?check_suite_focus=true',
+    '[log](https://github.com/pooriaarab/scripts/actions/runs/123456789)',
+    'See https://github.com/pooriaarab/scripts/actions/runs/123456789.',
+  ];
+  for (const shape of realShapes) {
+    assert.equal(warned(checkProof(`${validBody}\n${shape}`, nonUiFiles, config)), false, shape);
+  }
+
   // requireAttributableProof ratchets the same finding to a failure, for a repo
   // whose own tests run in CI and can always produce a run link.
   const strict = { ...config, requireAttributableProof: true };
