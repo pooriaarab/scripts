@@ -447,7 +447,12 @@ function hasValidProofNa(body) {
 // documented `Proof: n/a` hatch counts too, because it already carries its own
 // burden (a stated reason, judged by the review council) that a bare command
 // claim does not.
-const ACTIONS_RUN_URL = /https:\/\/github\.com\/[^\s\/]+\/[^\s\/]+\/actions\/runs\/\d+[^\s"'\x60\)\]<>]*/;
+// The negative lookahead after \d+ matters: without it, a run ID followed
+// directly by more letters/digits -- `runs/123not-a-run` -- still matches,
+// because \d+ simply stops at "123" and the trailing character class happily
+// swallows "not-a-run" as if it were a valid path/query suffix. A real GitHub
+// Actions URL never puts a word character immediately after the numeric ID.
+const ACTIONS_RUN_URL = /https:\/\/github\.com\/[^\s\/]+\/[^\s\/]+\/actions\/runs\/\d+(?![a-zA-Z0-9])[^\s"'\x60\)\]<>]*/;
 
 function hasExternalProofEvidence(verifiedSection) {
   if (countUserAttachments(verifiedSection) > 0) return true;

@@ -736,6 +736,13 @@ test('proof: a bare command claim warns that it lives only in the body', () => {
   // requireProof: false turns this off along with the UI checks -- a repo that
   // opted out of proof entirely has no reason to be warned about how it phrased it.
   assert.equal(warned(checkProof(validBody, nonUiFiles, { ...config, requireProof: false })), false);
+
+  // A run ID immediately followed by more word characters is not a GitHub
+  // Actions URL GitHub would ever produce -- it is a numeric prefix wearing a
+  // real link's clothes. Without a boundary check after \d+, the digits alone
+  // satisfied the pattern and the trailing text rode along for free.
+  const withFakeRun = `${validBody}\nhttps://github.com/pooriaarab/scripts/actions/runs/123not-a-run`;
+  assert.equal(warned(checkProof(withFakeRun, nonUiFiles, config)), true);
 });
 
 test('proof: a rename out of the UI globs still counts as a UI diff', () => {
