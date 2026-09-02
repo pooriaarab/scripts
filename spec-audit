@@ -1,0 +1,86 @@
+#!/usr/bin/env python3
+"""Score every open issue for whether a cheap model could implement it unaided.
+
+The rubric is not "is this a good issue" — most of these are fine notes for
+someone who knows the codebase. It is "does the text alone determine the
+change", because a model that has to guess will guess, and reviewing a guess
+costs more than writing the spec did.
+
+Four things decide it:
+  PATH   names a file or directory to change, not just a concept
+  REF    points at an existing thing to copy, which is the single strongest
+         instruction you can give a cheap model
+  DONE   says what finished looks like, testably
+  VERIFY names a command or test that proves it
+"""
+import json, re, subprocess, sys
+
+# Every repo that has adopted the standard, so the audit follows the rollout
+# rather than a list that goes stale the moment a repo adopts.
+def fleet_repos():
+    out = subprocess.run(
+        ["gh", "repo", "list", "pooriaarab", "--limit", "200",
+         "--json", "name,isArchived"], capture_output=True, text=True)
+    names = [r["name"] for r in json.loads(out.stdout or "[]") if not r["isArchived"]]
+    adopted = []
+    for name in names:
+        probe = subprocess.run(
+            ["gh", "api", f"repos/pooriaarab/{name}/contents/.github/pr-standards.json"],
+            capture_output=True, text=True)
+        if probe.returncode == 0:
+            adopted.append(name)
+    return adopted
+
+
+args = sys.argv[1:]
+READY_ONLY = "--ready" in args
+if "--repo" in args:
+    REPOS = [args[args.index("--repo") + 1]]
+else:
+    REPOS = fleet_repos()
+
+PATH_RE = re.compile(r"`[^`]*(?:/[\w.-]+|\.(?:ts|tsx|mjs|js|py|sh|yml|yaml|json|md))[^`]*`")
+REF_RE = re.compile(r"\b(copy|mirror|same (?:shape|pattern|way) as|like the|follow (?:the|its)|as `?\w+`? does|precedent)\b", re.I)
+DONE_RE = re.compile(r"^\s*(?:-\s*\[ \]|\d+\.)\s+", re.M)
+VERIFY_RE = re.compile(r"\b(bun test|npm test|node --test|pytest|\.test\.|acceptance|how i verified|verify|assert)\b", re.I)
+BLOCKED_RE = re.compile(r"\bblocked by #(\d+)\b", re.I)
+
+rows = []
+for repo in REPOS:
+    out = subprocess.run(
+        ["gh", "issue", "list", "--repo", f"pooriaarab/{repo}", "--state", "open",
+         "--limit", "200", "--json", "number,title,body,labels"],
+        capture_output=True, text=True)
+    if out.returncode != 0:
+        continue
+    for issue in json.loads(out.stdout or "[]"):
+        body = issue.get("body") or ""
+        score = {
+            "PATH": bool(PATH_RE.search(body)),
+            "REF": bool(REF_RE.search(body)),
+            "DONE": bool(DONE_RE.search(body)),
+            "VERIFY": bool(VERIFY_RE.search(body)),
+        }
+        rows.append({
+            "repo": repo,
+            "number": issue["number"],
+            "title": issue["title"],
+            "len": len(body),
+            "blocked": BLOCKED_RE.findall(body),
+            **score,
+            "total": sum(score.values()),
+        })
+
+rows.sort(key=lambda r: (-r["total"], r["repo"], r["number"]))
+if READY_ONLY:
+    rows = [r for r in rows if r["total"] >= 3 and not r["blocked"]]
+ready = [r for r in rows if r["total"] >= 3 and not r["blocked"]]
+print(f"{len(rows)} open issues")
+for n in range(5):
+    print(f"  score {n}/4: {sum(1 for r in rows if r['total'] == n)}")
+print(f"  blocked by another issue: {sum(1 for r in rows if r['blocked'])}")
+print(f"\nDISPATCHABLE NOW (>=3/4 and unblocked): {len(ready)}")
+for r in ready:
+    flags = "".join(k[0] for k in ("PATH", "REF", "DONE", "VERIFY") if r[k])
+    print(f"  {r['repo']:<15} #{r['number']:<6} [{flags:<4}] {r['title'][:56]}")
+json.dump(rows, open("/tmp/spec-audit.json", "w"), indent=1)

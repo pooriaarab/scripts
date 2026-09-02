@@ -245,6 +245,59 @@ requested in a body, and it leaves a record.
 cases. Whether a PR really does one thing is a judgement, and that judgement
 belongs to the review council, see the scope lens in `vibecodereview`.
 
+## What makes an issue dispatchable
+
+The standard says: no issue, no branch. That makes the issue the unit of work,
+which makes its text the thing that decides whether anyone else can do it.
+
+Measured across this fleet's 145 open issues, **10 were implementable by a
+delegate without guessing.** Not because the issues are bad — they are good
+notes to someone who already knows the codebase. `content-rabbit#1238` reads
+"Add `reactToComment` + declare like capability": clear to its author,
+underdetermined for anyone else. Which file? What signature? Which sibling
+already does this correctly?
+
+A delegate that has to guess will guess. Reviewing a guess costs more than
+writing the spec would have, so **the spec is the bottleneck, not the
+implementation.**
+
+### Four things a delegate needs
+
+| | Missing on |
+|---|---|
+| **A file or directory.** Not a concept: `apps/website/src/services/bluesky.ts`, not "the Bluesky service". | 40% |
+| **A thing to copy.** Name the sibling that already does this right. This is the strongest instruction available to a weak model, and the one most often absent. | 92% |
+| **A testable finish line.** "Under 15 seconds", "exit 1 on a malformed body". Never "faster", never "handles errors". | 84% |
+| **A verification command**, by name, that a reader can run. | 77% |
+
+### Two more when a human has to choose
+
+The four above let someone *check* the work. They do not let someone *decide*
+it. When the issue asks for a judgement rather than a correction, it needs
+something to judge.
+
+- **A flowchart**, when the change is a decision tree: a routing rule, a
+  failover chain, a gate with more than two outcomes. Prose describing a branch
+  is where a reviewer stops reading and starts assuming, and the assumption is
+  what ships.
+- **Something to look at**, when the change is visible: a screenshot, an HTML
+  prototype, or a Worker Preview URL. Nobody can judge a layout from a
+  paragraph. Asking them to is how a design decision gets made by whoever wrote
+  the paragraph.
+
+A rough prototype from a cheap model beats a careful description, because it can
+be rejected in five seconds. That is the point of a prototype: it is cheap to
+throw away, and prose is not — prose gets argued with.
+
+### Score before dispatching
+
+    ./spec-audit                      # every open issue in the fleet
+    ./spec-audit --repo content-rabbit
+    ./spec-audit --ready              # only the dispatchable ones
+
+It prints what each issue is missing. Run it before a dispatch round, so the
+gap shows up as a missing line in a spec rather than as a bad diff.
+
 ## Configuration
 
 Each repo may carry `.github/pr-standards.json`. The rollout writes it, and the
