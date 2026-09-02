@@ -92,7 +92,7 @@ target_repos() {
     printf '%s\n' "$TARGET_REPO"
     return
   fi
-  gh repo list "$OWNER" --limit 200 --json nameWithOwner --jq '.[].nameWithOwner' 2>/dev/null
+  gh repo list "$OWNER" --limit 200 --json nameWithOwner --jq '.[].nameWithOwner'
 }
 
 plan_repo() {
@@ -131,33 +131,49 @@ plan_repo() {
   # idempotent with --force, and a label is not a code change needing review.
   # Everything else goes through an issue and a pull request, because the
   # standard this rolls out says so.
-  printf '%s\n' "$LABELS" | while IFS='|' read -r name color description; do
+  #
+  # Read via process substitution, not a pipe: a pipe would run this loop in a
+  # subshell, and label_failures set there would never reach the tally below.
+  label_failures=0
+  while IFS='|' read -r name color description; do
     [ -n "$name" ] || continue
     if gh label create "$name" --repo "$repo" --color "$color" \
         --description "$description" --force >/dev/null 2>&1; then
       say "          label   $name"
     else
       say "          FAILED  label $name"
+      label_failures=$((label_failures + 1))
     fi
-  done
+  done < <(printf '%s\n' "$LABELS")
+
+  if [ "$label_failures" -gt 0 ]; then
+    say "          NOTE    $label_failures label(s) failed; rerun --apply --repo $repo to retry."
+    ANY_LABEL_FAILURE=1
+  fi
 
   say "          NOTE    forms, block and stub are not written by this script."
   say "                  Open the issue, branch, copy $TEMPLATES_DIR, fill the"
   say "                  stub, and open one pull request under the caps."
 }
 
+REPOS=$(target_repos) || { echo "ERROR: could not list repos for $OWNER" >&2; exit 2; }
+
 count=0
+ANY_LABEL_FAILURE=0
 while IFS= read -r repo; do
   [ -n "$repo" ] || continue
   plan_repo "$repo"
   count=$((count + 1))
 done <<EOF
-$(target_repos)
+$REPOS
 EOF
 
 say ""
 if [ "$DRY" -eq 1 ]; then
   say "$count repo(s) considered. Dry run: nothing was written. Re-run with --apply."
+elif [ "$ANY_LABEL_FAILURE" -eq 1 ]; then
+  say "$count repo(s) considered. Some labels FAILED — see FAILED lines above."
+  exit 1
 else
   say "$count repo(s) considered. Labels applied where planned."
 fi
