@@ -135,7 +135,7 @@ fi
 # ------------------------------------------------------------------ devin ----
 log "devin"
 # devin  — refuses an untrusted workspace headless; needs both flags to write
-# devin -p --respect-workspace-trust false --permission-mode accept-edits --model <m> -- "PROMPT"
+# devin -p --respect-workspace-trust false --permission-mode dangerous --model <m> -- "PROMPT"
 if [ -x "$BIN/devin" ]; then
   note "devin already present ($("$BIN/devin" --version 2>&1 | head -1))"
   mark devin "present"
