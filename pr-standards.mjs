@@ -451,43 +451,37 @@ function hasValidProofNa(body) {
 // documented `Proof: n/a` hatch counts too, because it already carries its own
 // burden (a stated reason, judged by the review council) that a bare command
 // claim does not.
-// The lookahead after \d+ names what CAN follow a real run ID, rather than
-// denying one more character at a time. A deny-list already failed once here:
-// the first version excluded only letters and digits, so `runs/123not-a-run`
-// was closed but `runs/123_not-a-run` and `runs/123-not-a-run` still matched,
-// because `_` and `-` are neither (#210). GitHub only ever follows the numeric
-// ID with end-of-string, a nested path (`/job/987`), a query string (`?...`),
-// a fragment (`#...`), whitespace, or ordinary sentence/markdown-closing
-// punctuation -- never a bare word character or a hyphen.
+// #210 tried to name, inside one regex, every character that can legitimately
+// follow a run ID in prose or Markdown -- and grew a new clause every time the
+// review council found one more real shape (a parenthetical closing on a
+// period, Markdown bold) that the previous clause rejected, or one more fake
+// shape (`_`, `-`, a glued `.`) that it accepted. Four rounds of that and the
+// lookahead was still a deny-list wearing an allow-list's name: it enumerated
+// followers instead of checking structure.
 //
-// Sentence punctuation (`.,;:!`) needs its own inner check: it is only a real
-// boundary when it actually ends the clause (followed by whitespace or
-// end-of-string). Treating it as a boundary unconditionally let a fake run ID
-// glue arbitrary text on through a single dot or comma -- `runs/123.not-a-run`
-// -- because the lookahead only inspected the one character right after the
-// digits and never looked past it. Path/query/fragment continuations are
-// consumed explicitly instead, so only those get to carry trailing characters.
-//
-// Closing delimiters (a paren, bracket, quote, backtick) can sit between the
-// punctuation and the whitespace/end that terminates it -- a parenthetical
-// remark ending in a full sentence closes as `...runs/123456789.)`, not
-// `...runs/123456789).`. Requiring whitespace/end immediately after the
-// punctuation rejected that real shape outright, because closing delimiters
-// are exactly the case where more (harmless) characters legitimately follow
-// the period before the line actually ends.
-//
-// `*` joins the sentence-punctuation group rather than the single-char
-// boundary group: Markdown bold/italic wraps a URL as `**...runs/123456789**`,
-// closing flush against the digits with no separator, so a bare word-char
-// deny-list can't tell that apart from `runs/123**not-a-run` gluing more text
-// on through the same character. Requiring the asterisk run to actually reach
-// whitespace/end-of-string (same rule as `.,;:!`) accepts the real Markdown
-// shape while still rejecting the glued one.
-const ACTIONS_RUN_URL = /https:\/\/github\.com\/[^\s\/]+\/[^\s\/]+\/actions\/runs\/\d+(?:[\/?#][^\s"'\x60\)\]<>]*)?(?=$|[\s"'\x60\)\]<>]|[.,;:!*]+[\x60"'\)\]<>]*(?=$|\s))/;
+// Splitting the match from the validation ends the arms race instead of
+// continuing it. `ACTIONS_RUN_URL_CANDIDATE` stays deliberately broad -- the
+// same "grab a URL-shaped run, worry about the edges after" idiom
+// countUserAttachments already uses below. What makes a candidate REAL is
+// structural, not enumerable: strip whatever ordinary prose or Markdown
+// closed around it, and check that what remains right after the digits is
+// empty or starts a genuine URL continuation (`/`, `?`, `#`). A fake glued
+// onto the digits (`123_not-a-run`, `123.not-a-run`, `123**not-a-run`) fails
+// that test regardless of which character did the gluing, so the next
+// disguise doesn't need a fifth patch.
+const ACTIONS_RUN_URL_CANDIDATE = /https:\/\/github\.com\/[^\s\/]+\/[^\s\/]+\/actions\/runs\/\d[^\s"'\x60\)\]<>]*/g;
+
+function isRealActionsRunUrl(candidate) {
+  const match = /\/actions\/runs\/(\d+)(.*)$/.exec(candidate);
+  if (!match) return false;
+  const afterId = match[2].replace(/[.,;:!*"'\x60\)\]<>]+$/, '');
+  return afterId === '' || /^[\/?#]/.test(afterId);
+}
 
 function hasExternalProofEvidence(verifiedSection) {
   if (countUserAttachments(verifiedSection) > 0) return true;
-  if (ACTIONS_RUN_URL.test(verifiedSection)) return true;
+  const runLinks = verifiedSection.match(ACTIONS_RUN_URL_CANDIDATE) || [];
+  if (runLinks.some(isRealActionsRunUrl)) return true;
   if (hasValidProofNa(verifiedSection)) return true;
   return false;
 }
