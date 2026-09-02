@@ -13,7 +13,11 @@ title:   [__PREFIX_UPPER__-<issue>] <Subject>   [__PREFIX_UPPER__-142] Fix onboa
 body:    Closes #142
          ## What / ## Why / ## How I verified
          Assisted-by: <agent>:<model>
+         Assisted-by: <agent>:<model>
 ```
+
+One `Assisted-by: <agent>:<model>` line per contributor. Repeat the line for
+each contributor. A comma-separated list on one line fails the check.
 
 Subject line: imperative mood, 10-50 characters, no trailing period, no emoji.
 Write "Fix the drop-off", not "Fixed the drop-off".
