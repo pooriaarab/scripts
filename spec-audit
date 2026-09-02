@@ -13,14 +13,16 @@ Four things decide it:
   DONE   says what finished looks like, testably
   VERIFY names a command or test that proves it
 """
-import json, re, subprocess, sys
+import json, os, re, subprocess, sys
 
 # Every repo that has adopted the standard, so the audit follows the rollout
 # rather than a list that goes stale the moment a repo adopts.
 def fleet_repos():
     out = subprocess.run(
-        ["gh", "repo", "list", "pooriaarab", "--limit", "200",
+        ["gh", "repo", "list", "pooriaarab", "--limit", "1000",
          "--json", "name,isArchived"], capture_output=True, text=True)
+    if out.returncode != 0:
+        sys.exit(f"spec-audit: gh repo list failed: {out.stderr.strip()}")
     names = [r["name"] for r in json.loads(out.stdout or "[]") if not r["isArchived"]]
     adopted = []
     for name in names:
@@ -35,7 +37,10 @@ def fleet_repos():
 args = sys.argv[1:]
 READY_ONLY = "--ready" in args
 if "--repo" in args:
-    REPOS = [args[args.index("--repo") + 1]]
+    i = args.index("--repo")
+    if i + 1 >= len(args):
+        sys.exit("usage: spec-audit [--repo NAME] [--ready]")
+    REPOS = [args[i + 1]]
 else:
     REPOS = fleet_repos()
 
@@ -46,12 +51,15 @@ VERIFY_RE = re.compile(r"\b(bun test|npm test|node --test|pytest|\.test\.|accept
 BLOCKED_RE = re.compile(r"\bblocked by #(\d+)\b", re.I)
 
 rows = []
+failed_repos = []
 for repo in REPOS:
     out = subprocess.run(
         ["gh", "issue", "list", "--repo", f"pooriaarab/{repo}", "--state", "open",
-         "--limit", "200", "--json", "number,title,body,labels"],
+         "--limit", "1000", "--json", "number,title,body,labels"],
         capture_output=True, text=True)
     if out.returncode != 0:
+        print(f"spec-audit: gh issue list failed for {repo}: {out.stderr.strip()}", file=sys.stderr)
+        failed_repos.append(repo)
         continue
     for issue in json.loads(out.stdout or "[]"):
         body = issue.get("body") or ""
@@ -72,15 +80,38 @@ for repo in REPOS:
         })
 
 rows.sort(key=lambda r: (-r["total"], r["repo"], r["number"]))
-if READY_ONLY:
-    rows = [r for r in rows if r["total"] >= 3 and not r["blocked"]]
 ready = [r for r in rows if r["total"] >= 3 and not r["blocked"]]
-print(f"{len(rows)} open issues")
-for n in range(5):
-    print(f"  score {n}/4: {sum(1 for r in rows if r['total'] == n)}")
-print(f"  blocked by another issue: {sum(1 for r in rows if r['blocked'])}")
-print(f"\nDISPATCHABLE NOW (>=3/4 and unblocked): {len(ready)}")
+
+if not READY_ONLY:
+    print(f"{len(rows)} open issues")
+    for n in range(5):
+        print(f"  score {n}/4: {sum(1 for r in rows if r['total'] == n)}")
+    print(f"  blocked by another issue: {sum(1 for r in rows if r['blocked'])}")
+    if failed_repos:
+        print(f"  repos that failed to load: {', '.join(failed_repos)}")
+    print()
+
+print(f"DISPATCHABLE NOW (>=3/4 and unblocked): {len(ready)}")
 for r in ready:
     flags = "".join(k[0] for k in ("PATH", "REF", "DONE", "VERIFY") if r[k])
     print(f"  {r['repo']:<15} #{r['number']:<6} [{flags:<4}] {r['title'][:56]}")
-json.dump(rows, open("/tmp/spec-audit.json", "w"), indent=1)
+
+if not READY_ONLY:
+    print("\nMISSING, by issue:")
+    for r in rows:
+        if r["total"] == 4:
+            continue
+        missing = ",".join(k for k in ("PATH", "REF", "DONE", "VERIFY") if not r[k])
+        print(f"  {r['repo']:<15} #{r['number']:<6} missing {missing:<20} {r['title'][:48]}")
+
+tmp_path = "/tmp/spec-audit.json"
+try:
+    os.remove(tmp_path)
+except FileNotFoundError:
+    pass
+fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+with os.fdopen(fd, "w") as f:
+    json.dump(rows, f, indent=1)
+
+if failed_repos:
+    sys.exit(1)
