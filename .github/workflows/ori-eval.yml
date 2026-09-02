@@ -7,8 +7,9 @@ name: ori-eval
 on:
   workflow_dispatch:
   schedule:
-    # First Monday of each month, 09:00 UTC
-    - cron: "0 9 1-7 * 1"
+    # Day 1 of each month, 09:00 UTC. Do not also restrict day-of-week: POSIX
+    # cron ORs those fields, so "1-7 and Monday" would fire ~10 times/month.
+    - cron: "0 9 1 * *"
 
 permissions:
   contents: read
@@ -16,27 +17,41 @@ permissions:
 jobs:
   eval:
     if: github.repository == 'pooriaarab/scripts'
-    runs-on: ubicloud-standard-2
+    # Public repo — match the other workflows here (not Ubicloud).
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: oven-sh/setup-bun@v2
-      - name: Install Ori
-        run: |
-          curl -fsSL https://openrouter.ai/labs/ori/install.sh | bash
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - name: List eval files
+        id: evals
         run: |
-          if ! ori eval --list --allow-no-key; then
+          mapfile -t files < <(find evals -type f -name '*.eval.ts' 2>/dev/null | sort || true)
+          if [ "${#files[@]}" -eq 0 ]; then
             echo "No *.eval.ts files yet — author one with the Ori interview (scripts#198)."
+            echo "present=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
+          printf '%s\n' "${files[@]}"
+          echo "present=true" >> "$GITHUB_OUTPUT"
+      - uses: oven-sh/setup-bun@v2
+        if: steps.evals.outputs.present == 'true'
+      - name: Install Ori
+        if: steps.evals.outputs.present == 'true'
+        # Ori's public docs only document curl|bash of install.sh (no versioned
+        # URL or checksum). Do not install until an eval file exists; pin the
+        # harness version inside that *.eval.ts (and record ori --version in
+        # the summary) so baseline diffs are attributable.
+        run: |
+          curl -fsSL https://openrouter.ai/labs/ori/install.sh -o /tmp/ori-install.sh
+          bash /tmp/ori-install.sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          ori --version | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Run evals
-        if: hashFiles('evals/**/*.eval.ts') != ''
+        if: steps.evals.outputs.present == 'true'
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
         run: ori eval --report eval-report.md --baseline last
       - name: Job summary
-        if: always()
+        if: always() && steps.evals.outputs.present == 'true'
         run: |
           if [ -f eval-report.md ]; then
             cat eval-report.md >> "$GITHUB_STEP_SUMMARY"
