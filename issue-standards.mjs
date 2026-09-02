@@ -270,7 +270,12 @@ function hasWord(text, word) {
   // The suffix is opt-in rather than a bare prefix match: \bauth with no
   // boundary would also match "author" and "authored".
   const escaped = word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  return new RegExp(`\\b${escaped}(?:s|es)?\\b`, 'i').test(text);
+  // A consonant-y word (dependency) pluralizes as -ies, not -ys: "Update
+  // dependencies" must still match "dependency", the CHORE_WORDS entry.
+  const plural = /[^aeiou]y$/i.test(word)
+    ? `${escaped.slice(0, -1)}(?:y|ies)`
+    : `${escaped}(?:s|es)?`;
+  return new RegExp(`\\b${plural}\\b`, 'i').test(text);
 }
 
 function firstWord(text, words) {
@@ -282,7 +287,12 @@ function countCriteria(body) {
 }
 
 function namesMultiplePhases(text) {
-  return (String(text).match(/\bphase\s+(?:\d+|[ivxlcdm]+|one|two|three|four|five|six|seven|eight|nine|ten)\b/gi) || []).length >= 2;
+  // Count distinct phases, not mentions: a body that says "Phase 1" twice
+  // (once in prose, once in a recap) names one phase, not two, and is not
+  // an epic on that signal alone.
+  const matches = String(text).match(/\bphase\s+(?:\d+|[ivxlcdm]+|one|two|three|four|five|six|seven|eight|nine|ten)\b/gi) || [];
+  const distinct = new Set(matches.map((match) => match.toLowerCase().replace(/\s+/g, ' ')));
+  return distinct.size >= 2;
 }
 
 function hasEpicHeading(body) {
@@ -312,10 +322,19 @@ function guessSize(body, kind) {
 }
 
 function globMatch(glob, filePath) {
+  // A bare "**" -> ".*" leaves the glob's own adjoining "/" in the output,
+  // so "**/payments/**" becomes "^.*/payments/.*$", which requires a slash
+  // right before "payments" and so never matches the root-level path
+  // "payments/charge.ts". "**/" and "/**" fold that slash into the
+  // optional group instead, so a globstar can also match zero directories.
   const source = String(glob)
     .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+    .replace(/\*\*\//g, '::GSS::')
+    .replace(/\/\*\*/g, '::SGS::')
     .replace(/\*\*/g, '::GS::')
     .replace(/\*/g, '[^/]*')
+    .replace(/::GSS::/g, '(?:.*/)?')
+    .replace(/::SGS::/g, '(?:/.*)?')
     .replace(/::GS::/g, '.*');
   return new RegExp(`^${source}$`).test(filePath);
 }
@@ -370,15 +389,18 @@ export function parseHighStakesGlobs(markdown) {
   for (const line of String(markdown || '').split('\n')) {
     if (!/^\s*\|/.test(line) || /^\s*\|\s*-+/.test(line)) continue;
     const cells = line.split('|').map((cell) => cell.trim()).filter(Boolean);
+    // A root-level file such as `wrangler.toml` is a valid high-stakes path
+    // even with no "/" or "*": requiring one silently dropped it, which is
+    // the direction this table must never be wrong in.
     const tick = cells[0] && /`([^`]+)`/.exec(cells[0]);
-    if (tick && /[/*]/.test(tick[1])) globs.push(tick[1]);
+    if (tick) globs.push(tick[1]);
   }
   return globs;
 }
 
-function ghJson(args) {
+function ghJson(args, execOptions = {}) {
   try {
-    const out = execFileSync('gh', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+    const out = execFileSync('gh', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], ...execOptions });
     return JSON.parse(out);
   } catch (error) {
     const stderr = String(error.stderr || error.message || '');
@@ -625,10 +647,13 @@ function fetchRepoFile(repo, filePath) {
 }
 
 function fetchOpenIssues(repo) {
+  // Up to 1000 issues with full bodies can exceed execFileSync's default 1MB
+  // stdout buffer and crash with ENOBUFS; pr-standards.mjs raises the same
+  // limit for its own large `gh api` reads.
   const issues = ghJson([
     'issue', 'list', '--repo', repo, '--state', 'open', '--limit', '1000',
     '--json', 'number,title,body,labels',
-  ]);
+  ], { maxBuffer: 20 * 1024 * 1024 });
   return (issues || []).map((issue) => ({
     number: issue.number,
     title: issue.title || '',

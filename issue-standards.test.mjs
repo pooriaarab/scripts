@@ -13,6 +13,7 @@ import {
   REQUIRED_HEADINGS,
   kindFromLabels,
   lintTemplates,
+  parseHighStakesGlobs,
   parseSections,
   suggestLabels,
   validateBody,
@@ -639,4 +640,31 @@ test('a plural high-stakes word still forces route:judgement', () => {
   const routeOf = (body) => suggestLabels('x', body, [], []).find((s) => s.group === 'route').label;
   assert.equal(routeOf('a billing migration'), 'route:judgement');
   assert.notEqual(routeOf('the author wrote docs'), 'route:judgement');
+});
+
+test('a consonant-y chore word still matches its -ies plural', () => {
+  // The same \b-after-bare-word gap as the migrations bug, for a word that
+  // pluralizes irregularly: "dependency" + an s/es suffix never spells
+  // "dependencies", so "Update dependencies" fell through to feature. The
+  // body is otherwise signal-free so only the title word is on trial.
+  const out = suggestLabels('Update dependencies', 'Keep the app current.', [], []);
+  assert.equal(out.find((s) => s.group === 'kind').label, 'chore');
+});
+
+test('a high-stakes glob matches a mentioned path at repo root, not only nested', () => {
+  // "**" folded its adjoining "/" into a literal in the compiled regex, so
+  // "**/payments/**" required a "/" before "payments" and never matched the
+  // root-level path "payments/charge.ts".
+  const out = suggestLabels('Rename helper', `${MINI_CHORE_BODY}\n\nTouch payments/charge.ts`, [], ['**/payments/**']);
+  assert.equal(out.find((s) => s.group === 'route').label, 'route:judgement');
+});
+
+test('repeating the same phase number is not multiple phases', () => {
+  const out = suggestLabels('Inbox sharing', 'See phase 1 above. As noted in phase 1, this is simple.', [], []);
+  assert.notEqual(out.find((s) => s.group === 'kind').label, 'epic');
+});
+
+test('parseHighStakesGlobs accepts a root-level path with no slash or wildcard', () => {
+  const markdown = ['| Path | Why |', '| --- | --- |', '| `wrangler.toml` | infra config |'].join('\n');
+  assert.deepEqual(parseHighStakesGlobs(markdown), ['wrangler.toml']);
 });
