@@ -1,5 +1,5 @@
 {
-  "$comment": "Tier names are durable, model names and prices are not. Update this file, not the CLAUDE.md copies.",
+  "$comment": "Tier names are durable, model names and prices are not. Update this file, not the CLAUDE.md copies. Retune tier defaults from measured defect rate, not vibes: `agent-defect-rate <repos> --since <date>` reads the `Assisted-by:` trailer on merged PRs and reports defect rate per agent, so it says whether a tier's default was the wrong call.",
   "updated": "2026-09-01",
   "tiers": {
     "route:mechanical": {

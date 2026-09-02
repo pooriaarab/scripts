@@ -159,7 +159,10 @@ Repos that are already configured are skipped.
 ## Agent routing
 
 The agent-worker roster lives in [agent-routing.json](agent-routing.json): three
-tiers (`route:mechanical`, `route:scoped`, `route:judgement`) mapped to concrete
-workers with commands, costs and indexes, plus an `unavailable` list with reasons.
-Tier names are durable; model names and prices are not, so update the JSON instead
-of editing CLAUDE.md copies that drift.
+tiers (`route:mechanical`, `route:scoped`, `route:judgement`) mapped to workers
+with cost and benchmark indexes, plus an `unavailable` list with reasons. Not
+every worker has a `command`: the default `route:judgement` worker is the
+native Claude Code session doing the reviewing, not a CLI invocation, so it has
+none. Tier names are durable; model names and prices are not, so update the
+JSON instead of editing CLAUDE.md copies that drift. Retune tier defaults from
+`agent-defect-rate` output, not vibes.
