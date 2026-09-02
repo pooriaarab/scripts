@@ -458,10 +458,16 @@ function hasValidProofNa(body) {
 // because `_` and `-` are neither (#210). GitHub only ever follows the numeric
 // ID with end-of-string, a nested path (`/job/987`), a query string (`?...`),
 // a fragment (`#...`), whitespace, or ordinary sentence/markdown-closing
-// punctuation -- never a bare word character or a hyphen, which is why an
-// allow-list closes every shape of this bypass at once instead of the one
-// shape someone thought to test.
-const ACTIONS_RUN_URL = /https:\/\/github\.com\/[^\s\/]+\/[^\s\/]+\/actions\/runs\/\d+(?=$|[\/?#.,;:!\s"'\x60\)\]<>])[^\s"'\x60\)\]<>]*/;
+// punctuation -- never a bare word character or a hyphen.
+//
+// Sentence punctuation (`.,;:!`) needs its own inner check: it is only a real
+// boundary when it actually ends the clause (followed by whitespace or
+// end-of-string). Treating it as a boundary unconditionally let a fake run ID
+// glue arbitrary text on through a single dot or comma -- `runs/123.not-a-run`
+// -- because the lookahead only inspected the one character right after the
+// digits and never looked past it. Path/query/fragment continuations are
+// consumed explicitly instead, so only those get to carry trailing characters.
+const ACTIONS_RUN_URL = /https:\/\/github\.com\/[^\s\/]+\/[^\s\/]+\/actions\/runs\/\d+(?:[\/?#][^\s"'\x60\)\]<>]*)?(?=$|[\s"'\x60\)\]<>]|[.,;:!](?=$|\s))/;
 
 function hasExternalProofEvidence(verifiedSection) {
   if (countUserAttachments(verifiedSection) > 0) return true;

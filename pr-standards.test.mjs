@@ -753,14 +753,33 @@ test('proof: a bare command claim warns that it lives only in the body', () => {
   const withHyphenRun = `${validBody}\nhttps://github.com/pooriaarab/scripts/actions/runs/123-not-a-run`;
   assert.equal(warned(checkProof(withHyphenRun, nonUiFiles, config)), true);
 
+  // Sentence punctuation only ends the run ID when it actually ends the
+  // clause. Gluing a dot, comma, semicolon, colon, or bang directly onto more
+  // text is the same disguised-suffix bypass wearing different punctuation --
+  // treating the punctuation as a boundary on its own (without checking what
+  // follows it) let all of these through.
+  const withGluedPunctuation = [
+    'https://github.com/pooriaarab/scripts/actions/runs/123.not-a-run',
+    'https://github.com/pooriaarab/scripts/actions/runs/123,not-a-run',
+    'https://github.com/pooriaarab/scripts/actions/runs/123;not-a-run',
+    'https://github.com/pooriaarab/scripts/actions/runs/123:not-a-run',
+    'https://github.com/pooriaarab/scripts/actions/runs/123!not-a-run',
+  ];
+  for (const shape of withGluedPunctuation) {
+    assert.equal(warned(checkProof(`${validBody}\n${shape}`, nonUiFiles, config)), true, shape);
+  }
+
   // A real run URL still clears the warning in every shape GitHub actually
-  // produces: nested under a job, with a query string, inside a markdown link,
-  // and followed by ordinary sentence punctuation.
+  // produces: nested under a job, with a query string, with a fragment,
+  // inside a markdown link, and followed by ordinary sentence punctuation
+  // that actually ends the clause (whitespace or end-of-string after it).
   const realShapes = [
     'https://github.com/pooriaarab/scripts/actions/runs/123456789/job/987654321',
     'https://github.com/pooriaarab/scripts/actions/runs/123456789?check_suite_focus=true',
+    'https://github.com/pooriaarab/scripts/actions/runs/123456789#summary',
     '[log](https://github.com/pooriaarab/scripts/actions/runs/123456789)',
     'See https://github.com/pooriaarab/scripts/actions/runs/123456789.',
+    'See https://github.com/pooriaarab/scripts/actions/runs/123456789, it passed.',
   ];
   for (const shape of realShapes) {
     assert.equal(warned(checkProof(`${validBody}\n${shape}`, nonUiFiles, config)), false, shape);
