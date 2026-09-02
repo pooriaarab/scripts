@@ -13,7 +13,7 @@ Four things decide it:
   DONE   says what finished looks like, testably
   VERIFY names a command or test that proves it
 """
-import json, os, re, subprocess, sys
+import json, os, re, subprocess, sys, tempfile
 
 # Every repo that has adopted the standard, so the audit follows the rollout
 # rather than a list that goes stale the moment a repo adopts.
@@ -55,7 +55,7 @@ PATH_RE = re.compile(r"`[^`]*(?:/[\w.-]+|\.(?:ts|tsx|mjs|js|py|sh|yml|yaml|json|
 REF_RE = re.compile(r"\b(copy|mirror|same (?:shape|pattern|way) as|like the|follow (?:the|its)|as `?\w+`? does|precedent)\b", re.I)
 DONE_RE = re.compile(r"^\s*(?:-\s*\[ \]|\d+\.)\s+", re.M)
 VERIFY_RE = re.compile(r"\b(bun test|npm test|node --test|pytest|\.test\.|acceptance|how i verified|verify|assert)\b", re.I)
-BLOCKED_RE = re.compile(r"\bblocked by #(\d+)\b", re.I)
+BLOCKED_RE = re.compile(r"\bblocked by (?:[\w.-]+/)?[\w.-]*#(\d+)\b", re.I)
 
 rows = []
 for repo in REPOS:
@@ -111,13 +111,10 @@ if not READY_ONLY:
         print(f"  {r['repo']:<15} #{r['number']:<6} missing {missing:<20} {r['title'][:48]}")
 
 tmp_path = "/tmp/spec-audit.json"
-try:
-    os.remove(tmp_path)
-except FileNotFoundError:
-    pass
-fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+fd, tmp_write_path = tempfile.mkstemp(dir=os.path.dirname(tmp_path), prefix=".spec-audit-")
 with os.fdopen(fd, "w") as f:
     json.dump(rows, f, indent=1)
+os.replace(tmp_write_path, tmp_path)
 
 if failed_repos:
     sys.exit(1)
