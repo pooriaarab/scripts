@@ -1107,7 +1107,7 @@ function parseArgs(argv) {
   const options = { mode, json, positional: [] };
   for (let index = 0; index < filtered.length; index += 1) {
     const arg = filtered[index];
-    if (arg === '--branch' || arg === '--title' || arg === '--repo' || arg === '--number') {
+    if (arg === '--branch' || arg === '--title' || arg === '--repo' || arg === '--number' || arg === '--prefix') {
       const value = filtered[index + 1];
       if (!value || value.startsWith('--')) throw new ConfigurationError(`${arg} requires a value`);
       options[arg.slice(2)] = value;
@@ -1124,7 +1124,7 @@ function parseArgs(argv) {
 function usage() {
   return `Usage:
   pr-standards branch [name]
-  pr-standards precheck --branch X [--title Y]
+  pr-standards precheck --branch X [--title Y] [--prefix P]
   pr-standards pr --repo owner/name --number N
   pr-standards --selfcheck
 
@@ -1143,7 +1143,7 @@ async function runBranch(options) {
     : prefixSource === 'registry'
       ? 'from repo-prefixes.json'
       : `derived from ${named.source}`;
-  if (options.branch || options.title || options.repo || options.number) throw new ConfigurationError('branch accepts only one optional branch name');
+  if (options.branch || options.title || options.repo || options.number || options.prefix) throw new ConfigurationError('branch accepts only one optional branch name');
   const branch = options.positional[0] || currentBranch();
   if (options.positional.length > 1) throw new ConfigurationError('branch accepts one optional name');
   const branchResult = validateBranchName(branch, config);
@@ -1170,14 +1170,28 @@ async function runPrecheck(options) {
       ? 'from repo-prefixes.json'
       : `derived from ${named.source}`;
   if (!options.branch) throw new ConfigurationError('precheck requires --branch');
-  if (options.positional.length > 0 || options.repo || options.number) throw new ConfigurationError('precheck accepts --branch and optional --title only');
-  const branchResult = validateBranchName(options.branch, config);
+  if (options.positional.length > 0 || options.repo || options.number) throw new ConfigurationError('precheck accepts --branch, --prefix and optional --title only');
+  // A caller may be judging a branch for a DIFFERENT repo than the one it is
+  // standing in. The PreToolUse guard is exactly that case: it runs in the
+  // session's working directory while `gh pr create --repo X` targets X. Without
+  // this, the branch is checked against the wrong prefix and a conforming
+  // cross-repo PR is refused.
+  let effective = config;
+  let effectiveProvenance = provenance;
+  if (options.prefix) {
+    if (!isValidPrefix(options.prefix)) {
+      throw new ConfigurationError(`--prefix must be 2-4 lowercase letters, got: ${options.prefix}`);
+    }
+    effective = { ...config, prefix: options.prefix };
+    effectiveProvenance = 'from --prefix';
+  }
+  const branchResult = validateBranchName(options.branch, effective);
   const failures = [...branchResult.failures];
   const passes = branchResult.ok ? [`branch name: ${options.branch}`] : [];
   if (options.title) {
     if (!branchResult.exempt) {
       if (branchResult.issueNumber !== null || branchResult.choreEscape) {
-        const titleResult = validateTitle(options.title, config.prefix, branchResult.issueNumber);
+        const titleResult = validateTitle(options.title, effective.prefix, branchResult.issueNumber);
         failures.push(...titleResult.failures);
         if (titleResult.ok) passes.push('PR title');
       } else {
@@ -1185,7 +1199,7 @@ async function runPrecheck(options) {
       }
     }
   }
-  return finish({ mode: 'precheck', prefix: config.prefix, provenance, failures, warnings: [], passes }, options.json);
+  return finish({ mode: 'precheck', prefix: effective.prefix, provenance: effectiveProvenance, failures, warnings: [], passes }, options.json);
 }
 
 async function fetchRemoteConfig(repo, repoName, ref) {
@@ -1234,7 +1248,7 @@ async function fetchRemoteConfig(repo, repoName, ref) {
 }
 
 async function runPr(options) {
-  if (options.positional.length > 0 || options.branch || options.title) throw new ConfigurationError('pr accepts --repo and --number only');
+  if (options.positional.length > 0 || options.branch || options.title || options.prefix) throw new ConfigurationError('pr accepts --repo and --number only');
   if (!options.repo || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(options.repo)) throw new ConfigurationError('pr requires --repo owner/name');
   if (!options.number || !/^[0-9]+$/.test(options.number) || Number(options.number) < 1) throw new ConfigurationError('pr requires a positive --number');
   const repoName = options.repo.split('/').pop();
