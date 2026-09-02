@@ -231,11 +231,32 @@ means guessing a base URL, and a wrong guess makes an enumeration failure look i
 an empty account — the one wrong answer that looks calm. (`api.ascii.dev` does not resolve;
 that was the first attempt, and it "found" zero Boxes.)
 
-**Not yet wired to CI.** There is no verified way to install the `box` CLI on a runner:
-`https://ascii.dev/install.sh` redirects to `https://box.ascii.dev/install.sh`, which
-returns a 404 HTML page, and `https://get.ascii.dev` does not answer. Until an install path
-is confirmed, run it from any machine that already has the CLI. Wiring it to a scheduled
-Ubicloud job is a small change once that is known.
+**Wired to CI**, and it does not need the CLI. Installing `box` on a runner was the wrong
+problem: `box status` reports the API base the CLI itself uses, and the endpoints work with
+curl and an API key.
+
+```
+box status  ->  "config": { "apiUrl": "https://ascii.dev", "channel": "prod" }
+
+GET  https://ascii.dev/api/box/boxes            200, same JSON shape as `box list --json`
+POST https://ascii.dev/api/box/boxes/{id}/stop  stop
+```
+
+Verify a route exists before trusting it. A missing route answers
+`{"error":"Not Found","path":"/..."}`, while a real route with a bad id answers
+`{"error":"not_found"}` — that distinction is how the stop path was confirmed without
+stopping anything.
+
+**The API is not the CLI, and the difference bites.** `GET /api/box/boxes` returns every
+Box the account has ever had, including `stopped` and `archived`; `box list` hides those by
+default (`--filter` defaults to running). The first API run reported **100 Boxes burning
+$3.636/hour**, when five were running and the real figure was $0.180/hour. The report now
+counts only billing states (`idle`, `running`, `pending`, `stopping`, `ready`).
+
+`.github/workflows/box-sweep.yml` runs it every 30 minutes on `ubicloud-standard-2`,
+report-only, with a `workflow_dispatch` input to actually stop. The first real run found two
+Boxes at **39h and 52h old** — claimed Boxes whose session state kept being refreshed, so
+the laptop reaper never touched them. That is precisely the gap this backstop exists for.
 
 ## The periodic reaper (added 2026-08-28, tightened 2026-08-30)
 
