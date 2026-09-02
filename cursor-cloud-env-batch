@@ -1,0 +1,147 @@
+#!/usr/bin/env bash
+# Batched Cursor Cloud agent fan-out that respects concurrency limits.
+# Archives IDLE agents between batches.
+#
+# Usage:
+#   ./cursor-cloud-env-setup --apply --batch-size 2 --batch-wait 90
+#
+set -u
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# Re-exec through the original script logic by sourcing patterns —
+# this wrapper only adds batching. Prefer editing cursor-cloud-env-setup
+# directly; keep this as a thin driver if the main script lacks batch flags.
+
+OWNER="pooriaarab"
+PREFIXES_FILE="$SCRIPT_DIR/repo-prefixes.json"
+CURSOR_ENV="${HOME}/Documents/Personal/.secrets/cursor.env"
+SECRETS_FILE="${HOME}/Documents/Personal/.secrets/cursor-cloud-secrets.env"
+BATCH_SIZE=2
+BATCH_WAIT=120
+MODEL="composer-2.5"
+DRY=0
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --batch-size) BATCH_SIZE="$2"; shift 2 ;;
+    --batch-wait) BATCH_WAIT="$2"; shift 2 ;;
+    --dry-run) DRY=1; shift ;;
+    --model) MODEL="$2"; shift 2 ;;
+    --help|-h) sed -n '2,10p' "$0"; exit 0 ;;
+    *) echo "unknown: $1"; exit 1 ;;
+  esac
+done
+
+set -a; source "$CURSOR_ENV"; set +a
+KEY="${CURSOR_API_KEY:-${CURSOR_TOKEN:-}}"
+[ -n "$KEY" ] || { echo "no CURSOR_API_KEY"; exit 2; }
+
+archive_idle() {
+  python3 - <<'PY'
+import json, urllib.request, base64, os
+key=os.environ["CURSOR_API_KEY"] if os.environ.get("CURSOR_API_KEY") else os.environ.get("CURSOR_TOKEN","")
+auth=base64.b64encode(f"{key}:".encode()).decode()
+req=urllib.request.Request("https://api.cursor.com/v1/agents?limit=50", headers={"Authorization":f"Basic {auth}"})
+with urllib.request.urlopen(req) as r:
+    items=json.load(r).get("items") or []
+n=0
+for a in items:
+    if a.get("status")!="IDLE": continue
+    aid=a["id"]
+    req2=urllib.request.Request(f"https://api.cursor.com/v1/agents/{aid}/archive", data=b"{}", method="POST",
+        headers={"Authorization":f"Basic {auth}","Content-Type":"application/json"})
+    try:
+        urllib.request.urlopen(req2).read()
+        print("archived", aid)
+        n+=1
+    except Exception as e:
+        print("archive_fail", aid, type(e).__name__)
+print("archived_total", n)
+PY
+}
+
+ENV_VARS_JSON='{}'
+if [ -r "$SECRETS_FILE" ]; then
+  ENV_VARS_JSON=$(SECRETS_FILE="$SECRETS_FILE" python3 - <<'PY'
+import json,os,re
+out={}
+for line in open(os.environ["SECRETS_FILE"]):
+    line=line.strip()
+    if not line or line.startswith("#") or "=" not in line: continue
+    k,_,v=line.partition("=")
+    k=k.strip(); v=v.strip().strip('"').strip("'")
+    if not k or k.startswith("CURSOR_") or not v: continue
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", k): continue
+    out[k]=v
+    if len(out)>=50: break
+print(json.dumps(out))
+PY
+)
+fi
+SECRET_COUNT=$(echo "$ENV_VARS_JSON" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')
+echo "secrets=$SECRET_COUNT batch_size=$BATCH_SIZE"
+
+REPOS=$(python3 -c "import json; print('\n'.join(sorted(json.load(open('$PREFIXES_FILE')))))")
+started=0; skipped=0; failed=0; batch=0
+
+archive_idle
+
+while IFS= read -r repo; do
+  [ -z "$repo" ] && continue
+  INFO=$(gh repo view "$OWNER/$repo" --json isArchived,isFork,diskUsage 2>/dev/null) || { skipped=$((skipped+1)); continue; }
+  read -r ARCH FORK DISK <<< "$(echo "$INFO" | python3 -c "import json,sys;d=json.load(sys.stdin);print(str(d['isArchived']).lower(),str(d['isFork']).lower(),d['diskUsage'])")"
+  [ "$ARCH" = "true" ] || [ "$FORK" = "true" ] || [ "$DISK" -lt 10 ] && { skipped=$((skipped+1)); continue; }
+  gh api "repos/$OWNER/$repo/contents/.cursor/environment.json" --jq .sha >/dev/null 2>&1 || { echo "SKIP $repo no env.json"; skipped=$((skipped+1)); continue; }
+
+  if [ "$DRY" -eq 1 ]; then
+    echo "WOULD $repo"; started=$((started+1)); continue
+  fi
+
+  PAYLOAD=$(REPO="$repo" MODEL="$MODEL" ENV_VARS_JSON="$ENV_VARS_JSON" OWNER="$OWNER" python3 - <<'PY'
+import json,os
+p={
+ "prompt":{"text":"Read .cursor/environment.json, print install field, echo ok, stop. Do not edit or open PR."},
+ "model":{"id":os.environ["MODEL"]},
+ "repos":[{"url":f"https://github.com/{os.environ['OWNER']}/{os.environ['REPO']}","startingRef":"main"}],
+ "autoCreatePR":False,
+}
+ev=json.loads(os.environ.get("ENV_VARS_JSON") or "{}")
+if ev: p["envVars"]=ev
+print(json.dumps(p))
+PY
+)
+  RESP=$(curl -sS -u "$KEY:" -H 'Content-Type: application/json' https://api.cursor.com/v1/agents -d "$PAYLOAD")
+  AGENT_ID=$(echo "$RESP" | python3 -c 'import json,sys;d=json.load(sys.stdin);a=d.get("agent") or d; print(a.get("id") or "")' 2>/dev/null)
+  ERR=$(echo "$RESP" | python3 -c 'import json,sys;d=json.load(sys.stdin);e=d.get("error") or {}; print((e.get("message") if isinstance(e,dict) else e) or "")' 2>/dev/null)
+  if [ -n "$AGENT_ID" ]; then
+    echo "START $repo $AGENT_ID"
+    started=$((started+1)); batch=$((batch+1))
+  else
+    echo "FAIL $repo ${ERR:-unknown}"
+    failed=$((failed+1))
+    if echo "$ERR" | grep -qi 'upgrade\|concurrent\|limit\|ultra'; then
+      echo "hit concurrency — waiting ${BATCH_WAIT}s and archiving idle"
+      sleep "$BATCH_WAIT"
+      archive_idle
+      # retry once
+      RESP=$(curl -sS -u "$KEY:" -H 'Content-Type: application/json' https://api.cursor.com/v1/agents -d "$PAYLOAD")
+      AGENT_ID=$(echo "$RESP" | python3 -c 'import json,sys;d=json.load(sys.stdin);a=d.get("agent") or d; print(a.get("id") or "")' 2>/dev/null)
+      if [ -n "$AGENT_ID" ]; then
+        echo "START $repo $AGENT_ID (retry)"
+        started=$((started+1)); failed=$((failed-1)); batch=$((batch+1))
+      else
+        echo "FAIL $repo still blocked — sleep longer"
+        sleep $((BATCH_WAIT * 2))
+        archive_idle
+      fi
+    fi
+  fi
+
+  if [ "$batch" -ge "$BATCH_SIZE" ]; then
+    echo "batch full — wait ${BATCH_WAIT}s"
+    sleep "$BATCH_WAIT"
+    archive_idle
+    batch=0
+  fi
+done <<< "$REPOS"
+
+echo "=== Summary started=$started skipped=$skipped failed=$failed ==="
