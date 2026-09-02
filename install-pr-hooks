@@ -23,7 +23,23 @@
 #   ./install-pr-hooks --drift           # whether the installed guard matches HEAD
 set -uo pipefail
 
-HERE="$(cd "$(dirname "$0")" && pwd)"
+# Resolve $0 through symlinks first: a symlink such as
+# ~/bin/install-pr-hooks -> /checkout/install-pr-hooks would otherwise put
+# HERE at ~/bin, and every git -C "$HERE" guard lookup would fail to find
+# this repo.
+resolve_script_path() {
+  local src="$1" dir
+  while [ -L "$src" ]; do
+    dir="$(cd "$(dirname "$src")" && pwd)"
+    src="$(readlink "$src")"
+    case "$src" in
+      /*) ;;
+      *) src="$dir/$src" ;;
+    esac
+  done
+  printf '%s\n' "$src"
+}
+HERE="$(cd "$(dirname "$(resolve_script_path "$0")")" && pwd)"
 GUARD_DIR="$HOME/.local/share/pr-standards"
 GUARD_DST="$GUARD_DIR/pr-standards-guard.sh"
 
@@ -425,17 +441,16 @@ handle_guard_drift() {
 
 handle_guard() {
   local expected stamp_sha
-  expected=$(guard_expected_sha) || {
-    echo "FAIL    PreToolUse guard (cannot read HEAD:hooks/pr-standards-guard.sh)"
-    failed=$((failed+1)); return
-  }
 
   if [ "$UNINSTALL" = 1 ]; then
     # No stamp-line check: GUARD_DST is a path this tool owns outright, and a
     # hand-edit that strips the stamp comment must not make uninstall silently
     # leave the guard in place. A symlink at that path gets the same removal:
     # rm -f drops the link itself without following it, so uninstall cannot
-    # silently leave a stray symlink installed.
+    # silently leave a stray symlink installed. Removal does not need the
+    # expected sha, so it runs before guard_expected_sha and still works when
+    # HEAD:hooks/pr-standards-guard.sh cannot be resolved (shallow clone, old
+    # checkout, missing repo).
     if [ -f "$GUARD_DST" ] || [ -L "$GUARD_DST" ]; then
       if [ "$APPLY" = 1 ]; then
         rm -f "$GUARD_DST" || { echo "FAIL    PreToolUse guard (remove failed)"; failed=$((failed+1)); return; }
@@ -446,6 +461,11 @@ handle_guard() {
     fi
     return
   fi
+
+  expected=$(guard_expected_sha) || {
+    echo "FAIL    PreToolUse guard (cannot read HEAD:hooks/pr-standards-guard.sh)"
+    failed=$((failed+1)); return
+  }
 
   if [ -L "$GUARD_DST" ]; then
     echo "FAIL    PreToolUse guard (refusing a symlink at $GUARD_DST)"
