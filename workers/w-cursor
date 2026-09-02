@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Cursor Agent, non-interactive.
+#
+# `set -a` before sourcing is the whole trick: `source cursor.env` in a subshell
+# assigns without exporting, so CURSOR_API_KEY never reaches the process and the
+# CLI reports "Authentication required" — which reads as a login problem rather
+# than a shell one, and sends you to re-authenticate something that is fine.
+set -uo pipefail
+BIN="$HOME/.local/bin/cursor-agent"
+SECRETS="$HOME/Documents/Personal/.secrets/cursor.env"
+dir="${1:?usage: w-cursor <dir> "<prompt>" [model]}"; prompt="${2:?prompt required}"
+model="${3:-composer-2.5}"
+
+[ -x "$BIN" ] || { echo "w-cursor: no binary at $BIN" >&2; exit 127; }
+[ -r "$SECRETS" ] || { echo "w-cursor: cannot read $SECRETS" >&2; exit 78; }
+set -a; . "$SECRETS"; set +a
+[ -n "${CURSOR_API_KEY:-}" ] || { echo "w-cursor: CURSOR_API_KEY unset after sourcing" >&2; exit 78; }
+
+cd "$dir" || exit 1
+# --trust and --force: without them a write is refused in non-interactive mode.
+exec "$BIN" -p --trust --force --model "$model" "$prompt"

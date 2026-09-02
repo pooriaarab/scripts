@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# Meta Muse, non-interactive. The only route here with no auth or flag trap;
+# it needs its absolute path because ~/.local/bin is often missing from a
+# non-interactive PATH.
+set -uo pipefail
+BIN="$HOME/.local/bin/muse"
+dir="${1:?usage: w-muse <dir> "<prompt>"}"; prompt="${2:?prompt required}"
+[ -x "$BIN" ] || { echo "w-muse: no binary at $BIN" >&2; exit 127; }
+exec "$BIN" exec --workspace "$dir" "$prompt"

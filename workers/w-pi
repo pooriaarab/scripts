@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# pi, non-interactive, on the metered zai-api route.
+#
+# PI_WORKER=1 matters: pi's default is a Codex-Luna orchestrator that fans out
+# and bills the wrong subscription.
+#
+# The zai-api key resolves through `zsh -lc "pi auth print-api-key"`, so PATH
+# must carry pi for the nested shell, or the key lookup fails and the run dies
+# with an auth error that looks like a missing key rather than a missing PATH.
+set -uo pipefail
+# pi lives in Homebrew, not ~/.local/bin. Resolved from a list rather than
+# assumed: a launcher that hardcodes the wrong path fails with exit 127, which
+# reads as "not installed" for something that is installed.
+BIN=""
+for candidate in /opt/homebrew/bin/pi /usr/local/bin/pi "$HOME/.local/bin/pi"; do
+  [ -x "$candidate" ] && { BIN="$candidate"; break; }
+done
+dir="${1:?usage: w-pi <dir> "<prompt>" [model]}"; prompt="${2:?prompt required}"
+model="${3:-glm-5.3-flash}"
+
+[ -n "$BIN" ] || { echo "w-pi: pi not found in /opt/homebrew/bin, /usr/local/bin or ~/.local/bin" >&2; exit 127; }
+export PATH="$HOME/.local/bin:/opt/homebrew/bin:$PATH"
+
+cd "$dir" || exit 1
+PI_WORKER=1 exec "$BIN" -p --no-extensions --provider zai-api --model "$model" \
+  -a --tools read,grep,find,ls,edit,write,bash "$prompt"
