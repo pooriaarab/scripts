@@ -150,21 +150,26 @@ def billable_ms(payload):
 
 
 def discover_repos():
-    data = gh_api(
-        f"users/{OWNER}/repos?type=owner&sort=pushed&direction=desc&per_page={LIMIT}"
-    )
-    if not isinstance(data, list):
-        die(f"error: repo list for {OWNER} was not an array")
     found = []
-    for r in data:
-        if not isinstance(r, dict) or r.get("archived"):
-            continue
-        full = r.get("full_name") or ""
-        if "/" not in full:
-            continue
-        found.append(full)
-        if len(found) >= LIMIT:
+    page = 1
+    while len(found) < LIMIT:
+        data = gh_api(
+            f"users/{OWNER}/repos?type=owner&sort=pushed&direction=desc&per_page=100&page={page}"
+        )
+        if not isinstance(data, list):
+            die(f"error: repo list for {OWNER} was not an array")
+        for r in data:
+            if not isinstance(r, dict) or r.get("archived"):
+                continue
+            full = r.get("full_name") or ""
+            if "/" not in full:
+                continue
+            found.append(full)
+            if len(found) >= LIMIT:
+                break
+        if len(data) < 100:
             break
+        page += 1
     return found
 
 
@@ -246,6 +251,11 @@ def aggregate(repo, runs):
     return entry
 
 
+def md_cell(v):
+    s = str(v).replace("|", "\\|")
+    return " ".join(s.splitlines())
+
+
 def render_markdown(report):
     cols = ["repo", "workflow", "runs", "p50 s", "p95 s", "total min", "fail %", "cancel %"]
     if report["timing"]:
@@ -273,7 +283,7 @@ def render_markdown(report):
             rows.append((w["total_min"], label, w["name"], row))
     rows.sort(key=lambda t: (-t[0], t[1], t[2]))
     for _, _, _, row in rows:
-        lines.append("| " + " | ".join(str(c) for c in row) + " |")
+        lines.append("| " + " | ".join(md_cell(c) for c in row) + " |")
     return "\n".join(lines) + "\n"
 
 

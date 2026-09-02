@@ -52,7 +52,16 @@ if [[ "$args" == *"actions/runs"* ]]; then
   if [[ -f "$DATA_DIR/runs_override.json" ]]; then cat "$DATA_DIR/runs_override.json"; else cat "$DATA_DIR/runs.json"; fi
   exit 0
 fi
-if [[ "$args" == *"users/"*"/repos"* ]]; then cat "$DATA_DIR/repos.json"; exit 0; fi
+if [[ "$args" == *"users/"*"/repos"* ]]; then
+  page=1
+  [[ "$args" =~ [?\&]page=([0-9]+) ]] && page="${BASH_REMATCH[1]}"
+  if [[ -f "$DATA_DIR/repos_page${page}.json" ]]; then
+    cat "$DATA_DIR/repos_page${page}.json"
+  else
+    cat "$DATA_DIR/repos.json"
+  fi
+  exit 0
+fi
 echo "unknown gh call: $args" >&2
 exit 1
 GH
@@ -111,6 +120,20 @@ else
 fi
 rm -f "$FAKE_DATA/runs_override.json"
 
+python3 -c '
+import json,sys
+json.dump({"workflow_runs":[
+  {"id":1,"name":"weird | pipe\nname","run_started_at":"2026-08-20T00:00:00Z","updated_at":"2026-08-20T00:00:10Z","conclusion":"success"}
+]}, open(sys.argv[1],"w"))
+' "$FAKE_DATA/runs_override.json"
+md=$(run owner/weird --pages 1 --markdown)
+rm -f "$FAKE_DATA/runs_override.json"
+if echo "$md" | grep -F '| owner/weird | weird \| pipe name | 1 | 10 | 10 | 0 | 0 | 0 |' >/dev/null; then
+  ok "markdown escapes pipes and newlines in workflow names"
+else
+  fail_msg "markdown escaping — md=$md"
+fi
+
 err=$(run owner/app --timing --pages 3 2>&1 >/dev/null)
 out=$(run owner/app --timing --pages 3 2>/dev/null)
 if echo "$err" | grep -q "warning: --timing costs one API request per run" \
@@ -138,6 +161,31 @@ assert set(names)=={"pooriaarab/newest","pooriaarab/older"}
   ok "discovers newest pushedAt repos and skips archived"
 else
   fail_msg "discovery — out=$out"
+fi
+
+python3 -c '
+import json,sys
+page1 = [{"full_name": f"pooriaarab/archived{i}", "archived": True} for i in range(99)]
+page1.append({"full_name": "pooriaarab/only-p1", "archived": False})
+json.dump(page1, open(sys.argv[1], "w"))
+' "$FAKE_DATA/repos_page1.json"
+cat > "$FAKE_DATA/repos_page2.json" <<'JSON'
+[
+  {"full_name":"pooriaarab/p2-a","archived":false},
+  {"full_name":"pooriaarab/p2-b","archived":false},
+  {"full_name":"pooriaarab/p2-c","archived":false}
+]
+JSON
+out=$(run --limit 3 --pages 1 2>/dev/null)
+rm -f "$FAKE_DATA/repos_page1.json" "$FAKE_DATA/repos_page2.json"
+if echo "$out" | python3 -c '
+import json,sys
+names=[r["repo"] for r in json.load(sys.stdin)["repos"]]
+assert names==["pooriaarab/only-p1","pooriaarab/p2-a","pooriaarab/p2-b"], names
+'; then
+  ok "discovery pages past a full page of archived repos to reach --limit"
+else
+  fail_msg "discovery pagination — out=$out"
 fi
 
 out=$(run --nope owner/app 2>&1); rc=$?
