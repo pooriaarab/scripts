@@ -1,0 +1,196 @@
+#!/usr/bin/env bash
+# issue-standards-rollout — adopt the issue standard across the fleet.
+#
+#   issue-standards-rollout [--apply] [--repo owner/name]
+#
+# Dry by default, like pr-standards-rollout. Without --apply it prints the plan
+# and writes nothing, locally or remotely.
+#
+# What it plans per repo: the four issue forms and config.yml, the 13 labels,
+# the AGENTS.md marker block, and a .agents/issues.md stub.
+#
+# What it does NOT do: fill in that stub. The stub names the repo's analytics
+# helper and its high-stakes paths, and neither can be derived from outside the
+# repo. Inventing them would put a confident wrong answer in 88 places, so the
+# stub ships with TODOs for a human who has read the repo.
+#
+# The rollout obeys the standard it rolls out: one issue and one pull request
+# per repo, each under the caps.
+set -u
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+TEMPLATES_DIR="$SCRIPT_DIR/issue-standards-templates"
+OWNER="pooriaarab"
+
+DRY=1; TARGET_REPO=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --apply) DRY=0; shift ;;
+    --repo)
+      [ $# -ge 2 ] || { echo "ERROR: --repo requires a value" >&2; exit 1; }
+      TARGET_REPO="$2"; shift 2 ;;
+    --help|-h) sed -n '2,17p' "$0"; exit 0 ;;
+    *) echo "unknown flag: $1" >&2; exit 1 ;;
+  esac
+done
+
+command -v gh >/dev/null 2>&1 || { echo "ERROR: gh is not installed" >&2; exit 2; }
+
+# Refuse to start if a template is missing or empty. set -u does not catch a
+# failed read, so an unreadable template would sail past here and --apply would
+# write an empty form into every target repo. Stopping before the first remote
+# write beats repairing sixty repos afterwards.
+REQUIRED_TEMPLATES="bug.yml feature.yml chore.yml epic.yml config.yml agents-block.md issues.md.stub"
+for name in $REQUIRED_TEMPLATES; do
+  file="$TEMPLATES_DIR/$name"
+  [ -s "$file" ] || { echo "ERROR: missing or empty template: $file" >&2; exit 2; }
+done
+
+# name|color|description. Four groups, and every issue carries exactly one from
+# each. `bug` is omitted: GitHub creates it on every repo, and --force would
+# rewrite a description someone may have changed.
+LABELS='feature|0e8a16|Something added or changed that a user can see
+chore|c5def5|Refactor, deps, CI, docs. Nothing a user sees
+epic|5319e7|Needs splitting into shippable slices before anyone starts
+mini|ededed|One string, one config value, a narrow rename
+standard|ededed|A bounded change in one area
+deep|ededed|Multiple surfaces, a new system, or a migration
+route:mechanical|1d76db|Mechanically checkable, nothing high-stakes
+route:scoped|1d76db|Needs judgement about the codebase
+route:judgement|b60205|Deep, cross-cutting, or touches a high-stakes path
+triage|fbca04|Not yet agreed. Do not start
+ready-for-agent|0e8a16|Agreed and specified. An agent may pick this up
+needs-info|d93f0b|Blocked on an answer from the reporter
+blocked|d93f0b|Blocked by another issue'
+
+say() { printf '%s\n' "$*"; }
+
+# Every remote read is best effort. A repo that cannot be reached is reported
+# and skipped, never guessed about.
+repo_has_issues() {
+  gh api "repos/$1" --jq '.has_issues' 2>/dev/null
+}
+
+# Prints "yes", "no" or "unknown". A confirmed 404 is the only "no": any other
+# failure (rate limit, permission, network) must not be read as "not adopted".
+repo_already_adopted() {
+  local resp
+  if resp=$(gh api "repos/$1/contents/.github/ISSUE_TEMPLATE" 2>&1); then
+    echo "yes"
+  elif echo "$resp" | grep -q '"Not Found"'; then
+    echo "no"
+  else
+    echo "unknown"
+  fi
+}
+
+# Decode entirely in Python, like pr-standards-rollout does: the GitHub API
+# returns base64 content wrapped across multiple lines, and shelling out to
+# `base64 --decode` is the exact portability trap that script's own comment
+# ("no macOS -w0 needed") already warns about.
+repo_prefix() {
+  gh api "repos/$1/contents/.github/pr-standards.json" 2>/dev/null | python3 -c "
+import sys, json, base64
+try:
+    d = json.load(sys.stdin)
+    print(json.loads(base64.b64decode(d['content']).decode()).get('prefix', ''))
+except Exception:
+    print('')
+"
+}
+
+target_repos() {
+  if [ -n "$TARGET_REPO" ]; then
+    printf '%s\n' "$TARGET_REPO"
+    return
+  fi
+  gh repo list "$OWNER" --limit 200 --json nameWithOwner --jq '.[].nameWithOwner'
+}
+
+plan_repo() {
+  repo="$1"
+
+  has_issues=$(repo_has_issues "$repo")
+  if [ -z "$has_issues" ]; then
+    say "SKIP    $repo — cannot read the repo"
+    return
+  fi
+  if [ "$has_issues" != "true" ]; then
+    say "SKIP    $repo — issues are disabled, so there is nothing to standardise"
+    return
+  fi
+  adopted=$(repo_already_adopted "$repo")
+  if [ "$adopted" = "yes" ]; then
+    say "SKIP    $repo — already has .github/ISSUE_TEMPLATE"
+    return
+  fi
+  if [ "$adopted" = "unknown" ]; then
+    say "SKIP    $repo — cannot confirm whether the issue standard is already adopted"
+    return
+  fi
+
+  prefix=$(repo_prefix "$repo")
+  if [ -z "$prefix" ]; then
+    say "SKIP    $repo — no .github/pr-standards.json, so the branch name cannot be derived"
+    return
+  fi
+
+  say "ADOPT   $repo"
+  say "          branch  ${prefix}-<issue>-adopt-the-issue-standard"
+  say "          forms   bug.yml feature.yml chore.yml epic.yml config.yml"
+  say "          labels  13, created with --force so a rerun changes nothing"
+  say "          block   AGENTS.md issue-standards marker block"
+  say "          stub    .agents/issues.md, with TODOs for a human to fill in"
+
+  [ "$DRY" -eq 1 ] && return
+
+  # Labels are the one part that is safe to apply directly: creation is
+  # idempotent with --force, and a label is not a code change needing review.
+  # Everything else goes through an issue and a pull request, because the
+  # standard this rolls out says so.
+  #
+  # Read via process substitution, not a pipe: a pipe would run this loop in a
+  # subshell, and label_failures set there would never reach the tally below.
+  label_failures=0
+  while IFS='|' read -r name color description; do
+    [ -n "$name" ] || continue
+    if gh label create "$name" --repo "$repo" --color "$color" \
+        --description "$description" --force >/dev/null 2>&1; then
+      say "          label   $name"
+    else
+      say "          FAILED  label $name"
+      label_failures=$((label_failures + 1))
+    fi
+  done < <(printf '%s\n' "$LABELS")
+
+  if [ "$label_failures" -gt 0 ]; then
+    say "          NOTE    $label_failures label(s) failed; rerun --apply --repo $repo to retry."
+    ANY_LABEL_FAILURE=1
+  fi
+
+  say "          NOTE    forms, block and stub are not written by this script."
+  say "                  Open the issue, branch, copy $TEMPLATES_DIR, fill the"
+  say "                  stub, and open one pull request under the caps."
+}
+
+REPOS=$(target_repos) || { echo "ERROR: could not list repos for $OWNER" >&2; exit 2; }
+
+count=0
+ANY_LABEL_FAILURE=0
+while IFS= read -r repo; do
+  [ -n "$repo" ] || continue
+  plan_repo "$repo"
+  count=$((count + 1))
+done <<EOF
+$REPOS
+EOF
+
+say ""
+if [ "$DRY" -eq 1 ]; then
+  say "$count repo(s) considered. Dry run: nothing was written. Re-run with --apply."
+elif [ "$ANY_LABEL_FAILURE" -eq 1 ]; then
+  say "$count repo(s) considered. Some labels FAILED — see FAILED lines above."
+  exit 1
+else
+  say "$count repo(s) considered. Labels applied where planned."
+fi
