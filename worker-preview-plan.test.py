@@ -91,11 +91,36 @@ class WorkerPreviewPlanTest(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(manifest["intended"]["preview"]["preview_domain"], domain)
 
-    def test_rejects_preview_hostname_beyond_access_limit(self):
+    def test_accepts_preview_hostname_beyond_one_dns_label(self):
         pin = {**self.pin, "branch": "blo-142-" + "a" * 48}
-        result, _ = self.run_plan(pin=pin)
+        result, manifest = self.run_plan(pin=pin)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(manifest["intended"]["preview"]["hostname"]), 84)
+
+    def test_rejects_preview_hostname_beyond_dns_limit(self):
+        pin = {**self.pin, "branch": "blo-142-" + "a" * 48}
+        domain = "preview.staging." + ".".join(["a" * 50] * 4)
+        self.assertLessEqual(len(domain), 253)
+        self.assertLessEqual(max(map(len, domain.split("."))), 63)
+        result, _ = self.run_plan(pin=pin, config={**self.config, "preview_domain": domain})
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("Access application URL limit", result.stderr)
+        self.assertIn("DNS hostname limit", result.stderr)
+
+    def test_accepts_preview_hostname_at_dns_limit(self):
+        pin = {**self.pin, "branch": "blo-142-" + "a" * 48}
+        domain = "preview." + ".".join(["a" * 62, "a" * 62, "a" * 62])
+        self.assertEqual(len(pin["branch"]) + 1 + len(domain), 253)
+        result, manifest = self.run_plan(pin=pin, config={**self.config, "preview_domain": domain})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(manifest["intended"]["preview"]["hostname"]), 253)
+
+    def test_rejects_preview_hostname_one_over_dns_limit(self):
+        pin = {**self.pin, "branch": "blo-142-" + "a" * 48}
+        domain = "preview." + ".".join(["a" * 62, "a" * 62, "a" * 63])
+        self.assertEqual(len(pin["branch"]) + 1 + len(domain), 254)
+        result, _ = self.run_plan(pin=pin, config={**self.config, "preview_domain": domain})
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("DNS hostname limit", result.stderr)
 
     def test_namespaces_account_resources_by_repository(self):
         first_result, first = self.run_plan()
