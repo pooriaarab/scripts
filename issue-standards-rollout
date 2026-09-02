@@ -71,20 +71,32 @@ repo_has_issues() {
   gh api "repos/$1" --jq '.has_issues' 2>/dev/null
 }
 
+# Prints "yes", "no" or "unknown". A confirmed 404 is the only "no": any other
+# failure (rate limit, permission, network) must not be read as "not adopted".
 repo_already_adopted() {
-  gh api "repos/$1/contents/.github/ISSUE_TEMPLATE" >/dev/null 2>&1
+  local resp
+  if resp=$(gh api "repos/$1/contents/.github/ISSUE_TEMPLATE" 2>&1); then
+    echo "yes"
+  elif echo "$resp" | grep -q '"Not Found"'; then
+    echo "no"
+  else
+    echo "unknown"
+  fi
 }
 
+# Decode entirely in Python, like pr-standards-rollout does: the GitHub API
+# returns base64 content wrapped across multiple lines, and shelling out to
+# `base64 --decode` is the exact portability trap that script's own comment
+# ("no macOS -w0 needed") already warns about.
 repo_prefix() {
-  gh api "repos/$1/contents/.github/pr-standards.json" --jq '.content' 2>/dev/null \
-    | base64 --decode 2>/dev/null \
-    | python3 -c "
-import sys, json
+  gh api "repos/$1/contents/.github/pr-standards.json" 2>/dev/null | python3 -c "
+import sys, json, base64
 try:
-    print(json.load(sys.stdin).get('prefix', ''))
+    d = json.load(sys.stdin)
+    print(json.loads(base64.b64decode(d['content']).decode()).get('prefix', ''))
 except Exception:
     print('')
-" 2>/dev/null
+"
 }
 
 target_repos() {
@@ -107,8 +119,13 @@ plan_repo() {
     say "SKIP    $repo — issues are disabled, so there is nothing to standardise"
     return
   fi
-  if repo_already_adopted "$repo"; then
+  adopted=$(repo_already_adopted "$repo")
+  if [ "$adopted" = "yes" ]; then
     say "SKIP    $repo — already has .github/ISSUE_TEMPLATE"
+    return
+  fi
+  if [ "$adopted" = "unknown" ]; then
+    say "SKIP    $repo — cannot confirm whether the issue standard is already adopted"
     return
   fi
 
