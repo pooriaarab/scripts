@@ -668,3 +668,30 @@ test('parseHighStakesGlobs accepts a root-level path with no slash or wildcard',
   const markdown = ['| Path | Why |', '| --- | --- |', '| `wrangler.toml` | infra config |'].join('\n');
   assert.deepEqual(parseHighStakesGlobs(markdown), ['wrangler.toml']);
 });
+
+test('an already-set epic kind still forces size deep on a short body', () => {
+  // guessSize used the freshly-guessed kind rather than the kind the issue
+  // already carries, so an issue already labelled epic but whose body has
+  // no epic signal of its own (no Slices heading, no repeated phase) was
+  // sized "mini" instead of the "epics are always deep" rule.
+  const body = 'Fix nothing.\n\n- [ ] One thing.';
+  const out = suggestLabels('Some title', body, ['epic'], []);
+  assert.equal(out.find((s) => s.group === 'kind').label, 'epic');
+  assert.equal(out.find((s) => s.group === 'kind').alreadySet, true);
+  assert.equal(out.find((s) => s.group === 'size').label, 'deep');
+  assert.equal(out.find((s) => s.group === 'size').reason, 'epics are always deep');
+});
+
+test('a high-stakes glob still matches a path followed by sentence punctuation', () => {
+  // The path-extraction regex includes "." in its character class, so a
+  // path at the end of a sentence ("Touch infra/wrangler.toml.") captured
+  // the closing period as part of the filename and then never matched the
+  // glob it was written to hit.
+  const out = suggestLabels(
+    'Rename helper',
+    `${MINI_CHORE_BODY}\n\nTouch infra/wrangler.toml.`,
+    [],
+    ['infra/*.toml'],
+  );
+  assert.equal(out.find((s) => s.group === 'route').label, 'route:judgement');
+});

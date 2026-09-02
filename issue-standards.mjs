@@ -340,7 +340,11 @@ function globMatch(glob, filePath) {
 }
 
 function mentionedPaths(text) {
-  return String(text).match(/(?:[A-Za-z0-9_.-]+\/)+[A-Za-z0-9_.-]+/g) || [];
+  const matches = String(text).match(/(?:[A-Za-z0-9_.-]+\/)+[A-Za-z0-9_.-]+/g) || [];
+  // The character class includes ".", so a path at the end of a sentence
+  // ("Touch infra/wrangler.toml.") captures the closing period as part of
+  // the filename and then never matches the glob it was written to hit.
+  return matches.map((path) => path.replace(/[.,;:!?)\]]+$/, ''));
 }
 
 function guessRoute(title, body, kind, size, highStakesGlobs) {
@@ -367,9 +371,18 @@ function guessRoute(title, body, kind, size, highStakesGlobs) {
 // when .agents/issues.md is absent, and an array (maybe empty) when it is not.
 export function suggestLabels(title, body, existingLabels, highStakesGlobs) {
   const present = new Set((existingLabels || []).map((label) => String(label).toLowerCase()));
+  // Size and route must reason from the kind and size an issue already
+  // carries, not the freshly-guessed one: an issue already labelled epic
+  // but with a short body would otherwise get sized "mini", contradicting
+  // "epics are always deep" the moment the guess and the existing label
+  // disagree.
+  const existingKind = LABEL_GROUPS.kind.find((label) => present.has(label));
+  const existingSize = LABEL_GROUPS.size.find((label) => present.has(label));
   const kind = guessKind(title, body);
-  const size = guessSize(body, kind.label);
-  const route = guessRoute(title, body, kind.label, size.label, highStakesGlobs);
+  const effectiveKind = existingKind || kind.label;
+  const size = guessSize(body, effectiveKind);
+  const effectiveSize = existingSize || size.label;
+  const route = guessRoute(title, body, effectiveKind, effectiveSize, highStakesGlobs);
   const state = { label: 'triage', reason: 'nothing here has been agreed' };
   const guesses = { kind, size, route, state };
   const suggestions = [];
