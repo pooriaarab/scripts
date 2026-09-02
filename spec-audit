@@ -24,25 +24,32 @@ def fleet_repos():
     if out.returncode != 0:
         sys.exit(f"spec-audit: gh repo list failed: {out.stderr.strip()}")
     names = [r["name"] for r in json.loads(out.stdout or "[]") if not r["isArchived"]]
-    adopted = []
+    adopted, failed = [], []
     for name in names:
         probe = subprocess.run(
             ["gh", "api", f"repos/pooriaarab/{name}/contents/.github/pr-standards.json"],
             capture_output=True, text=True)
         if probe.returncode == 0:
             adopted.append(name)
-    return adopted
+        elif "HTTP 404" not in probe.stderr:
+            # Only a confirmed 404 means "did not adopt". Anything else (rate
+            # limit, auth, 5xx) is a probe failure, not a verdict, and must
+            # not silently shrink the fleet.
+            print(f"spec-audit: adoption probe failed for {name}: {probe.stderr.strip()}", file=sys.stderr)
+            failed.append(name)
+    return adopted, failed
 
 
 args = sys.argv[1:]
 READY_ONLY = "--ready" in args
+failed_repos = []
 if "--repo" in args:
     i = args.index("--repo")
     if i + 1 >= len(args):
         sys.exit("usage: spec-audit [--repo NAME] [--ready]")
     REPOS = [args[i + 1]]
 else:
-    REPOS = fleet_repos()
+    REPOS, failed_repos = fleet_repos()
 
 PATH_RE = re.compile(r"`[^`]*(?:/[\w.-]+|\.(?:ts|tsx|mjs|js|py|sh|yml|yaml|json|md))[^`]*`")
 REF_RE = re.compile(r"\b(copy|mirror|same (?:shape|pattern|way) as|like the|follow (?:the|its)|as `?\w+`? does|precedent)\b", re.I)
@@ -51,7 +58,6 @@ VERIFY_RE = re.compile(r"\b(bun test|npm test|node --test|pytest|\.test\.|accept
 BLOCKED_RE = re.compile(r"\bblocked by #(\d+)\b", re.I)
 
 rows = []
-failed_repos = []
 for repo in REPOS:
     out = subprocess.run(
         ["gh", "issue", "list", "--repo", f"pooriaarab/{repo}", "--state", "open",
