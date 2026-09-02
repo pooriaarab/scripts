@@ -24,10 +24,10 @@ for route in gemini cursor devin pi muse; do
   [ -x "$launcher" ] || { printf '%-10s %-8s %s\n' "$route" MISSING "no $launcher"; broken=$((broken+1)); continue; }
   box="$WORK/$route"; mkdir -p "$box"; ( cd "$box" && git init -q )
   out=$("$launcher" "$box" "reply with only the number: 17*23" 2>&1); status=$?
-  answer=$(printf '%s' "$out" | grep -oE '\b391\b' | head -1)
-  if [ -n "$answer" ] && [ "$status" -eq 0 ]; then
+  last_line=$(printf '%s' "$out" | sed '/^[[:space:]]*$/d' | tail -n1 | tr -d '[:space:]')
+  if [ "$last_line" = "391" ] && [ "$status" -eq 0 ]; then
     printf '%-10s %-8s %s\n' "$route" ok "returned 391"
-  elif printf '%s' "$out" | grep -qiE 'resource_exhausted|quota|rate.?limit|insufficient.?(quota|balance|credits|funds)'; then
+  elif printf '%s' "$out" | grep -qiE 'resource_exhausted|too many requests|(quota|rate.?limit).{0,30}(exceeded|exhausted)|(exceeded|exhausted).{0,30}(quota|rate.?limit)|insufficient.?(quota|balance|credits|funds)'; then
     printf '%-10s %-8s %s\n' "$route" quota "authenticated, out of budget (retryable)"
   else
     printf '%-10s %-8s %s\n' "$route" BROKEN "exit=$status: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-70)"
