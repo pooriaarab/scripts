@@ -341,3 +341,115 @@ test('--selfcheck rejects extra arguments instead of silently ignoring them', ()
   const result = run(['check', '--selfcheck', '--repo', 'not-a-repo']);
   assert.equal(result.status, 2);
 });
+
+const BUG = [
+  '## Impact', 'Scheduled LinkedIn posts fail silently.',
+  '## Reproduction', '1. Schedule a post.\nExpected: it publishes.\nActual: nothing.',
+  '## Last known good', 'Worked on 2026-08-20.',
+  '## Acceptance criteria', '- [ ] The post publishes.',
+  '## How to verify', 'Schedule one and wait.',
+].join('\n');
+
+const EPIC = [
+  '## Job to be done', 'The inbox cannot be shared across providers.',
+  '## Slices', '- [ ] Extract the thread view.',
+  '## Out of scope', 'Anything outside the inbox.',
+].join('\n');
+
+function swapped(body, from, to) {
+  return body.replace(`## ${from}`, `## ${to}`);
+}
+
+test('alias group Job to be done: Why, Problem, Impact are accepted; canonical still works', () => {
+  assert.equal(validateBody(FEATURE, 'feature').failures.length, 0);
+  for (const alias of ['Why', 'Problem', 'Impact']) {
+    const result = validateBody(swapped(FEATURE, 'Job to be done', alias), 'feature');
+    assert.equal(result.failures.length, 0, alias);
+  }
+});
+
+test('alias group Today / Wanted: What, Current / Wanted are accepted; canonical still works', () => {
+  assert.equal(validateBody(FEATURE, 'feature').failures.length, 0);
+  for (const alias of ['What', 'Current / Wanted']) {
+    const result = validateBody(swapped(FEATURE, 'Today / Wanted', alias), 'feature');
+    assert.equal(result.failures.length, 0, alias);
+  }
+});
+
+test('alias group Acceptance criteria: Done, Definition of done are accepted; canonical still works', () => {
+  assert.equal(validateBody(FEATURE, 'feature').failures.length, 0);
+  for (const alias of ['Done', 'Definition of done']) {
+    const result = validateBody(swapped(FEATURE, 'Acceptance criteria', alias), 'feature');
+    assert.equal(result.failures.length, 0, alias);
+  }
+});
+
+test('alias group How to verify: Verification, How verified, Testing are accepted; canonical still works', () => {
+  assert.equal(validateBody(FEATURE, 'feature').failures.length, 0);
+  for (const alias of ['Verification', 'How verified', 'Testing']) {
+    const result = validateBody(swapped(FEATURE, 'How to verify', alias), 'feature');
+    assert.equal(result.failures.length, 0, alias);
+  }
+});
+
+test('alias group Out of scope: Scope, Not included, Non-goals are accepted; canonical still works', () => {
+  assert.equal(validateBody(EPIC, 'epic').failures.length, 0);
+  for (const alias of ['Scope', 'Not included', 'Non-goals']) {
+    const result = validateBody(swapped(EPIC, 'Out of scope', alias), 'epic');
+    assert.equal(result.failures.length, 0, alias);
+  }
+});
+
+test('alias group Slices: Deliverables, Phases are accepted; canonical still works', () => {
+  assert.equal(validateBody(EPIC, 'epic').failures.length, 0);
+  for (const alias of ['Deliverables', 'Phases']) {
+    const result = validateBody(swapped(EPIC, 'Slices', alias), 'epic');
+    assert.equal(result.failures.length, 0, alias);
+  }
+});
+
+test('alias group Reproduction: Steps to reproduce, Repro are accepted; canonical still works', () => {
+  assert.equal(validateBody(BUG, 'bug').failures.length, 0);
+  for (const alias of ['Steps to reproduce', 'Repro']) {
+    const result = validateBody(swapped(BUG, 'Reproduction', alias), 'bug');
+    assert.equal(result.failures.length, 0, alias);
+  }
+});
+
+test('alias group Last known good: Regression, Last working are accepted; canonical still works', () => {
+  assert.equal(validateBody(BUG, 'bug').failures.length, 0);
+  for (const alias of ['Regression', 'Last working']) {
+    const result = validateBody(swapped(BUG, 'Last known good', alias), 'bug');
+    assert.equal(result.failures.length, 0, alias);
+  }
+});
+
+test('alias group Success metric: Metric, Success metrics are accepted; canonical still works', () => {
+  assert.equal(validateBody(FEATURE, 'feature').failures.length, 0);
+  for (const alias of ['Metric', 'Success metrics']) {
+    const result = validateBody(swapped(FEATURE, 'Success metric', alias), 'feature');
+    assert.equal(result.failures.length, 0, alias);
+  }
+});
+
+test('R3: an epic carrying Done fails', () => {
+  // Done is the fleet's name for acceptance criteria. An epic with either
+  // heading has not been decomposed.
+  const result = validateBody(`${EPIC}\n## Done\n- [ ] Everything works.`, 'epic');
+  assert.ok(failed(result));
+  assert.ok(failedOn(result, 'Acceptance criteria'), JSON.stringify(result.failures));
+});
+
+test('R3: an epic may carry an Exit gate', () => {
+  // A gate is a condition for leaving a phase. Acceptance criteria are the
+  // testable statements of one issue, and an epic is forbidden from carrying
+  // those because its children do. Treating the two as one name made every
+  // phase epic in the fleet fail a rule it does not break.
+  const epic = [
+    '## Job to be done', 'The migration cannot land in one step.',
+    '## Slices', '- [ ] Phase one.',
+    '## Out of scope', 'Anything outside the migration.',
+    '## Exit gate', 'Runtime scans find no active resource.',
+  ].join('\n');
+  assert.equal(validateBody(epic, 'epic').failures.length, 0);
+});
