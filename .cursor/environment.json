@@ -1,6 +1,6 @@
 {
   "name": "scripts Cloud Environment",
-  "install": "node --version && python3 --version && bash --version | head -n 1",
+  "install": "node --version && python3 --version && bash --version",
   "terminals": [
     {
       "name": "Verify",
