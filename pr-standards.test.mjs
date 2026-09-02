@@ -1124,3 +1124,57 @@ test('proof: an attachment under a bullet is not inert', () => {
   const indented = body(`    ${url('ccc')}`, `    ${url('ddd')}`);
   assert.equal(failed(checkProof(indented, uiFiles, config)), false);
 });
+
+test('--prefix judges a branch belonging to another repo', () => {
+  // The PreToolUse guard runs in the session's working directory while
+  // `gh pr create --repo X` targets X. Without an explicit prefix the branch is
+  // checked against the wrong repo and a conforming cross-repo PR is refused.
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'prs-crossrepo-'));
+  try {
+    const launcher = fileURLToPath(new URL('./pr-standards', import.meta.url));
+    const run = (args, env = {}) => spawnSync(process.execPath, [launcher, ...args], {
+      cwd,
+      encoding: 'utf8',
+      env: { ...process.env, GITHUB_REPOSITORY: 'pooriaarab/content-rabbit', ...env },
+    });
+
+    const crossRepo = run(['precheck', '--branch', 'scr-173-define-the-issue-standard',
+      '--title', '[SCR-173] Define the issue standard', '--prefix', 'scr']);
+    assert.equal(crossRepo.status, 0, crossRepo.stdout + crossRepo.stderr);
+    assert.match(crossRepo.stdout, /Using prefix: scr \(from --prefix\)/);
+
+    // The same branch without the flag is judged against the cwd's repo, which
+    // is the bug this flag exists to fix. Asserted so a regression is visible.
+    const withoutFlag = run(['precheck', '--branch', 'scr-173-define-the-issue-standard']);
+    assert.notEqual(withoutFlag.status, 0, withoutFlag.stdout + withoutFlag.stderr);
+  } finally {
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test('--prefix narrows the check, it never widens it', () => {
+  // A flag that lets a caller choose the prefix could be used to wave a bad
+  // branch through. It must still refuse a branch that does not match the
+  // prefix it was given, and refuse a prefix that is not a valid prefix.
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'prs-prefixguard-'));
+  try {
+    const launcher = fileURLToPath(new URL('./pr-standards', import.meta.url));
+    const run = (args) => spawnSync(process.execPath, [launcher, ...args], {
+      cwd,
+      encoding: 'utf8',
+      env: { ...process.env, GITHUB_REPOSITORY: 'pooriaarab/content-rabbit' },
+    });
+
+    const mismatch = run(['precheck', '--branch', 'cr-173-x', '--prefix', 'scr']);
+    assert.notEqual(mismatch.status, 0, mismatch.stdout + mismatch.stderr);
+
+    // Exit 2 is the configuration-error code.
+    assert.equal(run(['precheck', '--branch', 'scr-1-x', '--prefix', 'SCRIPTS']).status, 2);
+    assert.equal(run(['precheck', '--branch', 'scr-1-x', '--prefix', 'toolong']).status, 2);
+
+    // The flag belongs to precheck alone; the other modes know their repo.
+    assert.equal(run(['branch', '--prefix', 'scr']).status, 2);
+  } finally {
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
+});
