@@ -11,9 +11,9 @@ loader = importlib.machinery.SourceFileLoader("provisioner", str(SCRIPT))
 spec = importlib.util.spec_from_loader(loader.name, loader)
 provisioner = importlib.util.module_from_spec(spec)
 loader.exec_module(provisioner)
-def plan():
+def plan(branch="scr-163-provision-preview-data", domain="preview.example.com"):
     owner = {"repository": "pooriaarab/example", "pull_request": 999,
-             "branch": "scr-163-provision-preview-data", "head_sha": "a" * 40,
+             "branch": branch, "head_sha": "a" * 40,
              "workflow": "Worker Preview Build", "run_id": 12,
              "artifact": "worker-preview-bundle", "artifact_id": 13,
              "artifact_digest": "sha256:" + "b" * 64}
@@ -21,10 +21,10 @@ def plan():
                         "name": provisioner.resource_name(owner["repository"], owner["branch"], kind, binding)}]
                 for kind, binding in (("d1", "DB"), ("kv", "CACHE"), ("r2", "FILES"))}
     intended.update({"target_worker": {"name": "example", "workers_dev": False},
-                     "preview": {"name": owner["branch"], "hostname": owner["branch"] + ".preview.example.com",
-                                 "preview_domain": "preview.example.com"},
+                     "preview": {"name": branch, "hostname": branch + "." + domain,
+                                 "preview_domain": domain},
                      "access": {"application_name": provisioner.resource_name(owner["repository"], owner["branch"], "access"),
-                                "hostname": owner["branch"] + ".preview.example.com", "policy_name": provisioner.resource_name(owner["repository"], owner["branch"], "policy"),
+                                "hostname": branch + "." + domain, "policy_name": provisioner.resource_name(owner["repository"], owner["branch"], "policy"),
                                 "service_token_name": provisioner.resource_name(owner["repository"], owner["branch"], "ci")},
                      "test_identity": {"name": provisioner.resource_name(owner["repository"], owner["branch"], "test-user")}})
     acquired = {"preview": {"version_id": None},
@@ -73,6 +73,24 @@ class ProvisionTest(unittest.TestCase):
         self.assertEqual(value["intended"]["d1"][0]["name"], "scr-163-prov-d1-fbb5becca9acbbd8")
         self.assertEqual(value["intended"]["kv"][0]["name"],
                          "scr-163-provision-preview-data-11ce1b37d5a55e80-kv-cache")
+    def test_validates_full_hostname_dns_limit(self):
+        branch = "scr-163-" + "a" * 48
+        long_valid = plan(branch, "preview.staging.example.com")
+        self.assertEqual(len(long_valid["intended"]["preview"]["hostname"]), 84)
+        self.assertIs(provisioner.validate_shape(long_valid, True), long_valid)
+        too_long = plan(branch, "preview.staging." + ".".join(["a" * 50] * 4))
+        self.assertLessEqual(max(map(len, too_long["intended"]["preview"]["preview_domain"].split("."))), 63)
+        with self.assertRaisesRegex(provisioner.ProvisionError, "inconsistent Preview intent"):
+            provisioner.validate_shape(too_long, True)
+    def test_validates_hostname_at_exact_dns_limit(self):
+        branch = "scr-163-" + "a" * 48
+        at_limit = plan(branch, "preview." + ".".join(["a" * 62, "a" * 62, "a" * 62]))
+        self.assertEqual(len(at_limit["intended"]["preview"]["hostname"]), 253)
+        self.assertIs(provisioner.validate_shape(at_limit, True), at_limit)
+        one_over = plan(branch, "preview." + ".".join(["a" * 62, "a" * 62, "a" * 63]))
+        self.assertEqual(len(one_over["intended"]["preview"]["hostname"]), 254)
+        with self.assertRaisesRegex(provisioner.ProvisionError, "inconsistent Preview intent"):
+            provisioner.validate_shape(one_over, True)
     def test_reconciles_ambiguous_create_and_is_idempotent(self):
         api = FakeApi(); api.ambiguous.add("d1")
         root, first = self.invoke(plan(), api)
