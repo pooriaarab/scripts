@@ -15,6 +15,10 @@ The [`agents`](https://github.com/pooriaarab/agents) repo is the hub — a porta
 | [scripts](https://github.com/pooriaarab/scripts) | Automation scripts |
 | [prompts](https://github.com/pooriaarab/prompts) | Refined prompts |
 
+## fleet-ci-census
+
+Fleet CI wall-time census. `./fleet-ci-census --help`.
+
 ## Diagnose CI in this order
 
 The four `ci-*` scripts are one workflow, not four tools. Run them in order. Each step
@@ -48,6 +52,7 @@ Not part of the diagnosis order above.
 | `claude-token-rotate` | Rotate a Claude OAuth token into every repo that runs the review action. Reads the token from a hidden prompt, never an argument, because an argument lands in shell history and the process list. |
 | `install-pr-hooks` | Installs the `pr-standards` pre-push hook into local pooriaarab checkouts that have adopted `.github/pr-standards.json`. Dry-run by default; `--apply` writes, `--uninstall --apply` removes. See [pr-standards.md](pr-standards.md). |
 | `fleet-digest` | One message a day that needs a person: owner-only label requests, failing default-branch CI, stale PRs and green PRs that wait for a human. Prints `Nothing needs you.` when empty. |
+| `fleet-ci-census` | Per repo and workflow: run count, p50/p95 wall time, total minutes, failure and cancellation rates. JSON by default; `--markdown` ranks by total minutes. A run count at the page cap is a floor, not a total. See [fleet-ci-census.md](fleet-ci-census.md). |
 
 ## Tests
 
