@@ -64,6 +64,33 @@ Or opt a Box out of reaping entirely:
 touch /home/user/.box-reap-keep
 ```
 
+## The four layers, and what each one knows
+
+Box cost control is four layers. Each knows strictly less than the one before.
+
+| # | Layer | Mechanism | What it knows | How it acts |
+|---|---|---|---|---|
+| 1 | Creation | `box-guard` | whether a Box has a deadline (`archiveAfter`) | gives an unbounded Box a TTL in place with `box extend --ttl`; see "The unbounded Box, and why the guard is not a rule" |
+| 2 | Session | `box-session`, wired to the Claude Code SessionStart/SessionEnd hooks | which repo claimed which Box (`~/.local/state/box-work/<repo>.id`) | warms one Box per repo; the last session out stops it and keeps the id so the next session resumes instead of creating; see "Stop keeps the id, so the next session resumes" |
+| 3 | Laptop | `box-reap` via launchd, every 15 minutes | CPU, load, and the heartbeat file inside the Box, over SSH | the only layer that decides with evidence: it probes each Box and stops it only when the probe says quiet; see "Why \"idle\" is a trap" |
+| 4 | Cloud | `box-sweep-remote` in `.github/workflows/box-sweep.yml`, on an Ubicloud runner every 30 minutes | age alone | cannot SSH into a Box, so it decides on age alone; report-only on a schedule, stopping only on a `workflow_dispatch` with `execute: true`; see "The laptop reaper cannot run while the laptop sleeps" |
+
+The layers are ordered by how much they know, and **a layer must never act with more
+confidence than its evidence supports.** The cloud layer's age rule is crude, and it is
+safe only because it defaults to reporting.
+
+What each layer misses, all of it recorded in the sections below:
+
+- **Creation:** a Box created with `--no-auto-stop` has `archiveAfter: null`, and nothing
+  stops it until `box-guard` gives it a deadline.
+- **Session:** a session killed before SessionEnd never runs `box-session end`, so its claim
+  file stays behind and shields the Box until the claim TTL expires.
+- **Laptop:** `box-reap` cannot run while the laptop is asleep, which is when a forgotten
+  Box bills longest.
+- **Probing:** a Box the reaper cannot reach over SSH produces no CPU or heartbeat evidence,
+  so the reaper must not stop it — and on 2026-09-02 two such Boxes reached 51.7h and 65.4h,
+  about $4.20 between them, before the cloud layer's age rule caught them.
+
 ## Why "idle" is a trap
 
 `box list` reports a state of `idle` for almost every Box you will ever look at.
