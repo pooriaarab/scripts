@@ -769,10 +769,18 @@ test('proof: a bare command claim warns that it lives only in the body', () => {
     assert.equal(warned(checkProof(`${validBody}\n${shape}`, nonUiFiles, config)), true, shape);
   }
 
+  // A lone `*` glued directly onto the digits is the same disguised-suffix
+  // bypass wearing a Markdown emphasis character instead of a dot or comma:
+  // it must actually reach whitespace/end-of-string to count as a boundary,
+  // not just appear once.
+  const withGluedAsterisk = `${validBody}\nhttps://github.com/pooriaarab/scripts/actions/runs/123*not-a-run`;
+  assert.equal(warned(checkProof(withGluedAsterisk, nonUiFiles, config)), true);
+
   // A real run URL still clears the warning in every shape GitHub actually
   // produces: nested under a job, with a query string, with a fragment,
-  // inside a markdown link, and followed by ordinary sentence punctuation
-  // that actually ends the clause (whitespace or end-of-string after it).
+  // inside a markdown link, wrapped in Markdown bold, and followed by
+  // ordinary sentence punctuation that actually ends the clause (whitespace
+  // or end-of-string after it).
   const realShapes = [
     'https://github.com/pooriaarab/scripts/actions/runs/123456789/job/987654321',
     'https://github.com/pooriaarab/scripts/actions/runs/123456789?check_suite_focus=true',
@@ -785,6 +793,10 @@ test('proof: a bare command claim warns that it lives only in the body', () => {
     // the closing delimiter both sit between the run ID and the line's end.
     '(https://github.com/pooriaarab/scripts/actions/runs/123456789.)',
     '[log](https://github.com/pooriaarab/scripts/actions/runs/123456789.)',
+    // Markdown bold closes flush against the digits with no separator --
+    // the emphasis markers themselves are the boundary here.
+    '**https://github.com/pooriaarab/scripts/actions/runs/123456789**',
+    'See **https://github.com/pooriaarab/scripts/actions/runs/123456789** it passed.',
   ];
   for (const shape of realShapes) {
     assert.equal(warned(checkProof(`${validBody}\n${shape}`, nonUiFiles, config)), false, shape);

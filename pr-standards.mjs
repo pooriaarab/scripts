@@ -475,7 +475,15 @@ function hasValidProofNa(body) {
 // punctuation rejected that real shape outright, because closing delimiters
 // are exactly the case where more (harmless) characters legitimately follow
 // the period before the line actually ends.
-const ACTIONS_RUN_URL = /https:\/\/github\.com\/[^\s\/]+\/[^\s\/]+\/actions\/runs\/\d+(?:[\/?#][^\s"'\x60\)\]<>]*)?(?=$|[\s"'\x60\)\]<>]|[.,;:!]+[\x60"'\)\]<>]*(?=$|\s))/;
+//
+// `*` joins the sentence-punctuation group rather than the single-char
+// boundary group: Markdown bold/italic wraps a URL as `**...runs/123456789**`,
+// closing flush against the digits with no separator, so a bare word-char
+// deny-list can't tell that apart from `runs/123**not-a-run` gluing more text
+// on through the same character. Requiring the asterisk run to actually reach
+// whitespace/end-of-string (same rule as `.,;:!`) accepts the real Markdown
+// shape while still rejecting the glued one.
+const ACTIONS_RUN_URL = /https:\/\/github\.com\/[^\s\/]+\/[^\s\/]+\/actions\/runs\/\d+(?:[\/?#][^\s"'\x60\)\]<>]*)?(?=$|[\s"'\x60\)\]<>]|[.,;:!*]+[\x60"'\)\]<>]*(?=$|\s))/;
 
 function hasExternalProofEvidence(verifiedSection) {
   if (countUserAttachments(verifiedSection) > 0) return true;
