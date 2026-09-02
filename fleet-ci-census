@@ -191,7 +191,9 @@ def fetch_runs(repo):
 
 
 def aggregate(repo, runs):
-    by_wf = defaultdict(lambda: {"durs": [], "ids": [], "fail": 0, "cancelled": 0})
+    # Keyed on workflow_id, not name: two workflow files can share a
+    # display name, and keying on name alone would merge their metrics.
+    by_wf = defaultdict(lambda: {"name": None, "durs": [], "ids": [], "fail": 0, "cancelled": 0})
     for r in runs:
         if not isinstance(r, dict):
             continue
@@ -203,7 +205,9 @@ def aggregate(repo, runs):
         secs = (end - start).total_seconds()
         if secs < 0 or secs > MAX_DURATION_S:
             continue
-        b = by_wf[r.get("name") or "(unnamed)"]
+        name = r.get("name") or "(unnamed)"
+        b = by_wf[r.get("workflow_id", name)]
+        b["name"] = name
         b["durs"].append(secs)
         if r.get("id") is not None:
             b["ids"].append(r["id"])
@@ -222,10 +226,10 @@ def aggregate(repo, runs):
                 timing_ms[rid] = billable_ms(payload)
 
     workflows = []
-    for name, b in by_wf.items():
+    for b in by_wf.values():
         n = len(b["durs"])
         row = {
-            "name": name,
+            "name": b["name"],
             "runs": n,
             "p50_s": int(round(percentile(b["durs"], 0.5))),
             "p95_s": int(round(percentile(b["durs"], 0.95))),
