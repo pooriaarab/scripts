@@ -63,8 +63,16 @@ jobs:
           if [ "${{ inputs.execute }}" = "true" ]; then args+=(--execute); fi
           # The report goes to the step summary so the result is readable without opening
           # logs, and to stdout so a failure is greppable in the log.
+          # Actions runs this with `bash --noprofile --norc -eo pipefail`, so errexit is
+          # already on before the `set -uo pipefail` above — that line adds -u and changes
+          # nothing about -e. A failing sweeper would therefore kill the step at this pipe,
+          # before rc is captured and before the schedule/warning logic below could run,
+          # and the job would go red exactly as it did before this change. Disable errexit
+          # across the pipe only.
+          set +e
           ./box-sweep-remote "${args[@]}" 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
           rc="${PIPESTATUS[0]}"
+          set -e
 
           # Exit 1 means "Boxes are over the ceiling and I left them running", which is the
           # normal state of a report-only run. Failing the job on it makes the schedule red
