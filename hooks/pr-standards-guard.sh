@@ -23,23 +23,51 @@ except Exception:
 
 operators = {"&&", "||", ";", "|", "&"}
 segments = []
-try:
-    for line in command.split("\n"):
-        tokens = shlex.split(re.sub(r"(\|\||&&|;|\||&)", r" \1 ", line), comments=True)
-        current = []
-        for token in tokens:
-            if token in operators:
-                segments.append(current)
-                current = []
-            else:
-                current.append(token)
-        segments.append(current)
-except ValueError:
-    raise SystemExit(0)
+for line in command.split("\n"):
+    # Per LINE, not per command. An unbalanced quote anywhere -- a heredoc body
+    # is the common one -- makes shlex raise, and wrapping the whole loop
+    # discarded every segment already found on earlier lines. So a multi-line
+    # call whose first line creates a bad branch and whose fifth line contains
+    # a stray quote sailed through unchecked.
+    try:
+        # punctuation_chars makes shlex itself yield `&&`, `||`, `;` and `|` as
+        # tokens, which is the one tokeniser that gets BOTH cases right:
+        #
+        #   - an unspaced operator still splits, so `true&&git checkout -b x`
+        #     is seen (a regex rewrite of the raw line also managed this);
+        #   - a QUOTED payload stays one token, so a command that merely
+        #     MENTIONS a branch is not judged as creating one. The regex
+        #     rewrite reached inside quotes and tore payloads open, which
+        #     blocked writing a test, a diagnostic, or documentation that
+        #     quotes an example command.
+        #
+        # Quoted tokens keep their quote characters, so such a token can never
+        # equal `git` or `gh` and can never be a segment head.
+        lexer = shlex.shlex(line, punctuation_chars=True)
+        lexer.whitespace_split = True
+        tokens = list(lexer)
+    except ValueError:
+        continue
+    current = []
+    for token in tokens:
+        if token in operators:
+            segments.append(current)
+            current = []
+        else:
+            current.append(token)
+    segments.append(current)
 
 assignment = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 create_flags = {"-f", "--force", "-t", "--track", "--no-track", "-c", "-C", "--copy"}
 copy_flags = {"-c", "-C", "--copy"}
+
+def unquote(value):
+    # punctuation_chars tokenising keeps a quoted token's quote characters, so
+    # an option value arrives as "'[SCR-1] Subject'" rather than the string the
+    # shell would pass. Strip one matched pair; anything else is left alone.
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+        return value[1:-1]
+    return value
 
 def option_value(tokens, names):
     # gh/cobra flags: a repeated flag has the LAST occurrence win, and a
@@ -61,10 +89,20 @@ def option_value(tokens, names):
         if matched:
             continue
         for name in short_names:
-            if token != name and token.startswith(name):
-                result = token[len(name):]
-                break
-    return result
+            # A glued shorthand is only an option when the token IS the option.
+            # Matching any token that merely STARTS with -H let a value inside
+            # an unrelated flag win: `--head real --body 'see -Hbad for why'`
+            # validated `bad`, because the scan is last-match-wins and the body
+            # is scanned later. A real glued shorthand is the first token of an
+            # argument, so require the previous token to be a flag or the start.
+            if token == name or not token.startswith(name):
+                continue
+            previous = tokens[index - 1] if index > 0 else None
+            if previous is not None and not previous.startswith("-"):
+                continue
+            result = token[len(name):]
+            break
+    return None if result is None else unquote(result)
 
 def created_branch(tokens):
     index = 1
@@ -198,7 +236,16 @@ while IFS= read -r encoded; do
   fi
 
   if command -v pr-standards >/dev/null 2>&1; then
-    if ! output=$(pr-standards precheck --branch "$branch" ${title:+--title "$title"} 2>&1); then
+    output=$(pr-standards precheck --branch "$branch" ${title:+--title "$title"} 2>&1)
+    engine_status=$?
+    # 127 and 126 mean the engine never ran -- on PATH but its interpreter is
+    # missing, or not executable. Reading that as a verdict blocked every
+    # branch on a machine with the checker installed and no `node` in the
+    # hook's PATH, and the message named the branch as if the branch were the
+    # problem. Only a verdict it actually reached is a verdict.
+    if [ "$engine_status" -eq 127 ] || [ "$engine_status" -eq 126 ]; then
+      inline_check "$branch" "$prefix" "$title" || status=2
+    elif [ "$engine_status" -ne 0 ]; then
       printf 'Branch "%s" does not meet the PR standard:\n%s\n' "$branch" "$output" >&2
       status=2
     fi
