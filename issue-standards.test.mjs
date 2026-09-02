@@ -298,6 +298,27 @@ test('lint is not fooled by a label that merely contains the heading', () => {
   }
 });
 
+test('lint is not fooled by a label-shaped line inside a markdown block scalar', () => {
+  // `value: |` starts a block scalar; everything indented under it is prose,
+  // not YAML keys. A description that happens to say "label: Job to be done"
+  // must not count as the field it describes.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'issue-templates-'));
+  try {
+    for (const kind of KINDS) {
+      const fields = REQUIRED_HEADINGS[kind].map((h) => `  - type: textarea\n    attributes:\n      label: ${h}`);
+      fs.writeFileSync(path.join(dir, `${kind}.yml`), `name: ${kind}\nbody:\n${fields.join('\n')}\n`);
+    }
+    const featureFile = path.join(dir, 'feature.yml');
+    const withoutField = fs.readFileSync(featureFile, 'utf8').replace(/.*Job to be done.*\n/, '');
+    fs.writeFileSync(featureFile, `${withoutField}  - type: markdown\n    attributes:\n      value: |\n        Copy this line if needed:\n        label: Job to be done\n`);
+    const result = lintTemplates(dir);
+    assert.ok(failed(result));
+    assert.ok(failedOn(result, 'Job to be done'), JSON.stringify(result.failures));
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('lint fails when a form offers a heading forbidden for its kind', () => {
   // Every issue this epic form produces would fail the body check: an epic
   // that carries its own acceptance criteria has not been decomposed.

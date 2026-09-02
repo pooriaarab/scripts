@@ -372,6 +372,27 @@ function runPrecheck(options) {
   }, options.json);
 }
 
+// A YAML block scalar (`value: |`) can carry lines that look like `label: X`
+// as plain description text, not a field. Without stripping those out first,
+// a form that merely mentions a heading in prose would count as still
+// offering the field, hiding real drift.
+function stripBlockScalars(text) {
+  const kept = [];
+  let blockIndent = null;
+  for (const line of text.split('\n')) {
+    if (blockIndent !== null) {
+      if (line.trim() === '') continue;
+      const indent = /^ */.exec(line)[0].length;
+      if (indent > blockIndent) continue;
+      blockIndent = null;
+    }
+    const scalarStart = /^(\s*)\S+:\s*[|>][+-]?\d*\s*$/.exec(line);
+    if (scalarStart) blockIndent = scalarStart[1].length;
+    kept.push(line);
+  }
+  return kept.join('\n');
+}
+
 // The forms are what people actually fill in, so they have to keep offering
 // every heading the checker demands. Without this the two drift and an issue
 // filed through the form fails the check that the form exists to satisfy.
@@ -387,7 +408,7 @@ export function lintTemplates(dir) {
       failures.push(fail(`${kind}.yml`, 'missing', `a form at ${file}`, `Add the ${kind} form.`));
       continue;
     }
-    const text = fs.readFileSync(file, 'utf8');
+    const text = stripBlockScalars(fs.readFileSync(file, 'utf8'));
     // Only a field's own `label:` counts. Matching anywhere in the file would
     // let the heading's words survive in an unrelated description after the
     // field itself was renamed or removed, and lint would miss the drift.
