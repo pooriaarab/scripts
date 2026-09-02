@@ -64,4 +64,16 @@ jobs:
           # The report goes to the step summary so the result is readable without opening
           # logs, and to stdout so a failure is greppable in the log.
           ./box-sweep-remote "${args[@]}" 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
-          exit "${PIPESTATUS[0]}"
+          rc="${PIPESTATUS[0]}"
+
+          # Exit 1 means "Boxes are over the ceiling and I left them running", which is the
+          # normal state of a report-only run. Failing the job on it makes the schedule red
+          # every 30 minutes until a human intervenes, and a signal that is always red is
+          # not a signal — it also hides exit 2/3, which mean the sweeper itself is broken.
+          # So on a schedule, exit 1 becomes a warning and the job stays green. A human who
+          # dispatched the run asked a direct question and gets the real exit code.
+          if [ "$rc" -eq 1 ] && [ "${{ github.event_name }}" = "schedule" ]; then
+            echo "::warning title=Boxes over the age ceiling::Dispatch box-sweep with execute=true to stop them, or leave them if they are in use."
+            exit 0
+          fi
+          exit "$rc"
