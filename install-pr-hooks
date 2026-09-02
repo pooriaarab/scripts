@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Install the pr-standards pre-push hook into local pooriaarab checkouts.
+# Install the pr-standards pre-push hook into local pooriaarab checkouts,
+# and the PreToolUse guard into ~/.local/share/pr-standards/.
 #
 # The hook rejects a branch whose name does not meet the standard before the
 # push reaches GitHub. It is the second of four enforcement layers, and on a
@@ -10,26 +11,38 @@
 # A repo is eligible when its origin remote is a pooriaarab repo AND it has
 # .github/pr-standards.json. Work and Mozilla checkouts are never touched.
 #
+# The PreToolUse guard is one machine-wide copy at a path this tool owns. The
+# installer prints a settings.json snippet to point at it and does not edit
+# any settings file.
+#
 # Usage:
 #   ./install-pr-hooks                  # dry-run every checkout under the roots
 #   ./install-pr-hooks --apply
 #   ./install-pr-hooks --apply --root ~/Documents/Personal/content-rabbit
 #   ./install-pr-hooks --uninstall --apply
+#   ./install-pr-hooks --drift           # whether the installed guard matches HEAD
 set -uo pipefail
+
+HERE="$(cd "$(dirname "$0")" && pwd)"
+GUARD_SRC="$HERE/hooks/pr-standards-guard.sh"
+GUARD_DIR="$HOME/.local/share/pr-standards"
+GUARD_DST="$GUARD_DIR/pr-standards-guard.sh"
 
 ROOTS=("$HOME/Documents/Personal")
 APPLY=0
 UNINSTALL=0
+DRIFT=0
 VERSION="v4"
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --apply)     APPLY=1; shift ;;
     --uninstall) UNINSTALL=1; shift ;;
+    --drift)     DRIFT=1; shift ;;
     --root)
       [ $# -ge 2 ] || { echo "--root requires a value" >&2; exit 1; }
       ROOTS=("$2"); shift 2 ;;
-    -h|--help)   sed -n '2,17p' "$0"; exit 0 ;;
+    -h|--help)   sed -n '2,23p' "$0"; exit 0 ;;
     *) echo "unknown flag: $1" >&2; exit 1 ;;
   esac
 done
@@ -325,8 +338,158 @@ resolve_real_path() {
   normalize_path "$existing$suffix"
 }
 
+# Revision of the repo copy of the guard. Blob SHA of HEAD:hooks/pr-standards-guard.sh.
+guard_expected_sha() {
+  git -C "$HERE" rev-parse HEAD:hooks/pr-standards-guard.sh
+}
+
+guard_stamp_sha() {
+  awk '/^# pr-standards-guard installed from / { print $5; exit }' "$1"
+}
+
+# Hash the installed file with the stamp line removed, so it is comparable to
+# the source blob. A hand-edit of the body changes this; a date-only stamp
+# change does not.
+guard_body_sha() {
+  awk '!/^# pr-standards-guard installed from /' "$1" | git hash-object --stdin
+}
+
+# Stamp comparison: the recorded SHA and the body blob must both equal HEAD.
+# Making this always succeed is the mutation that must turn the stale-file
+# case red; do not split the body check out of it.
+guard_stamp_matches() {
+  local stamp_sha="$1" body_sha="$2" expected="$3"
+  [ -n "$stamp_sha" ] && [ "$stamp_sha" = "$expected" ] && [ "$body_sha" = "$expected" ]
+}
+
+guard_is_current() {
+  [ -f "$GUARD_DST" ] && [ ! -L "$GUARD_DST" ] || return 1
+  local expected stamp_sha body_sha
+  expected=$(guard_expected_sha) || return 1
+  stamp_sha=$(guard_stamp_sha "$GUARD_DST")
+  body_sha=$(guard_body_sha "$GUARD_DST")
+  guard_stamp_matches "$stamp_sha" "$body_sha" "$expected"
+}
+
+write_guard() {
+  local tmp stamp expected
+  [ -f "$GUARD_SRC" ] || return 1
+  expected=$(guard_expected_sha) || return 1
+  mkdir -p "$GUARD_DIR" || return 1
+  tmp=$(mktemp "$GUARD_DIR/.guard.XXXXXX") || return 1
+  stamp="# pr-standards-guard installed from $expected on $(date -u +%F)"
+  if ! { IFS= read -r first; printf '%s\n' "$first"; printf '%s\n' "$stamp"; cat; } < "$GUARD_SRC" > "$tmp"
+  then
+    rm -f "$tmp"; return 1
+  fi
+  if ! chmod +x "$tmp"; then rm -f "$tmp"; return 1; fi
+  if ! mv -f "$tmp" "$GUARD_DST"; then rm -f "$tmp"; return 1; fi
+  return 0
+}
+
+print_guard_snippet() {
+  echo "Add this to settings.json under hooks.PreToolUse, matcher Bash:"
+  echo "  { \"type\": \"command\", \"command\": \"$GUARD_DST\" }"
+  echo "This tool does not edit any settings file."
+}
+
+# Same shape as `pr-standards drift`: PASS/FAIL, got/expected, missing vs stale.
+handle_guard_drift() {
+  local expected stamp_sha body_sha
+  expected=$(guard_expected_sha) || {
+    echo "FAIL  PreToolUse guard"
+    echo "      got:      cannot read HEAD:hooks/pr-standards-guard.sh"
+    echo "      expected: a blob sha"
+    return 1
+  }
+  if [ ! -f "$GUARD_DST" ] || [ -L "$GUARD_DST" ]; then
+    echo "FAIL  PreToolUse guard"
+    echo "      got:      not installed"
+    echo "      expected: $expected"
+    return 1
+  fi
+  stamp_sha=$(guard_stamp_sha "$GUARD_DST")
+  body_sha=$(guard_body_sha "$GUARD_DST")
+  if guard_stamp_matches "$stamp_sha" "$body_sha" "$expected"; then
+    echo "PASS  PreToolUse guard"
+    return 0
+  fi
+  echo "FAIL  PreToolUse guard"
+  echo "      got:      stale"
+  echo "      expected: $expected"
+  echo "      installed: $body_sha"
+  return 1
+}
+
+handle_guard() {
+  local expected stamp_sha
+  expected=$(guard_expected_sha) || {
+    echo "FAIL    PreToolUse guard (cannot read HEAD:hooks/pr-standards-guard.sh)"
+    failed=$((failed+1)); return
+  }
+
+  if [ "$UNINSTALL" = 1 ]; then
+    if [ -f "$GUARD_DST" ] && [ ! -L "$GUARD_DST" ] && grep -q '^# pr-standards-guard installed from ' "$GUARD_DST"; then
+      if [ "$APPLY" = 1 ]; then
+        rm -f "$GUARD_DST" || { echo "FAIL    PreToolUse guard (remove failed)"; failed=$((failed+1)); return; }
+        echo "removed PreToolUse guard at $GUARD_DST"
+      else
+        echo "would remove PreToolUse guard at $GUARD_DST"
+      fi
+    fi
+    return
+  fi
+
+  if [ -L "$GUARD_DST" ]; then
+    echo "FAIL    PreToolUse guard (refusing a symlink at $GUARD_DST)"
+    failed=$((failed+1)); return
+  fi
+
+  if guard_is_current; then
+    echo "already installed PreToolUse guard at $GUARD_DST"
+    return
+  fi
+
+  if [ -e "$GUARD_DST" ] && [ ! -f "$GUARD_DST" ]; then
+    echo "FAIL    PreToolUse guard (not a regular file: $GUARD_DST)"
+    failed=$((failed+1)); return
+  fi
+
+  if [ -f "$GUARD_DST" ]; then
+    stamp_sha=$(guard_stamp_sha "$GUARD_DST")
+    if [ "$APPLY" = 1 ]; then
+      if ! write_guard; then
+        echo "FAIL    PreToolUse guard (write failed)"; failed=$((failed+1)); return
+      fi
+      echo "updated PreToolUse guard at $GUARD_DST (installed ${stamp_sha:-unknown} expected $expected)"
+    else
+      echo "would update PreToolUse guard at $GUARD_DST (stale; installed ${stamp_sha:-unknown} expected $expected)"
+    fi
+    print_guard_snippet
+    return
+  fi
+
+  if [ "$APPLY" = 1 ]; then
+    if ! write_guard; then
+      echo "FAIL    PreToolUse guard (write failed)"; failed=$((failed+1)); return
+    fi
+    echo "wrote PreToolUse guard at $GUARD_DST"
+  else
+    echo "would write PreToolUse guard at $GUARD_DST"
+  fi
+  print_guard_snippet
+}
+
 installed=0 already=0 updated=0 removed=0 skipped=0 failed=0
 delegation_noted=0
+
+# --drift never scans checkouts: the guard is machine-wide, not per-repo.
+if [ "$DRIFT" = 1 ]; then
+  handle_guard_drift
+  exit $?
+fi
+
+handle_guard
 
 for root in "${ROOTS[@]}"; do
   # Without this, a missing or mistyped --root makes find fail silently (stderr
