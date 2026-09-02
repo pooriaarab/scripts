@@ -1,0 +1,376 @@
+#!/usr/bin/env bash
+# Fan out Cursor Cloud config to pooriaarab repos.
+#
+# Adds .cursor/environment.json, .cursorignore, cloud block in AGENTS.md,
+# .env.example (if missing), and .gitignore entries for .env.local.
+#
+# Dry-run is the default. Use --apply to open PRs.
+#
+# Usage:
+#   ./cursor-cloud-rollout                     # dry-run all eligible repos
+#   ./cursor-cloud-rollout --repo offrouter    # dry-run one repo
+#   ./cursor-cloud-rollout --apply             # open PRs fleet-wide
+#
+set -u
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PREFIXES_FILE="$SCRIPT_DIR/repo-prefixes.json"
+TEMPLATES_DIR="$SCRIPT_DIR/cursor-cloud-rollout-templates"
+DETECT_PY="$SCRIPT_DIR/cursor-cloud-detect.py"
+ENV_JSON_PY="$SCRIPT_DIR/cursor-cloud-environment-json.py"
+OWNER="pooriaarab"
+
+DRY=1
+TARGET_REPO=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --apply) DRY=0; shift ;;
+    --repo)
+      [ $# -ge 2 ] || { echo "ERROR: --repo requires a value"; exit 1; }
+      TARGET_REPO="$2"
+      shift 2
+      ;;
+    --help|-h) sed -n '2,13p' "$0"; exit 0 ;;
+    *) echo "unknown flag: $1"; exit 1 ;;
+  esac
+done
+
+for f in "$PREFIXES_FILE" "$TEMPLATES_DIR/agents-block.md" "$TEMPLATES_DIR/cursorignore" \
+  "$TEMPLATES_DIR/env.example" "$TEMPLATES_DIR/gitignore-additions.txt" "$DETECT_PY" "$ENV_JSON_PY"; do
+  [ -r "$f" ] || { echo "ERROR: cannot read $f" >&2; exit 2; }
+done
+chmod +x "$DETECT_PY" "$ENV_JSON_PY" 2>/dev/null || true
+
+read_template() {
+  local path="$1" content
+  content=$(cat "$path" 2>/dev/null) || { echo "ERROR: cannot read $path" >&2; return 1; }
+  [ -n "$content" ] || { echo "ERROR: $path is empty" >&2; return 1; }
+  printf '%s' "$content"
+}
+
+AGENTS_BLOCK_TPL=$(read_template "$TEMPLATES_DIR/agents-block.md") || exit 1
+CURSORIGNORE_TPL=$(read_template "$TEMPLATES_DIR/cursorignore") || exit 1
+ENV_EXAMPLE_TPL=$(read_template "$TEMPLATES_DIR/env.example") || exit 1
+GITIGNORE_ADD=$(read_template "$TEMPLATES_DIR/gitignore-additions.txt") || exit 1
+
+PREFIXES_B64=$(python3 -c "
+import json, base64, sys
+d = json.load(open('$PREFIXES_FILE'))
+sys.stdout.buffer.write(base64.b64encode(json.dumps(d).encode()))
+" 2>/dev/null) || { echo "ERROR: can't read $PREFIXES_FILE"; exit 1; }
+
+if [ -n "$TARGET_REPO" ] && ! printf '%s' "$TARGET_REPO" | grep -qE '^[A-Za-z0-9._-]+$'; then
+  echo "ERROR: --repo must match ^[A-Za-z0-9._-]+$ (got: $TARGET_REPO)"; exit 1
+fi
+
+if [ -n "$TARGET_REPO" ]; then
+  REPOS_LIST="$TARGET_REPO"
+else
+  REPOS_LIST=$(python3 -c "
+import json, base64
+prefixes = json.loads(base64.b64decode('$PREFIXES_B64').decode())
+for r in sorted(prefixes):
+    print(r)
+")
+fi
+
+ISSUE_TITLE="Adopt Cursor Cloud agent environment"
+ISSUE_MARKER="<!-- cursor-cloud-rollout -->"
+
+echo "=== Cursor Cloud Rollout (dry-run=$DRY) ==="
+echo ""
+
+done_c=0
+already_c=0
+skipped_c=0
+fail_c=0
+
+build_agents_md() {
+  local repo="$1" branch="$2" verify_cmd="$3" resp existing=""
+  AGENTS_BLOCK=$(VERIFY_CMD="$verify_cmd" python3 -c "
+import os
+block = open('$TEMPLATES_DIR/agents-block.md').read()
+print(block.replace('__VERIFY_CMD__', os.environ.get('VERIFY_CMD', 'echo verify')))
+")
+  resp=$(gh api "repos/$OWNER/$repo/contents/AGENTS.md?ref=$branch" 2>&1) || {
+    if echo "$resp" | grep -q '"Not Found"'; then
+      resp="__NOT_FOUND__"
+    else
+      return 1
+    fi
+  }
+  if [ "$resp" != "__NOT_FOUND__" ]; then
+    existing=$(echo "$resp" | python3 -c "
+import json, base64, sys
+d = json.load(sys.stdin)
+print(base64.b64decode(d['content']).decode())" 2>/dev/null) || return 1
+  fi
+  AGENTS_MD=$(EXISTING="$existing" BLOCK="$AGENTS_BLOCK" python3 -c "
+import os, re
+existing = os.environ.get('EXISTING', '')
+block = os.environ.get('BLOCK', '')
+start, end = '<!-- cursor-cloud:start -->', '<!-- cursor-cloud:end -->'
+if existing.count(start) == 1 and existing.count(end) == 1 and existing.index(start) < existing.index(end):
+    out = re.sub(re.escape(start) + '.*?' + re.escape(end), lambda _: block, existing, flags=re.S)
+elif existing.strip():
+    out = existing.rstrip() + '\n\n' + block + '\n'
+else:
+    out = '# AGENTS.md\n\n' + block + '\n'
+print(out, end='')
+")
+}
+
+merge_gitignore() {
+  local existing="$1"
+  GITIGNORE_OUT=$(EXISTING="$existing" ADDITIONS="$GITIGNORE_ADD" python3 -c "
+import os
+existing = os.environ.get('EXISTING', '')
+add = os.environ.get('ADDITIONS', '').strip()
+lines = [l for l in add.splitlines() if l.strip()]
+if not lines:
+    print(existing, end='')
+    raise SystemExit(0)
+out_lines = existing.splitlines()
+existing_set = set(l.strip() for l in out_lines)
+for line in lines:
+    if line.strip() not in existing_set:
+        out_lines.append(line)
+print('\n'.join(out_lines).rstrip() + '\n', end='')
+")
+}
+
+put_file() {
+  local repo="$1" branch="$2" path="$3" content="$4" message="$5"
+  local sha_resp existing_sha payload_json
+  sha_resp=$(gh api "repos/$OWNER/$repo/contents/$path?ref=$branch" 2>&1) || {
+    if ! echo "$sha_resp" | grep -q '"Not Found"'; then
+      return 1
+    fi
+    sha_resp=""
+  }
+  existing_sha=$(echo "$sha_resp" | python3 -c "
+import json, sys
+raw = sys.stdin.read().strip()
+print(json.loads(raw).get('sha', '') if raw else '')
+" 2>/dev/null || echo "")
+  payload_json=$(BRANCH="$branch" EXISTING_SHA="$existing_sha" MSG="$message" python3 -c "
+import json, base64, os, sys
+content = sys.stdin.read()
+payload = {
+    'message': os.environ['MSG'],
+    'branch': os.environ['BRANCH'],
+    'content': base64.b64encode(content.encode()).decode(),
+}
+sha = os.environ.get('EXISTING_SHA', '')
+if sha:
+    payload['sha'] = sha
+print(json.dumps(payload))
+" <<< "$content")
+  gh api "repos/$OWNER/$repo/contents/$path" --method PUT --silent --input - <<< "$payload_json"
+}
+
+while IFS= read -r repo; do
+  [ -z "$repo" ] && continue
+
+  PREFIX=$(python3 -c "
+import json, base64
+prefixes = json.loads(base64.b64decode('$PREFIXES_B64').decode())
+print(prefixes.get('$repo', ''))
+")
+  if [ -z "$PREFIX" ]; then
+    echo "SKIP  $repo  (no prefix)"
+    skipped_c=$((skipped_c + 1))
+    continue
+  fi
+  PREFIX_UPPER=$(printf '%s' "$PREFIX" | tr '[:lower:]' '[:upper:]')
+
+  INFO=$(gh repo view "$OWNER/$repo" --json isFork,isArchived,diskUsage 2>/dev/null) || {
+    VIEW_ERR=$(gh repo view "$OWNER/$repo" --json isFork,isArchived,diskUsage 2>&1 >/dev/null)
+    if echo "$VIEW_ERR" | grep -qi 'could not resolve\|not found'; then
+      echo "SKIP  $repo  (no longer exists)"
+      skipped_c=$((skipped_c + 1))
+    else
+      echo "FAIL  $repo  (can't view)"
+      fail_c=$((fail_c + 1))
+    fi
+    continue
+  }
+  read -r IS_FORK IS_ARCHIVED DISK <<< "$(echo "$INFO" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+print(str(d['isFork']).lower(), str(d['isArchived']).lower(), d['diskUsage'])
+")"
+  if [ "$IS_ARCHIVED" = "true" ]; then echo "SKIP  $repo  (archived)"; skipped_c=$((skipped_c + 1)); continue; fi
+  if [ "$IS_FORK" = "true" ]; then echo "SKIP  $repo  (fork)"; skipped_c=$((skipped_c + 1)); continue; fi
+  if [ "$DISK" -lt 10 ]; then echo "SKIP  $repo  (under 10KB)"; skipped_c=$((skipped_c + 1)); continue; fi
+
+  # Already done if environment.json exists and AGENTS block matches
+  ENV_RESP=$(gh api "repos/$OWNER/$repo/contents/.cursor/environment.json" 2>&1) || true
+  if ! echo "$ENV_RESP" | grep -q '"Not Found"'; then
+    AGENTS_RESP=$(gh api "repos/$OWNER/$repo/contents/AGENTS.md" --jq '.content' 2>/dev/null || echo "")
+    HAS_BLOCK=$(printf '%s' "$AGENTS_RESP" | base64 -d 2>/dev/null | python3 -c "
+import sys
+t = sys.stdin.read()
+print('yes' if '<!-- cursor-cloud:start -->' in t and '<!-- cursor-cloud:end -->' in t else 'no')
+" 2>/dev/null || echo "no")
+    if [ "$HAS_BLOCK" = "yes" ]; then
+      echo "OK    $repo  (already has cursor-cloud config)"
+      already_c=$((already_c + 1))
+      continue
+    fi
+  fi
+
+  DETECT_JSON=$("$DETECT_PY" "$OWNER" "$repo" 2>/dev/null) || {
+    echo "FAIL  $repo  (install detect)"
+    fail_c=$((fail_c + 1))
+    continue
+  }
+  INSTALL=$(echo "$DETECT_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin)['install'])")
+  VERIFY=$(echo "$DETECT_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin)['verify'])")
+  ENV_JSON=$("$ENV_JSON_PY" "$repo" "$INSTALL" "$VERIFY")
+
+  if [ "$DRY" -eq 1 ]; then
+    echo "WOULD  $repo  (prefix=$PREFIX install=$INSTALL)"
+    done_c=$((done_c + 1))
+    continue
+  fi
+
+  ISSUE_NUM=$(gh issue list --repo "$OWNER/$repo" --state open --limit 50 \
+    --search "$ISSUE_TITLE in:title" --json number,title,body \
+    --jq "[.[] | select(.title == \"$ISSUE_TITLE\" and ((.body // \"\") | contains(\"$ISSUE_MARKER\"))) | .number] | first // empty" 2>/dev/null) || {
+    echo "FAIL  $repo  (issue lookup)"
+    fail_c=$((fail_c + 1))
+    continue
+  }
+  if [ -z "$ISSUE_NUM" ]; then
+    ISSUE_NUM=$(gh issue create \
+      --repo "$OWNER/$repo" \
+      --title "$ISSUE_TITLE" \
+      --body "Add Cursor Cloud environment config for cloud agents.
+
+- \`.cursor/environment.json\` — install command
+- \`.cursorignore\` — keep secrets out of agent context
+- \`AGENTS.md\` — cloud setup block
+- \`.env.example\` — variable names (no values)
+
+After merge: create environment on cursor.com, add Secrets, wait for Build Success.
+
+$ISSUE_MARKER
+" 2>/dev/null | grep -oE '[0-9]+$' | head -1)
+  fi
+  if [ -z "$ISSUE_NUM" ]; then
+    echo "FAIL  $repo  (issue create)"
+    fail_c=$((fail_c + 1))
+    continue
+  fi
+
+  BRANCH="${PREFIX}-${ISSUE_NUM}-adopt-cursor-cloud"
+  DEFAULT_BRANCH=$(gh api "repos/$OWNER/$repo" --jq '.default_branch' 2>/dev/null)
+  SHA=$(gh api "repos/$OWNER/$repo/git/refs/heads/$DEFAULT_BRANCH" --jq '.object.sha' 2>/dev/null) || {
+    echo "FAIL  $repo  (SHA)"
+    fail_c=$((fail_c + 1))
+    continue
+  }
+  if ! gh api "repos/$OWNER/$repo/git/refs/heads/$BRANCH" &>/dev/null; then
+    gh api "repos/$OWNER/$repo/git/refs" \
+      --method POST --silent \
+      -f ref="refs/heads/$BRANCH" \
+      -f sha="$SHA" 2>/dev/null || {
+      echo "FAIL  $repo  (branch)"
+      fail_c=$((fail_c + 1))
+      continue
+    }
+  fi
+
+  build_agents_md "$repo" "$BRANCH" "$VERIFY" || {
+    echo "FAIL  $repo  (AGENTS.md)"
+    fail_c=$((fail_c + 1))
+    continue
+  }
+
+  WRITE_FAIL=0
+  put_file "$repo" "$BRANCH" ".cursor/environment.json" "$ENV_JSON" "[$PREFIX_UPPER-$ISSUE_NUM] Add Cursor Cloud environment" || WRITE_FAIL=1
+  put_file "$repo" "$BRANCH" ".cursorignore" "$CURSORIGNORE_TPL" "[$PREFIX_UPPER-$ISSUE_NUM] Add .cursorignore" || WRITE_FAIL=1
+
+  ENV_EXAMPLE_EXISTS=$(gh api "repos/$OWNER/$repo/contents/.env.example?ref=$BRANCH" --jq '.sha' 2>/dev/null || echo "")
+  if [ -z "$ENV_EXAMPLE_EXISTS" ]; then
+    put_file "$repo" "$BRANCH" ".env.example" "$ENV_EXAMPLE_TPL" "[$PREFIX_UPPER-$ISSUE_NUM] Add .env.example" || WRITE_FAIL=1
+  fi
+
+  GI_RESP=$(gh api "repos/$OWNER/$repo/contents/.gitignore?ref=$BRANCH" 2>&1) || GI_RESP=""
+  if echo "$GI_RESP" | grep -q '"Not Found"'; then
+    merge_gitignore ""
+    put_file "$repo" "$BRANCH" ".gitignore" "$GITIGNORE_OUT" "[$PREFIX_UPPER-$ISSUE_NUM] Add .gitignore" || WRITE_FAIL=1
+  elif [ -n "$GI_RESP" ]; then
+    EXISTING_GI=$(echo "$GI_RESP" | python3 -c "
+import json, base64, sys
+d = json.load(sys.stdin)
+print(base64.b64decode(d['content']).decode())" 2>/dev/null || echo "")
+    merge_gitignore "$EXISTING_GI"
+    if [ "$EXISTING_GI" != "$GITIGNORE_OUT" ]; then
+      put_file "$repo" "$BRANCH" ".gitignore" "$GITIGNORE_OUT" "[$PREFIX_UPPER-$ISSUE_NUM] Ignore .env.local" || WRITE_FAIL=1
+    fi
+  fi
+
+  put_file "$repo" "$BRANCH" "AGENTS.md" "$AGENTS_MD" "[$PREFIX_UPPER-$ISSUE_NUM] Add cloud agents block" || WRITE_FAIL=1
+
+  if [ "$WRITE_FAIL" -ne 0 ]; then
+    echo "FAIL  $repo  (partial write on $BRANCH)"
+    fail_c=$((fail_c + 1))
+    continue
+  fi
+
+  EXISTING_PR=$(gh pr list --repo "$OWNER/$repo" --head "$BRANCH" --state open --json number --jq '.[0].number // empty' 2>/dev/null) || {
+    echo "FAIL  $repo  (PR lookup)"
+    fail_c=$((fail_c + 1))
+    continue
+  }
+  if [ -n "$EXISTING_PR" ]; then
+    echo "DONE  $repo  (#$ISSUE_NUM -> $BRANCH -> reusing PR #$EXISTING_PR)"
+    done_c=$((done_c + 1))
+    continue
+  fi
+
+  PR_TITLE="[$PREFIX_UPPER-$ISSUE_NUM] Adopt Cursor Cloud environment"
+  VERIFY_EVIDENCE="gh api repos/$OWNER/$repo/contents/package.json --jq .name 2>/dev/null || echo config-only -> detected install: $INSTALL
+
+Proof: n/a — config-only rollout; no runtime code changed in this PR."
+  gh pr create \
+    --repo "$OWNER/$repo" \
+    --base "$DEFAULT_BRANCH" \
+    --head "$BRANCH" \
+    --title "$PR_TITLE" \
+    --body "Closes #$ISSUE_NUM
+
+## What
+
+Adds Cursor Cloud agent config: \`.cursor/environment.json\`, \`.cursorignore\`,
+cloud block in \`AGENTS.md\`, and \`.env.example\` (if missing).
+
+Install command: \`$INSTALL\`
+
+## Why
+
+Cloud agents need a saved environment + Build + Dashboard Secrets per repo.
+Local \`.env.local\` does not sync to the cloud.
+
+## How I verified
+
+$VERIFY_EVIDENCE
+
+After merge: cursor.com → Environments → Secrets → Build Success.
+
+Assisted-by: cursor:cursor-cloud-rollout" \
+    2>/dev/null && {
+    echo "DONE  $repo  (#$ISSUE_NUM -> $BRANCH -> PR)"
+    done_c=$((done_c + 1))
+  } || {
+    echo "FAIL  $repo  (PR create)"
+    fail_c=$((fail_c + 1))
+  }
+
+done <<< "$REPOS_LIST"
+
+echo ""
+echo "=== Summary ==="
+echo "would/done: $done_c  already: $already_c  skipped: $skipped_c  failed: $fail_c"
+[ "$fail_c" -eq 0 ] || exit 1
