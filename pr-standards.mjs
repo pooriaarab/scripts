@@ -621,30 +621,34 @@ export function validateBody(body, issueNumber, config = DEFAULT_CONFIG) {
       'Run a check and record the command and result under ## How I verified.',
     ));
   }
-  if (!/^Assisted-by:\s*[^\s:]+:[^\s]+\s*$/im.test(visibleSource)) {
+  {
     // The accepted form matches one trailer per line, so a comma-separated
     // list fails. Most work in this fleet has two or more contributors, so
     // that list is the common way this check fails, and the line is right
     // there in the body when it does. A "missing" message denies what the
-    // reviewer can see, so the failure must name the line it found. Find any
-    // Assisted-by line with the same anchor the accepted form reads — start of
-    // line, any case — and report the first one. Only a body with no such line
-    // at all reports "missing". This changes the message only: the comma list
-    // still fails, and one trailer per line stays the requirement.
-    const found = visibleSource.split('\n').find((line) => /^\s*assisted-by:/i.test(line));
-    if (found) {
-      failures.push(fail(
-        'Assisted-by line',
-        `not in the accepted form: ${found.trim()}`,
-        'one Assisted-by: <agent>:<model> line per contributor',
-        'Write one Assisted-by: <agent>:<model> line per contributor.',
-      ));
-    } else {
+    // reviewer can see, so the failure must name the line it found.
+    //
+    // Every candidate line must be checked, not just the first: testing the
+    // whole body against the accepted-form pattern only proves that SOME line
+    // matches, so a valid first trailer followed by a malformed second one
+    // passed silently. Commas are excluded from both fields too: `[^\s]+`
+    // alone accepts a comma-separated list that has no space after the
+    // comma, contradicting the documented rule that the list fails.
+    const assistedByLines = visibleSource.split('\n').filter((line) => /^\s*assisted-by:/i.test(line));
+    const badLine = assistedByLines.find((line) => !/^Assisted-by:\s*[^\s:,]+:[^\s,]+\s*$/i.test(line));
+    if (assistedByLines.length === 0) {
       failures.push(fail(
         'Assisted-by line',
         'missing',
         'Assisted-by: <agent>:<model>',
         'Add Assisted-by: <agent>:<model> in the body.',
+      ));
+    } else if (badLine) {
+      failures.push(fail(
+        'Assisted-by line',
+        `not in the accepted form: ${badLine.trim()}`,
+        'one Assisted-by: <agent>:<model> line per contributor',
+        'Write one Assisted-by: <agent>:<model> line per contributor.',
       ));
     }
   }

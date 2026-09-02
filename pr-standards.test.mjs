@@ -254,6 +254,22 @@ test('one Assisted-by trailer per line, and the failure names the line it found'
   // A body with no trailer at all is the one case "missing" still describes.
   const absent = validateBody(validBody.replace('Assisted-by: claude-personal:claude-opus-5', ''), 142, config);
   assert.equal(assistedBy(absent).got, 'missing');
+
+  // A valid first line must not shield a malformed second line: checking
+  // only "does some line match" instead of "does every line match" would
+  // let this pass.
+  const mixedLines = validateBody(
+    bodyWithTrailer('Assisted-by: muse:meta-code\nAssisted-by: muse:meta-code, claude:opus'), 142, config,
+  );
+  assert.equal(mixedLines.ok, false);
+  assert.notEqual(assistedBy(mixedLines).got, undefined);
+
+  // A comma list with no space after the comma has no whitespace for
+  // `[^\s]+` to stop at, so the fields must also reject commas directly.
+  const commaListNoSpace = validateBody(
+    bodyWithTrailer('Assisted-by: muse:meta-code,claude-personal-1:claude-opus-5'), 142, config,
+  );
+  assert.equal(commaListNoSpace.ok, false);
 });
 
 test('matches the supported exclusion glob forms', () => {
