@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# Gemini, non-interactive.
+#
+# The real binary, not the name: `gemini` on PATH is a zsh wrapper that calls
+# _offrouter_proxy_up and _gemini_personal_impl, and neither exists outside an
+# interactive login shell. The wrapper then prints "command not found", says it
+# is falling back, and returns nothing at all.
+#
+# -o json is not a preference. Text output comes back EMPTY; the answer is only
+# in .response of the JSON.
+set -uo pipefail
+BIN=/opt/homebrew/bin/gemini
+SECRETS="$HOME/Documents/Personal/.secrets/buzz.env"
+dir="${1:?usage: w-gemini <dir> "<prompt>" [model]}"; prompt="${2:?prompt required}"; model="${3:-}"
+
+[ -x "$BIN" ] || { echo "w-gemini: no binary at $BIN" >&2; exit 127; }
+key=$(grep -hoE '^(GEMINI_API_KEY|GOOGLE_API_KEY)=.*' "$SECRETS" 2>/dev/null | head -1 | cut -d= -f2-)
+[ -n "$key" ] || { echo "w-gemini: no GEMINI_API_KEY in $SECRETS" >&2; exit 78; }
+
+cd "$dir" || exit 1
+GEMINI_API_KEY="$key" GEMINI_CLI_HOME="$HOME/.gemini-personal" \
+  "$BIN" -o json --skip-trust --approval-mode yolo ${model:+-m "$model"} -p "$prompt" 2>/dev/null \
+  | python3 -c '
+import json, sys
+try:
+    data = json.load(sys.stdin)
+except ValueError:
+    sys.exit("w-gemini: no JSON on stdout")
+if data.get("error"):
+    sys.exit(f"w-gemini: {data['"'"'error'"'"']}")
+sys.stdout.write(data.get("response") or "")
+'
