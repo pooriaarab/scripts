@@ -85,3 +85,34 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: node /tmp/prs/pr-standards pr --repo "$GITHUB_REPOSITORY" --number "${{ github.event.pull_request.number }}"
+
+  pr-standards-drift:
+    name: PR standards drift
+    runs-on: ubicloud-standard-2
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: read
+    steps:
+      # The BASE, not the head. `drift` reads the working tree, so on a pull
+      # request that edits the managed block a head checkout would compare the
+      # block against the version this pull request just wrote and always report
+      # clean. The config check has the same property and solves it the same way.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+
+      - name: Fetch the checker
+        run: |
+          mkdir -p /tmp/prs
+          curl --retry 5 --retry-delay 2 --retry-all-errors -fsSL \
+            -o /tmp/pr-standards.tar.gz \
+            "https://codeload.github.com/pooriaarab/scripts/tar.gz/refs/tags/pr-standards-v1"
+          tar -xzf /tmp/pr-standards.tar.gz -C /tmp/prs --strip-components=1
+          chmod +x /tmp/prs/pr-standards
+          # A truncated archive must fail here, not later as a rule violation.
+          node /tmp/prs/pr-standards --selfcheck
+
+      - name: Check managed files for drift
+        run: node /tmp/prs/pr-standards drift
