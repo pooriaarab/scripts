@@ -64,6 +64,10 @@ export const DEFAULT_CONFIG = {
   exemptBranches: ['main', 'release', 'refactor', 'gh-pages'],
   excludeGlobs: DEFAULT_EXCLUDE_GLOBS,
   requireProof: true,
+  // Warn first, then ratchet. A fleet where no repo runs its tests in CI would
+  // go red everywhere on the day this became a failure, and a standard that
+  // does that on its first day gets switched off.
+  requireAttributableProof: false,
   uiGlobs: [
     '**/*.tsx', '**/*.jsx', '**/*.vue', '**/*.svelte', '**/*.css', '**/*.scss',
     '**/*.html', '**/components/**', '**/app/**/page.*', '**/pages/**',
@@ -439,6 +443,28 @@ function hasValidProofNa(body) {
   return false;
 }
 
+// A command and its result cost nothing to type whether or not the command
+// ran -- `bun test -> 214 passed` reads identically either way, and nothing
+// mechanical can tell the two apart from text alone. What CAN be checked is
+// whether the claim points to something outside the body: a run GitHub itself
+// executed, or an attachment that took a real screen capture to produce. The
+// documented `Proof: n/a` hatch counts too, because it already carries its own
+// burden (a stated reason, judged by the review council) that a bare command
+// claim does not.
+// The negative lookahead after \d+ matters: without it, a run ID followed
+// directly by more letters/digits -- `runs/123not-a-run` -- still matches,
+// because \d+ simply stops at "123" and the trailing character class happily
+// swallows "not-a-run" as if it were a valid path/query suffix. A real GitHub
+// Actions URL never puts a word character immediately after the numeric ID.
+const ACTIONS_RUN_URL = /https:\/\/github\.com\/[^\s\/]+\/[^\s\/]+\/actions\/runs\/\d+(?![a-zA-Z0-9])[^\s"'\x60\)\]<>]*/;
+
+function hasExternalProofEvidence(verifiedSection) {
+  if (countUserAttachments(verifiedSection) > 0) return true;
+  if (ACTIONS_RUN_URL.test(verifiedSection)) return true;
+  if (hasValidProofNa(verifiedSection)) return true;
+  return false;
+}
+
 export function isUiFile(filename, config = DEFAULT_CONFIG) {
   const uiGlobs = config.uiGlobs || [];
   const uiExcludeGlobs = config.uiExcludeGlobs || [];
@@ -537,9 +563,11 @@ export function checkProof(body, files, config = DEFAULT_CONFIG) {
   // the docs, so an attachment or hatch line pasted under ## What or ## Why
   // does not count: the evidence belongs where the reviewer is told to look.
   const verifiedSection = sectionBody(body, 'How I verified') || '';
+  let uiProofFailed = false;
   if (hasUiDiff(files || [], config) && !hasValidProofNa(verifiedSection)) {
     const count = countUserAttachments(verifiedSection);
     if (count === 0) {
+      uiProofFailed = true;
       failures.push(fail(
         'proof of a visible change',
         'no user-attachments URL in the body',
@@ -554,6 +582,32 @@ export function checkProof(body, files, config = DEFAULT_CONFIG) {
         'One image shows the result, not the change. Add the other side.',
       ));
     }
+  }
+
+  // Evidence has to be attributable, not merely present. A command claim like
+  // `bun test -> 214 passed` costs an agent nothing to write, and it reads
+  // identically whether or not it ran. What can be checked is whether the claim
+  // points to something outside the body: a run GitHub itself executed, or an
+  // attachment that took a real capture to produce.
+  //
+  // Silent when the visible-change check above already failed: that failure
+  // already names the same gap for a UI diff, and two findings for one missing
+  // capture reads as two gaps rather than one.
+  //
+  // Warn by default (#85). Most repos in the fleet do not yet run their own
+  // tests in CI, so failing every PR whose proof lives only in prose would turn
+  // the whole fleet red on day one and get the standard switched off. A repo
+  // ratchets this to a failure with `requireAttributableProof` once its tests
+  // run in CI and a run link is something its own agents can always produce.
+  if (!uiProofFailed && hasCommandAndResult(verifiedSection) && !hasExternalProofEvidence(verifiedSection)) {
+    const finding = fail(
+      'attributable proof',
+      'a command and result claimed in text, nothing outside the body to check it against',
+      'a linked Actions run, an attachment, or `Proof: n/a — <reason>`',
+      'A line like `bun test -> 214 passed` reads the same whether or not it ran. Link the Actions run that produced it, attach a screenshot, or state a `Proof: n/a` reason.',
+    );
+    if (config.requireAttributableProof) failures.push(finding);
+    else warnings.push(finding);
   }
   return { failures, warnings };
 }
@@ -807,6 +861,7 @@ export function validateConfig(config) {
   if (!Array.isArray(config.exemptBranches) || !config.exemptBranches.every((value) => typeof value === 'string')) throw new ConfigurationError('exemptBranches must be an array of strings');
   if (!Array.isArray(config.excludeGlobs) || !config.excludeGlobs.every((value) => typeof value === 'string')) throw new ConfigurationError('excludeGlobs must be an array of strings');
   if (typeof config.requireProof !== 'boolean') throw new ConfigurationError('requireProof must be true or false');
+  if (typeof config.requireAttributableProof !== 'boolean') throw new ConfigurationError('requireAttributableProof must be true or false');
   if (!Array.isArray(config.uiGlobs) || !config.uiGlobs.every((value) => typeof value === 'string')) throw new ConfigurationError('uiGlobs must be an array of strings');
   if (!Array.isArray(config.uiExcludeGlobs) || !config.uiExcludeGlobs.every((value) => typeof value === 'string')) throw new ConfigurationError('uiExcludeGlobs must be an array of strings');
   return config;

@@ -708,6 +708,61 @@ test('proof: a visible change needs before and after attachments', () => {
   assert.equal(hasUiDiff([{ filename: 'src/server/api.ts' }], config), false);
 });
 
+test('proof: a bare command claim warns that it lives only in the body', () => {
+  const nonUiFiles = [{ filename: 'src/server/api.ts', status: 'modified' }];
+  const warned = (r) => r.warnings.some((w) => w.check === 'attributable proof');
+
+  // validBody's "How I verified" is `bun test -> 214 passed` and nothing else --
+  // exactly the claim that costs nothing to type whether or not it ran.
+  assert.equal(warned(checkProof(validBody, nonUiFiles, config)), true);
+
+  // A linked Actions run is something GitHub itself produced.
+  const withRun = `${validBody}\nhttps://github.com/pooriaarab/scripts/actions/runs/123456789`;
+  assert.equal(warned(checkProof(withRun, nonUiFiles, config)), false);
+
+  // An attachment settles it too, even off the UI path.
+  const withAttachment = `${validBody}\n![log](https://github.com/user-attachments/assets/abc)`;
+  assert.equal(warned(checkProof(withAttachment, nonUiFiles, config)), false);
+
+  // The documented hatch already carries its own burden -- a stated reason --
+  // so it settles this warning the same way it settles the UI one.
+  const withHatch = `${validBody}\nProof: n/a — a CLI check with no visible surface at all.`;
+  assert.equal(warned(checkProof(withHatch, nonUiFiles, config)), false);
+
+  // Never fails. Most repos in the fleet do not run their own tests in CI yet,
+  // so this stays a nudge, not a gate (#85).
+  assert.equal(checkProof(validBody, nonUiFiles, config).failures.length, 0);
+
+  // requireProof: false turns this off along with the UI checks -- a repo that
+  // opted out of proof entirely has no reason to be warned about how it phrased it.
+  assert.equal(warned(checkProof(validBody, nonUiFiles, { ...config, requireProof: false })), false);
+
+  // A run ID immediately followed by more word characters is not a GitHub
+  // Actions URL GitHub would ever produce -- it is a numeric prefix wearing a
+  // real link's clothes. Without a boundary check after \d+, the digits alone
+  // satisfied the pattern and the trailing text rode along for free.
+  const withFakeRun = `${validBody}\nhttps://github.com/pooriaarab/scripts/actions/runs/123not-a-run`;
+  assert.equal(warned(checkProof(withFakeRun, nonUiFiles, config)), true);
+
+  // requireAttributableProof ratchets the same finding to a failure, for a repo
+  // whose own tests run in CI and can always produce a run link.
+  const strict = { ...config, requireAttributableProof: true };
+  const strictResult = checkProof(validBody, nonUiFiles, strict);
+  assert.equal(strictResult.failures.some((f) => f.check === 'attributable proof'), true);
+  assert.equal(warned(strictResult), false);
+  assert.equal(warned(checkProof(withRun, nonUiFiles, strict)), false);
+  assert.equal(checkProof(withRun, nonUiFiles, strict).failures.length, 0);
+
+  // Silent on a UI diff whose visible-change check already failed: that failure
+  // already names the missing capture, and two findings for one gap reads as
+  // two gaps.
+  const uiFiles = [{ filename: 'src/components/Button.tsx', status: 'modified' }];
+  const uiResult = checkProof(validBody, uiFiles, config);
+  assert.equal(uiResult.failures.some((f) => f.check === 'proof of a visible change'), true);
+  assert.equal(warned(uiResult), false);
+  assert.equal(checkProof(validBody, uiFiles, strict).failures.some((f) => f.check === 'attributable proof'), false);
+});
+
 test('proof: a rename out of the UI globs still counts as a UI diff', () => {
   // GitHub reports a rename as one file object with both names. Checking only
   // the new name lets a rename that moves a UI file to a non-matching name
@@ -749,7 +804,11 @@ test('proof: media belongs in user-attachments, not in the commit', () => {
     // only fix whose current failure direction is a false failure.
     assert.equal(isCommittedProofMedia(file), false, `should not flag ${filename}`);
     const r = checkProof(validBody, [file], config);
-    assert.equal(r.failures.length + r.warnings.length, 0);
+    assert.equal(r.failures.length, 0);
+    // validBody's own "How I verified" is a bare command claim with nothing
+    // external backing it, so the body-only-proof warning is expected here;
+    // what this test cares about is that the asset triggers nothing else.
+    assert.equal(r.warnings.every((w) => w.check === 'attributable proof'), true);
   }
   // A proof-named directory UNDER an asset root stays exempt. The precedence is
   // asserted on its own below; the short version is that a screenshot gallery
