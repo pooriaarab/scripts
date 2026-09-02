@@ -118,7 +118,7 @@ fi
 # ----------------------------------------------------------- cursor-agent ----
 log "cursor-agent"
 # cursor-agent — needs --trust; and the API key must be EXPORTED, not just sourced
-# set -a; source ~/Documents/Personal/.secrets/cursor.env; set +a
+# set -a; source ~/.agents/agent-clis.env; set +a
 # cursor-agent -p --trust --model composer-2.5 "PROMPT"     # or cursor-grok-4.6-high-fast
 if [ -x "$BIN/cursor-agent" ]; then
   note "cursor-agent already present ($("$BIN/cursor-agent" --version 2>&1 | head -1))"
