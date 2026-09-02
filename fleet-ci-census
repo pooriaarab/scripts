@@ -190,6 +190,8 @@ def aggregate(repo, runs):
     for r in runs:
         if not isinstance(r, dict):
             continue
+        if r.get("status") not in (None, "completed"):
+            continue
         start, end = parse_ts(r.get("run_started_at")), parse_ts(r.get("updated_at"))
         if start is None or end is None:
             continue

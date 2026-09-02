@@ -16,7 +16,8 @@ mkdir -p "$FAKE_BIN" "$FAKE_DATA"
 trap 'rm -rf "$FAKE_ROOT"' EXIT
 
 # Recorded Actions payload: two workflows, one failure, one cancel, one 8h
-# stuck run that must not enter percentiles, one run missing timestamps.
+# stuck run that must not enter percentiles, one run missing timestamps,
+# one still-in-progress run that must not be counted as if finished.
 cat > "$FAKE_DATA/runs.json" <<'JSON'
 {"workflow_runs":[
   {"id":1,"name":"oxlint","run_started_at":"2026-08-20T00:00:00Z","updated_at":"2026-08-20T00:00:10Z","conclusion":"success"},
@@ -28,7 +29,8 @@ cat > "$FAKE_DATA/runs.json" <<'JSON'
   {"id":7,"name":"CI","run_started_at":"2026-08-20T00:00:00Z","updated_at":"2026-08-20T00:02:00Z","conclusion":"cancelled"},
   {"id":8,"name":"CI","run_started_at":"2026-08-20T00:00:00Z","updated_at":"2026-08-20T00:03:00Z","conclusion":"success"},
   {"id":9,"name":"stuck","run_started_at":"2026-08-20T00:00:00Z","updated_at":"2026-08-20T08:00:01Z","conclusion":"cancelled"},
-  {"id":10,"name":"broken","updated_at":"2026-08-20T00:00:10Z","conclusion":"success"}
+  {"id":10,"name":"broken","updated_at":"2026-08-20T00:00:10Z","conclusion":"success"},
+  {"id":11,"name":"CI","status":"in_progress","run_started_at":"2026-08-20T00:00:00Z","updated_at":"2026-08-20T00:05:00Z","conclusion":null}
 ]}
 JSON
 echo '{"billable":{"UBUNTU":{"total_ms":120000}}}' > "$FAKE_DATA/timing.json"
@@ -71,7 +73,7 @@ import json,sys
 d=json.load(sys.stdin)
 assert d["page_cap"]==300 and d["max_duration_s"]==21600 and d["timing"] is False
 r=d["repos"][0]
-assert r["repo"]=="owner/app" and r["runs"]==10 and r["runs_are_floor"] is False
+assert r["repo"]=="owner/app" and r["runs"]==11 and r["runs_are_floor"] is False
 names=[w["name"] for w in r["workflows"]]
 assert names==["CI","oxlint"]
 ci,ox=r["workflows"]
