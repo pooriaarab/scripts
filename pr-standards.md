@@ -66,6 +66,7 @@ Four things, all required:
     Manually walked steps 1-4 of onboarding in staging.
 
     Assisted-by: claude-personal:claude-opus-5
+    Assisted-by: pi:glm-5
 
 - **Exactly one** closing reference, matching the branch issue. Two closing
   references means two concerns, which means two PRs.
@@ -92,6 +93,15 @@ Four things, all required:
   reason: so you can tell, later, which agent produced which class of defect.
   Convention puts it last. The check accepts it anywhere in the body rather than
   pretending to enforce a position it does not.
+
+  One trailer per line. Repeat the line for each contributor. Most work here has
+  two or more contributors, so two lines is the normal shape:
+
+      Assisted-by: muse:meta-code
+      Assisted-by: claude-personal-1:claude-opus-5
+
+  A comma-separated list on one line fails the check. The checker names the line
+  it finds, so the failure is not a false "missing".
 
 #### Proof of work
 
