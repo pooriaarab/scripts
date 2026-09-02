@@ -155,3 +155,14 @@ Repos that are already configured are skipped.
 | `t3-code-on-a-box.md` | Running T3 Code on a Box and reaching it over `box host` |
 | `silent-failover-discipline.md` | Why a working primary/backup credential failover can take a whole fleet down silently, and what to alert on instead |
 - [cloudflare-auth-discipline.md](cloudflare-auth-discipline.md) — why wrangler, OAuth and the Cloudflare MCP cannot mint an API token, the one permission that can, and how to mint narrow per-purpose tokens that do not break on custom domains.
+
+## Agent routing
+
+The agent-worker roster lives in [agent-routing.json](agent-routing.json): three
+tiers (`route:mechanical`, `route:scoped`, `route:judgement`) mapped to workers
+with cost and benchmark indexes, plus an `unavailable` list with reasons. Not
+every worker has a `command`: the default `route:judgement` worker is the
+native Claude Code session doing the reviewing, not a CLI invocation, so it has
+none. Tier names are durable; model names and prices are not, so update the
+JSON instead of editing CLAUDE.md copies that drift. Retune tier defaults from
+`agent-defect-rate` output, not vibes.

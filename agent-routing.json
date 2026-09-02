@@ -1,0 +1,59 @@
+{
+  "$comment": "Tier names are durable, model names and prices are not. Update this file, not the CLAUDE.md copies. Retune tier defaults from measured defect rate, not vibes: `agent-defect-rate <repos> --since <date>` reads the `Assisted-by:` trailer on merged PRs and reports defect rate per agent, so it says whether a tier's default was the wrong call.",
+  "updated": "2026-09-01",
+  "tiers": {
+    "route:mechanical": {
+      "when": "Chore or mini. Every acceptance criterion mechanically checkable. No high-stakes path.",
+      "workers": [
+        {
+          "id": "glm-5.3-flash",
+          "command": "PI_WORKER=1 pi -p --no-extensions --provider zai-api --model glm-5.3-flash \"[WORKER] ...\"",
+          "cost": "$0.075/M in, $0.25/M out",
+          "coding_index": 71.5,
+          "agentic_index": 58.2,
+          "default": true
+        },
+        {
+          "id": "deepseek-v4-flash",
+          "command": "PI_WORKER=1 pi -p --no-extensions --provider openrouter --model deepseek/deepseek-v4-flash-0731 \"[WORKER] ...\"",
+          "cost": "$0.065/M in, $0.18/M out",
+          "coding_index": 69.1,
+          "agentic_index": 48.4,
+          "default": false
+        }
+      ]
+    },
+    "route:scoped": {
+      "when": "Standard size, one area, needs judgement about the codebase.",
+      "workers": [
+        {
+          "id": "codex-gpt-5.6",
+          "command": "CODEX_HOME=$HOME/.codex-personal codex exec --sandbox workspace-write \"...\"",
+          "cost": "ChatGPT/Codex subscription",
+          "default": true
+        }
+      ]
+    },
+    "route:judgement": {
+      "when": "Deep or cross-cutting work, a migration, or any high-stakes path at any size regardless of how small the diff looks.",
+      "workers": [
+        {
+          "id": "claude-opus-5",
+          "cost": "Claude subscription weekly limit",
+          "default": true
+        },
+        {
+          "id": "codex-gpt-5.6-xhigh",
+          "cost": "ChatGPT/Codex subscription",
+          "default": false
+        }
+      ]
+    }
+  },
+  "unavailable": {
+    "gemini-personal": {
+      "reason": "every key on this machine resolves to GCP project 62772308511, which returns Lightning dunning decision is deny. Billing, not configuration.",
+      "since": "2026-09-01"
+    }
+  }
+}
