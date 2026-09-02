@@ -109,7 +109,9 @@ def _has_make_target(text: str, target: str) -> bool:
     return re.search(rf"(?m)^{re.escape(target)}:", text) is not None
 
 
-def detect_make(files: set[str], owner: str, repo: str) -> tuple[str, str] | None:
+def detect_make(
+    files: set[str], owner: str, repo: str
+) -> tuple[str | None, str | None] | None:
     if "Makefile" not in files:
         return None
     text = file_text(owner, repo, "Makefile") or ""
@@ -120,13 +122,15 @@ def detect_make(files: set[str], owner: str, repo: str) -> tuple[str, str] | Non
         # No relevant target: don't let a Makefile with unrelated rules (e.g. only
         # `uninstall:` or `docs:`) clobber a correctly detected ecosystem command.
         return None
-    install = "make install" if has_install else "echo 'No make install target'"
+    # `None` means "this Makefile doesn't cover it" — the caller keeps whatever
+    # the ecosystem detector already found instead of losing it to a placeholder.
+    install = "make install" if has_install else None
     if has_check:
         verify = "make check"
     elif has_test:
         verify = "make test"
     else:
-        verify = "echo 'Add make check'"
+        verify = None
     return install, verify
 
 
@@ -140,16 +144,21 @@ def detect(owner: str, repo: str) -> dict[str, str]:
 
     if "package.json" in files:
         install, verify = detect_node(files, owner, repo)
-    elif "pyproject.toml" in files or "requirements.txt" in files:
-        install, verify = detect_python(files)
-    elif "Cargo.toml" in files:
-        install, verify = detect_rust(files)
-    elif "go.mod" in files:
-        install, verify = detect_go(files)
+    else:
+        if "pyproject.toml" in files or "requirements.txt" in files:
+            install, verify = detect_python(files)
+        elif "Cargo.toml" in files:
+            install, verify = detect_rust(files)
+        elif "go.mod" in files:
+            install, verify = detect_go(files)
 
-    make_pair = detect_make(files, owner, repo)
-    if make_pair and "package.json" not in files:
-        install, verify = make_pair
+        make_pair = detect_make(files, owner, repo)
+        if make_pair:
+            make_install, make_verify = make_pair
+            if make_install is not None:
+                install = make_install
+            if make_verify is not None:
+                verify = make_verify
 
     return {"install": install, "verify": verify}
 
