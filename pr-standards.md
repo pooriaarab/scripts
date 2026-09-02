@@ -132,6 +132,18 @@ The checker enforces only what it can cheaply and mechanically:
 - `requireProof: false` turns off both proof checks for a repo with no
   user-facing surface. That is a config decision: it lives in the repo, it shows
   up in a diff, and it is reviewed like any other change.
+- **Proof has to be attributable, not merely present.** `bun test -> 214
+  passed` reads the same whether or not it ran, and nothing mechanical can tell
+  the two apart from text alone. What the checker can tell is whether the claim
+  points to something it did not write itself: a linked Actions run, a
+  user-attachments URL, or a `Proof: n/a` reason. None of those present is a
+  warning, not a failure — most repos in the fleet do not yet run their own
+  tests in CI, and failing every PR whose proof lives only in prose would turn
+  the whole fleet red on day one. Set `requireAttributableProof: true` once a
+  repo's own tests run in CI, so this becomes a failure instead of a warning.
+  Silent when the UI attachment check above already failed on the same diff —
+  that failure already names the missing capture. `requireProof: false` turns
+  this off too.
 
 Escape hatch, when proof truly does not apply:
 
