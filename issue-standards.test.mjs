@@ -280,6 +280,42 @@ test('lint is not fooled by the heading text surviving outside the field label',
   }
 });
 
+test('lint is not fooled by a label that merely contains the heading', () => {
+  // "Not the Job to be done" contains the words "Job to be done", but it is a
+  // different field. Substring matching would call the required field present
+  // when it is not.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'issue-templates-'));
+  try {
+    for (const kind of KINDS) {
+      const fields = REQUIRED_HEADINGS[kind].map((h) => `  - type: textarea\n    attributes:\n      label: ${h === 'Job to be done' ? 'Not the Job to be done' : h}`);
+      fs.writeFileSync(path.join(dir, `${kind}.yml`), `name: ${kind}\nbody:\n${fields.join('\n')}\n`);
+    }
+    const result = lintTemplates(dir);
+    assert.ok(failed(result));
+    assert.ok(failedOn(result, 'Job to be done'), JSON.stringify(result.failures));
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('lint fails when a form offers a heading forbidden for its kind', () => {
+  // Every issue this epic form produces would fail the body check: an epic
+  // that carries its own acceptance criteria has not been decomposed.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'issue-templates-'));
+  try {
+    for (const kind of KINDS) {
+      const fields = REQUIRED_HEADINGS[kind].map((h) => `  - type: textarea\n    attributes:\n      label: ${h}`);
+      if (kind === 'epic') fields.push('  - type: textarea\n    attributes:\n      label: Acceptance criteria');
+      fs.writeFileSync(path.join(dir, `${kind}.yml`), `name: ${kind}\nbody:\n${fields.join('\n')}\n`);
+    }
+    const result = lintTemplates(dir);
+    assert.ok(failed(result));
+    assert.ok(failedOn(result, 'Acceptance criteria'), JSON.stringify(result.failures));
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('--selfcheck rejects extra arguments instead of silently ignoring them', () => {
   const result = run(['check', '--selfcheck', '--repo', 'not-a-repo']);
   assert.equal(result.status, 2);

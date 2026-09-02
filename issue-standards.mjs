@@ -391,11 +391,13 @@ export function lintTemplates(dir) {
     // Only a field's own `label:` counts. Matching anywhere in the file would
     // let the heading's words survive in an unrelated description after the
     // field itself was renamed or removed, and lint would miss the drift.
+    // Equality, not substring: a label of "Not the Job to be done" is not the
+    // "Job to be done" field, even though the words appear inside it.
     const fieldLabels = [...text.matchAll(/^\s*label:\s*(.+)$/gim)].map((m) => normaliseHeading(m[1]));
-    const missing = REQUIRED_HEADINGS[kind].filter((heading) => {
-      const loose = normaliseHeading(heading);
-      return !fieldLabels.some((label) => label.includes(loose));
-    });
+    const missing = REQUIRED_HEADINGS[kind].filter((heading) => !fieldLabels.includes(normaliseHeading(heading)));
+    // A forbidden heading offered by the form is just as much drift as a
+    // missing required one: every issue it produces will fail the body check.
+    const forbidden = (FORBIDDEN_HEADINGS[kind] || []).filter((heading) => fieldLabels.includes(normaliseHeading(heading)));
     if (missing.length) {
       failures.push(fail(
         `${kind}.yml`,
@@ -403,9 +405,16 @@ export function lintTemplates(dir) {
         `a field per required heading: ${REQUIRED_HEADINGS[kind].join(', ')}`,
         'The form and the checker have drifted. An issue filed through the form would fail the check.',
       ));
-    } else {
-      passes.push(`${kind}.yml`);
     }
+    if (forbidden.length) {
+      failures.push(fail(
+        `${kind}.yml`,
+        `field for: ${forbidden.join(', ')}`,
+        `no field for ${forbidden.join(', ')} on the ${kind} form`,
+        `Every issue this form produces will fail the check. Remove the field from ${kind}.yml.`,
+      ));
+    }
+    if (!missing.length && !forbidden.length) passes.push(`${kind}.yml`);
   }
   return { failures, passes };
 }
