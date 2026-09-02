@@ -27,7 +27,7 @@ for route in gemini cursor devin pi muse; do
   answer=$(printf '%s' "$out" | grep -oE '\b391\b' | head -1)
   if [ -n "$answer" ]; then
     printf '%-10s %-8s %s\n' "$route" ok "returned 391"
-  elif printf '%s' "$out" | grep -qiE 'resource_exhausted|quota|rate.?limit|insufficient'; then
+  elif printf '%s' "$out" | grep -qiE 'resource_exhausted|quota|rate.?limit|insufficient.?(quota|balance|credits|funds)'; then
     printf '%-10s %-8s %s\n' "$route" quota "authenticated, out of budget (retryable)"
   else
     printf '%-10s %-8s %s\n' "$route" BROKEN "exit=$status: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-70)"

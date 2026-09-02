@@ -19,7 +19,7 @@ dir="${1:?usage: w-pi <dir> "<prompt>" [model]}"; prompt="${2:?prompt required}"
 model="${3:-glm-5.3-flash}"
 
 [ -n "$BIN" ] || { echo "w-pi: pi not found in /opt/homebrew/bin, /usr/local/bin or ~/.local/bin" >&2; exit 127; }
-export PATH="$HOME/.local/bin:/opt/homebrew/bin:$PATH"
+export PATH="$(dirname "$BIN"):$PATH"
 
 cd "$dir" || exit 1
 PI_WORKER=1 exec "$BIN" -p --no-extensions --provider zai-api --model "$model" \
