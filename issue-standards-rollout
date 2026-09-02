@@ -221,6 +221,7 @@ plan_repo() {
       say "SKIP    $repo — cannot read .agents/issues.md"
       return
     fi
+    names=$(printf '%s\n' "$names" | awk '!seen[$0]++')
     if [ -z "$names" ]; then
       say "SKIP    $repo - .agents/issues.md defines no milestone set"
       return
@@ -233,12 +234,20 @@ plan_repo() {
       done < <(printf '%s\n' "$names")
       return
     fi
+    # -X GET is not optional: -f adds a body parameter, and gh api switches
+    # a request with body parameters to POST unless the method is pinned.
+    # An unpinned request here would silently POST to the create endpoint
+    # instead of listing, so "existing" would always come back empty.
+    #
     # Read via process substitution, not a pipe: a pipe would run this loop
     # in a subshell, and milestone_failures set there would never reach the
     # tally below. Existing titles are listed first so a rerun is told apart
     # from a real create: matching "422" in the POST error would also match
     # validation failures that are not "already exists".
-    existing=$(gh api "repos/${repo}/milestones" -f state=all --paginate --jq '.[].title' 2>/dev/null)
+    if ! existing=$(gh api "repos/${repo}/milestones" -X GET -f state=all --paginate --jq '.[].title' 2>/dev/null); then
+      say "SKIP    $repo — cannot list existing milestones"
+      return
+    fi
     milestone_failures=0
     milestone_created=0
     while IFS= read -r name; do
