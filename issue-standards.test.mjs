@@ -695,3 +695,17 @@ test('a high-stakes glob still matches a path followed by sentence punctuation',
   );
   assert.equal(out.find((s) => s.group === 'route').label, 'route:judgement');
 });
+
+test('a wildcard high-stakes glob matches a root-level file with no directory', () => {
+  // mentionedPaths required a "/" to treat text as a path candidate at all,
+  // so a bare root-level mention like "wrangler.toml" was invisible to a
+  // glob written with a wildcard (e.g. "*.toml"). The literal-filename case
+  // already works via the plain substring check; this is the wildcard case.
+  const out = suggestLabels(
+    'Rename helper',
+    `${MINI_CHORE_BODY}\n\nTouch wrangler.toml directly.`,
+    [],
+    ['*.toml'],
+  );
+  assert.equal(out.find((s) => s.group === 'route').label, 'route:judgement');
+});

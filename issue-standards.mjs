@@ -340,11 +340,16 @@ function globMatch(glob, filePath) {
 }
 
 function mentionedPaths(text) {
-  const matches = String(text).match(/(?:[A-Za-z0-9_.-]+\/)+[A-Za-z0-9_.-]+/g) || [];
+  const nested = String(text).match(/(?:[A-Za-z0-9_.-]+\/)+[A-Za-z0-9_.-]+/g) || [];
+  // A root-level file such as `wrangler.toml` has no "/" for the pattern
+  // above to require, so a high-stakes glob written with a wildcard (e.g.
+  // `*.toml`, rather than the literal filename parseHighStakesGlobs already
+  // handles via a plain substring check) would never see it as a candidate.
+  const bareFiles = String(text).match(/\b[A-Za-z0-9_-]+\.[A-Za-z0-9]+\b/g) || [];
   // The character class includes ".", so a path at the end of a sentence
   // ("Touch infra/wrangler.toml.") captures the closing period as part of
   // the filename and then never matches the glob it was written to hit.
-  return matches.map((path) => path.replace(/[.,;:!?)\]]+$/, ''));
+  return [...nested, ...bareFiles].map((path) => path.replace(/[.,;:!?)\]]+$/, ''));
 }
 
 function guessRoute(title, body, kind, size, highStakesGlobs) {
