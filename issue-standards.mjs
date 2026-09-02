@@ -18,6 +18,26 @@ export const REQUIRED_HEADINGS = {
   epic: ['Job to be done', 'Slices', 'Out of scope'],
 };
 
+// The fleet already had names for these sections before the standard froze
+// its own. Accept either so existing issues pass. Failures still name the
+// canonical heading so new issues converge. Impact stays canonical for a bug
+// and is only an alias of Job to be done for the other kinds.
+export const HEADING_ALIASES = {
+  'Job to be done': ['Why', 'Problem', 'Impact'],
+  'Today / Wanted': ['What', 'Current / Wanted'],
+  // 'Exit gate' is deliberately NOT here. A gate is a condition for leaving a
+  // phase; acceptance criteria are the testable statements of one issue. An
+  // epic is forbidden from carrying criteria, so aliasing the two made every
+  // phase epic fail a rule it does not break.
+  'Acceptance criteria': ['Done', 'Definition of done'],
+  'How to verify': ['Verification', 'How verified', 'Testing'],
+  'Out of scope': ['Scope', 'Not included', 'Non-goals'],
+  'Slices': ['Deliverables', 'Phases'],
+  'Reproduction': ['Steps to reproduce', 'Repro'],
+  'Last known good': ['Regression', 'Last working'],
+  'Success metric': ['Metric', 'Success metrics'],
+};
+
 // An epic that carries its own acceptance criteria has not been decomposed. Its
 // children carry them, so the heading appearing here is the signal, not a bonus.
 export const FORBIDDEN_HEADINGS = { epic: ['Acceptance criteria'] };
@@ -61,6 +81,12 @@ function normaliseHeading(text) {
   return String(text).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 }
 
+// Canonical plus every accepted alternative, all through the same normalisation
+// so "Exit gate" and "exit-gate" are the same heading.
+function namesFor(canonical) {
+  return [canonical, ...(HEADING_ALIASES[canonical] || [])].map(normaliseHeading);
+}
+
 // Split a markdown body into { heading, body } sections. Fenced code is skipped
 // so a `## ` inside an example block does not read as a real heading.
 export function parseSections(body) {
@@ -83,9 +109,15 @@ export function parseSections(body) {
   }));
 }
 
+// More than one heading can normalise into the same target once aliases are in
+// play (an old "## Why" alongside the canonical "## Job to be done"). The first
+// match is not necessarily the one that was filled in, so prefer whichever
+// match actually has content and only fall back to the first when none do.
 function findSection(sections, wanted) {
-  const target = normaliseHeading(wanted);
-  return sections.find((section) => normaliseHeading(section.heading) === target) || null;
+  const targets = new Set(namesFor(wanted));
+  const matches = sections.filter((section) => targets.has(normaliseHeading(section.heading)));
+  if (matches.length === 0) return null;
+  return matches.find((section) => section.body && !isPlaceholderOnly(section.body)) || matches[0];
 }
 
 // A body still carrying the form's own prompt text has not been filled in. The
@@ -415,10 +447,14 @@ export function lintTemplates(dir) {
     // Equality, not substring: a label of "Not the Job to be done" is not the
     // "Job to be done" field, even though the words appear inside it.
     const fieldLabels = [...text.matchAll(/^\s*label:\s*(.+)$/gim)].map((m) => normaliseHeading(m[1]));
-    const missing = REQUIRED_HEADINGS[kind].filter((heading) => !fieldLabels.includes(normaliseHeading(heading)));
+    // Aliases go through the same label equality as the canonical name. A
+    // mention in a description is still not a field.
+    const offers = (heading) => namesFor(heading).some((name) => fieldLabels.includes(name));
+    const missing = REQUIRED_HEADINGS[kind].filter((heading) => !offers(heading));
     // A forbidden heading offered by the form is just as much drift as a
     // missing required one: every issue it produces will fail the body check.
-    const forbidden = (FORBIDDEN_HEADINGS[kind] || []).filter((heading) => fieldLabels.includes(normaliseHeading(heading)));
+    // Aliases of the forbidden heading are the same field under another name.
+    const forbidden = (FORBIDDEN_HEADINGS[kind] || []).filter((heading) => offers(heading));
     if (missing.length) {
       failures.push(fail(
         `${kind}.yml`,
