@@ -1,0 +1,126 @@
+#!/usr/bin/env bash
+# worker-run — wrap a delegated agent run and fail when it changed nothing.
+#
+# THE PROBLEM
+# Every agent CLI in the roster reports success by exiting 0, and all of them
+# have a path to exiting 0 with an untouched worktree. Four shapes, all seen in
+# one session, all exit code 0:
+#
+#   gemini   the shell function is not defined in a non-interactive shell
+#   gemini   no GEMINI_API_KEY, and the folder is untrusted
+#   gemini   edited one file, announced its next step, and stopped
+#   codex    a heredoc in the same shell call ate its stdin, so it waited for a
+#            prompt that never arrived
+#
+# Each leaves a different string in a different place, and the last is
+# indistinguishable from a fast success unless someone reads the transcript.
+# A worker's own report is no better: one that stops half way describes what it
+# was about to do in the same voice as what it did.
+#
+# WHY THE WORKTREE AND NOT THE EXIT CODE
+# A worker that did something changed a file. One that did not, did not. That
+# holds whichever CLI ran and however it failed, so it needs to know nothing
+# about any of them.
+#
+#   worker-run --dir <worktree> -- codex exec "..."
+#   worker-run --dir <worktree> --verify 'node x --selfcheck' -- pi -p "..."
+#
+# Exit codes are distinct on purpose, because "did nothing" and "did something
+# broken" need different responses from the caller:
+#
+#   0  changed, and --verify passed or was not asked for
+#   1  the worker command itself failed
+#   2  the worker exited 0 and changed nothing
+#   3  the worker changed something and --verify failed
+#   4  usage or environment error
+set -uo pipefail
+
+DIR=""; VERIFY=""; CMD=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --dir)    [ $# -ge 2 ] || { echo "worker-run: --dir needs a value" >&2; exit 4; }; DIR="$2"; shift 2 ;;
+    --verify) [ $# -ge 2 ] || { echo "worker-run: --verify needs a command" >&2; exit 4; }; VERIFY="$2"; shift 2 ;;
+    -h|--help) sed -n '2,32p' "$0"; exit 0 ;;
+    --)       shift; CMD=("$@"); break ;;
+    *)        echo "worker-run: unknown flag: $1" >&2; exit 4 ;;
+  esac
+done
+
+[ -n "$DIR" ] || { echo "worker-run: --dir is required" >&2; exit 4; }
+[ "${#CMD[@]}" -gt 0 ] || { echo "worker-run: no command after --" >&2; exit 4; }
+[ -d "$DIR" ] || { echo "worker-run: not a directory: $DIR" >&2; exit 4; }
+git -C "$DIR" rev-parse --git-dir >/dev/null 2>&1 || { echo "worker-run: not a git checkout: $DIR" >&2; exit 4; }
+
+# A fingerprint, not a file list. `status --porcelain` reports an already-dirty
+# file as " M" before and after, so a worker that edits a file someone else had
+# already touched would read as having done nothing. Content has to be in the
+# hash: the tracked diff, and the bytes of every untracked file.
+#
+# --exclude-standard keeps .gitignore honoured, so node_modules and build output
+# stay out of the hash and out of the cost.
+fingerprint() {
+  local dir="$1"
+  git -C "$dir" rev-parse HEAD 2>/dev/null || echo "no-head"
+  git -C "$dir" diff HEAD --binary 2>/dev/null | shasum
+  git -C "$dir" ls-files --others --exclude-standard -z 2>/dev/null \
+    | while IFS= read -r -d '' f; do printf '%s ' "$f"; shasum "$dir/$f" 2>/dev/null | cut -d' ' -f1; echo; done
+}
+
+before=$(fingerprint "$DIR")
+
+"${CMD[@]}"
+worker_status=$?
+
+after=$(fingerprint "$DIR")
+
+receipt() {
+  local stat
+  stat=$(git -C "$DIR" diff --stat HEAD 2>/dev/null | tail -1)
+  [ -n "$stat" ] && echo "  tracked:   $stat"
+  local untracked
+  untracked=$(git -C "$DIR" ls-files --others --exclude-standard 2>/dev/null | head -20)
+  [ -n "$untracked" ] && echo "$untracked" | sed 's/^/  new file: /'
+  return 0
+}
+
+if [ "$before" = "$after" ]; then
+  if [ "$worker_status" -ne 0 ]; then
+    echo "worker-run: the command failed (exit $worker_status) and changed nothing." >&2
+    exit 1
+  fi
+  # The case this script exists for. Say so in words that name the likely cause,
+  # because the worker's own output rarely does.
+  cat >&2 <<'MSG'
+worker-run: the command exited 0 and changed nothing.
+
+An agent CLI reports success by exiting 0 even when it never ran. Check, in
+this order:
+  - is the binary a shell function that does not exist outside an interactive
+    shell? `command -v <name>` and use the real path
+  - did it want a credential it did not have?
+  - did something else in the same shell call consume its stdin? run it alone,
+    with `< /dev/null`
+  - did it stop half way and describe its next step as though it were done?
+MSG
+  exit 2
+fi
+
+echo "worker-run: the worktree changed."
+receipt
+
+if [ -n "$VERIFY" ]; then
+  echo "worker-run: verifying with: $VERIFY"
+  if ( cd "$DIR" && eval "$VERIFY" ); then
+    echo "worker-run: verify passed."
+  else
+    verify_status=$?
+    echo "worker-run: the worker changed files but verify failed (exit $verify_status)." >&2
+    exit 3
+  fi
+fi
+
+if [ "$worker_status" -ne 0 ]; then
+  echo "worker-run: the command changed files but exited $worker_status." >&2
+  exit 1
+fi
+exit 0
