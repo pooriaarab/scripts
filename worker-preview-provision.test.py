@@ -82,6 +82,15 @@ class ProvisionTest(unittest.TestCase):
         self.assertLessEqual(max(map(len, too_long["intended"]["preview"]["preview_domain"].split("."))), 63)
         with self.assertRaisesRegex(provisioner.ProvisionError, "inconsistent Preview intent"):
             provisioner.validate_shape(too_long, True)
+    def test_validates_hostname_at_exact_dns_limit(self):
+        branch = "scr-163-" + "a" * 48
+        at_limit = plan(branch, "preview." + ".".join(["a" * 62, "a" * 62, "a" * 62]))
+        self.assertEqual(len(at_limit["intended"]["preview"]["hostname"]), 253)
+        self.assertIs(provisioner.validate_shape(at_limit, True), at_limit)
+        one_over = plan(branch, "preview." + ".".join(["a" * 62, "a" * 62, "a" * 63]))
+        self.assertEqual(len(one_over["intended"]["preview"]["hostname"]), 254)
+        with self.assertRaisesRegex(provisioner.ProvisionError, "inconsistent Preview intent"):
+            provisioner.validate_shape(one_over, True)
     def test_reconciles_ambiguous_create_and_is_idempotent(self):
         api = FakeApi(); api.ambiguous.add("d1")
         root, first = self.invoke(plan(), api)
