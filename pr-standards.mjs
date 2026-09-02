@@ -467,7 +467,15 @@ function hasValidProofNa(body) {
 // -- because the lookahead only inspected the one character right after the
 // digits and never looked past it. Path/query/fragment continuations are
 // consumed explicitly instead, so only those get to carry trailing characters.
-const ACTIONS_RUN_URL = /https:\/\/github\.com\/[^\s\/]+\/[^\s\/]+\/actions\/runs\/\d+(?:[\/?#][^\s"'\x60\)\]<>]*)?(?=$|[\s"'\x60\)\]<>]|[.,;:!](?=$|\s))/;
+//
+// Closing delimiters (a paren, bracket, quote, backtick) can sit between the
+// punctuation and the whitespace/end that terminates it -- a parenthetical
+// remark ending in a full sentence closes as `...runs/123456789.)`, not
+// `...runs/123456789).`. Requiring whitespace/end immediately after the
+// punctuation rejected that real shape outright, because closing delimiters
+// are exactly the case where more (harmless) characters legitimately follow
+// the period before the line actually ends.
+const ACTIONS_RUN_URL = /https:\/\/github\.com\/[^\s\/]+\/[^\s\/]+\/actions\/runs\/\d+(?:[\/?#][^\s"'\x60\)\]<>]*)?(?=$|[\s"'\x60\)\]<>]|[.,;:!]+[\x60"'\)\]<>]*(?=$|\s))/;
 
 function hasExternalProofEvidence(verifiedSection) {
   if (countUserAttachments(verifiedSection) > 0) return true;

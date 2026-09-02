@@ -780,6 +780,11 @@ test('proof: a bare command claim warns that it lives only in the body', () => {
     '[log](https://github.com/pooriaarab/scripts/actions/runs/123456789)',
     'See https://github.com/pooriaarab/scripts/actions/runs/123456789.',
     'See https://github.com/pooriaarab/scripts/actions/runs/123456789, it passed.',
+    // A parenthetical remark that ends in a full sentence closes with the
+    // period *inside* the parenthesis, not after it -- the punctuation and
+    // the closing delimiter both sit between the run ID and the line's end.
+    '(https://github.com/pooriaarab/scripts/actions/runs/123456789.)',
+    '[log](https://github.com/pooriaarab/scripts/actions/runs/123456789.)',
   ];
   for (const shape of realShapes) {
     assert.equal(warned(checkProof(`${validBody}\n${shape}`, nonUiFiles, config)), false, shape);
