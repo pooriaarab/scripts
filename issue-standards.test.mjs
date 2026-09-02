@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 
 import {
   ConfigurationError,
+  FORBIDDEN_HEADINGS,
   KINDS,
   REQUIRED_HEADINGS,
   kindFromLabels,
@@ -452,4 +453,53 @@ test('R3: an epic may carry an Exit gate', () => {
     '## Exit gate', 'Runtime scans find no active resource.',
   ].join('\n');
   assert.equal(validateBody(epic, 'epic').failures.length, 0);
+});
+
+test('a stray empty alias heading does not hide a populated canonical one later in the body', () => {
+  // An unrelated "## Why" intro, empty or otherwise, normalises to the same
+  // target as "## Job to be done" now that the two are aliased. Picking
+  // whichever match comes first in the document would report the required
+  // heading as empty even though it was filled in further down.
+  const body = [
+    '## Why', '',
+    FEATURE,
+  ].join('\n');
+  assert.equal(validateBody(body, 'feature').failures.length, 0);
+});
+
+test('lint accepts a required heading offered only through an alias label', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'issue-templates-'));
+  try {
+    for (const kind of KINDS) {
+      const fields = REQUIRED_HEADINGS[kind].map((h) => {
+        const label = h === 'Job to be done' ? 'Why' : h;
+        return `  - type: textarea\n    attributes:\n      label: ${label}`;
+      });
+      fs.writeFileSync(path.join(dir, `${kind}.yml`), `name: ${kind}\nbody:\n${fields.join('\n')}\n`);
+    }
+    const result = lintTemplates(dir);
+    assert.equal(result.failures.length, 0, JSON.stringify(result.failures));
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('lint rejects a forbidden heading offered only through an alias label', () => {
+  // "Done" is the fleet's name for "Acceptance criteria". An epic form
+  // offering it is exactly as forbidden as one offering the canonical name.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'issue-templates-'));
+  try {
+    for (const kind of KINDS) {
+      const fields = REQUIRED_HEADINGS[kind].map((h) => `  - type: textarea\n    attributes:\n      label: ${h}`);
+      if (kind === 'epic' && FORBIDDEN_HEADINGS.epic.includes('Acceptance criteria')) {
+        fields.push('  - type: textarea\n    attributes:\n      label: Done');
+      }
+      fs.writeFileSync(path.join(dir, `${kind}.yml`), `name: ${kind}\nbody:\n${fields.join('\n')}\n`);
+    }
+    const result = lintTemplates(dir);
+    assert.ok(failed(result));
+    assert.ok(failedOn(result, 'Acceptance criteria'), JSON.stringify(result.failures));
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });

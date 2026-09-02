@@ -109,9 +109,15 @@ export function parseSections(body) {
   }));
 }
 
+// More than one heading can normalise into the same target once aliases are in
+// play (an old "## Why" alongside the canonical "## Job to be done"). The first
+// match is not necessarily the one that was filled in, so prefer whichever
+// match actually has content and only fall back to the first when none do.
 function findSection(sections, wanted) {
   const targets = new Set(namesFor(wanted));
-  return sections.find((section) => targets.has(normaliseHeading(section.heading))) || null;
+  const matches = sections.filter((section) => targets.has(normaliseHeading(section.heading)));
+  if (matches.length === 0) return null;
+  return matches.find((section) => section.body && !isPlaceholderOnly(section.body)) || matches[0];
 }
 
 // A body still carrying the form's own prompt text has not been filled in. The
