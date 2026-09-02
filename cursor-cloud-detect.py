@@ -93,16 +93,19 @@ def detect_python(files: set[str]) -> tuple[str, str]:
         install = 'pip install -e ".[dev]" 2>/dev/null || pip install -e . || pip install -r requirements.txt'
     else:
         install = "pip install -r requirements.txt"
-    verify = "pytest -q 2>/dev/null || python -m pytest -q 2>/dev/null || make check 2>/dev/null || echo 'Add pytest or make check'"
+    # Only fall back to the module invocation (same test suite, different entry
+    # point) — never to an unrelated command, which would report success on a
+    # real test failure.
+    verify = "pytest -q || python -m pytest -q"
     return install, verify
 
 
 def detect_rust(_files: set[str]) -> tuple[str, str]:
-    return "cargo fetch", "cargo test --no-run 2>/dev/null || cargo check"
+    return "cargo fetch", "cargo test"
 
 
 def detect_go(_files: set[str]) -> tuple[str, str]:
-    return "go mod download", "go test ./... 2>/dev/null || go vet ./..."
+    return "go mod download", "go test ./..."
 
 
 def _has_make_target(text: str, target: str) -> bool:
