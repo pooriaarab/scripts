@@ -1,18 +1,20 @@
 #!/usr/bin/env bash
 # install-agent-clis.sh — provision the personal agent-CLI roster on an ascii.dev Box.
 #
-# Installs and wires: claude (3 subscription profiles), codex, gemini, kimi, pi, muse.
+# Installs and wires: claude (3 subscription profiles), codex, gemini, kimi, pi, muse, cursor-agent, devin.
 # Idempotent: safe to re-run. Never fails the whole run on one CLI; it reports per CLI.
 #
 # NO SECRETS LIVE IN THIS FILE. Credentials arrive out of band, through
 # `box env set-file`, at these in-box paths:
 #
-#   ~/.agents/agent-clis.env       CLAUDE_CODE_OAUTH_TOKEN[_2|_3], GEMINI_API_KEY
+#   ~/.agents/agent-clis.env       CLAUDE_CODE_OAUTH_TOKEN[_2|_3], GEMINI_API_KEY, CURSOR_API_KEY
 #   ~/.gemini-personal/.gemini/.env   GEMINI_API_KEY
 #   ~/.pi/agent/auth.json         pi provider keys (openrouter, zai, ...)
 #   ~/.kimi-code/config.toml      Moonshot API key + model table
 #   ~/.config/muse/auth.json      Meta Muse OAuth
 #   ~/.codex-personal/auth.json   optional; falls back to the box-injected ~/.codex/auth.json
+#   ~/.config/devin/config.json   devin configuration (default model)
+#   ~/.local/share/devin/credentials.toml   devin credentials (written by devin auth login)
 #
 # Usage:  box new --environment <env> --setup-file box-setup/install-agent-clis.sh
 
@@ -56,6 +58,8 @@ npm_install() { # <bin-name> <package>
 }
 
 log "gemini-cli"
+# gemini — needs --skip-trust or it errors "not running in a trusted directory"
+# GEMINI_API_KEY=<ai-studio-key> gemini --skip-trust -m gemini-3.8-flash -p "PROMPT"
 npm_install gemini "@google/gemini-cli"
 
 log "pi coding agent"
@@ -95,6 +99,8 @@ fi
 # The launcher is a small bash script; it downloads the real binary on first run
 # and needs ~/.config/muse/auth.json to authenticate that download.
 log "muse code"
+# muse — defaults to --approval-mode on-request, so headless it waits forever then SIGTERMs with ZERO edits
+# muse exec --workspace <path> --trust-workspace --approval-mode never "PROMPT"
 if [ -x "$BIN/muse" ]; then
   note "muse launcher already present"
   mark muse "present"
@@ -108,6 +114,39 @@ fi
 # Pre-warm: the launcher downloads a ~166 MB binary on first use, which is
 # longer than a `box exec` round trip. Pay that cost during setup instead.
 [ -x "$BIN/muse" ] && "$BIN/muse" --version >/dev/null 2>&1
+
+# ----------------------------------------------------------- cursor-agent ----
+log "cursor-agent"
+# cursor-agent — needs --trust; and the API key must be EXPORTED, not just sourced
+# set -a; source ~/Documents/Personal/.secrets/cursor.env; set +a
+# cursor-agent -p --trust --model composer-2.5 "PROMPT"     # or cursor-grok-4.6-high-fast
+if [ -x "$BIN/cursor-agent" ]; then
+  note "cursor-agent already present ($("$BIN/cursor-agent" --version 2>&1 | head -1))"
+  mark cursor-agent "present"
+else
+  curl -fsSL https://cursor.com/install | bash >/dev/null 2>&1
+  if [ -x "$BIN/cursor-agent" ]; then
+    mark cursor-agent "installed"
+  else
+    mark cursor-agent "FAILED (cursor.com/install)"
+  fi
+fi
+
+# ------------------------------------------------------------------ devin ----
+log "devin"
+# devin  — refuses an untrusted workspace headless; needs both flags to write
+# devin -p --respect-workspace-trust false --permission-mode accept-edits --model <m> -- "PROMPT"
+if [ -x "$BIN/devin" ]; then
+  note "devin already present ($("$BIN/devin" --version 2>&1 | head -1))"
+  mark devin "present"
+else
+  curl -fsSL https://cli.devin.ai/install.sh | bash >/dev/null 2>&1
+  if [ -x "$BIN/devin" ]; then
+    mark devin "installed"
+  else
+    mark devin "FAILED (cli.devin.ai/install.sh)"
+  fi
+fi
 
 # --------------------------------------------------------- codex-personal ----
 # The box image injects the owner's own ChatGPT credential at ~/.codex/auth.json.
@@ -276,7 +315,8 @@ done
 log "installed"
 for f in "$HOME/.agents/agent-clis.env" "$HOME/.pi/agent/auth.json" \
          "$HOME/.kimi-code/config.toml" "$HOME/.config/muse/auth.json" \
-         "$HOME/.gemini-personal/.gemini/.env" "$HOME/.codex-personal/auth.json"; do
+         "$HOME/.gemini-personal/.gemini/.env" "$HOME/.codex-personal/auth.json" \
+         "$HOME/.config/devin/config.json" "$HOME/.local/share/devin/credentials.toml"; do
   if [ -s "$f" ]; then mark "cred:$(basename "$(dirname "$f")")/$(basename "$f")" "present"
   else mark "cred:$(basename "$(dirname "$f")")/$(basename "$f")" "MISSING"; fi
 done
