@@ -784,6 +784,7 @@ test('proof: a bare command claim warns that it lives only in the body', () => {
   const withGluedDelimiter = [
     'https://github.com/pooriaarab/scripts/actions/runs/123)not-a-run',
     'https://github.com/pooriaarab/scripts/actions/runs/123]not-a-run',
+    'https://github.com/pooriaarab/scripts/actions/runs/123}not-a-run',
     'https://github.com/pooriaarab/scripts/actions/runs/123"not-a-run',
   ];
   for (const shape of withGluedDelimiter) {
@@ -813,6 +814,8 @@ test('proof: a bare command claim warns that it lives only in the body', () => {
     '**https://github.com/pooriaarab/scripts/actions/runs/123456789**',
     'See **https://github.com/pooriaarab/scripts/actions/runs/123456789** it passed.',
     '_https://github.com/pooriaarab/scripts/actions/runs/123456789_',
+    // A curly brace closes the same way a paren or bracket does.
+    '{https://github.com/pooriaarab/scripts/actions/runs/123456789}',
   ];
   for (const shape of realShapes) {
     assert.equal(warned(checkProof(`${validBody}\n${shape}`, nonUiFiles, config)), false, shape);

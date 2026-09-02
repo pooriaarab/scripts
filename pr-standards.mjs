@@ -474,9 +474,11 @@ function hasValidProofNa(body) {
 // of the string. Structural, not enumerable, and there is no separate
 // "grab now, worry about the edges later" step for stray characters to hide
 // behind. (`_` is in that closing set alongside `*` so a run URL wrapped in
-// Markdown underscore-emphasis, `_..._`, reads the same as `**bold**` does.)
+// Markdown underscore-emphasis, `_..._`, reads the same as `**bold**` does.
+// `}` closes the set the same way `)` and `]` already do, for a URL wrapped
+// in a curly brace instead of a paren or bracket.)
 const ACTIONS_RUN_URL =
-  /https:\/\/github\.com\/[^\s\/]+\/[^\s\/]+\/actions\/runs\/\d+(?=[\/?#]|[.,;:!*_"'\x60\)\]<>]*(?:\s|$))/;
+  /https:\/\/github\.com\/[^\s\/]+\/[^\s\/]+\/actions\/runs\/\d+(?=[\/?#]|[.,;:!*_"'\x60\)\]\}<>]*(?:\s|$))/;
 
 function hasExternalProofEvidence(verifiedSection) {
   if (countUserAttachments(verifiedSection) > 0) return true;
