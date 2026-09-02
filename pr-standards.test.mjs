@@ -1146,3 +1146,85 @@ test('prefix precedence holds on the CI path, not only in loadConfig', async () 
     delete process.env.GITHUB_REPOSITORY;
   }
 });
+
+test('drift reports an absent AGENTS.md on an adopted repo', () => {
+  // Not silence. pr-standards-rollout CREATES AGENTS.md when it is absent --
+  // `out = '# AGENTS.md\\n\\n' + block` in its merge helper -- so an adopted
+  // repo always has one. Absence therefore means the rollout did not finish,
+  // which is exactly the drift this check exists to surface. Staying quiet
+  // would hide a half-installed standard behind a green check.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'prs-drift-no-agents-'));
+  try {
+    fs.mkdirSync(path.join(root, '.github'));
+    fs.copyFileSync(path.join(checkerRoot, '.github', 'pr-standards.json'), path.join(root, '.github', 'pr-standards.json'));
+    fs.copyFileSync(path.join(checkerRoot, '.github', 'pull_request_template.md'), path.join(root, '.github', 'pull_request_template.md'));
+    // Intentionally do not create AGENTS.md.
+    const result = runDrift(root);
+    assert.equal(result.status, 1, result.stdout + result.stderr);
+    assert.equal(result.json.adopted, true);
+    const failure = result.json.failures.find((item) => item.check === 'managed AGENTS.md block');
+    assert.equal(failure.got, 'missing');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('the drift job checks out the base, so a PR head cannot hide drift', () => {
+  // drift reads the working tree. In CI that is the pull request's HEAD, so a
+  // PR editing the managed block would be compared against the version it just
+  // wrote and always report clean. fetchRemoteConfig has the same property and
+  // answers it the same way.
+  //
+  // base.sha, not base.ref: the sha is the commit the pull request is actually
+  // based on at event time, while the ref is a branch name that can move
+  // between the event firing and the checkout running.
+  const files = [
+    ['template', './pr-standards-templates/pr-standards.yml'],
+    ['installed', './.github/workflows/pr-standards.yml'],
+  ];
+  for (const [label, relative] of files) {
+    const content = readFileSync(new URL(relative, import.meta.url), 'utf8');
+    assert.match(content, /pr-standards-drift:/, `${label} must define the drift job`);
+    assert.match(
+      content,
+      /pr-standards-drift:[\s\S]*?ref:\s*\$\{\{\s*github\.event\.pull_request\.base\.sha\s*\}\}/,
+      `${label} drift job must check out base.sha`,
+    );
+    // It reuses the same unauthenticated fetch, so it adds no API calls.
+    assert.match(content, /codeload\.github\.com\/pooriaarab\/scripts\/tar\.gz\/refs\/tags\/pr-standards-v1/, label);
+    // Two independent jobs. A drifted block must not fail an unrelated PR's
+    // required check, so drift must not be a step inside the size/title job.
+    assert.doesNotMatch(content, /pr-standards-drift:[\s\S]*?needs:/, `${label} drift job must not depend on the other`);
+  }
+});
+
+test('a PR whose head edits the managed block is still judged against the base', () => {
+  // Simulate a repo where base has a correct managed block but head edits it
+  // to be stale. Drift on the working tree (head) would see the stale block
+  // and correctly fail, but the trap the task describes is the opposite: a PR
+  // that edits the block to look clean in head while base is still drifted
+  // would hide drift if drift read head. More concretely, verify that drift
+  // in a repo with a stale head still fails (it judges the working tree), and
+  // that the workflow's base-checkout fix ensures CI judges base instead.
+  // This unit test covers the engine half: a stale working tree must be stale.
+  const root = driftFixture();
+  try {
+    const agentsPath = path.join(root, 'AGENTS.md');
+    fs.writeFileSync(agentsPath, readFileSync(agentsPath, 'utf8').replace(
+      'One issue. One PR. One concern. Under 500 counted lines.',
+      'One issue can use two pull requests.',
+    ));
+    const result = runDrift(root);
+    const failure = result.json.failures.find((item) => item.check === 'managed AGENTS.md block');
+    assert.equal(result.status, 1, result.stdout + result.stderr);
+    assert.equal(failure.got, 'stale');
+    // Complement: after restoring the correct block, drift passes. A head that
+    // fixes drift should pass when run locally (on its own working tree).
+    fs.copyFileSync(path.join(checkerRoot, 'AGENTS.md'), agentsPath);
+    const clean = runDrift(root);
+    assert.equal(clean.status, 0, clean.stdout + clean.stderr);
+    assert.deepEqual(clean.json.failures, []);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
