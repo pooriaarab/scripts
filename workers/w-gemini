@@ -18,15 +18,18 @@ key=$(grep -hoE '^(GEMINI_API_KEY|GOOGLE_API_KEY)=.*' "$SECRETS" 2>/dev/null | h
 [ -n "$key" ] || { echo "w-gemini: no GEMINI_API_KEY in $SECRETS" >&2; exit 78; }
 
 cd "$dir" || exit 1
+ERR="$(mktemp)"
+trap 'rm -f "$ERR"' EXIT
 GEMINI_API_KEY="$key" GEMINI_CLI_HOME="$HOME/.gemini-personal" \
-  "$BIN" -o json --skip-trust --approval-mode yolo ${model:+-m "$model"} -p "$prompt" 2>/dev/null \
+  "$BIN" -o json --skip-trust --approval-mode yolo ${model:+-m "$model"} -p "$prompt" 2>"$ERR" \
   | python3 -c '
 import json, sys
 try:
     data = json.load(sys.stdin)
 except ValueError:
-    sys.exit("w-gemini: no JSON on stdout")
+    stderr = open(sys.argv[1]).read().strip()
+    sys.exit(f"w-gemini: no JSON on stdout: {stderr}" if stderr else "w-gemini: no JSON on stdout")
 if data.get("error"):
     sys.exit(f"w-gemini: {data['"'"'error'"'"']}")
 sys.stdout.write(data.get("response") or "")
-'
+' "$ERR"
