@@ -67,6 +67,7 @@ fingerprint() {
     | while IFS= read -r -d '' f; do printf '%s ' "$f"; shasum "$dir/$f" 2>/dev/null | cut -d' ' -f1; echo; done
 }
 
+before_head=$(git -C "$DIR" rev-parse HEAD 2>/dev/null)
 before=$(fingerprint "$DIR")
 
 "${CMD[@]}"
@@ -74,9 +75,12 @@ worker_status=$?
 
 after=$(fingerprint "$DIR")
 
+# Diffed against the HEAD captured before the run, not the live HEAD: a worker
+# that commits its own changes moves HEAD, and `diff --stat HEAD` against the
+# new HEAD would find the worktree clean and name nothing.
 receipt() {
   local stat
-  stat=$(git -C "$DIR" diff --stat HEAD 2>/dev/null)
+  stat=$(git -C "$DIR" diff --stat "$before_head" 2>/dev/null)
   [ -n "$stat" ] && echo "$stat" | sed 's/^/  tracked:  /'
   local untracked
   untracked=$(git -C "$DIR" ls-files --others --exclude-standard 2>/dev/null | head -20)

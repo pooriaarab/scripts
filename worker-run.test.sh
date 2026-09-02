@@ -146,6 +146,21 @@ test_edited_tracked_file_names_it_in_receipt() {
   fi
 }
 
+# Case 3c. A worker can commit its own changes instead of leaving them
+# uncommitted. That moves HEAD, so a receipt that diffs the live HEAD against
+# the worktree finds it clean and names nothing — the file the receipt exists
+# to report vanishes exactly when the worker did the tidiest possible thing.
+test_committed_change_is_named_in_receipt() {
+  local fix
+  fix=$(new_repo)
+  run_worker "$fix" -- bash -c 'echo edited > tracked.txt && git add tracked.txt && git commit -qm wip'
+  if (( rc == 0 )) && echo "$out" | grep -q "tracked.txt"; then
+    pass "a worker that commits its change still names it in the receipt"
+  else
+    fail "a worker that commits its change still names it in the receipt" "rc=$rc out=$out"
+  fi
+}
+
 # Case 4. The subtle one. `git status --porcelain` prints " M" for the file
 # before AND after the run, so any check based on the file list alone would
 # call a worker that only edited an already-dirty file "no change". The
@@ -311,6 +326,7 @@ test_no_change_is_a_failure
 test_new_file_is_work
 test_edited_tracked_file_is_work
 test_edited_tracked_file_names_it_in_receipt
+test_committed_change_is_named_in_receipt
 test_edit_of_already_dirty_file_is_work
 test_failed_worker_no_change_is_exit_1
 test_failed_worker_with_change_is_exit_1
