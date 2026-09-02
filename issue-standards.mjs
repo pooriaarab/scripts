@@ -258,6 +258,124 @@ export function kindFromLabels(labels) {
   return found.length === 1 ? found[0] : null;
 }
 
+const BUG_WORDS = ['defect', 'error', 'crash', 'regression', 'fails', 'broken'];
+const CHORE_WORDS = ['refactor', 'dependency', 'bump', 'ci', 'docs', 'cleanup', 'rename'];
+const HIGH_STAKES_WORDS = ['auth', 'billing', 'credits', 'migration', 'webhook', 'rbac', 'token', 'middleware'];
+
+function hasWord(text, word) {
+  // Allow a plural suffix. A trailing \b after the bare word cannot match
+  // "migrations", because \b needs a non-word character and "s" is one, so
+  // every plural form silently missed. A real issue saying "owner-approved
+  // Cloudflare migrations" was routed as ordinary work by exactly this.
+  // The suffix is opt-in rather than a bare prefix match: \bauth with no
+  // boundary would also match "author" and "authored".
+  const escaped = word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`\\b${escaped}(?:s|es)?\\b`, 'i').test(text);
+}
+
+function firstWord(text, words) {
+  return words.find((word) => hasWord(text, word)) || null;
+}
+
+function countCriteria(body) {
+  return (String(body || '').match(/^\s*[-*]\s+\[[ xX]\]/gm) || []).length;
+}
+
+function namesMultiplePhases(text) {
+  return (String(text).match(/\bphase\s+(?:\d+|[ivxlcdm]+|one|two|three|four|five|six|seven|eight|nine|ten)\b/gi) || []).length >= 2;
+}
+
+function hasEpicHeading(body) {
+  const targets = new Set(namesFor('Slices'));
+  return parseSections(body).some((section) => targets.has(normaliseHeading(section.heading)));
+}
+
+function guessKind(title, body) {
+  const text = `${title}\n${body}`;
+  if (firstWord(text, BUG_WORDS)) return { label: 'bug', reason: 'defect language' };
+  if (firstWord(text, CHORE_WORDS)) return { label: 'chore', reason: 'chore language' };
+  if (hasEpicHeading(body)) return { label: 'epic', reason: 'slices heading' };
+  if (namesMultiplePhases(text)) return { label: 'epic', reason: 'names multiple phases' };
+  return { label: 'feature', reason: 'no defect, chore or epic signal' };
+}
+
+function guessSize(body, kind) {
+  if (kind === 'epic') return { label: 'deep', reason: 'epics are always deep' };
+  const length = String(body || '').length;
+  const criteria = countCriteria(body);
+  if (length > 2000) return { label: 'deep', reason: 'body over 2000 chars' };
+  if (criteria > 5) return { label: 'deep', reason: 'more than 5 criteria' };
+  if (hasWord(body, 'migration')) return { label: 'deep', reason: 'mentions migration' };
+  if (/multiple surfaces/i.test(body)) return { label: 'deep', reason: 'mentions multiple surfaces' };
+  if (length < 400 && criteria === 1) return { label: 'mini', reason: 'body under 400 chars with one criterion' };
+  return { label: 'standard', reason: 'neither mini nor deep' };
+}
+
+function globMatch(glob, filePath) {
+  const source = String(glob)
+    .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+    .replace(/\*\*/g, '::GS::')
+    .replace(/\*/g, '[^/]*')
+    .replace(/::GS::/g, '.*');
+  return new RegExp(`^${source}$`).test(filePath);
+}
+
+function mentionedPaths(text) {
+  return String(text).match(/(?:[A-Za-z0-9_.-]+\/)+[A-Za-z0-9_.-]+/g) || [];
+}
+
+function guessRoute(title, body, kind, size, highStakesGlobs) {
+  const text = `${title}\n${body}`;
+  const word = firstWord(text, HIGH_STAKES_WORDS);
+  if (word) return { label: 'route:judgement', reason: `mentions ${word}` };
+  if (Array.isArray(highStakesGlobs)) {
+    const paths = mentionedPaths(text);
+    const glob = highStakesGlobs.find((item) => text.includes(item) || paths.some((filePath) => globMatch(item, filePath)));
+    if (glob) return { label: 'route:judgement', reason: `touches ${glob}` };
+  }
+  // No issues.md: never guess mechanical. Guessing low is the direction this
+  // must not be wrong in.
+  if (highStakesGlobs == null) {
+    return { label: 'route:scoped', reason: 'no .agents/issues.md; guessing low is the direction this must not be wrong in' };
+  }
+  if (size === 'mini' && kind === 'chore') {
+    return { label: 'route:mechanical', reason: 'mini chore and no high-stakes path' };
+  }
+  return { label: 'route:scoped', reason: 'not mini-chore' };
+}
+
+// Pure so tests can exercise the rules without GitHub. highStakesGlobs is null
+// when .agents/issues.md is absent, and an array (maybe empty) when it is not.
+export function suggestLabels(title, body, existingLabels, highStakesGlobs) {
+  const present = new Set((existingLabels || []).map((label) => String(label).toLowerCase()));
+  const kind = guessKind(title, body);
+  const size = guessSize(body, kind.label);
+  const route = guessRoute(title, body, kind.label, size.label, highStakesGlobs);
+  const state = { label: 'triage', reason: 'nothing here has been agreed' };
+  const guesses = { kind, size, route, state };
+  const suggestions = [];
+  for (const [group, allowed] of Object.entries(LABEL_GROUPS)) {
+    const existing = allowed.filter((label) => present.has(label));
+    if (existing.length > 0) {
+      suggestions.push({ group, label: existing[0], reason: 'already set', alreadySet: true });
+    } else {
+      suggestions.push({ group, label: guesses[group].label, reason: guesses[group].reason, alreadySet: false });
+    }
+  }
+  return suggestions;
+}
+
+export function parseHighStakesGlobs(markdown) {
+  const globs = [];
+  for (const line of String(markdown || '').split('\n')) {
+    if (!/^\s*\|/.test(line) || /^\s*\|\s*-+/.test(line)) continue;
+    const cells = line.split('|').map((cell) => cell.trim()).filter(Boolean);
+    const tick = cells[0] && /`([^`]+)`/.exec(cells[0]);
+    if (tick && /[/*]/.test(tick[1])) globs.push(tick[1]);
+  }
+  return globs;
+}
+
 function ghJson(args) {
   try {
     const out = execFileSync('gh', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
@@ -289,6 +407,13 @@ function humanFailure(item, prefix = '      ') {
 }
 
 function outputHuman(result) {
+  if (result.mode === 'suggest') {
+    const lines = [...(result.lines || [])];
+    for (const item of result.failures || []) lines.push(`FAIL  ${item.check}\n${humanFailure(item)}`);
+    if ((result.failures || []).length) lines.push(`${result.failures.length} failure(s)`);
+    process.stdout.write(`${lines.join('\n')}\n`);
+    return;
+  }
   const lines = [];
   if (result.subject) lines.push(result.subject);
   for (const pass of result.passes || []) lines.push(`PASS  ${pass}`);
@@ -313,6 +438,7 @@ function usage() {
   issue-standards check --repo owner/name --number N
   issue-standards precheck --body-file F --kind <${KINDS.join('|')}>
   issue-standards lint [--dir D]
+  issue-standards suggest --repo owner/name [--number N] [--apply]
   issue-standards --selfcheck
 
 Add --json to any command for machine-readable output.`;
@@ -328,10 +454,10 @@ function parseArgs(argv) {
     return { selfcheck: true, json };
   }
   const mode = filtered.shift();
-  if (!mode || !['check', 'precheck', 'lint'].includes(mode)) {
-    throw new ConfigurationError('usage: issue-standards check --repo owner/name --number N, precheck --body-file F --kind K, or lint');
+  if (!mode || !['check', 'precheck', 'lint', 'suggest'].includes(mode)) {
+    throw new ConfigurationError('usage: issue-standards check --repo owner/name --number N, precheck --body-file F --kind K, lint, or suggest --repo owner/name');
   }
-  const options = { mode, json, positional: [] };
+  const options = { mode, json, apply: false, positional: [] };
   for (let index = 0; index < filtered.length; index += 1) {
     const arg = filtered[index];
     if (['--repo', '--number', '--body-file', '--kind', '--dir'].includes(arg)) {
@@ -339,6 +465,8 @@ function parseArgs(argv) {
       if (!value || value.startsWith('--')) throw new ConfigurationError(`${arg} requires a value`);
       options[arg.slice(2).replace(/-([a-z])/g, (_, c) => c.toUpperCase())] = value;
       index += 1;
+    } else if (arg === '--apply') {
+      options.apply = true;
     } else if (arg.startsWith('--')) {
       throw new ConfigurationError(`unknown option: ${arg}`);
     } else {
@@ -349,7 +477,7 @@ function parseArgs(argv) {
 }
 
 function runCheck(options) {
-  if (options.bodyFile || options.kind || options.dir) {
+  if (options.bodyFile || options.kind || options.dir || options.apply) {
     throw new ConfigurationError('check accepts --repo and --number only');
   }
   if (!options.repo || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(options.repo)) {
@@ -382,7 +510,7 @@ function runCheck(options) {
 }
 
 function runPrecheck(options) {
-  if (options.repo || options.number || options.dir) {
+  if (options.repo || options.number || options.dir || options.apply) {
     throw new ConfigurationError('precheck accepts --body-file and --kind only');
   }
   if (!options.bodyFile) throw new ConfigurationError('precheck requires --body-file');
@@ -477,12 +605,103 @@ export function lintTemplates(dir) {
 }
 
 function runLint(options) {
-  if (options.repo || options.number || options.bodyFile || options.kind) {
+  if (options.repo || options.number || options.bodyFile || options.kind || options.apply) {
     throw new ConfigurationError('lint accepts --dir only');
   }
   const dir = options.dir || '.github/ISSUE_TEMPLATE';
   const result = lintTemplates(dir);
   return finish({ mode: 'lint', subject: dir, failures: result.failures, passes: result.passes }, options.json);
+}
+
+function fetchRepoFile(repo, filePath) {
+  try {
+    const file = ghJson(['api', `repos/${repo}/contents/${filePath}`]);
+    if (!file || file.type !== 'file' || !file.content) return null;
+    return Buffer.from(String(file.content).replace(/\n/g, ''), 'base64').toString('utf8');
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 404) return null;
+    throw error;
+  }
+}
+
+function fetchOpenIssues(repo) {
+  const issues = ghJson([
+    'issue', 'list', '--repo', repo, '--state', 'open', '--limit', '1000',
+    '--json', 'number,title,body,labels',
+  ]);
+  return (issues || []).map((issue) => ({
+    number: issue.number,
+    title: issue.title || '',
+    body: issue.body || '',
+    labels: (issue.labels || []).map((label) => (typeof label === 'string' ? label : label.name)),
+  }));
+}
+
+function applyLabel(repo, number, label) {
+  try {
+    execFileSync('gh', ['issue', 'edit', String(number), '--repo', repo, '--add-label', label], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+  } catch (error) {
+    const stderr = String(error.stderr || error.message || '');
+    throw new ApiError(`gh failed: ${stderr.trim().split('\n')[0] || 'unknown error'}`);
+  }
+}
+
+function runSuggest(options) {
+  if (options.bodyFile || options.kind || options.dir) {
+    throw new ConfigurationError('suggest accepts --repo, --number and --apply only');
+  }
+  if (!options.repo || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(options.repo)) {
+    throw new ConfigurationError('suggest requires --repo owner/name');
+  }
+  if (options.number && !/^[1-9][0-9]*$/.test(options.number)) {
+    throw new ConfigurationError('suggest --number requires N');
+  }
+  const markdown = fetchRepoFile(options.repo, '.agents/issues.md');
+  const globs = markdown == null ? null : parseHighStakesGlobs(markdown);
+  const issues = options.number
+    ? [fetchIssue(options.repo, options.number)]
+    : fetchOpenIssues(options.repo);
+
+  const failures = [];
+  const passes = [];
+  const lines = [];
+  const suggestions = [];
+  for (const issue of issues) {
+    const items = suggestLabels(issue.title, issue.body, issue.labels, globs);
+    suggestions.push({ number: issue.number, items });
+    for (const item of items) {
+      const reason = item.alreadySet ? 'already set' : item.reason;
+      const line = `#${issue.number}  ${item.label}  ${reason}`;
+      lines.push(line);
+      if (options.apply && !item.alreadySet) {
+        try {
+          applyLabel(options.repo, issue.number, item.label);
+          passes.push(line);
+        } catch (error) {
+          failures.push(fail(
+            `#${issue.number} ${item.label}`,
+            error.message,
+            'gh issue edit to add the label',
+            'Check gh authentication and that the label exists on the repo.',
+          ));
+        }
+      } else {
+        passes.push(line);
+      }
+    }
+  }
+  return finish({
+    mode: 'suggest',
+    subject: options.number ? `${options.repo}#${options.number}` : `${options.repo} open issues`,
+    apply: Boolean(options.apply),
+    suggestions,
+    lines,
+    failures,
+    passes,
+  }, options.json);
 }
 
 // A checker nobody has checked is a checker nobody should trust. This asserts
@@ -530,6 +749,7 @@ export async function main(argv) {
     if (options.selfcheck) return runSelfcheck(options.json);
     if (options.mode === 'check') return runCheck(options);
     if (options.mode === 'precheck') return runPrecheck(options);
+    if (options.mode === 'suggest') return runSuggest(options);
     return runLint(options);
   } catch (error) {
     const item = fail(

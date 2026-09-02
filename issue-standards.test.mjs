@@ -14,6 +14,7 @@ import {
   kindFromLabels,
   lintTemplates,
   parseSections,
+  suggestLabels,
   validateBody,
   validateLabels,
 } from './issue-standards.mjs';
@@ -502,4 +503,140 @@ test('lint rejects a forbidden heading offered only through an alias label', () 
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+function pick(suggestions, group) {
+  return suggestions.find((item) => item.group === group);
+}
+
+// Short enough to be mini once it has exactly one criterion, and chore-shaped
+// so route tests can reuse it.
+const MINI_CHORE_BODY = [
+  'Rename the leftover helper.',
+  '',
+  '## Acceptance criteria',
+  '- [ ] The helper has the new name.',
+].join('\n');
+
+test('suggest: defect language is a bug', () => {
+  const out = suggestLabels('Login crash', 'The submit button is broken and fails.', [], []);
+  assert.equal(pick(out, 'kind').label, 'bug');
+});
+
+test('suggest: chore language is a chore', () => {
+  const out = suggestLabels('Refactor the save path', 'cleanup the module and bump the dependency', [], []);
+  assert.equal(pick(out, 'kind').label, 'chore');
+});
+
+test('suggest: a Slices, Deliverables or Phases heading is an epic', () => {
+  for (const heading of ['Slices', 'Deliverables', 'Phases']) {
+    const out = suggestLabels('Inbox sharing', `## ${heading}\n- [ ] Extract the thread view.`, [], []);
+    assert.equal(pick(out, 'kind').label, 'epic', heading);
+  }
+});
+
+test('suggest: naming multiple phases is an epic', () => {
+  const out = suggestLabels('Inbox sharing', 'Phase 1 extracts the view. Phase 2 shares it.', [], []);
+  assert.equal(pick(out, 'kind').label, 'epic');
+});
+
+test('suggest: no kind signal is a feature', () => {
+  const out = suggestLabels('Workspace badge', 'Show the workspace on each row.', [], []);
+  assert.equal(pick(out, 'kind').label, 'feature');
+});
+
+test('suggest: a short body with one criterion is mini', () => {
+  const out = suggestLabels('Rename helper', MINI_CHORE_BODY, [], []);
+  assert.equal(pick(out, 'kind').label, 'chore');
+  assert.equal(pick(out, 'size').label, 'mini');
+});
+
+test('suggest: a mid-size body is standard', () => {
+  const body = `${'The list should show a workspace badge. '.repeat(20)}\n\n- [ ] Badge shows.\n- [ ] Filter still works.`;
+  assert.ok(body.length >= 400 && body.length <= 2000, body.length);
+  const out = suggestLabels('Workspace badge', body, [], []);
+  assert.equal(pick(out, 'size').label, 'standard');
+});
+
+test('suggest: a body over 2000 chars is deep', () => {
+  const body = `${'x'.repeat(2001)}\n\n- [ ] Done.`;
+  assert.equal(pick(suggestLabels('Long write-up', body, [], []), 'size').label, 'deep');
+});
+
+test('suggest: more than five criteria is deep', () => {
+  const body = ['Keep going.', '', '## Acceptance criteria', ...Array.from({ length: 6 }, (_, i) => `- [ ] Criterion ${i + 1}.`)].join('\n');
+  assert.ok(body.length < 2000, body.length);
+  assert.equal(pick(suggestLabels('Many checks', body, [], []), 'size').label, 'deep');
+});
+
+test('suggest: migration or multiple surfaces is deep', () => {
+  assert.equal(pick(suggestLabels('Move data', 'This migration copies rows.\n\n- [ ] Copied.', [], []), 'size').label, 'deep');
+  assert.equal(pick(suggestLabels('Badges', 'Touches multiple surfaces.\n\n- [ ] Done.', [], []), 'size').label, 'deep');
+});
+
+test('suggest: an epic is always deep', () => {
+  const out = suggestLabels('Inbox sharing', '## Slices\n- [ ] One.', [], []);
+  assert.equal(pick(out, 'kind').label, 'epic');
+  assert.equal(pick(out, 'size').label, 'deep');
+});
+
+test('suggest: a high-stakes word forces route:judgement regardless of size', () => {
+  // Mini chore would otherwise be mechanical. Auth is expensive even as a rename.
+  const out = suggestLabels('Rename auth helper', MINI_CHORE_BODY, [], []);
+  assert.equal(pick(out, 'kind').label, 'chore');
+  assert.equal(pick(out, 'size').label, 'mini');
+  assert.equal(pick(out, 'route').label, 'route:judgement');
+});
+
+test('suggest: a high-stakes glob in the body forces route:judgement', () => {
+  const out = suggestLabels('Rename helper', `${MINI_CHORE_BODY}\n\nTouch src/payments/charge.ts`, [], ['src/payments/**']);
+  assert.equal(pick(out, 'size').label, 'mini');
+  assert.equal(pick(out, 'route').label, 'route:judgement');
+});
+
+test('suggest: mini chore with issues.md present is route:mechanical', () => {
+  const out = suggestLabels('Rename helper', MINI_CHORE_BODY, [], []);
+  assert.equal(pick(out, 'kind').label, 'chore');
+  assert.equal(pick(out, 'size').label, 'mini');
+  assert.equal(pick(out, 'route').label, 'route:mechanical');
+});
+
+test('suggest: without issues.md, never guess route:mechanical', () => {
+  // Guessing low is the direction this must not be wrong in.
+  const out = suggestLabels('Rename helper', MINI_CHORE_BODY, [], null);
+  assert.equal(pick(out, 'kind').label, 'chore');
+  assert.equal(pick(out, 'size').label, 'mini');
+  assert.equal(pick(out, 'route').label, 'route:scoped');
+  assert.match(pick(out, 'route').reason, /guessing low/);
+});
+
+test('suggest: an existing label is kept', () => {
+  const out = suggestLabels('Login crash', 'The submit button is broken.', ['feature', 'mini'], []);
+  assert.equal(pick(out, 'kind').label, 'feature');
+  assert.equal(pick(out, 'kind').alreadySet, true);
+  assert.match(pick(out, 'kind').reason, /already set/);
+  assert.equal(pick(out, 'size').label, 'mini');
+  assert.equal(pick(out, 'size').alreadySet, true);
+  assert.equal(pick(out, 'state').label, 'triage');
+});
+
+test('suggest without --repo is a configuration error', () => {
+  assert.equal(run(['suggest']).status, 2);
+  assert.equal(run(['suggest', '--number', '1']).status, 2);
+});
+
+test('a plural high-stakes word still forces route:judgement', () => {
+  // \b after a bare word cannot match a plural: \b needs a non-word character
+  // and "s" is one. A real epic saying "owner-approved Cloudflare migrations"
+  // was routed as ordinary work by exactly this, which is the direction the
+  // route rule must never be wrong in.
+  const body = 'Remove unused resources through separate owner-approved Cloudflare migrations.';
+  const route = suggestLabels('Purge infrastructure', body, [], []).find((s) => s.group === 'route');
+  assert.equal(route.label, 'route:judgement', JSON.stringify(route));
+
+  // The singular must keep working, and a bare prefix must not over-match:
+  // "author" is not "auth".
+  const routeOf = (body) => suggestLabels('x', body, [], []).find((s) => s.group === 'route').label;
+  assert.equal(routeOf('a billing migration'), 'route:judgement');
+  assert.notEqual(routeOf('the author wrote docs'), 'route:judgement');
 });
