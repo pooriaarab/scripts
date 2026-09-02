@@ -31,5 +31,9 @@ except ValueError:
     sys.exit(f"w-gemini: no JSON on stdout: {stderr}" if stderr else "w-gemini: no JSON on stdout")
 if data.get("error"):
     sys.exit(f"w-gemini: {data['"'"'error'"'"']}")
-sys.stdout.write(data.get("response") or "")
+response = data.get("response")
+if not response:
+    stderr = open(sys.argv[1]).read().strip()
+    sys.exit(f"w-gemini: empty response: {stderr}" if stderr else "w-gemini: empty response")
+sys.stdout.write(response)
 ' "$ERR"
