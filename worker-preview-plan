@@ -111,8 +111,8 @@ def validate_config(config, pin):
         raise PlanError("verified branch does not meet the trusted PR standard")
     domain = validate_domain(config["preview_domain"])
     hostname = f"{pin['branch']}.{domain}"
-    if len(hostname) > 63:
-        raise PlanError("derived Preview hostname exceeds the Access application URL limit")
+    if len(hostname) > 253:
+        raise PlanError("derived Preview hostname exceeds the DNS hostname limit")
     bindings = config["bindings"]
     if not isinstance(bindings, dict) or set(bindings) != set(BINDING_KINDS):
         raise PlanError("trusted bindings need exact d1, kv, and r2 lists")

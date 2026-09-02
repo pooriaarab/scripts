@@ -95,7 +95,7 @@ def validate_shape(value, plan_input):
             or not re.fullmatch(r"[A-Za-z0-9-]{1,255}", worker["name"])
             or worker["workers_dev"] and (len(worker["name"]) > 63 or worker["name"].startswith("-") or worker["name"].endswith("-"))
             or type(worker["workers_dev"]) is not bool or not domain_ok or preview["name"] != owner["branch"]
-            or access["hostname"] != preview["hostname"] or len(preview["hostname"]) > 63
+            or access["hostname"] != preview["hostname"] or len(preview["hostname"]) > 253
             or preview["hostname"] != f"{owner['branch']}.{preview['preview_domain']}"
             or access["application_name"] != resource_name(owner["repository"], owner["branch"], "access")
             or access["policy_name"] != resource_name(owner["repository"], owner["branch"], "policy")
