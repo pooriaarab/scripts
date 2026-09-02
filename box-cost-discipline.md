@@ -73,7 +73,7 @@ Box cost control is four layers. Each knows strictly less than the one before.
 | 1 | Creation | `box-guard` | whether a Box has a deadline (`archiveAfter`) | gives an unbounded Box a TTL in place with `box extend --ttl`; see "The unbounded Box, and why the guard is not a rule" |
 | 2 | Session | `box-session`, wired to the Claude Code SessionStart/SessionEnd hooks | which repo claimed which Box (`~/.local/state/box-work/<repo>.id`) | warms one Box per repo; the last session out stops it and keeps the id so the next session resumes instead of creating; see "Stop keeps the id, so the next session resumes" |
 | 3 | Laptop | `box-reap` via launchd, every 15 minutes | CPU, load, and the heartbeat file inside the Box, over SSH | the only layer that decides with evidence: it probes each Box and stops it only when the probe says quiet; see "Why \"idle\" is a trap" |
-| 4 | Cloud | `box-sweep-remote` in `.github/workflows/box-sweep.yml`, on an Ubicloud runner every 30 minutes | age alone | cannot SSH into a Box, so it decides on age alone; report-only on a schedule, stopping only on a `workflow_dispatch` with `execute: true`; see "The laptop reaper cannot run while the laptop sleeps" |
+| 4 | Cloud | `box-sweep-remote` in `.github/workflows/box-sweep.yml`, on a GitHub-hosted runner every 30 minutes | age alone | cannot SSH into a Box, so it decides on age alone; report-only on a schedule, stopping only on a `workflow_dispatch` with `execute: true`; see "The laptop reaper cannot run while the laptop sleeps" |
 
 The layers are ordered by how much they know, and **a layer must never act with more
 confidence than its evidence supports.** The cloud layer's age rule is crude, and it is
@@ -280,7 +280,7 @@ default (`--filter` defaults to running). The first API run reported **100 Boxes
 $3.636/hour**, when five were running and the real figure was $0.180/hour. The report now
 counts only billing states (`idle`, `running`, `pending`, `stopping`, `ready`).
 
-`.github/workflows/box-sweep.yml` runs it every 30 minutes on `ubicloud-standard-2`,
+`.github/workflows/box-sweep.yml` runs it every 30 minutes on `ubuntu-latest`,
 report-only, with a `workflow_dispatch` input to actually stop. The first real run found two
 Boxes at **39h and 52h old** — claimed Boxes whose session state kept being refreshed, so
 the laptop reaper never touched them. That is precisely the gap this backstop exists for.
