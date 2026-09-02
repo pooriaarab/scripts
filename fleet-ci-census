@@ -86,9 +86,8 @@ if (( TIMING )); then
   echo "warning: --timing costs one API request per run" >&2
 fi
 
-# A cancelled job that never finished can keep updating for hours. That span
-# is a stuck row, not CI time, and must not enter p50/p95 as a multi-hour
-# outlier. 6h is past any runner-queue tail the census is meant to see.
+# A cancelled job that never finished can keep updating for hours. 6h is past any
+# runner-queue tail the census is meant to see.
 MAX_DURATION_S=$((6 * 3600))
 PAGE_CAP=$((PAGES * 100))
 REPOS_STR="${REPOS[*]+"${REPOS[*]}"}"
@@ -191,8 +190,7 @@ def fetch_runs(repo):
 
 
 def aggregate(repo, runs):
-    # Keyed on workflow_id, not name: two workflow files can share a
-    # display name, and keying on name alone would merge their metrics.
+    # workflow_id not name: two files can share a display name.
     by_wf = defaultdict(lambda: {"name": None, "durs": [], "ids": [], "fail": 0, "cancelled": 0})
     for r in runs:
         if not isinstance(r, dict):

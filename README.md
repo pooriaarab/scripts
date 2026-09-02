@@ -15,6 +15,11 @@ The [`agents`](https://github.com/pooriaarab/agents) repo is the hub — a porta
 | [scripts](https://github.com/pooriaarab/scripts) | Automation scripts |
 | [prompts](https://github.com/pooriaarab/prompts) | Refined prompts |
 
+## fleet-ci-census
+
+Wall-time CI census across the fleet. JSON default; `--markdown` ranks by total minutes.
+Repos that hit the page cap are marked `(floor)`. Run `./fleet-ci-census --help`.
+
 ## Diagnose CI in this order
 
 The four `ci-*` scripts are one workflow, not four tools. Run them in order. Each step

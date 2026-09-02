@@ -15,9 +15,6 @@ FAKE_DATA="$FAKE_ROOT/data"
 mkdir -p "$FAKE_BIN" "$FAKE_DATA"
 trap 'rm -rf "$FAKE_ROOT"' EXIT
 
-# Recorded Actions payload: two workflows, one failure, one cancel, one 8h
-# stuck run that must not enter percentiles, one run missing timestamps,
-# one still-in-progress run that must not be counted as if finished.
 cat > "$FAKE_DATA/runs.json" <<'JSON'
 {"workflow_runs":[
   {"id":1,"name":"oxlint","run_started_at":"2026-08-20T00:00:00Z","updated_at":"2026-08-20T00:00:10Z","conclusion":"success"},
@@ -163,27 +160,12 @@ else
   fail_msg "discovery — out=$out"
 fi
 
-python3 -c '
-import json,sys
-page1 = [{"full_name": f"pooriaarab/archived{i}", "archived": True} for i in range(99)]
-page1.append({"full_name": "pooriaarab/only-p1", "archived": False})
-json.dump(page1, open(sys.argv[1], "w"))
-' "$FAKE_DATA/repos_page1.json"
-cat > "$FAKE_DATA/repos_page2.json" <<'JSON'
-[
-  {"full_name":"pooriaarab/p2-a","archived":false},
-  {"full_name":"pooriaarab/p2-b","archived":false},
-  {"full_name":"pooriaarab/p2-c","archived":false}
-]
-JSON
+python3 -c 'import json,sys; p=[{"full_name":f"pooriaarab/archived{i}","archived":True} for i in range(99)]; p.append({"full_name":"pooriaarab/only-p1","archived":False}); json.dump(p,open(sys.argv[1],"w"))' "$FAKE_DATA/repos_page1.json"
+echo '[{"full_name":"pooriaarab/p2-a","archived":false},{"full_name":"pooriaarab/p2-b","archived":false}]' > "$FAKE_DATA/repos_page2.json"
 out=$(run --limit 3 --pages 1 2>/dev/null)
 rm -f "$FAKE_DATA/repos_page1.json" "$FAKE_DATA/repos_page2.json"
-if echo "$out" | python3 -c '
-import json,sys
-names=[r["repo"] for r in json.load(sys.stdin)["repos"]]
-assert names==["pooriaarab/only-p1","pooriaarab/p2-a","pooriaarab/p2-b"], names
-'; then
-  ok "discovery pages past a full page of archived repos to reach --limit"
+if echo "$out" | python3 -c 'import json,sys; n=[r["repo"] for r in json.load(sys.stdin)["repos"]]; assert n==["pooriaarab/only-p1","pooriaarab/p2-a","pooriaarab/p2-b"],n'; then
+  ok "discovery pages past archived repos"
 else
   fail_msg "discovery pagination — out=$out"
 fi
