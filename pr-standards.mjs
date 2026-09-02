@@ -439,6 +439,23 @@ function hasValidProofNa(body) {
   return false;
 }
 
+// A command and its result cost nothing to type whether or not the command
+// ran -- `bun test -> 214 passed` reads identically either way, and nothing
+// mechanical can tell the two apart from text alone. What CAN be checked is
+// whether the claim points to something outside the body: a run GitHub itself
+// executed, or an attachment that took a real screen capture to produce. The
+// documented `Proof: n/a` hatch counts too, because it already carries its own
+// burden (a stated reason, judged by the review council) that a bare command
+// claim does not.
+const ACTIONS_RUN_URL = /https:\/\/github\.com\/[^\s\/]+\/[^\s\/]+\/actions\/runs\/\d+[^\s"'\x60\)\]<>]*/;
+
+function hasExternalProofEvidence(verifiedSection) {
+  if (countUserAttachments(verifiedSection) > 0) return true;
+  if (ACTIONS_RUN_URL.test(verifiedSection)) return true;
+  if (hasValidProofNa(verifiedSection)) return true;
+  return false;
+}
+
 export function isUiFile(filename, config = DEFAULT_CONFIG) {
   const uiGlobs = config.uiGlobs || [];
   const uiExcludeGlobs = config.uiExcludeGlobs || [];
@@ -554,6 +571,20 @@ export function checkProof(body, files, config = DEFAULT_CONFIG) {
         'One image shows the result, not the change. Add the other side.',
       ));
     }
+  }
+
+  // Warn only. Most repos in the fleet do not yet run their own tests in CI,
+  // so failing every PR whose proof lives only in prose would turn the whole
+  // fleet red on day one and get the standard switched off (#85). A command
+  // claim with nothing external backing it is still allowed through; it is
+  // just named for what it is.
+  if (hasCommandAndResult(verifiedSection) && !hasExternalProofEvidence(verifiedSection)) {
+    warnings.push(fail(
+      'proof that only lives in the PR body',
+      'a command and result claimed in text, nothing outside the body to check it against',
+      'a linked Actions run, an attachment, or `Proof: n/a — <reason>`',
+      'A line like `bun test -> 214 passed` reads the same whether or not it ran. Link the Actions run that produced it, attach a screenshot, or state a `Proof: n/a` reason.',
+    ));
   }
   return { failures, warnings };
 }

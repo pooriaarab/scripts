@@ -132,6 +132,14 @@ The checker enforces only what it can cheaply and mechanically:
 - `requireProof: false` turns off both proof checks for a repo with no
   user-facing surface. That is a config decision: it lives in the repo, it shows
   up in a diff, and it is reviewed like any other change.
+- **A command claim with nothing outside the body warns.** `bun test -> 214
+  passed` reads the same whether or not it ran, and nothing mechanical can tell
+  the two apart from text alone. What the checker can tell is whether the claim
+  points to something it did not write itself: a linked Actions run, a
+  user-attachments URL, or a `Proof: n/a` reason. None of those present is a
+  warning, not a failure — most repos in the fleet do not yet run their own
+  tests in CI, and failing every PR whose proof lives only in prose would turn
+  the whole fleet red on day one. `requireProof: false` turns this off too.
 
 Escape hatch, when proof truly does not apply:
 
