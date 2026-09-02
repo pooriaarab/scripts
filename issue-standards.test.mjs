@@ -8,9 +8,13 @@ import { fileURLToPath } from 'node:url';
 
 import {
   ConfigurationError,
+  KINDS,
   REQUIRED_HEADINGS,
+  kindFromLabels,
+  lintTemplates,
   parseSections,
   validateBody,
+  validateLabels,
 } from './issue-standards.mjs';
 
 const LAUNCHER = fileURLToPath(new URL('./issue-standards', import.meta.url));
@@ -167,6 +171,28 @@ test('a heading inside a fenced block is not a heading', () => {
   assert.equal(sections.filter((s) => s.heading === 'Acceptance criteria').length, 1);
 });
 
+test('R3: labels need exactly one from each of four groups', () => {
+  assert.equal(validateLabels(['feature', 'mini', 'route:mechanical', 'triage']).failures.length, 0);
+
+  const missing = validateLabels(['feature', 'mini', 'triage']);
+  assert.ok(failed(missing));
+  assert.ok(missing.failures.some((f) => f.check.startsWith('route')), JSON.stringify(missing.failures));
+
+  const doubled = validateLabels(['feature', 'bug', 'mini', 'route:mechanical', 'triage']);
+  assert.ok(failed(doubled));
+  assert.ok(doubled.failures.some((f) => f.got.includes('bug') && f.got.includes('feature')));
+});
+
+test('an unrecognised label is ignored rather than treated as a group member', () => {
+  assert.equal(validateLabels(['feature', 'mini', 'route:mechanical', 'triage', 'good first issue']).failures.length, 0);
+});
+
+test('the kind comes from the label, and is unknown when ambiguous', () => {
+  assert.equal(kindFromLabels(['feature', 'mini']), 'feature');
+  assert.equal(kindFromLabels(['feature', 'bug']), null);
+  assert.equal(kindFromLabels(['mini']), null);
+});
+
 test('precheck runs offline against a body file', () => {
   withBody(FEATURE, (file) => {
     const result = run(['precheck', '--body-file', file, '--kind', 'feature']);
@@ -189,6 +215,7 @@ test('--json is machine readable on every command', () => {
 });
 
 test('exit codes match pr-standards: 0 clean, 1 failures, 2 configuration', () => {
+  assert.equal(run(['--selfcheck']).status, 0);
   withBody(FEATURE.replace('## How to verify', '## Notes'), (file) => {
     assert.equal(run(['precheck', '--body-file', file, '--kind', 'feature']).status, 1);
   });
@@ -196,9 +223,39 @@ test('exit codes match pr-standards: 0 clean, 1 failures, 2 configuration', () =
   assert.equal(run(['precheck', '--kind', 'feature']).status, 2);
   assert.equal(run(['precheck', '--body-file', '/tmp', '--kind', 'nonsense']).status, 2);
   assert.equal(run(['nonsense']).status, 2);
+  assert.equal(run(['check', '--repo', 'not-a-repo']).status, 2);
 });
 
 test('an unknown kind is a configuration error, not a silent pass', () => {
   assert.throws(() => validateBody(FEATURE, 'improvement'), ConfigurationError);
 });
 
+test('lint fails when a form stops offering a required heading', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'issue-templates-'));
+  try {
+    for (const kind of KINDS) {
+      const fields = REQUIRED_HEADINGS[kind].map((h) => `  - type: textarea\n    attributes:\n      label: ${h}`);
+      fs.writeFileSync(path.join(dir, `${kind}.yml`), `name: ${kind}\nbody:\n${fields.join('\n')}\n`);
+    }
+    assert.equal(lintTemplates(dir).failures.length, 0);
+
+    // Drop one field. The form and the checker have drifted, and an issue filed
+    // through the form would fail the check the form exists to satisfy.
+    const featureFile = path.join(dir, 'feature.yml');
+    fs.writeFileSync(featureFile, fs.readFileSync(featureFile, 'utf8').replace(/.*Success metric.*\n/, ''));
+    const drifted = lintTemplates(dir);
+    assert.ok(failed(drifted));
+    assert.ok(failedOn(drifted, 'Success metric'), JSON.stringify(drifted.failures));
+
+    fs.rmSync(path.join(dir, 'epic.yml'));
+    assert.ok(lintTemplates(dir).failures.some((f) => f.check === 'epic.yml'));
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('lint says so when the repo has no templates at all', () => {
+  const result = lintTemplates('/nope/no-such-directory');
+  assert.ok(failed(result));
+  assert.ok(failedOn(result, 'ISSUE_TEMPLATE'), JSON.stringify(result.failures));
+});
