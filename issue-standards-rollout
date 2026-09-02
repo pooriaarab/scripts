@@ -7,7 +7,8 @@
 # and writes nothing, locally or remotely.
 #
 # What it plans per repo: the four issue forms and config.yml, the 13 labels,
-# the AGENTS.md marker block, and a .agents/issues.md stub.
+# the milestones named in that repo's .agents/issues.md, the AGENTS.md marker
+# block, and a .agents/issues.md stub.
 #
 # --labels-only plans only the 13 labels. Labels need no branch and no prefix,
 # so this reaches repos the full rollout skips for lacking pr-standards.json.
@@ -16,6 +17,7 @@
 # .agents/issues.md. Milestones need no branch and no prefix, so this
 # reaches repos the full rollout skips for lacking pr-standards.json.
 # A repo that defines no set gets none created; the names cannot be guessed.
+# Full mode creates the same milestones alongside labels and forms.
 #
 # What it does NOT do: fill in that stub. The stub names the repo's analytics
 # helper and its high-stakes paths, and neither can be derived from outside the
@@ -189,6 +191,67 @@ for line in lines[start:]:
 '
 }
 
+# Shared by --milestones-only and full mode: the issue asks for milestone
+# creation in both, and it needs no branch or prefix in either.
+apply_milestones() {
+  repo="$1"
+  names=$(repo_milestone_names "$repo")
+  fetch_status=$?
+  if [ "$fetch_status" -eq 2 ]; then
+    say "SKIP    $repo — cannot read .agents/issues.md"
+    return
+  fi
+  names=$(printf '%s\n' "$names" | awk '!seen[$0]++')
+  if [ -z "$names" ]; then
+    say "SKIP    $repo - .agents/issues.md defines no milestone set"
+    return
+  fi
+  say "MILESTONES  $repo"
+  if [ "$DRY" -eq 1 ]; then
+    while IFS= read -r name; do
+      [ -n "$name" ] || continue
+      say "          milestone  $name"
+    done < <(printf '%s\n' "$names")
+    return
+  fi
+  # -X GET is not optional: -f adds a body parameter, and gh api switches
+  # a request with body parameters to POST unless the method is pinned.
+  # An unpinned request here would silently POST to the create endpoint
+  # instead of listing, so "existing" would always come back empty.
+  #
+  # Read via process substitution, not a pipe: a pipe would run this loop
+  # in a subshell, and milestone_failures set there would never reach the
+  # tally below. Existing titles are listed first so a rerun is told apart
+  # from a real create: matching "422" in the POST error would also match
+  # validation failures that are not "already exists".
+  if ! existing=$(gh api "repos/${repo}/milestones" -X GET -f state=all --paginate --jq '.[].title' 2>/dev/null); then
+    say "SKIP    $repo — cannot list existing milestones"
+    return
+  fi
+  milestone_failures=0
+  milestone_created=0
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    if printf '%s\n' "$existing" | grep -qxF "$name"; then
+      say "          milestone  $name (already exists)"
+      continue
+    fi
+    if gh api "repos/${repo}/milestones" -X POST -f title="${name}" >/dev/null 2>&1; then
+      say "          milestone  $name"
+      milestone_created=$((milestone_created + 1))
+    else
+      say "          FAILED  milestone $name"
+      milestone_failures=$((milestone_failures + 1))
+    fi
+  done < <(printf '%s\n' "$names")
+  if [ "$milestone_failures" -gt 0 ]; then
+    say "          NOTE    $milestone_failures milestone(s) failed; rerun --apply --repo $repo to retry."
+    ANY_MILESTONE_FAILURE=1
+  elif [ "$milestone_created" -eq 0 ]; then
+    say "          NOTE    no change: all named milestones already exist."
+  fi
+}
+
 target_repos() {
   if [ -n "$TARGET_REPO" ]; then
     printf '%s\n' "$TARGET_REPO"
@@ -215,61 +278,7 @@ plan_repo() {
   # is needed, which is why this mode does not require pr-standards.json.
   # Same argument --labels-only makes.
   if [ "$MILESTONES_ONLY" -eq 1 ]; then
-    names=$(repo_milestone_names "$repo")
-    fetch_status=$?
-    if [ "$fetch_status" -eq 2 ]; then
-      say "SKIP    $repo — cannot read .agents/issues.md"
-      return
-    fi
-    names=$(printf '%s\n' "$names" | awk '!seen[$0]++')
-    if [ -z "$names" ]; then
-      say "SKIP    $repo - .agents/issues.md defines no milestone set"
-      return
-    fi
-    say "MILESTONES  $repo"
-    if [ "$DRY" -eq 1 ]; then
-      while IFS= read -r name; do
-        [ -n "$name" ] || continue
-        say "          milestone  $name"
-      done < <(printf '%s\n' "$names")
-      return
-    fi
-    # -X GET is not optional: -f adds a body parameter, and gh api switches
-    # a request with body parameters to POST unless the method is pinned.
-    # An unpinned request here would silently POST to the create endpoint
-    # instead of listing, so "existing" would always come back empty.
-    #
-    # Read via process substitution, not a pipe: a pipe would run this loop
-    # in a subshell, and milestone_failures set there would never reach the
-    # tally below. Existing titles are listed first so a rerun is told apart
-    # from a real create: matching "422" in the POST error would also match
-    # validation failures that are not "already exists".
-    if ! existing=$(gh api "repos/${repo}/milestones" -X GET -f state=all --paginate --jq '.[].title' 2>/dev/null); then
-      say "SKIP    $repo — cannot list existing milestones"
-      return
-    fi
-    milestone_failures=0
-    milestone_created=0
-    while IFS= read -r name; do
-      [ -n "$name" ] || continue
-      if printf '%s\n' "$existing" | grep -qxF "$name"; then
-        say "          milestone  $name (already exists)"
-        continue
-      fi
-      if gh api "repos/${repo}/milestones" -X POST -f title="${name}" >/dev/null 2>&1; then
-        say "          milestone  $name"
-        milestone_created=$((milestone_created + 1))
-      else
-        say "          FAILED  milestone $name"
-        milestone_failures=$((milestone_failures + 1))
-      fi
-    done < <(printf '%s\n' "$names")
-    if [ "$milestone_failures" -gt 0 ]; then
-      say "          NOTE    $milestone_failures milestone(s) failed; rerun --apply --repo $repo to retry."
-      ANY_MILESTONE_FAILURE=1
-    elif [ "$milestone_created" -eq 0 ]; then
-      say "          NOTE    no change: all named milestones already exist."
-    fi
+    apply_milestones "$repo"
     return
   fi
 
@@ -299,6 +308,7 @@ plan_repo() {
     say "          labels  13, created with --force so a rerun changes nothing"
     say "          block   AGENTS.md issue-standards marker block"
     say "          stub    .agents/issues.md, with TODOs for a human to fill in"
+    apply_milestones "$repo"
   else
     say "LABELS  $repo"
   fi
@@ -369,8 +379,8 @@ elif [ "$MILESTONES_ONLY" -eq 1 ]; then
   else
     say "$count $scope considered. Milestones applied where planned."
   fi
-elif [ "$ANY_LABEL_FAILURE" -eq 1 ]; then
-  say "$count $scope considered. Some labels FAILED — see FAILED lines above."
+elif [ "$ANY_LABEL_FAILURE" -eq 1 ] || [ "$ANY_MILESTONE_FAILURE" -eq 1 ]; then
+  say "$count $scope considered. Some labels or milestones FAILED — see FAILED lines above."
   exit 1
 else
   say "$count $scope considered. Labels applied where planned."
