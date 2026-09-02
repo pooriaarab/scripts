@@ -466,8 +466,17 @@ The council must actually read it. Every code repo's `vibecodereview.yml` skips
 markdown, for a good reason — a README typo does not need a five-model council —
 and that skip covered `VISION.md` too. So the one file the council consults to
 judge every other pull request was the one file it never reviewed, and a docs-only
-vision could never be approved. Re-include it: `paths-ignore: ["**.md", "docs/**",
-"!VISION.md"]`.
+vision could never be approved. Re-include it with an ordered `paths` filter — `!` exclusions work with `paths`
+and not with `paths-ignore`, so the negated `paths-ignore` form looks right and
+still skips the file:
+
+```yaml
+paths:
+  - "**"
+  - "!**.md"
+  - "!docs/**"
+  - "VISION.md"
+```
 
 Two failures to avoid:
 
