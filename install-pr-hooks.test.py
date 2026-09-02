@@ -6,7 +6,8 @@ branch rule. That copy drifted from pr-standards.mjs once already: it accepted
 cr-0-x and cr-007-x, imposed no slug length, and exempted master, which the
 canonical validator does not. These cases pin the two together.
 """
-import pathlib, subprocess, os, tempfile, json, sys
+import pathlib
+import re, subprocess, os, tempfile, json, sys
 HERE = pathlib.Path(__file__).parent
 # The installer writes the PreToolUse guard under $HOME/.local/share. Pin HOME
 # to a throwaway directory so this suite cannot touch the real one, ~/.claude*,
@@ -555,6 +556,34 @@ def test_pretooluse_drift_reports_stale_after_hand_edit():
     return ok
 
 
+def test_pretooluse_dry_run_distinguishes_edited_from_older():
+    """The dry-run message must not print one revision twice.
+
+    --drift computes a content sha, so it names two different values. The
+    dry-run install path prints the STAMP twice, and a stamp is unchanged by a
+    hand edit -- so it read "stale; installed X expected X", which tells the
+    reader nothing and looks like a broken tool. Two causes, two messages.
+    """
+    home, root, env, dest, sp = _guard_harness()
+    _guard_run(sp, env, "--apply", "--root", root)
+
+    # Cause 1: edited after install. The stamp still matches.
+    pathlib.Path(dest).write_text(pathlib.Path(dest).read_text() + "# hand-edit\n")
+    edited = _guard_run(sp, env, "--root", root).stdout
+    ok = "edited since install" in edited and "expected" not in edited
+
+    # Cause 2: installed from an older revision. The stamp differs.
+    old = "0" * 40
+    pathlib.Path(dest).write_text(
+        re.sub(r"(installed from )[0-9a-f]{40}", r"\g<1>" + old, pathlib.Path(dest).read_text(), count=1)
+    )
+    older = _guard_run(sp, env, "--root", root).stdout
+    ok = ok and "stale" in older and old in older and _expected_sha(sp) in older
+
+    print(f"  {'OK ' if ok else 'FAIL'} dry run tells an edit apart from an older revision")
+    return ok
+
+
 def test_pretooluse_drift_absent_is_not_installed_not_stale():
     """No installed file is 'not installed', never 'stale'."""
     home, root, env, dest, sp = _guard_harness()
@@ -626,6 +655,7 @@ for _guard_test in (
     test_pretooluse_apply_writes_stamped_copy_and_snippet,
     test_pretooluse_apply_is_idempotent,
     test_pretooluse_drift_reports_stale_after_hand_edit,
+    test_pretooluse_dry_run_distinguishes_edited_from_older,
     test_pretooluse_drift_absent_is_not_installed_not_stale,
     test_pretooluse_uninstall_removes_and_drift_says_not_installed,
     test_pretooluse_never_writes_settings_or_outside_owned_dir,

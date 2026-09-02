@@ -461,9 +461,21 @@ handle_guard() {
       if ! write_guard; then
         echo "FAIL    PreToolUse guard (write failed)"; failed=$((failed+1)); return
       fi
-      echo "updated PreToolUse guard at $GUARD_DST (installed ${stamp_sha:-unknown} expected $expected)"
+      if [ -n "$stamp_sha" ] && [ "$stamp_sha" = "$expected" ]; then
+        echo "updated PreToolUse guard at $GUARD_DST (was edited since install at $stamp_sha)"
+      else
+        echo "updated PreToolUse guard at $GUARD_DST (installed ${stamp_sha:-unknown} expected $expected)"
+      fi
     else
-      echo "would update PreToolUse guard at $GUARD_DST (stale; installed ${stamp_sha:-unknown} expected $expected)"
+      # Two different reasons the copy is not current, and printing the same
+      # revision twice for the second one reads as a broken tool. When the
+      # stamp matches, the revision is not the story -- the file was edited
+      # after it was installed.
+      if [ -n "$stamp_sha" ] && [ "$stamp_sha" = "$expected" ]; then
+        echo "would update PreToolUse guard at $GUARD_DST (edited since install at $stamp_sha)"
+      else
+        echo "would update PreToolUse guard at $GUARD_DST (stale; installed ${stamp_sha:-unknown} expected $expected)"
+      fi
     fi
     print_guard_snippet
     return
