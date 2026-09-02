@@ -641,6 +641,62 @@ test('a stale branch point reaches the base comparison and fails on overlap end 
   }
 });
 
+test('a stale branch point with no overlapping files warns rather than fails end to end', async () => {
+  const originalWrite = process.stdout.write;
+  const originalPath = process.env.PATH;
+  const originalToken = process.env.GITHUB_TOKEN;
+  const originalFetch = globalThis.fetch;
+  let output = '';
+  process.stdout.write = (chunk) => { output += chunk; return true; };
+  process.env.PATH = '';
+  process.env.GITHUB_TOKEN = 'test-token';
+  process.env.GITHUB_REPOSITORY = 'other/repo';
+
+  globalThis.fetch = async (url) => {
+    if (url.includes('contents/.github/pr-standards.json')) {
+      return { ok: true, json: async () => ({ content: Buffer.from(JSON.stringify({ prefix: 'cr' })).toString('base64'), encoding: 'base64' }) };
+    }
+    if (url.includes('pulls/12/commits')) {
+      return { ok: true, json: async () => ([{ sha: 'abc1234', commit: { message: 'Fix the thing' } }]) };
+    }
+    if (url.includes('pulls/12/files')) {
+      return { ok: true, json: async () => ([{ filename: 'README.md' }]) };
+    }
+    if (url.includes('/compare/main...deadbee')) {
+      return { ok: true, json: async () => ({ behind_by: 11, merge_base_commit: { sha: '1234567' } }) };
+    }
+    if (url.includes('/compare/1234567...main')) {
+      return {
+        ok: true,
+        json: async () => ({
+          commits: [{ sha: 'abcdef1', commit: { message: 'Remove the escape hatch' } }],
+          files: [{ filename: 'pr-standards.mjs' }],
+        }),
+      };
+    }
+    if (url.includes('pulls/12')) {
+      return { ok: true, json: async () => ({ head: { ref: 'cr-12-test', sha: 'deadbee' }, base: { ref: 'main' }, title: '[CR-12] Warn on a stale branch point', body: validBody.replace('142', '12').replace('142', '12').replace('142', '12') }) };
+    }
+    if (url.includes('issues/12')) {
+      return { ok: true, json: async () => ({ state: 'open' }) };
+    }
+    throw new Error(`Unexpected fetch URL: ${url}`);
+  };
+
+  try {
+    const exitCode = await main(['pr', '--repo', 'test/repo', '--number', '12', '--json']);
+    assert.equal(exitCode, 0);
+    const result = JSON.parse(output);
+    assert.equal(result.warnings.some((w) => w.check === 'branch point is behind base'), true);
+  } finally {
+    process.stdout.write = originalWrite;
+    process.env.PATH = originalPath;
+    process.env.GITHUB_TOKEN = originalToken;
+    globalThis.fetch = originalFetch;
+    delete process.env.GITHUB_REPOSITORY;
+  }
+});
+
 test('counts every GitHub closing keyword, not only Closes and Fixes', () => {
   // GitHub honours nine keywords. A checker that knows two of them lets a PR
   // close two issues while reporting one.
