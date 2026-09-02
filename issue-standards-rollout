@@ -111,11 +111,19 @@ except Exception:
 
 # Titles come from the repo, never from this script: a guessed name would
 # create the same wrong milestone on every rerun, and 422 would then
-# preserve it. Empty stdout means the caller must say why and create none.
+# preserve it. Empty stdout means the file was read and defines no set.
+# A failed read (rate limit, auth, network) returns 2 instead, so it is
+# never reported as "no milestone set" the way repo_already_adopted keeps
+# "unknown" apart from a confirmed 404.
 # Decode in Python for the same reason repo_prefix does: GitHub wraps
 # base64 across lines, and macOS base64 is the portability trap.
 repo_milestone_names() {
-  gh api "repos/$1/contents/.agents/issues.md" 2>/dev/null | python3 -c '
+  local resp
+  if ! resp=$(gh api "repos/$1/contents/.agents/issues.md" 2>&1); then
+    printf '%s' "$resp" | grep -q '"Not Found"' && return 0
+    return 2
+  fi
+  printf '%s' "$resp" | python3 -c '
 import sys, json, base64, re
 try:
     d = json.load(sys.stdin)
@@ -208,6 +216,11 @@ plan_repo() {
   # Same argument --labels-only makes.
   if [ "$MILESTONES_ONLY" -eq 1 ]; then
     names=$(repo_milestone_names "$repo")
+    fetch_status=$?
+    if [ "$fetch_status" -eq 2 ]; then
+      say "SKIP    $repo — cannot read .agents/issues.md"
+      return
+    fi
     if [ -z "$names" ]; then
       say "SKIP    $repo - .agents/issues.md defines no milestone set"
       return
@@ -222,15 +235,21 @@ plan_repo() {
     fi
     # Read via process substitution, not a pipe: a pipe would run this loop
     # in a subshell, and milestone_failures set there would never reach the
-    # tally below. 422 means the title already exists. gh label create
-    # --force treats that as success so a rerun is a no-op; do the same.
+    # tally below. Existing titles are listed first so a rerun is told apart
+    # from a real create: matching "422" in the POST error would also match
+    # validation failures that are not "already exists".
+    existing=$(gh api "repos/${repo}/milestones" -f state=all --paginate --jq '.[].title' 2>/dev/null)
     milestone_failures=0
+    milestone_created=0
     while IFS= read -r name; do
       [ -n "$name" ] || continue
-      if out=$(gh api "repos/${repo}/milestones" -X POST -f title="${name}" 2>&1); then
+      if printf '%s\n' "$existing" | grep -qxF "$name"; then
+        say "          milestone  $name (already exists)"
+        continue
+      fi
+      if gh api "repos/${repo}/milestones" -X POST -f title="${name}" >/dev/null 2>&1; then
         say "          milestone  $name"
-      elif printf '%s' "$out" | grep -q '422'; then
-        say "          milestone  $name"
+        milestone_created=$((milestone_created + 1))
       else
         say "          FAILED  milestone $name"
         milestone_failures=$((milestone_failures + 1))
@@ -239,6 +258,8 @@ plan_repo() {
     if [ "$milestone_failures" -gt 0 ]; then
       say "          NOTE    $milestone_failures milestone(s) failed; rerun --apply --repo $repo to retry."
       ANY_MILESTONE_FAILURE=1
+    elif [ "$milestone_created" -eq 0 ]; then
+      say "          NOTE    no change: all named milestones already exist."
     fi
     return
   fi
