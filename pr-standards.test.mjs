@@ -776,6 +776,20 @@ test('proof: a bare command claim warns that it lives only in the body', () => {
   const withGluedAsterisk = `${validBody}\nhttps://github.com/pooriaarab/scripts/actions/runs/123*not-a-run`;
   assert.equal(warned(checkProof(withGluedAsterisk, nonUiFiles, config)), true);
 
+  // A fake glued on with one of the delimiter characters the boundary check
+  // otherwise treats as an ordinary closing character (`)`, `]`, a quote, a
+  // backtick) is the same disguised-suffix bypass again: that character must
+  // still actually reach whitespace/end-of-string to count as a real close,
+  // not just appear once with more text riding along after it.
+  const withGluedDelimiter = [
+    'https://github.com/pooriaarab/scripts/actions/runs/123)not-a-run',
+    'https://github.com/pooriaarab/scripts/actions/runs/123]not-a-run',
+    'https://github.com/pooriaarab/scripts/actions/runs/123"not-a-run',
+  ];
+  for (const shape of withGluedDelimiter) {
+    assert.equal(warned(checkProof(`${validBody}\n${shape}`, nonUiFiles, config)), true, shape);
+  }
+
   // A real run URL still clears the warning in every shape GitHub actually
   // produces: nested under a job, with a query string, with a fragment,
   // inside a markdown link, wrapped in Markdown bold, and followed by
@@ -794,9 +808,11 @@ test('proof: a bare command claim warns that it lives only in the body', () => {
     '(https://github.com/pooriaarab/scripts/actions/runs/123456789.)',
     '[log](https://github.com/pooriaarab/scripts/actions/runs/123456789.)',
     // Markdown bold closes flush against the digits with no separator --
-    // the emphasis markers themselves are the boundary here.
+    // the emphasis markers themselves are the boundary here. Underscore
+    // emphasis (italics) does the same thing with a different character.
     '**https://github.com/pooriaarab/scripts/actions/runs/123456789**',
     'See **https://github.com/pooriaarab/scripts/actions/runs/123456789** it passed.',
+    '_https://github.com/pooriaarab/scripts/actions/runs/123456789_',
   ];
   for (const shape of realShapes) {
     assert.equal(warned(checkProof(`${validBody}\n${shape}`, nonUiFiles, config)), false, shape);

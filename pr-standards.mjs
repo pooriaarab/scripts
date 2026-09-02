@@ -459,29 +459,28 @@ function hasValidProofNa(body) {
 // lookahead was still a deny-list wearing an allow-list's name: it enumerated
 // followers instead of checking structure.
 //
-// Splitting the match from the validation ends the arms race instead of
-// continuing it. `ACTIONS_RUN_URL_CANDIDATE` stays deliberately broad -- the
-// same "grab a URL-shaped run, worry about the edges after" idiom
-// countUserAttachments already uses below. What makes a candidate REAL is
-// structural, not enumerable: strip whatever ordinary prose or Markdown
-// closed around it, and check that what remains right after the digits is
-// empty or starts a genuine URL continuation (`/`, `?`, `#`). A fake glued
-// onto the digits (`123_not-a-run`, `123.not-a-run`, `123**not-a-run`) fails
-// that test regardless of which character did the gluing, so the next
-// disguise doesn't need a fifth patch.
-const ACTIONS_RUN_URL_CANDIDATE = /https:\/\/github\.com\/[^\s\/]+\/[^\s\/]+\/actions\/runs\/\d[^\s"'\x60\)\]<>]*/g;
-
-function isRealActionsRunUrl(candidate) {
-  const match = /\/actions\/runs\/(\d+)(.*)$/.exec(candidate);
-  if (!match) return false;
-  const afterId = match[2].replace(/[.,;:!*"'\x60\)\]<>]+$/, '');
-  return afterId === '' || /^[\/?#]/.test(afterId);
-}
+// A later attempt split the match from the validation: grab a broad
+// URL-shaped candidate first, decide if it's real after. That reintroduced
+// the same bug in a new spot -- the candidate regex still had to exclude
+// delimiter characters (`)`, `]`, quotes, a backtick) so Markdown wrappers
+// didn't get swallowed into the match, which meant a fake glued onto the
+// digits with one of THOSE characters (`123)not-a-run`) got truncated to a
+// clean-looking `.../123` before validation ever saw the `)not-a-run` tail.
+//
+// The fix is one regex, one lookahead, checking the real source text instead
+// of a pre-truncated copy of it: what follows the digits is either an
+// immediate URL continuation (`/`, `?`, `#`), or a run of ordinary
+// closing/punctuation characters that actually reaches whitespace or the end
+// of the string. Structural, not enumerable, and there is no separate
+// "grab now, worry about the edges later" step for stray characters to hide
+// behind. (`_` is in that closing set alongside `*` so a run URL wrapped in
+// Markdown underscore-emphasis, `_..._`, reads the same as `**bold**` does.)
+const ACTIONS_RUN_URL =
+  /https:\/\/github\.com\/[^\s\/]+\/[^\s\/]+\/actions\/runs\/\d+(?=[\/?#]|[.,;:!*_"'\x60\)\]<>]*(?:\s|$))/;
 
 function hasExternalProofEvidence(verifiedSection) {
   if (countUserAttachments(verifiedSection) > 0) return true;
-  const runLinks = verifiedSection.match(ACTIONS_RUN_URL_CANDIDATE) || [];
-  if (runLinks.some(isRealActionsRunUrl)) return true;
+  if (ACTIONS_RUN_URL.test(verifiedSection)) return true;
   if (hasValidProofNa(verifiedSection)) return true;
   return false;
 }
