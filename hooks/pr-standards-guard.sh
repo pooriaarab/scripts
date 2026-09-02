@@ -129,10 +129,15 @@ def created_branch(tokens):
 for tokens in segments:
     while tokens and assignment.match(tokens[0]): tokens = tokens[1:]
     if not tokens: continue
-    if os.path.basename(tokens[0]) == "git":
+    # A quoted command word ("git" checkout -b x) still runs as git once the
+    # shell strips the quotes, but punctuation_chars tokenising above keeps
+    # them, so comparing the raw token let quoting the executable name alone
+    # evade detection. Unquote before matching the command word only.
+    command_word = os.path.basename(unquote(tokens[0]))
+    if command_word == "git":
         branch = created_branch(tokens)
         if branch: print(base64.b64encode(json.dumps({"kind": "git", "branch": branch}).encode()).decode())
-    if len(tokens) >= 3 and os.path.basename(tokens[0]) == "gh" and tokens[1:3] == ["pr", "create"]:
+    if len(tokens) >= 3 and command_word == "gh" and tokens[1:3] == ["pr", "create"]:
         print(base64.b64encode(json.dumps({
             "kind": "gh", "repo": option_value(tokens[3:], {"--repo", "-R"}),
             "head": option_value(tokens[3:], {"--head", "-H"}),
@@ -167,7 +172,10 @@ normalize_repo() {
 }
 
 local_prefix() {
-  case "$(git remote get-url origin 2>/dev/null || true)" in *github.com[:/]pooriaarab/*) ;; *) return 1;; esac
+  # GitHub owners are case-insensitive, same reasoning as origin_repo/
+  # normalize_repo above: a PoOrIaArAb-cased origin must still match, or
+  # every local branch check on that checkout silently fails open.
+  case "$(git remote get-url origin 2>/dev/null | tr '[:upper:]' '[:lower:]')" in *github.com[:/]pooriaarab/*) ;; *) return 1;; esac
   [ -f .github/pr-standards.json ] || return 1
   python3 -c 'import json; print(json.load(open(".github/pr-standards.json")).get("prefix", ""))' 2>/dev/null
 }
