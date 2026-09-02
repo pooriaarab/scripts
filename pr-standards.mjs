@@ -622,12 +622,31 @@ export function validateBody(body, issueNumber, config = DEFAULT_CONFIG) {
     ));
   }
   if (!/^Assisted-by:\s*[^\s:]+:[^\s]+\s*$/im.test(visibleSource)) {
-    failures.push(fail(
-      'Assisted-by line',
-      'missing',
-      'Assisted-by: <agent>:<model>',
-      'Add Assisted-by: <agent>:<model> in the body.',
-    ));
+    // The accepted form matches one trailer per line, so a comma-separated
+    // list fails. Most work in this fleet has two or more contributors, so
+    // that list is the common way this check fails, and the line is right
+    // there in the body when it does. A "missing" message denies what the
+    // reviewer can see, so the failure must name the line it found. Find any
+    // Assisted-by line with the same anchor the accepted form reads — start of
+    // line, any case — and report the first one. Only a body with no such line
+    // at all reports "missing". This changes the message only: the comma list
+    // still fails, and one trailer per line stays the requirement.
+    const found = visibleSource.split('\n').find((line) => /^\s*assisted-by:/i.test(line));
+    if (found) {
+      failures.push(fail(
+        'Assisted-by line',
+        `not in the accepted form: ${found.trim()}`,
+        'one Assisted-by: <agent>:<model> line per contributor',
+        'Write one Assisted-by: <agent>:<model> line per contributor.',
+      ));
+    } else {
+      failures.push(fail(
+        'Assisted-by line',
+        'missing',
+        'Assisted-by: <agent>:<model>',
+        'Add Assisted-by: <agent>:<model> in the body.',
+      ));
+    }
   }
 
   return { ok: failures.length === 0, failures };

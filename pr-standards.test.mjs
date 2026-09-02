@@ -224,6 +224,38 @@ test('requires one matching closing reference and the required body sections', (
   assert.equal(validateBody('<!-- template -->', 142, config).ok, false);
 });
 
+test('one Assisted-by trailer per line, and the failure names the line it found', () => {
+  // Two pull requests failed this check in one day with "got: missing" while
+  // their bodies carried `Assisted-by: muse:meta-code,
+  // claude-personal-1:claude-opus-5`. Most work here has two or more
+  // contributors, so the comma list is the common failure, and a message that
+  // denies the line sends the author hunting for a line they already wrote.
+  const bodyWithTrailer = (trailer) =>
+    validBody.replace('Assisted-by: claude-personal:claude-opus-5', trailer);
+  const assistedBy = (r) => r.failures.find((f) => f.check === 'Assisted-by line');
+
+  // Two trailers on two lines is the accepted shape.
+  assert.equal(validateBody(
+    bodyWithTrailer('Assisted-by: muse:meta-code\nAssisted-by: claude-personal-1:claude-opus-5'), 142, config,
+  ).ok, true);
+
+  // The comma list still fails: the fix is a second line, not a looser match.
+  const commaList = validateBody(
+    bodyWithTrailer('Assisted-by: muse:meta-code, claude-personal-1:claude-opus-5'), 142, config,
+  );
+  assert.equal(commaList.ok, false);
+  assert.equal(
+    assistedBy(commaList).got.includes('Assisted-by: muse:meta-code, claude-personal-1:claude-opus-5'),
+    true,
+    'the failure reports the line it found, not "missing"',
+  );
+  assert.notEqual(assistedBy(commaList).got, 'missing');
+
+  // A body with no trailer at all is the one case "missing" still describes.
+  const absent = validateBody(validBody.replace('Assisted-by: claude-personal:claude-opus-5', ''), 142, config);
+  assert.equal(assistedBy(absent).got, 'missing');
+});
+
 test('matches the supported exclusion glob forms', () => {
   assert.equal(matchesGlob('app.lock', '**/*.lock'), true);
   assert.equal(matchesGlob('packages/app.lock', '**/*.lock'), true);
