@@ -266,10 +266,9 @@ def render_markdown(report):
         "# Fleet CI census",
         "",
         f"Window: {report['days']} days from {report['since']}. "
-        f"Page cap: {report['page_cap']} runs/repo. "
-        f"Duration clamp: {report['max_duration_s']}s.",
+        f"Page cap: {report['page_cap']} runs/repo.",
         "",
-        "Repos marked (floor) returned exactly the page cap; their totals understate the window.",
+        "Repos marked (floor) hit the page cap; totals understate the window.",
         "",
         "| " + " | ".join(cols) + " |",
         "|" + "|".join(["---"] * len(cols)) + "|",
