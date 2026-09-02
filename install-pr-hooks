@@ -24,7 +24,6 @@
 set -uo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
-GUARD_SRC="$HERE/hooks/pr-standards-guard.sh"
 GUARD_DIR="$HOME/.local/share/pr-standards"
 GUARD_DST="$GUARD_DIR/pr-standards-guard.sh"
 
@@ -373,12 +372,15 @@ guard_is_current() {
 
 write_guard() {
   local tmp stamp expected
-  [ -f "$GUARD_SRC" ] || return 1
   expected=$(guard_expected_sha) || return 1
   mkdir -p "$GUARD_DIR" || return 1
   tmp=$(mktemp "$GUARD_DIR/.guard.XXXXXX") || return 1
   stamp="# pr-standards-guard installed from $expected on $(date -u +%F)"
-  if ! { IFS= read -r first; printf '%s\n' "$first"; printf '%s\n' "$stamp"; cat; } < "$GUARD_SRC" > "$tmp"
+  # Read the committed blob, not the working-tree file: if hooks/pr-standards-guard.sh
+  # has an uncommitted edit, copying disk bytes but stamping them with the HEAD sha
+  # produces a stamp that lies, and guard_is_current() then reports stale forever.
+  if ! git -C "$HERE" cat-file blob "$expected" 2>/dev/null \
+       | { IFS= read -r first; printf '%s\n' "$first"; printf '%s\n' "$stamp"; cat; } > "$tmp"
   then
     rm -f "$tmp"; return 1
   fi
@@ -429,7 +431,10 @@ handle_guard() {
   }
 
   if [ "$UNINSTALL" = 1 ]; then
-    if [ -f "$GUARD_DST" ] && [ ! -L "$GUARD_DST" ] && grep -q '^# pr-standards-guard installed from ' "$GUARD_DST"; then
+    # No stamp-line check: GUARD_DST is a path this tool owns outright, and a
+    # hand-edit that strips the stamp comment must not make uninstall silently
+    # leave the guard in place.
+    if [ -f "$GUARD_DST" ] && [ ! -L "$GUARD_DST" ]; then
       if [ "$APPLY" = 1 ]; then
         rm -f "$GUARD_DST" || { echo "FAIL    PreToolUse guard (remove failed)"; failed=$((failed+1)); return; }
         echo "removed PreToolUse guard at $GUARD_DST"
