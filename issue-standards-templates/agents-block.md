@@ -13,8 +13,8 @@ false. "Improve the loading state" is not a criterion.
 
 Four forms in `.github/ISSUE_TEMPLATE/`: bug, feature, chore, epic. A bug needs a
 reproduction, and a failing test is welcome but not required. A feature needs a
-success metric naming a real `trackEvent` event, or saying plainly that the event
-has to be added.
+success metric naming a real event through the analytics helper named in
+`.agents/issues.md`, or saying plainly that the event has to be added.
 
 Declare a size first: `mini`, `standard` or `deep`. A section that is not
 required is not written, because an empty heading looks answered.

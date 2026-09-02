@@ -57,10 +57,10 @@ body:
     attributes:
       label: Success metric
       description: >-
-        Name a real event sent through `trackEvent`
-        (apps/website/src/lib/analytics/client.ts), or say plainly that the event
-        has to be added. Do not invent a name: the next agent will search for it
-        and conclude the code is broken. PostHog is the queryable sink, not GA4.
+        Name a real event and the analytics helper that sends it — both are
+        named in `.agents/issues.md` — or say plainly that the event has to be
+        added. Do not invent a name: the next agent will search for it and
+        conclude the code is broken.
       value: |
         Event:
         Question:
