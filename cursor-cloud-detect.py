@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 from typing import Any
@@ -47,7 +48,14 @@ def detect_node(files: set[str], owner: str, repo: str) -> tuple[str, str]:
     elif "package-lock.json" in files:
         install = "npm ci"
     elif "yarn.lock" in files:
-        install = "yarn install --immutable"
+        yarn_lock = file_text(owner, repo, "yarn.lock") or ""
+        # Yarn Berry (2+) lockfiles carry a `__metadata:` block; Yarn Classic (1) doesn't
+        # support `--immutable`, so pick the flag each version actually understands.
+        install = (
+            "yarn install --immutable"
+            if "__metadata:" in yarn_lock
+            else "yarn install --frozen-lockfile"
+        )
     else:
         install = "npm install"
 
@@ -97,18 +105,28 @@ def detect_go(_files: set[str]) -> tuple[str, str]:
     return "go mod download", "go test ./... 2>/dev/null || go vet ./..."
 
 
+def _has_make_target(text: str, target: str) -> bool:
+    return re.search(rf"(?m)^{re.escape(target)}:", text) is not None
+
+
 def detect_make(files: set[str], owner: str, repo: str) -> tuple[str, str] | None:
-    makefile = file_text(owner, repo, "Makefile")
-    if "Makefile" not in files and makefile is None:
+    if "Makefile" not in files:
         return None
-    text = makefile or ""
-    install = "make install" if "install:" in text else "echo 'No make install target'"
-    if "check:" in text:
+    text = file_text(owner, repo, "Makefile") or ""
+    has_install = _has_make_target(text, "install")
+    has_check = _has_make_target(text, "check")
+    has_test = _has_make_target(text, "test")
+    if not (has_install or has_check or has_test):
+        # No relevant target: don't let a Makefile with unrelated rules (e.g. only
+        # `uninstall:` or `docs:`) clobber a correctly detected ecosystem command.
+        return None
+    install = "make install" if has_install else "echo 'No make install target'"
+    if has_check:
         verify = "make check"
-    elif "test:" in text:
+    elif has_test:
         verify = "make test"
     else:
-        verify = "make check 2>/dev/null || make test 2>/dev/null || echo 'Add make check'"
+        verify = "echo 'Add make check'"
     return install, verify
 
 
