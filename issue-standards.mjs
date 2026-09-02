@@ -239,6 +239,11 @@ function ghJson(args) {
 
 export function fetchIssue(repo, number) {
   const issue = ghJson(['api', `repos/${repo}/issues/${number}`]);
+  // GitHub's issues endpoint returns pull requests too: a PR is an issue with
+  // a `pull_request` key. This standard is for filed issues, not PRs.
+  if (issue.pull_request) {
+    throw new ApiError(`#${number} is a pull request, not an issue`, 422);
+  }
   return {
     number: issue.number,
     title: issue.title || '',
@@ -286,7 +291,10 @@ function parseArgs(argv) {
   const json = args.includes('--json');
   const filtered = args.filter((arg) => arg !== '--json');
   if (filtered.includes('--help') || filtered.includes('-h')) return { help: true };
-  if (filtered.includes('--selfcheck')) return { selfcheck: true, json };
+  if (filtered.includes('--selfcheck')) {
+    if (filtered.length > 1) throw new ConfigurationError('--selfcheck takes no other arguments');
+    return { selfcheck: true, json };
+  }
   const mode = filtered.shift();
   if (!mode || !['check', 'precheck', 'lint'].includes(mode)) {
     throw new ConfigurationError('usage: issue-standards check --repo owner/name --number N, precheck --body-file F --kind K, or lint');
@@ -380,10 +388,13 @@ export function lintTemplates(dir) {
       continue;
     }
     const text = fs.readFileSync(file, 'utf8');
+    // Only a field's own `label:` counts. Matching anywhere in the file would
+    // let the heading's words survive in an unrelated description after the
+    // field itself was renamed or removed, and lint would miss the drift.
+    const fieldLabels = [...text.matchAll(/^\s*label:\s*(.+)$/gim)].map((m) => normaliseHeading(m[1]));
     const missing = REQUIRED_HEADINGS[kind].filter((heading) => {
-      const loose = normaliseHeading(heading).replace(/ /g, '[^a-z0-9]*');
-      return !new RegExp(loose, 'i').test(normaliseHeading(text).replace(/ /g, ' '))
-        && !new RegExp(loose, 'i').test(text.toLowerCase());
+      const loose = normaliseHeading(heading);
+      return !fieldLabels.some((label) => label.includes(loose));
     });
     if (missing.length) {
       failures.push(fail(
@@ -456,14 +467,14 @@ export async function main(argv) {
     return runLint(options);
   } catch (error) {
     const item = fail(
-      error.name === 'ConfigurationError' ? 'configuration' : 'GitHub API',
+      error instanceof ConfigurationError ? 'configuration' : error instanceof ApiError ? 'GitHub API' : 'unexpected error',
       error.message,
       'a valid command and an accessible repository',
-      'Fix the command, or check gh authentication.',
+      error instanceof ApiError ? 'Fix the command, or check gh authentication.' : 'Fix the command.',
     );
     const json = options?.json || argv.includes('--json');
     if (json) outputJson({ clean: false, failures: [item], passes: [] });
     else process.stderr.write(`FAIL  ${item.check}\n${humanFailure(item)}\n`);
-    return error.name === 'ConfigurationError' ? 2 : 1;
+    return error instanceof ConfigurationError ? 2 : 1;
   }
 }

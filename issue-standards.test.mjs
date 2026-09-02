@@ -259,3 +259,28 @@ test('lint says so when the repo has no templates at all', () => {
   assert.ok(failed(result));
   assert.ok(failedOn(result, 'ISSUE_TEMPLATE'), JSON.stringify(result.failures));
 });
+
+test('lint is not fooled by the heading text surviving outside the field label', () => {
+  // The field for "Success metric" is gone, but the phrase lingers in an
+  // unrelated description. A text-wide search would call this fine; it is not.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'issue-templates-'));
+  try {
+    for (const kind of KINDS) {
+      const fields = REQUIRED_HEADINGS[kind].map((h) => `  - type: textarea\n    attributes:\n      label: ${h}`);
+      fs.writeFileSync(path.join(dir, `${kind}.yml`), `name: ${kind}\nbody:\n${fields.join('\n')}\n`);
+    }
+    const featureFile = path.join(dir, 'feature.yml');
+    const withoutField = fs.readFileSync(featureFile, 'utf8').replace(/.*Success metric.*\n/, '');
+    fs.writeFileSync(featureFile, `${withoutField}  - type: markdown\n    attributes:\n      value: See the Success metric section of the standard.\n`);
+    const result = lintTemplates(dir);
+    assert.ok(failed(result));
+    assert.ok(failedOn(result, 'Success metric'), JSON.stringify(result.failures));
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('--selfcheck rejects extra arguments instead of silently ignoring them', () => {
+  const result = run(['check', '--selfcheck', '--repo', 'not-a-repo']);
+  assert.equal(result.status, 2);
+});
