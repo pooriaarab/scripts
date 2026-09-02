@@ -25,7 +25,7 @@ for route in gemini cursor devin pi muse; do
   box="$WORK/$route"; mkdir -p "$box"; ( cd "$box" && git init -q )
   out=$("$launcher" "$box" "reply with only the number: 17*23" 2>&1); status=$?
   answer=$(printf '%s' "$out" | grep -oE '\b391\b' | head -1)
-  if [ -n "$answer" ]; then
+  if [ -n "$answer" ] && [ "$status" -eq 0 ]; then
     printf '%-10s %-8s %s\n' "$route" ok "returned 391"
   elif printf '%s' "$out" | grep -qiE 'resource_exhausted|quota|rate.?limit|insufficient.?(quota|balance|credits|funds)'; then
     printf '%-10s %-8s %s\n' "$route" quota "authenticated, out of budget (retryable)"
