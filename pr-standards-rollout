@@ -127,6 +127,8 @@ gh_write() {
     if printf '%s\n' "$err" | grep -q 'HTTP 403' \
         && printf '%s\n' "$err" | grep -qi 'rate limit'; then
       if [ "$attempt" -ge "$max_attempts" ]; then
+        GH_WRITE_OUT="$err"
+        printf '%s\n' "$err" >&2
         sleep "$WRITE_PACE_SECONDS"
         return 1
       fi
@@ -135,6 +137,8 @@ gh_write() {
       attempt=$((attempt + 1))
       continue
     fi
+    GH_WRITE_OUT="$err"
+    printf '%s\n' "$err" >&2
     sleep "$WRITE_PACE_SECONDS"
     return 1
   done
