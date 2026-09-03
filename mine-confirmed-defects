@@ -229,7 +229,7 @@ def undo_hit(prev, later, shared):
             return path, first_line(a[path])
     return None
 def later_fixes(pr, earlier):
-    if is_bot(pr["author"]):
+    if is_bot(pr["author"]) or any(is_bot(l, n) for c in pr["commits"] for l, n in c["authors"]):
         return []
     refs = set(closing_refs(pr["body"], pr["repo"])) | set(closing_refs(pr["title"], pr["repo"]))
     hits = []
@@ -239,9 +239,8 @@ def later_fixes(pr, earlier):
         ensure_files(pr); ensure_files(prev)
         shared = set(src_files(pr["files"])).intersection(src_files(prev["files"]))
         hit = undo_hit(prev, pr, shared)
-        path = (hit[0] if hit else (sorted(shared) or src_files(prev["files"]) or ["unknown"])[0])
-        line = hit[1] if hit else 1
-        hits.append((prev, path, line))
+        if hit:
+            hits.append((prev, hit[0], hit[1]))
     if hits:
         return hits[:3]
     if not FIX_TITLE.search(pr["title"].strip()):
