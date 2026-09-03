@@ -427,7 +427,13 @@ const PROOF_RESULT_RE = /(?:->|\b(?:pass(?:ed)?|success(?:ful(?:ly)?)?|clean|gre
 // string — "Found 7 warnings and 0 errors" is not a passing result even
 // though it contains a zero count. A nonzero warnings/errors count anywhere
 // in the text means the run was not clean, full stop.
-const PROOF_NONZERO_RE = /\b[1-9]\d*\s+(?:warnings?|errors?)\b/i;
+//
+// Same masking, different word: "12 passed, 2 failed" matches `pass(?:ed)?`
+// and reads as a passing result, with the "2 failed" right next to it doing
+// nothing to stop it. `failed=2` is the same failure wearing install-pr-hooks'
+// key=value spelling. Either spelling of a nonzero failure count means the
+// run was not clean, same as a nonzero warning or error count.
+const PROOF_NONZERO_RE = /\b[1-9]\d*\s+(?:warnings?|errors?|failed)\b|\bfailed\s*=\s*[1-9]\d*\b/i;
 
 function proofCommand(text) {
   const lines = String(text).split('\n').map((line) => line.trim()).filter(Boolean);

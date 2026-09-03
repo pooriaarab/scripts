@@ -1505,6 +1505,26 @@ test('bash is a command, and real tool output is a result', () => {
   assert.doesNotMatch(resultOnly.expected, /a command and its result/i);
 });
 
+test('a nonzero failed count is not masked by "passed" in the same result', () => {
+  // "12 passed, 2 failed" matches `pass(?:ed)?` on its own, the same way
+  // "Found 7 warnings and 0 errors" matched a clean "0 errors" until the
+  // prior fix. A nonzero failure count next to a passing word is still a
+  // red run, in either spelling this repo's tools use.
+  const body = (verified) => [
+    '## What', 'One sentence.',
+    '## Why', 'Because of the reason.',
+    '## How I verified', verified,
+    'Assisted-by: agent:model',
+  ].join('\n\n');
+  const fails = (text) => validateBody(body(text), 142, config)
+    .failures.some((f) => f.check === '## How I verified');
+
+  assert.equal(fails('pytest -q\n12 passed, 2 failed'), true, '2 failed is not a result, even beside "passed"');
+  assert.equal(fails('bash tests/x.sh\n13 passed, 0 failed'), false, '0 failed stays a passing result');
+  assert.equal(fails('python3 install-pr-hooks --apply\ninstalled=1 failed=0 failed=2'), true, 'a later failed=2 is not masked by an earlier failed=0');
+  assert.doesNotMatch(resultOnly.expected, /a command and its result/i);
+});
+
 test('prefix precedence holds on the CI path, not only in loadConfig', async () => {
   // #101 fixed the precedence and covered it through loadConfig, which is the
   // LOCAL path. The path that was broken is this one: runPr -> fetchRemoteConfig.
