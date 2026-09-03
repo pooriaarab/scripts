@@ -1,0 +1,281 @@
+#!/usr/bin/env bash
+# standards-coverage — measure standards coverage across a GitHub owner's repos.
+#
+#   standards-coverage [--json] [--owner NAME] [--missing LAYER]
+#
+# This script reads only. It never creates or modifies a repository, issue,
+# label, or any persistent file. A transient work directory under the script's
+# own directory is used to aggregate parallel worker output and is removed on
+# exit.
+#
+# For every repo of the owner, it checks four layers:
+#   1. .github/pr-standards.json exists
+#   2. .github/workflows/pr-standards.yml exists
+#   3. .github/ISSUE_TEMPLATE exists
+#   4. all 14 labels in the vocabulary are present
+#
+# It also records whether the repo is public or private and whether issues are
+# enabled.
+#
+# The default table reports counts and percentages for repos with issues
+# enabled, not all repos. A repo with issues off cannot carry an issue template
+# or labels, so it is left out of the denominator. That denominator is printed
+# in the header so the numbers are not misread as a percentage of all repos.
+#
+#   --owner NAME    GitHub user or organization to audit (default: pooriaarab)
+#   --missing LAYER print repo names missing that layer, one per line
+#                   valid layers: prefix, workflow, forms, labels
+#                   For forms and labels, only repos with issues enabled are
+#                   listed, because the other repos cannot carry them.
+#   --json          print the whole dataset as machine-readable JSON
+set -u
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+OWNER="pooriaarab"
+JSON=0
+MISSING=""
+
+usage() {
+  cat <<'USAGE'
+Usage: standards-coverage [--json] [--owner NAME] [--missing LAYER]
+
+  --owner NAME    GitHub user or organization to audit (default: pooriaarab)
+  --missing LAYER print repo names missing that layer, one per line
+                  valid: prefix, workflow, forms, labels
+                  For forms and labels only repos with issues enabled are
+                  listed, because issues-off repos cannot carry them.
+  --json          print the full dataset as JSON
+  --help          show this help
+
+Reads only. It never writes to a repository, issue, label, or persistent file.
+USAGE
+}
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --json) JSON=1; shift ;;
+    --owner)
+      [ $# -ge 2 ] || { echo "ERROR: --owner requires a value" >&2; exit 1; }
+      OWNER="$2"; shift 2 ;;
+    --missing)
+      [ $# -ge 2 ] || { echo "ERROR: --missing requires a value" >&2; exit 1; }
+      MISSING="$2"; shift 2 ;;
+    --help|-h) usage; exit 0 ;;
+    *) echo "ERROR: unknown flag: $1" >&2; usage >&2; exit 1 ;;
+  esac
+done
+
+if [ -n "$MISSING" ]; then
+  case "$MISSING" in
+    prefix|workflow|forms|labels) ;;
+    *) echo "ERROR: --missing must be one of: prefix, workflow, forms, labels" >&2; exit 1 ;;
+  esac
+fi
+
+command -v gh >/dev/null 2>&1 || { echo "ERROR: gh is not installed" >&2; exit 2; }
+command -v python3 >/dev/null 2>&1 || { echo "ERROR: python3 is not installed" >&2; exit 2; }
+
+TODAY="$(date +%Y-%m-%d)"
+
+# Keep all working files inside the script's own directory. They are deleted on
+# exit and never committed or pushed.
+tmp=$(mktemp -d "$SCRIPT_DIR/standards-coverage-tmp.XXXXXX") || { echo "ERROR: cannot create temp directory" >&2; exit 2; }
+trap 'rm -rf "$tmp"' EXIT
+
+MAX_JOBS=8
+
+# Expected 14-label vocabulary, sorted once with a fixed locale so the set
+# comparison is exact and order does not depend on the user's locale.
+EXPECTED_FILE="$tmp/expected-labels.txt"
+mkdir -p "$tmp/labels" "$tmp/results"
+LC_ALL=C sort > "$EXPECTED_FILE" <<'LABELS'
+blocked
+bug
+chore
+deep
+epic
+feature
+mini
+needs-info
+ready-for-agent
+route:judgement
+route:mechanical
+route:scoped
+standard
+triage
+LABELS
+
+# Fetch the repo list. Limit 1000 because this script is meant for personal or
+# fleet-scale owners, not massive organizations. gh repo list paginates up to
+# that limit.
+if ! gh repo list "$OWNER" --limit 1000 --json nameWithOwner,isPrivate,hasIssuesEnabled > "$tmp/repos.json" 2>&1; then
+  echo "ERROR: could not list repos for $OWNER" >&2
+  exit 2
+fi
+
+# Convert the JSON repo list to a tab-separated manifest that the bash loop can
+# read without parsing JSON in the shell.
+python3 - "$tmp" <<'PY'
+import json, os, sys
+tmp = sys.argv[1]
+with open(os.path.join(tmp, 'repos.json')) as f:
+    repos = json.load(f)
+with open(os.path.join(tmp, 'manifest.tsv'), 'w') as f:
+    for r in repos:
+        f.write(f"{r['nameWithOwner']}\t{str(r['isPrivate']).lower()}\t{str(r['hasIssuesEnabled']).lower()}\n")
+PY
+
+if [ ! -s "$tmp/manifest.tsv" ]; then
+  echo "No repos found for $OWNER" >&2
+  exit 0
+fi
+
+# Check one repo and write a JSON row for it. The four layer checks are best
+# effort: a permission or network error is treated as "not present" so that one
+# unreachable repo does not abort the whole run. A note about failed reads is
+# still printed to stderr so the caller can see it.
+check_repo() {
+  local repo="$1" is_private="$2" has_issues="$3" out="$4"
+  local has_prefix=0 has_workflow=0 has_forms=0 has_labels=0
+  local slug actual_raw actual missing_count
+
+  # slug replaces the slash in owner/name so it is safe as a filename.
+  slug=$(printf '%s' "$repo" | tr '/' '_')
+  actual_raw="$tmp/labels/${slug}.raw"
+  actual="$tmp/labels/${slug}.sorted"
+
+  if gh api "repos/$repo/contents/.github/pr-standards.json" >/dev/null 2>&1; then
+    has_prefix=1
+  fi
+
+  if gh api "repos/$repo/contents/.github/workflows/pr-standards.yml" >/dev/null 2>&1; then
+    has_workflow=1
+  fi
+
+  if gh api "repos/$repo/contents/.github/ISSUE_TEMPLATE" >/dev/null 2>&1; then
+    has_forms=1
+  fi
+
+  # gh label list with --json name and --jq '.[].name' emits one plain name per
+  # line. We compare the sorted actual set against the sorted expected set with
+  # comm -23, not with jq's index(), because index() returns 0 for the first
+  # element and 0 is falsy, which silently drops it and undercounts labels.
+  if ! gh label list --repo "$repo" --json name --jq '.[].name' --limit 1000 > "$actual_raw" 2>/dev/null; then
+    : > "$actual_raw"
+  fi
+  LC_ALL=C sort "$actual_raw" > "$actual" 2>/dev/null || { : > "$actual"; }
+  missing_count=$(LC_ALL=C comm -23 "$EXPECTED_FILE" "$actual" 2>/dev/null | wc -l | tr -d ' ')
+  if [ "$missing_count" -eq 0 ]; then
+    has_labels=1
+  fi
+
+  # Write the per-repo result as JSON. This is the only local write the script
+  # makes, and it lives in the transient temp directory.
+  python3 - "$repo" "$is_private" "$has_issues" "$has_prefix" "$has_workflow" "$has_forms" "$has_labels" "$out" <<'PY'
+import json, sys
+repo, is_private, has_issues, has_prefix, has_workflow, has_forms, has_labels, out = sys.argv[1:9]
+row = {
+    'repo': repo,
+    'is_private': is_private == 'true',
+    'has_issues': has_issues == 'true',
+    'prefix': int(has_prefix),
+    'workflow': int(has_workflow),
+    'forms': int(has_forms),
+    'labels': int(has_labels)
+}
+with open(out, 'w') as f:
+    json.dump(row, f)
+PY
+}
+
+# Run the per-repo checks in parallel with a bounded number of background jobs.
+# wait -n is not available on macOS bash 3.2, so we poll jobs -r -p instead.
+while IFS=$'\t' read -r repo is_private has_issues; do
+  [ -n "$repo" ] || continue
+  slug=$(printf '%s' "$repo" | tr '/' '_')
+  out="$tmp/results/${slug}.json"
+
+  while [ "$(jobs -r -p | wc -l | tr -d ' ')" -ge "$MAX_JOBS" ]; do
+    sleep 0.2
+  done
+
+  check_repo "$repo" "$is_private" "$has_issues" "$out" &
+done < "$tmp/manifest.tsv"
+
+wait
+
+# Aggregate the per-repo JSON rows and produce the requested output. All summary
+# counts and percentages use repos with issues enabled as the denominator.
+python3 - "$OWNER" "$tmp" "$TODAY" "$JSON" "$MISSING" <<'PY'
+import json, os, sys
+
+owner, tmp, today, as_json, missing = sys.argv[1:6]
+as_json = as_json == '1'
+
+results_dir = os.path.join(tmp, 'results')
+rows = []
+for name in sorted(os.listdir(results_dir)):
+    if not name.endswith('.json'):
+        continue
+    with open(os.path.join(results_dir, name)) as f:
+        rows.append(json.load(f))
+
+rows.sort(key=lambda r: r['repo'])
+
+total = len(rows)
+issues_enabled = [r for r in rows if r['has_issues']]
+issues_enabled_count = len(issues_enabled)
+
+summary = {}
+for key, label in (
+    ('prefix', '.github/pr-standards.json'),
+    ('workflow', '.github/workflows/pr-standards.yml'),
+    ('forms', '.github/ISSUE_TEMPLATE'),
+    ('labels', 'all 14 labels'),
+):
+    count = sum(1 for r in issues_enabled if r[key])
+    pct = (count / issues_enabled_count * 100) if issues_enabled_count else 0.0
+    summary[key] = {'label': label, 'count': count, 'percent': pct}
+
+if missing:
+    layer = missing
+    if layer in ('forms', 'labels'):
+        candidates = issues_enabled
+    else:
+        candidates = rows
+    missing_repos = [r['repo'] for r in candidates if not r[layer]]
+    missing_repos.sort()
+    for r in missing_repos:
+        print(r)
+    sys.exit(0)
+
+if as_json:
+    out = {
+        'date': today,
+        'owner': owner,
+        'total_repos': total,
+        'issues_enabled': issues_enabled_count,
+        'public': sum(1 for r in rows if not r['is_private']),
+        'private': sum(1 for r in rows if r['is_private']),
+        'summary': {
+            key: {'count': v['count'], 'percent': round(v['percent'], 1)}
+            for key, v in summary.items()
+        },
+        'repos': rows
+    }
+    print(json.dumps(out, indent=2))
+    sys.exit(0)
+
+# Default table.
+print(f"Standards coverage for {owner} on {today}")
+print(f"{total} repos, {issues_enabled_count} with issues enabled.")
+print("Counts and percentages are of the repos with issues enabled.")
+print()
+
+width = max([len(v['label']) for v in summary.values()] + [5])
+print(f"{'Layer':<{width}} {'count':>6} {'percent':>8}")
+print(f"{'-' * width} {'-' * 6:>6} {'-' * 8:>8}")
+for key in ('prefix', 'workflow', 'forms', 'labels'):
+    v = summary[key]
+    print(f"{v['label']:<{width}} {v['count']:>6} {v['percent']:>7.1f}%")
+PY
