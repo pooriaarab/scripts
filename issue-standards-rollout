@@ -83,6 +83,50 @@ repo_has_issues() {
   gh api "repos/$1" --jq '.has_issues' 2>/dev/null
 }
 
+# Same class of check as repo_has_issues: a property that makes every write
+# impossible. GitHub refuses every mutation on an archived repo, so planning
+# labels or milestones there can never succeed.
+repo_is_archived() {
+  gh api "repos/$1" --jq '.archived' 2>/dev/null
+}
+
+# GitHub's secondary rate limit for content-creating requests is about 500
+# per hour. The rate_limit endpoint does not expose it: core stays 5000/5000
+# while these 403s fire. 13 labels times ~90 repos, plus milestones, is well
+# over that ceiling if writes run back to back. 8 seconds between writes
+# keeps a full-fleet apply under 500 content-creating requests per hour.
+WRITE_PACE_SECONDS=8
+
+# Retry a content-creating call. A 403 whose body mentions a rate limit is
+# the secondary limit and is transient. A 404 or a permission error is a
+# genuine failure and must surface immediately so the caller can tally it.
+gh_write() {
+  local attempt=1
+  local max_attempts=4
+  local delay=2
+  local err
+  while [ "$attempt" -le "$max_attempts" ]; do
+    if err=$("$@" 2>&1); then
+      sleep "$WRITE_PACE_SECONDS"
+      return 0
+    fi
+    # Two greps, not one alternation: BSD grep has no \|, and the 403 and
+    # the words "rate limit" can sit on the same line or adjacent lines.
+    if printf '%s\n' "$err" | grep -q 'HTTP 403' \
+        && printf '%s\n' "$err" | grep -qi 'rate limit'; then
+      if [ "$attempt" -ge "$max_attempts" ]; then
+        return 1
+      fi
+      sleep "$delay"
+      delay=$((delay * 2))
+      attempt=$((attempt + 1))
+      continue
+    fi
+    return 1
+  done
+  return 1
+}
+
 # Prints "yes", "no" or "unknown". A confirmed 404 is the only "no": any other
 # failure (rate limit, permission, network) must not be read as "not adopted".
 repo_already_adopted() {
@@ -236,7 +280,7 @@ apply_milestones() {
       say "          milestone  $name (already exists)"
       continue
     fi
-    if gh api "repos/${repo}/milestones" -X POST -f title="${name}" >/dev/null 2>&1; then
+    if gh_write gh api "repos/${repo}/milestones" -X POST -f title="${name}"; then
       say "          milestone  $name"
       milestone_created=$((milestone_created + 1))
     else
@@ -270,6 +314,18 @@ plan_repo() {
   fi
   if [ "$has_issues" != "true" ]; then
     say "SKIP    $repo — issues are disabled, so there is nothing to standardise"
+    return
+  fi
+
+  # Check before any plan line, including dry-run, so the printed plan
+  # matches what --apply would do. GitHub will not accept a write here.
+  is_archived=$(repo_is_archived "$repo")
+  if [ -z "$is_archived" ]; then
+    say "SKIP    $repo — cannot read the repo"
+    return
+  fi
+  if [ "$is_archived" = "true" ]; then
+    say "SKIP    $repo — archived, so it is read-only"
     return
   fi
 
@@ -326,8 +382,8 @@ plan_repo() {
   label_failures=0
   while IFS='|' read -r name color description; do
     [ -n "$name" ] || continue
-    if gh label create "$name" --repo "$repo" --color "$color" \
-        --description "$description" --force >/dev/null 2>&1; then
+    if gh_write gh label create "$name" --repo "$repo" --color "$color" \
+        --description "$description" --force; then
       say "          label   $name"
     else
       say "          FAILED  label $name"
