@@ -35,11 +35,12 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# Prints a fresh temp dir path. Callers must register the result in TMPDIRS
+# themselves: this runs inside a subshell whenever called as `$(newtd)`, so
+# a TMPDIRS+= done here would mutate the subshell's copy and never reach the
+# trap that cleans up on exit.
 newtd() {
-  local d
-  d=$(mktemp -d "${TMPDIR:-/tmp}/worker-run-test.XXXXXX")
-  TMPDIRS+=("$d")
-  printf '%s' "$d"
+  mktemp -d "${TMPDIR:-/tmp}/worker-run-test.XXXXXX"
 }
 
 # A throwaway repo with one commit, so HEAD exists and `git diff HEAD` has
@@ -49,6 +50,7 @@ newtd() {
 PROTO=""
 build_proto() {
   PROTO=$(newtd)
+  TMPDIRS+=("$PROTO")
   git init -q "$PROTO" 2>/dev/null
   git -C "$PROTO" config user.email test@example.com
   git -C "$PROTO" config user.name test
@@ -66,6 +68,7 @@ build_proto() {
 new_repo() {
   local d
   d=$(newtd)
+  TMPDIRS+=("$d")
   ( cd "$PROTO" && tar cf - . ) | ( cd "$d" && tar xf - )
   printf '%s' "$d"
 }
@@ -274,6 +277,7 @@ test_usage_no_command_is_exit_4() {
 test_usage_not_a_git_checkout_is_exit_4() {
   local d
   d=$(newtd)   # a plain directory, never git-inited
+  TMPDIRS+=("$d")
   run_worker_x --dir "$d" -- bash -c 'true'
   if (( rc == 4 )) && echo "$out" | grep -q "not a git checkout"; then
     pass "--dir that is not a git checkout is a usage error, exit 4"
@@ -288,6 +292,7 @@ test_usage_not_a_git_checkout_is_exit_4() {
 test_usage_no_commits_is_exit_4() {
   local d
   d=$(newtd)
+  TMPDIRS+=("$d")
   git init -q "$d" 2>/dev/null
   run_worker_x --dir "$d" -- bash -c 'true'
   if (( rc == 4 )) && echo "$out" | grep -q "no commits"; then
