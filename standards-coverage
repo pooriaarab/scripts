@@ -107,15 +107,20 @@ LABELS
 
 # Fetch the repo list. Limit 1000 because this script is meant for personal or
 # fleet-scale owners, not massive organizations. gh repo list paginates up to
-# that limit.
-if ! gh repo list "$OWNER" --limit 1000 --json nameWithOwner,isPrivate,hasIssuesEnabled > "$tmp/repos.json" 2>&1; then
+# that limit. stderr is kept in its own file rather than merged with 2>&1: gh
+# can print a warning on stdout's fd while still exiting 0, and merging it into
+# repos.json would corrupt the JSON the next step parses.
+if ! gh repo list "$OWNER" --limit 1000 --json nameWithOwner,isPrivate,hasIssuesEnabled > "$tmp/repos.json" 2>"$tmp/repos.err"; then
   echo "ERROR: could not list repos for $OWNER" >&2
+  cat "$tmp/repos.err" >&2
   exit 2
 fi
 
 # Convert the JSON repo list to a tab-separated manifest that the bash loop can
-# read without parsing JSON in the shell.
-python3 - "$tmp" <<'PY'
+# read without parsing JSON in the shell. This conversion's exit status is
+# checked: a malformed repos.json must be a hard error, not a silent "no repos
+# found" once the rest of the pipeline treats an empty manifest as zero repos.
+if ! python3 - "$tmp" <<'PY'
 import json, os, sys
 tmp = sys.argv[1]
 with open(os.path.join(tmp, 'repos.json')) as f:
@@ -124,44 +129,59 @@ with open(os.path.join(tmp, 'manifest.tsv'), 'w') as f:
     for r in repos:
         f.write(f"{r['nameWithOwner']}\t{str(r['isPrivate']).lower()}\t{str(r['hasIssuesEnabled']).lower()}\n")
 PY
+then
+  echo "ERROR: could not parse repo list for $OWNER" >&2
+  exit 2
+fi
 
-if [ ! -s "$tmp/manifest.tsv" ]; then
-  echo "No repos found for $OWNER" >&2
-  exit 0
+if [ "$(wc -l < "$tmp/manifest.tsv" | tr -d ' ')" -eq 1000 ]; then
+  echo "WARNING: gh repo list returned exactly 1000 repos, the --limit cap; the list may be truncated" >&2
 fi
 
 # Check one repo and write a JSON row for it. The four layer checks are best
-# effort: a permission or network error is treated as "not present" so that one
-# unreachable repo does not abort the whole run. A note about failed reads is
-# still printed to stderr so the caller can see it.
+# effort: an expected 404 (the file or path is absent) is recorded as "not
+# present" so that a normal repo does not abort the run. Any other failure
+# (network, rate limit, permissions) is instead logged to probe-errors.log and
+# surfaced as a warning once the run finishes, because silently folding those
+# into "not present" would understate coverage without telling anyone.
 check_repo() {
   local repo="$1" is_private="$2" has_issues="$3" out="$4"
   local has_prefix=0 has_workflow=0 has_forms=0 has_labels=0
-  local slug actual_raw actual missing_count
+  local slug actual_raw actual missing_count err label_err
 
   # slug replaces the slash in owner/name so it is safe as a filename.
   slug=$(printf '%s' "$repo" | tr '/' '_')
   actual_raw="$tmp/labels/${slug}.raw"
   actual="$tmp/labels/${slug}.sorted"
+  label_err="$tmp/labels/${slug}.err"
 
-  if gh api "repos/$repo/contents/.github/pr-standards.json" >/dev/null 2>&1; then
+  if err=$(gh api "repos/$repo/contents/.github/pr-standards.json" 2>&1 >/dev/null); then
     has_prefix=1
+  elif ! printf '%s' "$err" | grep -qi '404\|not found'; then
+    printf '%s\tpr-standards.json\t%s\n' "$repo" "$err" >> "$tmp/probe-errors.log"
   fi
 
-  if gh api "repos/$repo/contents/.github/workflows/pr-standards.yml" >/dev/null 2>&1; then
+  if err=$(gh api "repos/$repo/contents/.github/workflows/pr-standards.yml" 2>&1 >/dev/null); then
     has_workflow=1
+  elif ! printf '%s' "$err" | grep -qi '404\|not found'; then
+    printf '%s\tpr-standards.yml\t%s\n' "$repo" "$err" >> "$tmp/probe-errors.log"
   fi
 
-  if gh api "repos/$repo/contents/.github/ISSUE_TEMPLATE" >/dev/null 2>&1; then
+  if err=$(gh api "repos/$repo/contents/.github/ISSUE_TEMPLATE" 2>&1 >/dev/null); then
     has_forms=1
+  elif ! printf '%s' "$err" | grep -qi '404\|not found'; then
+    printf '%s\tISSUE_TEMPLATE\t%s\n' "$repo" "$err" >> "$tmp/probe-errors.log"
   fi
 
   # gh label list with --json name and --jq '.[].name' emits one plain name per
   # line. We compare the sorted actual set against the sorted expected set with
   # comm -23, not with jq's index(), because index() returns 0 for the first
   # element and 0 is falsy, which silently drops it and undercounts labels.
-  if ! gh label list --repo "$repo" --json name --jq '.[].name' --limit 1000 > "$actual_raw" 2>/dev/null; then
+  if ! gh label list --repo "$repo" --json name --jq '.[].name' --limit 1000 > "$actual_raw" 2>"$label_err"; then
     : > "$actual_raw"
+    if [ -s "$label_err" ]; then
+      printf '%s\tlabel list\t%s\n' "$repo" "$(cat "$label_err")" >> "$tmp/probe-errors.log"
+    fi
   fi
   LC_ALL=C sort "$actual_raw" > "$actual" 2>/dev/null || { : > "$actual"; }
   missing_count=$(LC_ALL=C comm -23 "$EXPECTED_FILE" "$actual" 2>/dev/null | wc -l | tr -d ' ')
@@ -203,6 +223,21 @@ while IFS=$'\t' read -r repo is_private has_issues; do
 done < "$tmp/manifest.tsv"
 
 wait
+
+# wait does not report which background job failed, so a crashed or
+# killed worker would otherwise vanish from the results directory with no
+# sign anything went wrong, silently lowering total_repos. Compare the number
+# of repos submitted against the number of result files actually written.
+expected_count=$(wc -l < "$tmp/manifest.tsv" | tr -d ' ')
+actual_count=$(find "$tmp/results" -name '*.json' | wc -l | tr -d ' ')
+if [ "$actual_count" -ne "$expected_count" ]; then
+  echo "WARNING: $((expected_count - actual_count)) of $expected_count repo checks did not report a result; totals below are undercounted" >&2
+fi
+
+if [ -s "$tmp/probe-errors.log" ]; then
+  echo "WARNING: $(wc -l < "$tmp/probe-errors.log" | tr -d ' ') layer probe(s) failed with an error other than 404; affected repos may be undercounted as missing that layer:" >&2
+  cat "$tmp/probe-errors.log" >&2
+fi
 
 # Aggregate the per-repo JSON rows and produce the requested output. All summary
 # counts and percentages use repos with issues enabled as the denominator.
