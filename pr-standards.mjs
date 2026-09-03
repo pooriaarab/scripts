@@ -433,7 +433,12 @@ const PROOF_RESULT_RE = /(?:->|\b(?:pass(?:ed)?|success(?:ful(?:ly)?)?|clean|gre
 // nothing to stop it. `failed=2` is the same failure wearing install-pr-hooks'
 // key=value spelling. Either spelling of a nonzero failure count means the
 // run was not clean, same as a nonzero warning or error count.
-const PROOF_NONZERO_RE = /\b[1-9]\d*\s+(?:warnings?|errors?|failed)\b|\bfailed\s*=\s*[1-9]\d*\b/i;
+// The count must not be the value half of a key=value pair. `installed=1
+// failed=0` is a clean run of install-pr-hooks, and reading "1 failed" across
+// the `=` boundary vetoed it: the 1 counts installs, the failures are 0. The
+// lookbehind requires the digits to start a token, so "2 failed" in "12
+// passed, 2 failed" still vetoes and `key=1 failed=0` does not.
+const PROOF_NONZERO_RE = /(?<![=\d])[1-9]\d*\s+(?:warnings?|errors?|failed)\b|\bfailed\s*=\s*[1-9]\d*\b/i;
 
 function proofCommand(text) {
   const lines = String(text).split('\n').map((line) => line.trim()).filter(Boolean);

@@ -1487,6 +1487,10 @@ test('bash is a command, and real tool output is a result', () => {
   assert.equal(fails('bunx oxlint@^1\nFound 7 warnings and 0 errors'), true, 'a nonzero warning count fails even next to 0 errors');
   assert.equal(fails('python3 install-pr-hooks --apply\ninstalled=1 failed=2'), true, 'failed=2 is not a result');
   assert.equal(fails('python3 install-pr-hooks --selfcheck\ninstalled=1 failed=0'), false, 'failed=0 is a result');
+  // The nonzero veto must not read a count across a `key=value` boundary: the
+  // 1 in `installed=1` counts installs, not failures.
+  assert.equal(fails('bunx x\n12 passed, 2 failed'), true, 'a nonzero failed count still vetoes');
+  assert.equal(fails('bunx x\nFound 7 warnings and 0 errors'), true, 'a clean errors count cannot mask warnings');
   assert.equal(fails('npx tsc --noEmit\n0 errors'), false, '0 errors is a result');
   assert.equal(fails('pytest -q\n12 passed'), false, 'pytest still counts');
   assert.equal(fails('cargo test\n14 passed'), false, 'cargo still counts');
