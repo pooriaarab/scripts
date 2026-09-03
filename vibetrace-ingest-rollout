@@ -150,30 +150,67 @@ print(base64.b64decode(d['content']).decode())" 2>/dev/null) || {
     continue
   }
 
-  if echo "$EXISTING_YML" | grep -q "vibetrace_ingest_url" && echo "$EXISTING_YML" | grep -q "vibetrace_ingest_token"; then
-    echo "OK    $repo  (already has vibetrace_ingest_url and vibetrace_ingest_token)"
-    already_c=$((already_c + 1))
-    continue
-  fi
-
-  MODIFIED_YML=$(EXISTING_YML="$EXISTING_YML" python3 -c '
-import os, sys
+  TRANSFORM_OUT=$(EXISTING_YML="$EXISTING_YML" python3 -c '
+import os, re, sys
 content = os.environ.get("EXISTING_YML", "")
-has_url = "vibetrace_ingest_url" in content
-has_token = "vibetrace_ingest_token" in content
+lines = content.splitlines()
+step_re = re.compile(r"^(\s*)-\s")
+marker = "uses: pooriaarab/vibecodereview"
+
+# Scope the already-configured check and the insertion point to the lines
+# that belong to the matched step, not the whole file, so an unrelated step
+# (or a comment) mentioning these names cannot fool either check.
+step_block = []
+step_indent = None
+in_step = False
+for line in lines:
+    if in_step:
+        m = step_re.match(line)
+        if m and len(m.group(1)) <= step_indent:
+            break
+        step_block.append(line)
+    if marker in line:
+        in_step = True
+        step_indent = len(line) - len(line.lstrip())
+        step_block.append(line)
+
+if not step_block:
+    sys.exit(1)
+
+step_text = "\n".join(step_block)
+has_url = "vibetrace_ingest_url" in step_text
+has_token = "vibetrace_ingest_token" in step_text
+
 if has_url and has_token:
-    print(content, end="")
+    print("ALREADY")
     sys.exit(0)
 
-lines = content.splitlines()
+def with_block(indent):
+    sub_indent = indent + 2
+    block = [" " * indent + "with:"]
+    if not has_url:
+        block.append(" " * sub_indent + "vibetrace_ingest_url: ${{ secrets.VIBETRACE_INGEST_URL }}")
+    if not has_token:
+        block.append(" " * sub_indent + "vibetrace_ingest_token: ${{ secrets.VIBETRACE_INGEST_TOKEN }}")
+    return block
+
 out = []
 found_uses = False
 modified = False
+uses_indent = 0
 
 for line in lines:
+    if found_uses and not modified:
+        m = step_re.match(line)
+        if m and len(m.group(1)) <= uses_indent:
+            # Left the matched step without finding its own with: block.
+            out.extend(with_block(uses_indent))
+            modified = True
+            found_uses = False
     out.append(line)
-    if not modified and "uses: pooriaarab/vibecodereview" in line:
+    if not modified and marker in line:
         found_uses = True
+        uses_indent = len(line) - len(line.lstrip())
     if found_uses and not modified and line.strip() == "with:":
         indent = len(line) - len(line.lstrip())
         sub_indent = indent + 2
@@ -184,15 +221,29 @@ for line in lines:
         modified = True
         found_uses = False
 
+if found_uses and not modified:
+    # Matched step was the last one in the file and had no with: block.
+    out.extend(with_block(uses_indent))
+    modified = True
+
 if not modified:
     sys.exit(1)
 
+print("MODIFIED")
 print("\n".join(out) + ("\n" if content.endswith("\n") else ""), end="")
 ' 2>/dev/null) || {
     echo "FAIL  $repo  (could not insert vibetrace parameters into vibecodereview.yml)"
     fail_c=$((fail_c + 1))
     continue
   }
+
+  TRANSFORM_STATUS=$(printf '%s\n' "$TRANSFORM_OUT" | head -1)
+  if [ "$TRANSFORM_STATUS" = "ALREADY" ]; then
+    echo "OK    $repo  (already has vibetrace_ingest_url and vibetrace_ingest_token)"
+    already_c=$((already_c + 1))
+    continue
+  fi
+  MODIFIED_YML=$(printf '%s\n' "$TRANSFORM_OUT" | tail -n +2)
 
   if [ "$DRY" -eq 1 ]; then
     echo "WOULD  $repo  (prefix=$PREFIX)"
