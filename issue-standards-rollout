@@ -100,6 +100,13 @@ WRITE_PACE_SECONDS=8
 # Retry a content-creating call. A 403 whose body mentions a rate limit is
 # the secondary limit and is transient. A 404 or a permission error is a
 # genuine failure and must surface immediately so the caller can tally it.
+#
+# The pace applies on every exit, not just success: a permanent failure (or
+# a rate-limited call that exhausts its retries) still counted as one of the
+# content-creating requests GitHub is throttling, and the caller moves on to
+# the next write right after this returns. Skipping the sleep here would let
+# a run of failures fire back-to-back and reproduce the exact burst that
+# trips the secondary limit in the first place.
 gh_write() {
   local attempt=1
   local max_attempts=4
@@ -115,6 +122,7 @@ gh_write() {
     if printf '%s\n' "$err" | grep -q 'HTTP 403' \
         && printf '%s\n' "$err" | grep -qi 'rate limit'; then
       if [ "$attempt" -ge "$max_attempts" ]; then
+        sleep "$WRITE_PACE_SECONDS"
         return 1
       fi
       sleep "$delay"
@@ -122,8 +130,10 @@ gh_write() {
       attempt=$((attempt + 1))
       continue
     fi
+    sleep "$WRITE_PACE_SECONDS"
     return 1
   done
+  sleep "$WRITE_PACE_SECONDS"
   return 1
 }
 
