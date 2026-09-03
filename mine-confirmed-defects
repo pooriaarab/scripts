@@ -97,12 +97,15 @@ def first_line(patch):
     m = re.search(r"\+(\d+)", patch or "")
     return int(m.group(1)) if m else 1
 def numbered_added_lines(patch):
+    # gh's per-file `patch` is hunks only, never "--- a/" / "+++ b/" file
+    # headers, so those aren't stripped here: a line.startswith("+++") check
+    # misfires on an added line whose own text starts with "++" (e.g. "++i;").
     out, new_line = {}, 0
     for line in (patch or "").splitlines():
         if line.startswith("@@"):
             m = re.search(r"\+(\d+)", line)
             new_line = int(m.group(1)) - 1 if m else new_line
-        elif line.startswith("+++") or line.startswith("---") or line.startswith("\\"):
+        elif line.startswith("\\"):
             continue
         elif line.startswith("+"):
             new_line += 1
