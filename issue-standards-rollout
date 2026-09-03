@@ -110,7 +110,10 @@ WRITE_PACE_SECONDS=8
 gh_write() {
   local attempt=1
   local max_attempts=4
-  local delay=2
+  # Start the backoff at the pacing floor: a retry is still a
+  # content-creating request, so it must never fire sooner than
+  # WRITE_PACE_SECONDS after the attempt before it.
+  local delay="$WRITE_PACE_SECONDS"
   local err
   while [ "$attempt" -le "$max_attempts" ]; do
     if err=$("$@" 2>&1); then
