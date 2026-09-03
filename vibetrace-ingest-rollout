@@ -150,8 +150,8 @@ print(base64.b64decode(d['content']).decode())" 2>/dev/null) || {
     continue
   }
 
-  if echo "$EXISTING_YML" | grep -q "vibetrace_ingest_url"; then
-    echo "OK    $repo  (already has vibetrace_ingest_url)"
+  if echo "$EXISTING_YML" | grep -q "vibetrace_ingest_url" && echo "$EXISTING_YML" | grep -q "vibetrace_ingest_token"; then
+    echo "OK    $repo  (already has vibetrace_ingest_url and vibetrace_ingest_token)"
     already_c=$((already_c + 1))
     continue
   fi
@@ -159,7 +159,9 @@ print(base64.b64decode(d['content']).decode())" 2>/dev/null) || {
   MODIFIED_YML=$(EXISTING_YML="$EXISTING_YML" python3 -c '
 import os, sys
 content = os.environ.get("EXISTING_YML", "")
-if "vibetrace_ingest_url" in content:
+has_url = "vibetrace_ingest_url" in content
+has_token = "vibetrace_ingest_token" in content
+if has_url and has_token:
     print(content, end="")
     sys.exit(0)
 
@@ -175,8 +177,10 @@ for line in lines:
     if found_uses and not modified and line.strip() == "with:":
         indent = len(line) - len(line.lstrip())
         sub_indent = indent + 2
-        out.append(" " * sub_indent + "vibetrace_ingest_url: ${{ secrets.VIBETRACE_INGEST_URL }}")
-        out.append(" " * sub_indent + "vibetrace_ingest_token: ${{ secrets.VIBETRACE_INGEST_TOKEN }}")
+        if not has_url:
+            out.append(" " * sub_indent + "vibetrace_ingest_url: ${{ secrets.VIBETRACE_INGEST_URL }}")
+        if not has_token:
+            out.append(" " * sub_indent + "vibetrace_ingest_token: ${{ secrets.VIBETRACE_INGEST_TOKEN }}")
         modified = True
         found_uses = False
 
@@ -246,7 +250,7 @@ $ISSUE_MARKER
 
   if [ -n "${VIBETRACE_INGEST_URL:-}" ]; then
     echo "SET SECRET VIBETRACE_INGEST_URL on $repo"
-    gh secret set VIBETRACE_INGEST_URL --body "$VIBETRACE_INGEST_URL" --repo "$OWNER/$repo" >/dev/null || {
+    gh secret set VIBETRACE_INGEST_URL --body-file - --repo "$OWNER/$repo" >/dev/null <<< "$VIBETRACE_INGEST_URL" || {
       echo "FAIL  $repo  (failed to set VIBETRACE_INGEST_URL secret)"
       fail_c=$((fail_c + 1))
       continue
@@ -257,7 +261,7 @@ $ISSUE_MARKER
 
   if [ -n "${VIBETRACE_INGEST_TOKEN:-}" ]; then
     echo "SET SECRET VIBETRACE_INGEST_TOKEN on $repo"
-    gh secret set VIBETRACE_INGEST_TOKEN --body "$VIBETRACE_INGEST_TOKEN" --repo "$OWNER/$repo" >/dev/null || {
+    gh secret set VIBETRACE_INGEST_TOKEN --body-file - --repo "$OWNER/$repo" >/dev/null <<< "$VIBETRACE_INGEST_TOKEN" || {
       echo "FAIL  $repo  (failed to set VIBETRACE_INGEST_TOKEN secret)"
       fail_c=$((fail_c + 1))
       continue
@@ -271,6 +275,17 @@ $ISSUE_MARKER
     fail_c=$((fail_c + 1))
     continue
   }
+
+  VERIFY_CMD="gh api repos/$OWNER/$repo/contents/$YML_PATH?ref=$BRANCH"
+  VERIFY_YML=$(gh api "repos/$OWNER/$repo/contents/$YML_PATH?ref=$BRANCH" 2>/dev/null | python3 -c "
+import json, base64, sys
+d = json.load(sys.stdin)
+print(base64.b64decode(d['content']).decode())" 2>/dev/null)
+  if ! echo "$VERIFY_YML" | grep -q "vibetrace_ingest_url" || ! echo "$VERIFY_YML" | grep -q "vibetrace_ingest_token"; then
+    echo "FAIL  $repo  (post-write verification: $YML_PATH on $BRANCH is missing the vibetrace parameters)"
+    fail_c=$((fail_c + 1))
+    continue
+  fi
 
   EXISTING_PR=$(gh pr list --repo "$OWNER/$repo" --head "$BRANCH" --state open --json number --jq '.[0].number // empty' 2>/dev/null) || {
     echo "FAIL  $repo  (PR lookup)"
@@ -302,7 +317,8 @@ Required for automated code review telemetry and tracing.
 
 ## How I verified
 
-Config-only rollout. Verified with bash -n on the template.
+\$ $VERIFY_CMD
+vibetrace_ingest_url and vibetrace_ingest_token both present on $BRANCH — verified
 
 Assisted-by: gemini:gemini-3.8-flash" \
     2>/dev/null && {
