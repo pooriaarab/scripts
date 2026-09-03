@@ -1528,6 +1528,26 @@ test('a nonzero failed count is not masked by "passed" in the same result', () =
   assert.equal(fails('python3 install-pr-hooks --apply\ninstalled=1 failed=0 failed=2'), true, 'a later failed=2 is not masked by an earlier failed=0');
 });
 
+test('a count is not always spelled with the noun right against it', () => {
+  // go test prints "1 test failed", not "1 failed" -- the noun sits between
+  // the digit and the word the veto looks for. A count is also not always
+  // written without a leading zero. Neither should let a red run through.
+  const body = (verified) => [
+    '## What', 'One sentence.',
+    '## Why', 'Because of the reason.',
+    '## How I verified', verified,
+    'Assisted-by: agent:model',
+  ].join('\n\n');
+  const fails = (text) => validateBody(body(text), 142, config)
+    .failures.some((f) => f.check === '## How I verified');
+
+  assert.equal(fails('go test ./...\n13 passed, 1 test failed'), true, 'a noun between the count and "failed" still vetoes');
+  assert.equal(fails('go test ./...\n11 passed, 2 tests failed'), true, 'the plural noun still vetoes');
+  assert.equal(fails('pytest -q\n13 passed, 02 failed'), true, 'a leading zero does not hide a nonzero count');
+  assert.equal(fails('python3 install-pr-hooks --apply\ninstalled=1 failed=02'), true, 'a leading zero in a key=value count still vetoes');
+  assert.equal(fails('go test ./...\n13 passed, 0 tests failed'), false, 'an all-zero count with a noun stays a passing result');
+});
+
 test('prefix precedence holds on the CI path, not only in loadConfig', async () => {
   // #101 fixed the precedence and covered it through loadConfig, which is the
   // LOCAL path. The path that was broken is this one: runPr -> fetchRemoteConfig.

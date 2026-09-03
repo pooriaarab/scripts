@@ -438,7 +438,15 @@ const PROOF_RESULT_RE = /(?:->|\b(?:pass(?:ed)?|success(?:ful(?:ly)?)?|clean|gre
 // the `=` boundary vetoed it: the 1 counts installs, the failures are 0. The
 // lookbehind requires the digits to start a token, so "2 failed" in "12
 // passed, 2 failed" still vetoes and `key=1 failed=0` does not.
-const PROOF_NONZERO_RE = /(?<![=\d])[1-9]\d*\s+(?:warnings?|errors?|failed)\b|\bfailed\s*=\s*[1-9]\d*\b/i;
+//
+// A count is not always adjacent to the word it counts. go test prints
+// "1 test failed", not "1 failed" -- the noun sits between the digit and
+// the word this rule looks for, so the count and "failed" need an optional
+// noun between them. And a count is not always written without a leading
+// zero: "02 failed" still means two failures. `0*` before the required
+// nonzero digit absorbs the leading zero without letting an all-zero count
+// like "00" or "0" through, since `[1-9]` still demands one nonzero digit.
+const PROOF_NONZERO_RE = /(?<![=\d])0*[1-9]\d*\s+(?:(?:tests?|checks?|cases?)\s+)?(?:warnings?|errors?|failed)\b|\bfailed\s*=\s*0*[1-9]\d*\b/i;
 
 function proofCommand(text) {
   const lines = String(text).split('\n').map((line) => line.trim()).filter(Boolean);
