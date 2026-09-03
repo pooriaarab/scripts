@@ -1068,6 +1068,49 @@ test('python3 counts as a command, like pytest already did', () => {
   assert.equal(fails('The pythonic idiom was verified'), true);
 });
 
+test('shell, container, and infrastructure tools count as commands', () => {
+  const body = (verified) => [
+    '## What', 'One sentence.',
+    '## Why', 'Because of the reason.',
+    '## How I verified', verified,
+    'Assisted-by: agent:model',
+  ].join('\n\n');
+  const fails = (text) => validateBody(body(text), 142, config)
+    .failures.some((f) => f.check === '## How I verified');
+
+  assert.equal(fails('bash tests/x.sh\nResults: 13 passed, 0 failed'), false);
+  assert.equal(fails('sh -c "shunit2 tests/x.sh"\nOK'), false);
+  assert.equal(fails('docker build .\nSuccessfully built'), false);
+  assert.equal(fails('curl -f http://localhost:8080/health\nOK'), false);
+  assert.equal(fails('terraform plan\nNo changes.'), false);
+  assert.equal(fails('./worker-run.test.sh\n0 errors'), false);
+  assert.equal(fails('bunxx frobnicate -> 3 passed'), true);
+});
+
+test('real result shapes pass and half-failures name the missing half', () => {
+  const body = (verified) => [
+    '## What', 'One sentence.',
+    '## Why', 'Because of the reason.',
+    '## How I verified', verified,
+    'Assisted-by: agent:model',
+  ].join('\n\n');
+  const fails = (text) => validateBody(body(text), 142, config)
+    .failures.some((f) => f.check === '## How I verified');
+  const how = (text) => validateBody(body(text), 142, config)
+    .failures.find((f) => f.check === '## How I verified');
+
+  assert.equal(fails('bunx oxlint@^1\nFound 0 warnings'), false);
+  assert.equal(fails('./install-pr-hooks\ninstalled=1 failed=0'), false);
+  assert.equal(fails('npx tsc --noEmit\n0 errors'), false);
+  const commandOnly = how('bash tests/x.sh\nit did a thing');
+  assert.ok(commandOnly, 'expected a failure');
+  assert.ok(commandOnly.expected.includes('a result'), commandOnly.expected);
+  const resultOnly = how('Found 0 warnings');
+  assert.ok(resultOnly, 'expected a failure');
+  assert.ok(resultOnly.expected.includes('a command'), resultOnly.expected);
+  assert.equal(fails('Tested locally.'), true);
+});
+
 test('prefix precedence holds on the CI path, not only in loadConfig', async () => {
   // #101 fixed the precedence and covered it through loadConfig, which is the
   // LOCAL path. The path that was broken is this one: runPr -> fetchRemoteConfig.
