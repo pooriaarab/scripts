@@ -396,9 +396,38 @@ function hasCommandAndResult(text) {
   // named neither: a pull request whose evidence was a real `python3` run
   // failed the rule, and the author met the regex by prefixing a pointless
   // `node -e` to the command that had already run.
-  const command = lines.some((line) => /^(?:[$>`]\s*|\*\s*)?(?:bunx|bun|npm|pnpm|yarn|node|deno|cargo|go|pytest|python3|python|make|git|gh|npx|\.\/)\b[^\n]*/i.test(line));
-  const result = /(?:->|\b(?:pass(?:ed)?|success(?:ful)?|clean|green|ok|verified|complete|no issues|exit(?:ed)?\s+0)\b|\d+\s+(?:tests?|checks?)\s+(?:pass|passed|successful))/i.test(text);
-  return command && result;
+  // The unprompted command list is kept as a bounded guard, not replaced by a
+  // pure shape rule. A shape-only first-token check would accept invented
+  // command names like `bunxx` and would treat `Bundle was verified` as a
+  // command, so the first token must either be a known executable, a script or
+  // absolute path, or a line introduced by a shell prompt or list marker. The
+  // result side is deliberately shape-based: it accepts any success word, a
+  // count with zero failures, or the `->` command/result separator. New tools
+  // can pass by using a prompt (`$`, `>`, `` ` ``, `*`) or a path; the list
+  // only grows for common unprompted runners.
+  const commandRe = /^(?:[$>`]\s*|\*\s*)?(?:(?:\.\/|\.\.\/|~\/|\/)[^\s]+|(?:bash|bunx|bun|cargo|curl|deno|docker|gh|git|go|make|node|npm|npx|pnpm|pytest|python3|python|sh|terraform|yarn)\b)[^\n]*$/i;
+  const resultPatterns = [
+    '->',
+    '\\b(?:pass(?:ed|ing)?|success(?:ful(?:ly)?)?|succeeded|successful|ok|verified|clean|green|complete(?:d)?|done|finished|no\\s+issues|no\\s+changes|no\\s+errors|no\\s+warnings|no\\s+failures|up\\s+to\\s+date|exit(?:ed)?\\s+0)\\b',
+    '\\b(?:all|every)\\s+(?:tests?|checks?|results?|suites?|specs?|cases?|files?|runs?|examples?)?\\s*(?:pass(?:ed|ing)?|successful)\\b',
+    '\\b[1-9]\\d*\\s+(?:tests?|checks?|results?|suites?|specs?|cases?|files?|runs?|examples?)?\\s*(?:pass(?:ed|ing)?|successful)\\b',
+    '\\b0\\s+(?:errors?|warnings?|failures?|failed)\\b',
+    '\\b(?:errors?|warnings?|failures?|failed)\\s*[:=]\\s*0\\b',
+  ];
+  const resultRe = new RegExp(resultPatterns.map((pattern) => `(?:${pattern})`).join('|'), 'i');
+
+  let command = false;
+  let commandLine = null;
+  for (const line of lines) {
+    if (commandRe.test(line)) {
+      command = true;
+      commandLine = line;
+      break;
+    }
+  }
+  const resultMatch = String(text).match(resultRe);
+  const result = resultMatch !== null;
+  return { ok: command && result, command, result, commandLine, resultText: resultMatch ? resultMatch[0] : null };
 }
 
 // Proof helpers — an agent can type "tested locally" for free; a screenshot
@@ -599,7 +628,7 @@ export function checkProof(body, files, config = DEFAULT_CONFIG) {
   // the whole fleet red on day one and get the standard switched off. A repo
   // ratchets this to a failure with `requireAttributableProof` once its tests
   // run in CI and a run link is something its own agents can always produce.
-  if (!uiProofFailed && hasCommandAndResult(verifiedSection) && !hasExternalProofEvidence(verifiedSection)) {
+  if (!uiProofFailed && hasCommandAndResult(verifiedSection).ok && !hasExternalProofEvidence(verifiedSection)) {
     const finding = fail(
       'attributable proof',
       'a command and result claimed in text, nothing outside the body to check it against',
@@ -689,12 +718,30 @@ export function validateBody(body, issueNumber, config = DEFAULT_CONFIG) {
         const hatch = PROOF_NA_LINE.exec(line);
         return hatch ? hatch[1] : line;
       }).join('\n');
-  if (!verified || /\b(?:N\/A|TODO|tested locally)\b/i.test(claimed) || !hasCommandAndResult(verified)) {
+  const proof = hasCommandAndResult(verified);
+  const refuses = !verified || /\b(?:N\/A|TODO|tested locally)\b/i.test(claimed);
+  if (refuses || !proof.ok) {
+    let expected;
+    let fix;
+    let got;
+    if (refuses || (!proof.command && !proof.result)) {
+      expected = 'a command and its result, such as: bash tests/x.sh -> 13 passed';
+      fix = 'Run a check and record the command and result under ## How I verified.';
+      got = verified || 'missing';
+    } else if (!proof.result) {
+      expected = 'a result, such as: 0 errors, Found 0 warnings, No changes, Successfully built, or 13 passed';
+      fix = 'Record the output that shows the command succeeded.';
+      got = proof.commandLine || verified || 'missing';
+    } else {
+      expected = 'a command, such as: bash tests/x.sh, sh -c, docker build ., curl, or terraform plan';
+      fix = 'State the command that produced the output.';
+      got = proof.resultText || verified || 'missing';
+    }
     failures.push(fail(
       '## How I verified',
-      verified || 'missing',
-      'a command and its result, such as: bun test -> 214 passed',
-      'Run a check and record the command and result under ## How I verified.',
+      got,
+      expected,
+      fix,
     ));
   }
   if (!/^Assisted-by:\s*[^\s:]+:[^\s]+\s*$/im.test(visibleSource)) {
