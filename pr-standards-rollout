@@ -73,6 +73,60 @@ if [ "$WITH_GENERATED_DRIFT" -eq 1 ]; then
   GENERATED_DRIFT_YML=$(read_template generated-drift.yml) || exit 1
 fi
 
+# GitHub's secondary rate limit for content-creating requests is about 500
+# per hour. The rate_limit endpoint does not expose it: core stays 5000/5000
+# while these 403s fire. A full apply is roughly 7 writes per repo (issue,
+# branch, four files, PR) across ~107 repos, so 749 back-to-back writes blow
+# past that ceiling. 8 seconds between writes keeps a full-fleet apply under
+# 500 content-creating requests per hour (3600 / 8 = 450).
+WRITE_PACE_SECONDS=8
+
+# Retry a content-creating call. A 403 whose body mentions a rate limit is
+# the secondary limit and is transient. A 404 or a permission error is a
+# genuine failure and must surface immediately so the caller can tally it.
+#
+# The pace applies on every exit, not just success: a permanent failure (or
+# a rate-limited call that exhausts its retries) still counted as one of the
+# content-creating requests GitHub is throttling, and the caller moves on to
+# the next write right after this returns. Skipping the sleep here would let
+# a run of failures fire back-to-back and reproduce the exact burst that
+# trips the secondary limit in the first place.
+GH_WRITE_OUT=""
+gh_write() {
+  local attempt=1
+  local max_attempts=4
+  # Start the backoff at the pacing floor: a retry is still a
+  # content-creating request, so it must never fire sooner than
+  # WRITE_PACE_SECONDS after the attempt before it.
+  local delay="$WRITE_PACE_SECONDS"
+  local err
+  GH_WRITE_OUT=""
+  while [ "$attempt" -le "$max_attempts" ]; do
+    if err=$("$@" 2>&1); then
+      GH_WRITE_OUT="$err"
+      sleep "$WRITE_PACE_SECONDS"
+      return 0
+    fi
+    # Two greps, not one alternation: BSD grep has no \|, and the 403 and
+    # the words "rate limit" can sit on the same line or adjacent lines.
+    if printf '%s\n' "$err" | grep -q 'HTTP 403' \
+        && printf '%s\n' "$err" | grep -qi 'rate limit'; then
+      if [ "$attempt" -ge "$max_attempts" ]; then
+        sleep "$WRITE_PACE_SECONDS"
+        return 1
+      fi
+      sleep "$delay"
+      delay=$((delay * 2))
+      attempt=$((attempt + 1))
+      continue
+    fi
+    sleep "$WRITE_PACE_SECONDS"
+    return 1
+  done
+  sleep "$WRITE_PACE_SECONDS"
+  return 1
+}
+
 # ── List target repos ───────────────────────────────────────────────────
 # Repo names are interpolated into python source below. GitHub will not mint a
 # name outside this set, but a typo or a pasted argument should fail here rather
@@ -158,8 +212,8 @@ print(prefixes.get('$repo', ''))
   # without this check a single deleted/renamed repo would FAIL forever and
   # `exit 1` at the bottom would never go away. Tell that apart from a real
   # lookup failure (auth, rate-limit) the same way the config/PR lookups do.
-  INFO=$(gh repo view "$OWNER/$repo" --json isFork,isArchived,diskUsage 2>/dev/null) || {
-    VIEW_ERR=$(gh repo view "$OWNER/$repo" --json isFork,isArchived,diskUsage 2>&1 >/dev/null)
+  INFO=$(gh repo view "$OWNER/$repo" --json isFork,isArchived 2>/dev/null) || {
+    VIEW_ERR=$(gh repo view "$OWNER/$repo" --json isFork,isArchived 2>&1 >/dev/null)
     if echo "$VIEW_ERR" | grep -qi 'could not resolve\|not found'; then
       echo "SKIP  $repo  (no longer exists)"
       skipped_c=$(( skipped_c + 1 ))
@@ -169,13 +223,13 @@ print(prefixes.get('$repo', ''))
     fi
     continue
   }
-  # One python3 call emits all three values with booleans lowercased so bash
-  # compares against 'true'/'false' correctly. Three calls carried too many
+  # One python3 call emits both values with booleans lowercased so bash
+  # compares against 'true'/'false' correctly. Two calls carried too many
   # chances for the same class of bug.
-  read -r IS_FORK IS_ARCHIVED DISK <<< "$(echo "$INFO" | python3 -c "
+  read -r IS_FORK IS_ARCHIVED <<< "$(echo "$INFO" | python3 -c "
 import json, sys
 d = json.load(sys.stdin)
-print(str(d['isFork']).lower(), str(d['isArchived']).lower(), d['diskUsage'])
+print(str(d['isFork']).lower(), str(d['isArchived']).lower())
 ")"
 
   if [ "$IS_ARCHIVED" = "true" ]; then
@@ -184,9 +238,9 @@ print(str(d['isFork']).lower(), str(d['isArchived']).lower(), d['diskUsage'])
   if [ "$IS_FORK" = "true" ]; then
     echo "SKIP  $repo  (fork)"; skipped_c=$(( skipped_c + 1 )); continue
   fi
-  if [ "$DISK" -lt 10 ]; then
-    echo "SKIP  $repo  (under 10KB)"; skipped_c=$(( skipped_c + 1 )); continue
-  fi
+  # Eligibility (including the diskUsage==0 never-pushed floor) belongs in
+  # repo-prefixes.json via build-repo-prefixes.py. A second size floor here
+  # can only disagree with the registry and skip repos the generator admitted.
 
   # ── Check if already done ────────────────────────────────────────────
   # A repo is "done" once the config prefix matches, the companion files exist,
@@ -415,10 +469,10 @@ if sha:
     payload['sha'] = sha
 print(json.dumps(payload))
 " <<< "$FC")
-        gh api "repos/$OWNER/$repo/contents/$FP" --method PUT --silent --input - <<< "$PAYLOAD_JSON" 2>/dev/null || {
+        if ! gh_write gh api "repos/$OWNER/$repo/contents/$FP" --method PUT --silent --input - <<< "$PAYLOAD_JSON"; then
           echo "WARN  $repo  (REPAIR: $FP failed)"
           REPAIR_FAIL=1
-        }
+        fi
       done
       if [ "$REPAIR_FAIL" -ne 0 ]; then
         echo "FAIL  $repo  (REPAIR: one or more writes failed)"
@@ -455,7 +509,7 @@ print(json.dumps(payload))
   if [ -n "$ISSUE_NUM" ]; then
     echo "      $repo  (reusing open issue #$ISSUE_NUM from an earlier run)"
   else
-  ISSUE_NUM=$(gh issue create \
+  if gh_write gh issue create \
     --repo "$OWNER/$repo" \
     --title "Adopt the fleet PR standard" \
     --body "Set up branch naming, PR title enforcement, and size checks.
@@ -468,7 +522,11 @@ Branch names: \`$PREFIX-<issue>-<slug>\`
 PR titles: \`[$PREFIX_UPPER-<ISSUE>] description\`
 
 $ISSUE_MARKER
-" 2>/dev/null | grep -oE '[0-9]+$' | head -1)
+"; then
+    ISSUE_NUM=$(printf '%s\n' "$GH_WRITE_OUT" | grep -oE '[0-9]+$' | head -1)
+  else
+    ISSUE_NUM=""
+  fi
   fi
   if [ -z "$ISSUE_NUM" ]; then
     echo "FAIL  $repo  (issue create returned no number)"
@@ -488,14 +546,14 @@ $ISSUE_MARKER
   # died before the PR (the issue reuse above means a retry hits this same
   # branch name, and creating a ref that already exists always fails).
   if ! gh api "repos/$OWNER/$repo/git/refs/heads/$BRANCH" &>/dev/null; then
-    gh api "repos/$OWNER/$repo/git/refs" \
+    if ! gh_write gh api "repos/$OWNER/$repo/git/refs" \
       --method POST --silent \
       -f ref="refs/heads/$BRANCH" \
-      -f sha="$SHA" 2>/dev/null || {
+      -f sha="$SHA"; then
       echo "FAIL  $repo  (branch)"
       fail_c=$(( fail_c + 1 ))
       continue
-    }
+    fi
   fi
 
   # Step C: write three files via contents API
@@ -548,13 +606,13 @@ if '$EXISTING_SHA':
 print(json.dumps(payload))
 " <<< "$FC")
 
-    gh api "repos/$OWNER/$repo/contents/$FP" \
+    if ! gh_write gh api "repos/$OWNER/$repo/contents/$FP" \
       --method PUT --silent \
-      --input - <<< "$PAYLOAD_JSON" 2>/dev/null || {
+      --input - <<< "$PAYLOAD_JSON"; then
       echo "WARN  $repo  (failed $FP — may need workflow scope)"
       WRITE_FAIL=1
       WRITE_FAIL_FILE="$FP"
-    }
+    fi
   done
 
   # Step D: abort if any write failed — leave the branch for a re-run
@@ -621,7 +679,7 @@ print(json.dumps(payload))
     continue
   fi
 
-  gh pr create \
+  if gh_write gh pr create \
     --repo "$OWNER/$repo" \
     --base "$DEFAULT_BRANCH" \
     --head "$BRANCH" \
@@ -655,18 +713,17 @@ $PRECHECK_OUT
 The remaining rules -- the body's shape, the size caps, the commit trailers --
 are judged by the same checker when it runs on this PR.
 
-Assisted-by: pooriaarab/scripts:pr-standards-rollout" \
-    2>/dev/null && {
-      echo "DONE  $repo  (#$ISSUE_NUM -> $BRANCH -> PR)"
-      # An assignment, not (( done_c++ )). Post-increment returns the value
-      # before incrementing, so on the first success it returns 0, the group
-      # exits 1, the || branch also runs, and one repo is reported both DONE
-      # and FAIL while fail_c climbs.
-      done_c=$(( done_c + 1 ))
-    } || {
-      echo "FAIL  $repo  (PR)"
-      fail_c=$(( fail_c + 1 ))
-    }
+Assisted-by: pooriaarab/scripts:pr-standards-rollout"; then
+    echo "DONE  $repo  (#$ISSUE_NUM -> $BRANCH -> PR)"
+    # An assignment, not (( done_c++ )). Post-increment returns the value
+    # before incrementing, so on the first success it returns 0, the group
+    # exits 1, the || branch also runs, and one repo is reported both DONE
+    # and FAIL while fail_c climbs.
+    done_c=$(( done_c + 1 ))
+  else
+    echo "FAIL  $repo  (PR)"
+    fail_c=$(( fail_c + 1 ))
+  fi
 
 done <<< "$REPOS_LIST"
 
