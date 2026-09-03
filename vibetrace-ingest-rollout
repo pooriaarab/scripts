@@ -1,0 +1,321 @@
+#!/usr/bin/env bash
+# Roll Vibetrace ingest secrets into VibeCodeReview workflows.
+#
+# For every pooriaarab repo with .github/workflows/vibecodereview.yml,
+# adds vibetrace_ingest_url and vibetrace_ingest_token parameters.
+#
+# Dry-run is the default. Use --apply to open PRs and optionally set secrets.
+#
+# Usage:
+#   ./vibetrace-ingest-rollout                     # dry-run all eligible repos
+#   ./vibetrace-ingest-rollout --repo offrouter    # dry-run one repo
+#   ./vibetrace-ingest-rollout --apply             # open PRs fleet-wide
+#
+set -u
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PREFIXES_FILE="$SCRIPT_DIR/repo-prefixes.json"
+OWNER="pooriaarab"
+
+DRY=1
+TARGET_REPO=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --apply) DRY=0; shift ;;
+    --repo)
+      [ $# -ge 2 ] || { echo "ERROR: --repo requires a value"; exit 1; }
+      TARGET_REPO="$2"
+      shift 2
+      ;;
+    --help|-h) sed -n '2,13p' "$0"; exit 0 ;;
+    *) echo "unknown flag: $1"; exit 1 ;;
+  esac
+done
+
+for f in "$PREFIXES_FILE"; do
+  [ -r "$f" ] || { echo "ERROR: cannot read $f" >&2; exit 2; }
+done
+
+PREFIXES_B64=$(python3 -c "
+import json, base64, sys
+d = json.load(open('$PREFIXES_FILE'))
+sys.stdout.buffer.write(base64.b64encode(json.dumps(d).encode()))
+" 2>/dev/null) || { echo "ERROR: can't read $PREFIXES_FILE"; exit 1; }
+
+if [ -n "$TARGET_REPO" ] && ! printf '%s' "$TARGET_REPO" | grep -qE '^[A-Za-z0-9._-]+$'; then
+  echo "ERROR: --repo must match ^[A-Za-z0-9._-]+$ (got: $TARGET_REPO)"; exit 1
+fi
+
+if [ -n "$TARGET_REPO" ]; then
+  REPOS_LIST="$TARGET_REPO"
+else
+  REPOS_LIST=$(python3 -c "
+import json, base64
+prefixes = json.loads(base64.b64decode('$PREFIXES_B64').decode())
+for r in sorted(prefixes):
+    print(r)
+")
+fi
+
+echo "=== Vibetrace Ingest Rollout (dry-run=$DRY) ==="
+echo ""
+
+done_c=0
+already_c=0
+skipped_c=0
+fail_c=0
+
+put_file() {
+  local repo="$1" branch="$2" path="$3" content="$4" message="$5"
+  local sha_resp existing_sha payload_json
+  sha_resp=$(gh api "repos/$OWNER/$repo/contents/$path?ref=$branch" 2>&1) || {
+    if ! echo "$sha_resp" | grep -q '"Not Found"'; then
+      return 1
+    fi
+    sha_resp=""
+  }
+  existing_sha=$(echo "$sha_resp" | python3 -c "
+import json, sys
+raw = sys.stdin.read().strip()
+print(json.loads(raw).get('sha', '') if raw else '')
+" 2>/dev/null || echo "")
+  payload_json=$(BRANCH="$branch" EXISTING_SHA="$existing_sha" MSG="$message" python3 -c "
+import json, base64, os, sys
+content = sys.stdin.read()
+payload = {
+    'message': os.environ['MSG'],
+    'branch': os.environ['BRANCH'],
+    'content': base64.b64encode(content.encode()).decode(),
+}
+sha = os.environ.get('EXISTING_SHA', '')
+if sha:
+    payload['sha'] = sha
+print(json.dumps(payload))
+" <<< "$content")
+  gh api "repos/$OWNER/$repo/contents/$path" --method PUT --silent --input - <<< "$payload_json"
+}
+
+while IFS= read -r repo; do
+  [ -z "$repo" ] && continue
+
+  PREFIX=$(python3 -c "
+import json, base64
+prefixes = json.loads(base64.b64decode('$PREFIXES_B64').decode())
+print(prefixes.get('$repo', ''))
+")
+  if [ -z "$PREFIX" ]; then
+    echo "SKIP  $repo  (no prefix)"
+    skipped_c=$((skipped_c + 1))
+    continue
+  fi
+  PREFIX_UPPER=$(printf '%s' "$PREFIX" | tr '[:lower:]' '[:upper:]')
+
+  INFO=$(gh repo view "$OWNER/$repo" --json isFork,isArchived,diskUsage 2>/dev/null) || {
+    VIEW_ERR=$(gh repo view "$OWNER/$repo" --json isFork,isArchived,diskUsage 2>&1 >/dev/null)
+    if echo "$VIEW_ERR" | grep -qi 'could not resolve\|not found'; then
+      echo "SKIP  $repo  (no longer exists)"
+      skipped_c=$((skipped_c + 1))
+    else
+      echo "FAIL  $repo  (can't view)"
+      fail_c=$((fail_c + 1))
+    fi
+    continue
+  }
+  read -r IS_FORK IS_ARCHIVED DISK <<< "$(echo "$INFO" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+print(str(d['isFork']).lower(), str(d['isArchived']).lower(), d['diskUsage'])
+")"
+  if [ "$IS_ARCHIVED" = "true" ]; then echo "SKIP  $repo  (archived)"; skipped_c=$((skipped_c + 1)); continue; fi
+  if [ "$IS_FORK" = "true" ]; then echo "SKIP  $repo  (fork)"; skipped_c=$((skipped_c + 1)); continue; fi
+  if [ "$DISK" -lt 10 ]; then echo "SKIP  $repo  (under 10KB)"; skipped_c=$((skipped_c + 1)); continue; fi
+
+  YML_PATH=".github/workflows/vibecodereview.yml"
+  YML_RESP=$(gh api "repos/$OWNER/$repo/contents/$YML_PATH" 2>&1) || {
+    if echo "$YML_RESP" | grep -q '"Not Found"'; then
+      echo "SKIP  $repo  (no vibecodereview.yml)"
+      skipped_c=$((skipped_c + 1))
+    else
+      echo "FAIL  $repo  (can't view vibecodereview.yml)"
+      fail_c=$((fail_c + 1))
+    fi
+    continue
+  }
+
+  EXISTING_YML=$(echo "$YML_RESP" | python3 -c "
+import json, base64, sys
+d = json.load(sys.stdin)
+print(base64.b64decode(d['content']).decode())" 2>/dev/null) || {
+    echo "FAIL  $repo  (failed to decode vibecodereview.yml)"
+    fail_c=$((fail_c + 1))
+    continue
+  }
+
+  if echo "$EXISTING_YML" | grep -q "vibetrace_ingest_url"; then
+    echo "OK    $repo  (already has vibetrace_ingest_url)"
+    already_c=$((already_c + 1))
+    continue
+  fi
+
+  MODIFIED_YML=$(EXISTING_YML="$EXISTING_YML" python3 -c '
+import os, sys
+content = os.environ.get("EXISTING_YML", "")
+if "vibetrace_ingest_url" in content:
+    print(content, end="")
+    sys.exit(0)
+
+lines = content.splitlines()
+out = []
+found_uses = False
+modified = False
+
+for line in lines:
+    out.append(line)
+    if not modified and "uses: pooriaarab/vibecodereview" in line:
+        found_uses = True
+    if found_uses and not modified and line.strip() == "with:":
+        indent = len(line) - len(line.lstrip())
+        sub_indent = indent + 2
+        out.append(" " * sub_indent + "vibetrace_ingest_url: ${{ secrets.VIBETRACE_INGEST_URL }}")
+        out.append(" " * sub_indent + "vibetrace_ingest_token: ${{ secrets.VIBETRACE_INGEST_TOKEN }}")
+        modified = True
+        found_uses = False
+
+if not modified:
+    sys.exit(1)
+
+print("\n".join(out) + ("\n" if content.endswith("\n") else ""), end="")
+' 2>/dev/null) || {
+    echo "FAIL  $repo  (could not insert vibetrace parameters into vibecodereview.yml)"
+    fail_c=$((fail_c + 1))
+    continue
+  }
+
+  if [ "$DRY" -eq 1 ]; then
+    echo "WOULD  $repo  (prefix=$PREFIX)"
+    done_c=$((done_c + 1))
+    continue
+  fi
+
+  ISSUE_TITLE="Roll vibetrace ingest secrets into VCR workflows"
+  ISSUE_MARKER="<!-- vibetrace-ingest-rollout -->"
+  
+  ISSUE_NUM=$(gh issue list --repo "$OWNER/$repo" --state open --limit 50 \
+    --search "$ISSUE_TITLE in:title" --json number,title,body \
+    --jq "[.[] | select(.title == \"$ISSUE_TITLE\" and ((.body // \"\") | contains(\"$ISSUE_MARKER\"))) | .number] | first // empty" 2>/dev/null) || {
+    echo "FAIL  $repo  (issue lookup)"
+    fail_c=$((fail_c + 1))
+    continue
+  }
+  
+  if [ -z "$ISSUE_NUM" ]; then
+    ISSUE_NUM=$(gh issue create \
+      --repo "$OWNER/$repo" \
+      --title "$ISSUE_TITLE" \
+      --body "Roll Vibetrace ingest secrets into VibeCodeReview workflow.
+
+We want to add the VIBETRACE_INGEST_URL and VIBETRACE_INGEST_TOKEN secrets under the pooriaarab/vibecodereview step in \`.github/workflows/vibecodereview.yml\`.
+
+$ISSUE_MARKER
+" 2>/dev/null | grep -oE '[0-9]+$' | head -1)
+  fi
+  
+  if [ -z "$ISSUE_NUM" ]; then
+    echo "FAIL  $repo  (issue create)"
+    fail_c=$((fail_c + 1))
+    continue
+  fi
+
+  BRANCH="${PREFIX}-${ISSUE_NUM}-vibetrace-ingest-vcr"
+  DEFAULT_BRANCH=$(gh api "repos/$OWNER/$repo" --jq '.default_branch' 2>/dev/null)
+  SHA=$(gh api "repos/$OWNER/$repo/git/refs/heads/$DEFAULT_BRANCH" --jq '.object.sha' 2>/dev/null) || {
+    echo "FAIL  $repo  (SHA)"
+    fail_c=$((fail_c + 1))
+    continue
+  }
+  
+  if ! gh api "repos/$OWNER/$repo/git/refs/heads/$BRANCH" &>/dev/null; then
+    gh api "repos/$OWNER/$repo/git/refs" \
+      --method POST --silent \
+      -f ref="refs/heads/$BRANCH" \
+      -f sha="$SHA" 2>/dev/null || {
+      echo "FAIL  $repo  (branch)"
+      fail_c=$((fail_c + 1))
+      continue
+    }
+  fi
+
+  if [ -n "${VIBETRACE_INGEST_URL:-}" ]; then
+    echo "SET SECRET VIBETRACE_INGEST_URL on $repo"
+    gh secret set VIBETRACE_INGEST_URL --body "$VIBETRACE_INGEST_URL" --repo "$OWNER/$repo" >/dev/null || {
+      echo "FAIL  $repo  (failed to set VIBETRACE_INGEST_URL secret)"
+      fail_c=$((fail_c + 1))
+      continue
+    }
+  else
+    echo "SKIP SECRET VIBETRACE_INGEST_URL on $repo (env unset)"
+  fi
+
+  if [ -n "${VIBETRACE_INGEST_TOKEN:-}" ]; then
+    echo "SET SECRET VIBETRACE_INGEST_TOKEN on $repo"
+    gh secret set VIBETRACE_INGEST_TOKEN --body "$VIBETRACE_INGEST_TOKEN" --repo "$OWNER/$repo" >/dev/null || {
+      echo "FAIL  $repo  (failed to set VIBETRACE_INGEST_TOKEN secret)"
+      fail_c=$((fail_c + 1))
+      continue
+    }
+  else
+    echo "SKIP SECRET VIBETRACE_INGEST_TOKEN on $repo (env unset)"
+  fi
+
+  put_file "$repo" "$BRANCH" "$YML_PATH" "$MODIFIED_YML" "[$PREFIX_UPPER-$ISSUE_NUM] Add vibetrace secrets to VCR workflow" || {
+    echo "FAIL  $repo  (contents write on $BRANCH)"
+    fail_c=$((fail_c + 1))
+    continue
+  }
+
+  EXISTING_PR=$(gh pr list --repo "$OWNER/$repo" --head "$BRANCH" --state open --json number --jq '.[0].number // empty' 2>/dev/null) || {
+    echo "FAIL  $repo  (PR lookup)"
+    fail_c=$((fail_c + 1))
+    continue
+  }
+  if [ -n "$EXISTING_PR" ]; then
+    echo "DONE  $repo  (#$ISSUE_NUM -> $BRANCH -> reusing PR #$EXISTING_PR)"
+    done_c=$((done_c + 1))
+    continue
+  fi
+
+  PR_TITLE="[$PREFIX_UPPER-$ISSUE_NUM] Roll vibetrace ingest into VCR"
+  gh pr create \
+    --repo "$OWNER/$repo" \
+    --base "$DEFAULT_BRANCH" \
+    --head "$BRANCH" \
+    --title "$PR_TITLE" \
+    --body "Closes #$ISSUE_NUM
+
+## What
+
+Roll Vibetrace ingest secrets into VibeCodeReview workflow.
+Adds \`vibetrace_ingest_url\` and \`vibetrace_ingest_token\` to \`.github/workflows/vibecodereview.yml\`.
+
+## Why
+
+Required for automated code review telemetry and tracing.
+
+## How I verified
+
+Config-only rollout. Verified with bash -n on the template.
+
+Assisted-by: gemini:gemini-3.8-flash" \
+    2>/dev/null && {
+    echo "DONE  $repo  (#$ISSUE_NUM -> $BRANCH -> PR)"
+    done_c=$((done_c + 1))
+  } || {
+    echo "FAIL  $repo  (PR create)"
+    fail_c=$((fail_c + 1))
+  }
+
+done <<< "$REPOS_LIST"
+
+echo ""
+echo "=== Summary ==="
+echo "would/done: $done_c  already: $already_c  skipped: $skipped_c  failed: $fail_c"
+[ "$fail_c" -eq 0 ] || exit 1
