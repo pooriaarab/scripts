@@ -169,6 +169,24 @@ unavailable. Labels carry classification instead, in three groups.
 Every issue carries exactly four labels, one from each group. More than one from
 a group is a contradiction, not extra information.
 
+## Fields
+
+| Field | Rule |
+|---|---|
+| Labels | Exactly one from each of four groups. Specified above. |
+| Project | At most one, from the set named in the repo .agents/issues.md. Never create one. |
+| Milestone | At most one, from the milestones that already exist. Never create one. |
+| Relationships | A parent is a sub-issue. A blocker is an issue dependency. Never prose. |
+| Assignee | An agent never sets this. |
+
+The enumerated sets live in the repo `.agents/issues.md` beside the labels. A project name is repo-specific and cannot be derived from outside the repo.
+
+A field is checked only where the repo defines a set for it. Zero milestones exist across the fleet today, so a rule that always required one would fail every issue on day one and get the standard switched off. `requireProof` in `pr-standards` already works this way.
+
+A parent is a sub-issue and a blocker is an issue dependency, never prose. This covers `Depends on` as well as `Parent:` and `Blocked by:`. Ten phase epics in `content-rabbit` say `Depends on Phase 10` in prose while carrying zero real dependencies, which is the failure this rule exists to stop.
+
+An agent never sets an assignee, because assignment is a person deciding who does the work.
+
 ## Sub-issues and dependencies
 
 Both are native GitHub features and both work on private repos on this account,
