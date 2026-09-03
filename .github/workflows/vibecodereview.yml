@@ -19,6 +19,8 @@ jobs:
     steps:
       - uses: pooriaarab/vibecodereview@v1
         with:
+          vibetrace_ingest_url: ${{ secrets.VIBETRACE_INGEST_URL }}
+          vibetrace_ingest_token: ${{ secrets.VIBETRACE_INGEST_TOKEN }}
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           claude_code_oauth_token_2: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN_2 }}
           github_token: ${{ github.token }}
