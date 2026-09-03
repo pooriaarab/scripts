@@ -14,9 +14,11 @@ import {
   kindFromLabels,
   lintTemplates,
   parseHighStakesGlobs,
+  parseAllowedSets,
   parseSections,
   suggestLabels,
   validateBody,
+  validateFields,
   validateLabels,
 } from './issue-standards.mjs';
 
@@ -118,6 +120,51 @@ test('R4: prose merely mentioning a parent is not a false positive', () => {
   // check must not be wrong in.
   const body = FEATURE.replace('## How to verify', '## How to verify\nThe parent epic #1119 tracks the rest.\n');
   assert.equal(validateBody(body, 'feature').failures.length, 0);
+});
+
+test('R4: Depends on #12 fails, and names a native issue dependency', () => {
+  const result = validateBody(`Depends on #12\n\n${FEATURE}`, 'feature');
+  assert.ok(failed(result));
+  assert.ok(failedOn(result, 'native issue dependency'), JSON.stringify(result.failures));
+});
+
+test('R4: Depends on Phase 10 fails the same way', () => {
+  const result = validateBody(`Depends on Phase 10.\n\n${FEATURE}`, 'feature');
+  assert.ok(failed(result));
+  assert.ok(failedOn(result, 'native issue dependency'), JSON.stringify(result.failures));
+});
+
+test('R4: a sentence merely containing depends is not a false positive', () => {
+  // The rule is a line-leading label plus an issue or a phase, not the word.
+  const body = FEATURE.replace('## How to verify', '## How to verify\nThe result depends on the cache.\n');
+  assert.equal(validateBody(body, 'feature').failures.length, 0);
+});
+
+test('a project outside the allowed set fails, and names the allowed values', () => {
+  const allowed = parseAllowedSets([
+    '## Allowed projects',
+    '- Roadmap',
+    '- Launch',
+    '## Allowed milestones',
+    '- v1',
+  ].join('\n'));
+  const project = validateFields({ projects: ['Secret'], milestone: null }, allowed);
+  assert.ok(failed(project));
+  assert.ok(failedOn(project, 'Roadmap'), JSON.stringify(project.failures));
+  const mile = validateFields({ projects: [], milestone: 'v9' }, allowed);
+  assert.ok(failed(mile));
+  assert.ok(failedOn(mile, 'v1'), JSON.stringify(mile.failures));
+});
+
+test('a field with no set defined is not checked', () => {
+  // No Allowed projects or Allowed milestones heading means no vocabulary,
+  // so the field is skipped. Requiring one would fail every issue in a repo
+  // that has never created a milestone.
+  const allowed = parseAllowedSets('# Writing issues\n\nNo lists here.\n');
+  assert.equal(allowed.projects, null);
+  assert.equal(allowed.milestones, null);
+  const result = validateFields({ projects: ['Anything'], milestone: 'v9' }, allowed);
+  assert.equal(result.failures.length, 0);
 });
 
 test('R5: a success metric with no event name fails', () => {
