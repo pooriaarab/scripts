@@ -1450,6 +1450,43 @@ test('python3 counts as a command, like pytest already did', () => {
   assert.equal(fails('The pythonic idiom was verified'), true);
 });
 
+test('shell commands (bash, zsh, sh) count as commands', () => {
+  const body = (verified) => [
+    '## What', 'One sentence.',
+    '## Why', 'Because of the reason.',
+    '## How I verified', verified,
+    'Assisted-by: agent:model',
+  ].join('\n\n');
+  const fails = (text) => validateBody(body(text), 142, config)
+    .failures.some((f) => f.check === '## How I verified');
+
+  // B1 "$ bash t.sh" + "Results: 13 passed" -> body passes
+  assert.equal(fails('$ bash t.sh\nResults: 13 passed'), false);
+
+  // B2 the same, indented four spaces -> passes
+  assert.equal(fails('    $ bash t.sh\n    Results: 13 passed'), false);
+
+  // B3 the same, inside a fenced block -> passes
+  assert.equal(fails('```\n$ bash t.sh\nResults: 13 passed\n```'), false);
+
+  // B4 "$ sh t.sh" + a result line -> passes
+  assert.equal(fails('$ sh t.sh\npassed'), false);
+
+  // B5 "$ zsh t.sh" + a result line -> passes
+  assert.equal(fails('$ zsh t.sh\npassed'), false);
+
+  // B6 "finish the migration" + "ok" -> body FAILS
+  assert.equal(fails('finish the migration\nok'), true);
+
+  // B7 "pushd /tmp" + "ok" -> body FAILS
+  assert.equal(fails('pushd /tmp\nok'), true);
+
+  // B8 existing bunx / python3 / ./x.test.sh cases -> still pass
+  assert.equal(fails('bunx vitest run -> 214 passed'), false);
+  assert.equal(fails('python3 build-repo-prefixes.test.py\nOK'), false);
+  assert.equal(fails('./adopt-branch-pattern.test.sh\nALL PASS'), false);
+});
+
 test('prefix precedence holds on the CI path, not only in loadConfig', async () => {
   // #101 fixed the precedence and covered it through loadConfig, which is the
   // LOCAL path. The path that was broken is this one: runPr -> fetchRemoteConfig.
