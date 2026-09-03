@@ -387,8 +387,14 @@ guard_is_current() {
 }
 
 write_guard() {
-  local tmp stamp expected
+  local tmp stamp expected guard_real home_real
   expected=$(guard_expected_sha) || return 1
+  home_real=$(cd "$HOME" && pwd -P) || return 1
+  guard_real=$(resolve_real_path "$GUARD_DIR") || return 1
+  case "$guard_real" in
+    "$home_real/.local/share/pr-standards"|"$home_real/.local/share/pr-standards"/*) ;;
+    *) echo "FAIL    PreToolUse guard (guard directory resolves outside owned path: $GUARD_DIR -> $guard_real)"; return 1 ;;
+  esac
   mkdir -p "$GUARD_DIR" || return 1
   tmp=$(mktemp "$GUARD_DIR/.guard.XXXXXX") || return 1
   stamp="# pr-standards-guard installed from $expected on $(date -u +%F)"
@@ -431,6 +437,12 @@ handle_guard_drift() {
   if [ -x "$GUARD_DST" ] && guard_stamp_matches "$stamp_sha" "$body_sha" "$expected"; then
     echo "PASS  PreToolUse guard"
     return 0
+  fi
+  if guard_stamp_matches "$stamp_sha" "$body_sha" "$expected"; then
+    echo "FAIL  PreToolUse guard"
+    echo "      got:      not executable"
+    echo "      expected: $expected"
+    return 1
   fi
   echo "FAIL  PreToolUse guard"
   echo "      got:      stale"

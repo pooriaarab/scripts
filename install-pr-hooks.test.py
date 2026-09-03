@@ -650,6 +650,68 @@ def test_pre_push_still_installs_alongside_the_guard():
     return ok
 
 
+def test_pretooluse_drift_reports_not_executable():
+    """A missing execute bit is reported distinctly, not as stale with two shas."""
+    home, root, env, dest, sp = _guard_harness()
+    _guard_run(sp, env, "--apply", "--root", root)
+    os.chmod(dest, 0o644)
+    out = _guard_run(sp, env, "--drift")
+    expected = _expected_sha(sp)
+    ok = out.returncode != 0 and "not executable" in out.stdout and expected in out.stdout and "stale" not in out.stdout and "installed" not in out.stdout
+    print(f"  {'OK ' if ok else 'FAIL'} drift reports not executable, not duplicate shas")
+    return ok
+
+
+def test_pretooluse_apply_refuses_symlinked_guard_dir():
+    """A symlinked parent of the guard directory must not redirect the write."""
+    home, root, env, dest, sp = _guard_harness()
+    real_share = os.path.join(home, "real-share")
+    os.makedirs(real_share)
+    os.makedirs(os.path.join(home, ".local"))
+    os.symlink(real_share, os.path.join(home, ".local", "share"))
+    out = _guard_run(sp, env, "--apply", "--root", root)
+    outside = os.path.join(real_share, "pr-standards", "pr-standards-guard.sh")
+    ok = out.returncode != 0 and "resolves outside" in out.stdout and not os.path.exists(outside)
+    print(f"  {'OK ' if ok else 'FAIL'} apply refuses a symlinked guard directory")
+    return ok
+
+
+def test_installer_invoked_through_symlinked_script():
+    home, root, env, dest, sp = _guard_harness()
+    link = os.path.join(home, "install-pr-hooks-link")
+    os.symlink(str(HERE / "install-pr-hooks"), link)
+    out = sp.run([link, "--apply", "--root", root], capture_output=True, text=True, env=env)
+    ok = out.returncode == 0 and os.path.isfile(dest) and "wrote" in out.stdout
+    print(f"  {'OK ' if ok else 'FAIL'} installer works through a symlinked $0")
+    return ok
+
+def test_uninstall_succeeds_when_guard_blob_unresolvable():
+    """Uninstall does not need HEAD:hooks/pr-standards-guard.sh to resolve."""
+    home, root, env, dest, sp = _guard_harness()
+    _guard_run(sp, env, "--apply", "--root", root)
+    copy = os.path.join(home, "install-pr-hooks-copy")
+    pathlib.Path(copy).write_bytes(pathlib.Path(HERE / "install-pr-hooks").read_bytes())
+    os.chmod(copy, 0o755)
+    out = sp.run([copy, "--uninstall", "--apply", "--root", root], capture_output=True, text=True, env=env)
+    ok = out.returncode == 0 and not os.path.exists(dest) and "removed" in out.stdout
+    print(f"  {'OK ' if ok else 'FAIL'} uninstall works when guard source is unresolvable")
+    return ok
+
+
+def test_uninstall_removes_symlinked_guard():
+    """A symlinked GUARD_DST is removed, not followed, on uninstall."""
+    home, root, env, dest, sp = _guard_harness()
+    _guard_run(sp, env, "--apply", "--root", root)
+    other = os.path.join(home, "other-guard")
+    pathlib.Path(other).write_text("foreign\n")
+    os.remove(dest)
+    os.symlink(other, dest)
+    out = _guard_run(sp, env, "--uninstall", "--apply", "--root", root)
+    ok = out.returncode == 0 and not os.path.exists(dest) and not os.path.islink(dest) and os.path.isfile(other)
+    print(f"  {'OK ' if ok else 'FAIL'} uninstall removes a symlinked guard")
+    return ok
+
+
 for _guard_test in (
     test_pretooluse_dry_run_writes_nothing,
     test_pretooluse_apply_writes_stamped_copy_and_snippet,
@@ -660,6 +722,11 @@ for _guard_test in (
     test_pretooluse_uninstall_removes_and_drift_says_not_installed,
     test_pretooluse_never_writes_settings_or_outside_owned_dir,
     test_pre_push_still_installs_alongside_the_guard,
+    test_pretooluse_drift_reports_not_executable,
+    test_pretooluse_apply_refuses_symlinked_guard_dir,
+    test_installer_invoked_through_symlinked_script,
+    test_uninstall_succeeds_when_guard_blob_unresolvable,
+    test_uninstall_removes_symlinked_guard,
 ):
     if not _guard_test():
         ALL_OK = False
