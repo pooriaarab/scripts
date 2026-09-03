@@ -50,8 +50,10 @@ export const LABEL_GROUPS = {
 };
 
 const CHECKBOX_RE = /^\s*[-*]\s+\[[ xX]\]/m;
-// A parent written in prose is a parent no tool knows about.
-const NATIVE_LINK_RE = /^\s*(Parent|Blocked by)\s*:\s*#?\d+/im;
+// A relationship written in prose is a relationship no tool knows about.
+// Line-leading labels only, then an issue reference or a phase name. A
+// sentence that merely contains "depends" is not a relationship.
+const NATIVE_LINK_RE = /^\s*(Parent|Blocked by|Depends on|Blocks|Related to)\s*:?\s*(?:#?\d+|Phase\s+\S+)/im;
 // Event names are lowercase snake_case with at least one underscore, which is
 // what distinguishes a real one from a sentence.
 const EVENT_RE = /\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b/;
@@ -144,8 +146,8 @@ export function validateNativeLinks(body) {
     failures.push(fail(
       'parent or blocker in the body',
       match[0].trim(),
-      'a native sub-issue or issue dependency',
-      'Use the sub-issues API for a parent and issue dependencies for a blocker. Body text is invisible to every query, filter and board.',
+      'a native sub-issue or issue dependency, not body text',
+      'Use the sub-issues API for a parent and issue dependencies for a blocker or a dependency. A dependency is a native issue dependency, not body text. Body text is invisible to every query, filter and board.',
     ));
   }
   return { failures, passes: [] };
@@ -247,6 +249,111 @@ export function validateLabels(labels) {
       passes.push(`${group} label: ${found[0]}`);
     }
   }
+  return { failures, passes };
+}
+
+// Assignee is never checked. An agent does not assign work.
+
+// The allowed sets live in .agents/issues.md beside the high-stakes paths.
+// A field with no set is not checked: zero milestones exist across the fleet,
+// and a rule that always required one would fail every issue.
+export function parseAllowedSets(markdown) {
+  if (markdown == null) return { projects: null, milestones: null };
+  return {
+    projects: parseNamedList(markdown, 'Allowed projects'),
+    milestones: parseNamedList(markdown, 'Allowed milestones'),
+  };
+}
+
+function parseNamedList(markdown, heading) {
+  const target = normaliseHeading(heading);
+  const lines = String(markdown).split('\n');
+  let inSection = false;
+  let seen = false;
+  const items = [];
+
+  const takeItem = (raw) => {
+    const text = String(raw).replace(/^\*\*|\*\*$/g, '').trim();
+    if (!text || /^[-:]+$/.test(text)) return;
+    if (/^(project|projects|milestone|milestones|name|title|notes|why)$/i.test(text)) return;
+    const tick = /`([^`]+)`/.exec(text);
+    items.push(tick ? tick[1].trim() : text.replace(/[,.]$/, '').trim());
+  };
+
+  for (const line of lines) {
+    const headingMatch = /^#{1,6}\s+(.+?)\s*$/.exec(line);
+    if (headingMatch) {
+      if (inSection) break;
+      inSection = normaliseHeading(headingMatch[1]) === target;
+      seen = seen || inSection;
+      continue;
+    }
+    const labelled = /^(?:\*\*)?(Allowed (?:projects|milestones))(?:\*\*)?\s*:?\s*(.*)$/i.exec(line.trim());
+    if (labelled) {
+      if (normaliseHeading(labelled[1]) === target) {
+        seen = true;
+        inSection = true;
+        if (labelled[2]) {
+          for (const part of labelled[2].split(',')) takeItem(part);
+        }
+      } else if (inSection) {
+        break;
+      }
+      continue;
+    }
+    if (!inSection) continue;
+    if (/^\s*\|/.test(line)) {
+      if (/^\s*\|\s*:?-/.test(line)) continue;
+      const cells = line.split('|').map((cell) => cell.trim()).filter(Boolean);
+      if (cells[0]) takeItem(cells[0]);
+      continue;
+    }
+    const bullet = /^\s*(?:[-*]|\d+\.)\s+(.+)$/.exec(line);
+    if (bullet) takeItem(bullet[1]);
+  }
+  return seen ? items : null;
+}
+
+function namesMatch(left, right) {
+  return String(left).trim().toLowerCase() === String(right).trim().toLowerCase();
+}
+
+export function validateFields(issue, allowed) {
+  const failures = [];
+  const passes = [];
+  const projects = Array.isArray(issue?.projects)
+    ? issue.projects.filter(Boolean)
+    : (issue?.project ? [issue.project] : []);
+  const milestone = issue?.milestone || null;
+  const sets = allowed || {};
+
+  if (Array.isArray(sets.projects)) {
+    const unexpected = projects.filter((name) => !sets.projects.some((allowedName) => namesMatch(name, allowedName)));
+    if (unexpected.length) {
+      failures.push(fail(
+        'project',
+        unexpected.join(', '),
+        `one of: ${sets.projects.join(', ')}`,
+        `Move the issue to an allowed project. Allowed projects: ${sets.projects.join(', ')}.`,
+      ));
+    } else if (projects.length) {
+      passes.push(`project: ${projects.join(', ')}`);
+    }
+  }
+
+  if (Array.isArray(sets.milestones)) {
+    if (milestone && !sets.milestones.some((allowedName) => namesMatch(milestone, allowedName))) {
+      failures.push(fail(
+        'milestone',
+        milestone,
+        `one of: ${sets.milestones.join(', ')}`,
+        `Set a milestone from the allowed set. Allowed milestones: ${sets.milestones.join(', ')}.`,
+      ));
+    } else if (milestone) {
+      passes.push(`milestone: ${milestone}`);
+    }
+  }
+
   return { failures, passes };
 }
 
@@ -439,7 +546,35 @@ export function fetchIssue(repo, number) {
     title: issue.title || '',
     body: issue.body || '',
     labels: (issue.labels || []).map((label) => (typeof label === 'string' ? label : label.name)),
+    // REST carries the milestone. Projects v2 need a second call.
+    milestone: issue.milestone && issue.milestone.title ? issue.milestone.title : null,
+    projects: fetchIssueProjects(repo, number),
   };
+}
+
+// Same reader the suggest command uses for high-stakes paths. One fetch of
+// .agents/issues.md, then each parser takes what it needs.
+export function fetchRepoFile(repo, filePath) {
+  try {
+    const file = ghJson(['api', `repos/${repo}/contents/${filePath}`]);
+    if (!file || file.type !== 'file' || !file.content) return null;
+    return Buffer.from(String(file.content).replace(/\n/g, ''), 'base64').toString('utf8');
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 404) return null;
+    throw error;
+  }
+}
+
+function fetchIssueProjects(repo, number) {
+  try {
+    // title is the project name. Token may lack read:project; then this is
+    // empty rather than a check failure.
+    const extra = ghJson(['issue', 'view', String(number), '--repo', repo, '--json', 'projectItems']);
+    return (extra.projectItems || []).map((item) => item.title).filter(Boolean);
+  } catch (error) {
+    if (error instanceof ApiError) return [];
+    throw error;
+  }
 }
 
 function humanFailure(item, prefix = '      ') {
@@ -528,9 +663,12 @@ function runCheck(options) {
   }
   const issue = fetchIssue(options.repo, options.number);
   const labelResult = validateLabels(issue.labels);
+  // Reuse the suggest-command reader. Do not open .agents/issues.md a second way.
+  const allowed = parseAllowedSets(fetchRepoFile(options.repo, '.agents/issues.md'));
+  const fieldResult = validateFields(issue, allowed);
   const kind = kindFromLabels(issue.labels);
-  const failures = [...labelResult.failures];
-  const passes = [...labelResult.passes];
+  const failures = [...labelResult.failures, ...fieldResult.failures];
+  const passes = [...labelResult.passes, ...fieldResult.passes];
   if (kind) {
     const bodyResult = validateBody(issue.body, kind);
     failures.push(...bodyResult.failures);
@@ -653,17 +791,6 @@ function runLint(options) {
   return finish({ mode: 'lint', subject: dir, failures: result.failures, passes: result.passes }, options.json);
 }
 
-function fetchRepoFile(repo, filePath) {
-  try {
-    const file = ghJson(['api', `repos/${repo}/contents/${filePath}`]);
-    if (!file || file.type !== 'file' || !file.content) return null;
-    return Buffer.from(String(file.content).replace(/\n/g, ''), 'base64').toString('utf8');
-  } catch (error) {
-    if (error instanceof ApiError && error.status === 404) return null;
-    throw error;
-  }
-}
-
 function fetchOpenIssues(repo) {
   // Up to 1000 issues with full bodies can exceed execFileSync's default 1MB
   // stdout buffer and crash with ENOBUFS; pr-standards.mjs raises the same
@@ -772,6 +899,11 @@ function runSelfcheck(json) {
   expect('an unfilled form placeholder fails', validateBody(good.replace('Today: nothing. Wanted: a badge.', 'Today:\nWanted:'), 'feature').failures.length > 0);
   expect('criteria without a checkbox fails', validateBody(good.replace('- [ ] The badge renders.', 'It renders.'), 'feature').failures.length > 0);
   expect('a Parent line fails', validateBody(`Parent: #12\n${good}`, 'feature').failures.length > 0);
+  expect('a Depends on issue line fails', validateBody(`Depends on #12\n${good}`, 'feature').failures.length > 0);
+  expect('a Depends on Phase line fails', validateBody(`Depends on Phase 10.\n${good}`, 'feature').failures.length > 0);
+  expect('prose containing depends does not fail', validateBody(good.replace('Open the list. The badge is there.', 'The result depends on the cache. Open the list. The badge is there.'), 'feature').failures.length === 0);
+  expect('a project outside the allowed set fails', validateFields({ projects: ['Secret'] }, { projects: ['Roadmap'], milestones: null }).failures.length > 0);
+  expect('a field with no set defined passes', validateFields({ projects: ['Anything'], milestone: 'v9' }, { projects: null, milestones: null }).failures.length === 0);
   expect('a success metric with no event fails', validateBody(good.replace('Event: publish_success', 'Event: to be decided'), 'feature').failures.length > 0);
   expect('an epic with criteria fails', validateBody('## Job to be done\nx\n## Slices\n- [ ] a\n## Out of scope\nx\n## Acceptance criteria\n- [ ] b', 'epic').failures.length > 0);
   expect('a full label set passes', validateLabels(['feature', 'mini', 'route:mechanical', 'triage']).failures.length === 0);
