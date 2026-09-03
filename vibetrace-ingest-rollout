@@ -250,7 +250,7 @@ $ISSUE_MARKER
 
   if [ -n "${VIBETRACE_INGEST_URL:-}" ]; then
     echo "SET SECRET VIBETRACE_INGEST_URL on $repo"
-    gh secret set VIBETRACE_INGEST_URL --body-file - --repo "$OWNER/$repo" >/dev/null <<< "$VIBETRACE_INGEST_URL" || {
+    printf '%s' "$VIBETRACE_INGEST_URL" | gh secret set VIBETRACE_INGEST_URL --body-file - --repo "$OWNER/$repo" >/dev/null || {
       echo "FAIL  $repo  (failed to set VIBETRACE_INGEST_URL secret)"
       fail_c=$((fail_c + 1))
       continue
@@ -261,7 +261,7 @@ $ISSUE_MARKER
 
   if [ -n "${VIBETRACE_INGEST_TOKEN:-}" ]; then
     echo "SET SECRET VIBETRACE_INGEST_TOKEN on $repo"
-    gh secret set VIBETRACE_INGEST_TOKEN --body-file - --repo "$OWNER/$repo" >/dev/null <<< "$VIBETRACE_INGEST_TOKEN" || {
+    printf '%s' "$VIBETRACE_INGEST_TOKEN" | gh secret set VIBETRACE_INGEST_TOKEN --body-file - --repo "$OWNER/$repo" >/dev/null || {
       echo "FAIL  $repo  (failed to set VIBETRACE_INGEST_TOKEN secret)"
       fail_c=$((fail_c + 1))
       continue
