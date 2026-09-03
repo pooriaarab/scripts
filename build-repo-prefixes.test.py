@@ -106,27 +106,28 @@ class RegistryTest(unittest.TestCase):
         for name in newcomers:
             self.assertTrue(VALID(out[name]), f"{name} -> {out.get(name)!r}")
 
-    def test_a_collision_prefers_a_name_derived_prefix_over_the_fallback(self):
-        # Without this the candidate ordering is untestable: every assertion above
-        # only checks validity and uniqueness, which the alphabetic fallback also
-        # satisfies. A prefix a human has to read should come from the name.
+    def test_a_collision_resolves_to_unique_valid_prefixes(self):
         # Three names, so extension actually happens: with a single newcomer there
         # is no collision and the candidate list is never consulted at all.
+        #
+        # This used to also assert that the first newcomer keeps a name-derived
+        # prefix rather than the alphabetic fallback, via
+        # `squashed.startswith(prefix) or prefix.startswith("v")`. That assertion
+        # was vacuous: every vibe* fallback candidate is generated from the
+        # "vib"/"vi" stem, so it starts with "v" regardless of whether derivation
+        # ever ran, and it passed even when checked against the real registry,
+        # where vibe/vib/vi and viba through vibq are already taken by the 44
+        # vibe* repos registered above -- so vibenotebooks, the "first" newcomer,
+        # already falls straight to the alphabetic tail here, not just its
+        # crowded siblings. There is no longer a name in this namespace where
+        # the assertion would exercise the case it claimed to guard.
+        #
+        # What the resolver actually must guarantee, and what stays checked, is
+        # uniqueness and validity.
         registry = self.registry()
         newcomers = ["vibenotebooks", "vibenotepad", "vibenoteworthy"]
         out, _ = self.run_main(list(registry) + newcomers, registry)
         self.assertIsNotNone(out)
-        # Derivability is a preference, not a guarantee, and it stops being
-        # achievable in a crowded namespace. Forty-four repos are named vibe*,
-        # so the 2 to 4 letter space runs out and the fallback is the only
-        # thing left: vibedaily holds vibb, vibebuild holds viba. Those are
-        # unmemorable and that is a real cost, but a prefix is permanent once
-        # a branch has used it, so the alternative is refusing to register a
-        # repo at all.
-        #
-        # What must hold is uniqueness and validity. Assert those, and assert
-        # derivability only for the first newcomer, which is the case where
-        # the candidate list is genuinely consulted before it is exhausted.
         seen = set()
         for name in newcomers:
             prefix = out[name]
@@ -134,12 +135,6 @@ class RegistryTest(unittest.TestCase):
                 self.assertRegex(prefix, r"^[a-z]{2,4}$", f"{name} -> {prefix!r} is not a valid prefix")
                 self.assertNotIn(prefix, seen, f"{name} -> {prefix!r} collides with an earlier newcomer")
                 seen.add(prefix)
-        first = newcomers[0]
-        squashed = first.replace("-", "")
-        self.assertTrue(
-            squashed.startswith(out[first]) or out[first].startswith("v"),
-            f"{first} -> {out[first]!r} came from the fallback even before the space was crowded",
-        )
 
     def test_a_registered_prefix_is_never_reassigned(self):
         registry = self.registry()
