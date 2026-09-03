@@ -100,9 +100,17 @@ gh_write() {
   # WRITE_PACE_SECONDS after the attempt before it.
   local delay="$WRITE_PACE_SECONDS"
   local err
+  # Buffer stdin once. Some callers pipe a payload in via a heredoc
+  # (`gh_write gh api ... <<< "$PAYLOAD_JSON"`); that heredoc is a
+  # temp file, and the first "$@" attempt below reads it to EOF. A
+  # retry that read the same fd again would see EOF immediately and
+  # send an empty body instead of the payload. Re-feeding a buffered
+  # copy on every attempt keeps retries identical to the first try.
+  local stdin_buf=""
+  [ -t 0 ] || stdin_buf=$(cat)
   GH_WRITE_OUT=""
   while [ "$attempt" -le "$max_attempts" ]; do
-    if err=$("$@" 2>&1); then
+    if err=$(printf '%s\n' "$stdin_buf" | "$@" 2>&1); then
       GH_WRITE_OUT="$err"
       sleep "$WRITE_PACE_SECONDS"
       return 0
