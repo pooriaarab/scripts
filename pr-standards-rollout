@@ -106,6 +106,13 @@ gh_write() {
   # retry that read the same fd again would see EOF immediately and
   # send an empty body instead of the payload. Re-feeding a buffered
   # copy on every attempt keeps retries identical to the first try.
+  #
+  # This whole function runs inside the outer `while read -r repo`
+  # loop, so a call with no heredoc of its own inherits that loop's
+  # fd0 (the REPOS_LIST here-string). `cat` on that fd would drain
+  # the remaining repo list and end the loop early. Callers with no
+  # payload (issue/branch/PR create) must redirect `</dev/null` so
+  # this reads an empty, already-at-EOF fd instead.
   local stdin_buf=""
   [ -t 0 ] || stdin_buf=$(cat)
   GH_WRITE_OUT=""
@@ -530,7 +537,7 @@ Branch names: \`$PREFIX-<issue>-<slug>\`
 PR titles: \`[$PREFIX_UPPER-<ISSUE>] description\`
 
 $ISSUE_MARKER
-"; then
+" </dev/null; then
     ISSUE_NUM=$(printf '%s\n' "$GH_WRITE_OUT" | grep -oE '[0-9]+$' | head -1)
   else
     ISSUE_NUM=""
@@ -557,7 +564,7 @@ $ISSUE_MARKER
     if ! gh_write gh api "repos/$OWNER/$repo/git/refs" \
       --method POST --silent \
       -f ref="refs/heads/$BRANCH" \
-      -f sha="$SHA"; then
+      -f sha="$SHA" </dev/null; then
       echo "FAIL  $repo  (branch)"
       fail_c=$(( fail_c + 1 ))
       continue
@@ -721,7 +728,7 @@ $PRECHECK_OUT
 The remaining rules -- the body's shape, the size caps, the commit trailers --
 are judged by the same checker when it runs on this PR.
 
-Assisted-by: pooriaarab/scripts:pr-standards-rollout"; then
+Assisted-by: pooriaarab/scripts:pr-standards-rollout" </dev/null; then
     echo "DONE  $repo  (#$ISSUE_NUM -> $BRANCH -> PR)"
     # An assignment, not (( done_c++ )). Post-increment returns the value
     # before incrementing, so on the first success it returns 0, the group
