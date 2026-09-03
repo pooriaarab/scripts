@@ -274,9 +274,14 @@ repo chose:
 {
   "prefix": "cr",
   "maxLines": 900,
+  "maxBaseCommitsBehind": 20,
   "allowChoreEscape": true
 }
 ```
+
+`maxBaseCommitsBehind` defaults to 10. Above that limit, the checker names the
+base commits that arrived after the branch point. It warns for independent
+files and fails when the base and pull request change the same file.
 
 The full set of keys and their defaults is `DEFAULT_CONFIG` in `pr-standards.mjs`.
 
