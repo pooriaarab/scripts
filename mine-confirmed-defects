@@ -1,0 +1,345 @@
+#!/usr/bin/env bash
+# Mine independently confirmed PR defects. Bots, including vibecodereview[bot],
+# are never evidence. A later change counts only when it undoes the PR.
+set -euo pipefail
+
+usage() {
+  cat <<'USAGE'
+Usage: mine-confirmed-defects [owner/repo ...] [--out FILE] [--max N] [--validate FILE]
+
+  owner/repo      repos to mine (default: the eight fleet repos)
+  --out FILE      write confirmed-defects.json (default: confirmed-defects.json)
+  --max N         cap after a deterministic stratified pick (default: 100)
+  --validate FILE check a dataset; print case and error counts
+  --help          show this help
+
+Evidence: revert | later-fix-commit | linked-fix-issue | in-pr-correction.
+A later change counts only when it deletes a line the PR added. Bots
+are dropped. Lens keywords and the mapping order are in mine-confirmed-defects.md.
+USAGE
+}
+
+OUT="confirmed-defects.json"
+MAX=100
+VALIDATE=""
+REPOS=()
+pint() {
+  [[ "${2:-}" =~ ^[0-9]+$ ]] && (( 10#$2 > 0 )) || { echo "error: $1 needs a positive integer" >&2; exit 2; }
+  printf '%s' "$((10#$2))"
+}
+while (( $# )); do
+  case "$1" in
+    --out) OUT="${2:-}"; [[ -n "$OUT" ]] || { echo "error: --out needs a path" >&2; exit 2; }; shift 2 ;;
+    --max) MAX=$(pint --max "${2:-}"); shift 2 ;;
+    --validate) VALIDATE="${2:-}"; [[ -n "$VALIDATE" ]] || { echo "error: --validate needs a path" >&2; exit 2; }; shift 2 ;;
+    --help|-h) usage; exit 0 ;;
+    --) shift; break ;;
+    -*) echo "error: unknown flag $1" >&2; usage >&2; exit 2 ;;
+    *) REPOS+=("$1"); shift ;;
+  esac
+done
+while (( $# )); do REPOS+=("$1"); shift; done
+for r in "${REPOS[@]+"${REPOS[@]}"}"; do
+  [[ "$r" =~ ^[A-Za-z0-9_.\-]+/[A-Za-z0-9_.\-]+$ ]] || { echo "error: owner/repo must match [A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+" >&2; exit 2; }
+done
+command -v python3 >/dev/null || { echo "error: python3 not found" >&2; exit 3; }
+[[ -n "$VALIDATE" ]] || command -v gh >/dev/null || { echo "error: gh CLI not found" >&2; exit 3; }
+export OUT MAX VALIDATE REPOS_STR="${REPOS[*]+"${REPOS[*]}"}"
+
+python3 - <<'PY'
+import json, os, re, subprocess, sys
+from collections import defaultdict
+OUT, MAX = os.environ["OUT"], int(os.environ["MAX"])
+VALIDATE = os.environ.get("VALIDATE") or ""
+REPOS = sorted(set(os.environ.get("REPOS_STR", "").split() or [
+    "pooriaarab/beeloud", "pooriaarab/content-rabbit", "pooriaarab/imecore",
+    "pooriaarab/manorslop", "pooriaarab/replytosocial", "pooriaarab/scripts",
+    "pooriaarab/skills", "pooriaarab/vibecodereview",
+]))
+LENSES = ("security", "performance", "scope", "maintainability", "correctness")
+KINDS = ("later-fix-commit", "revert", "linked-fix-issue", "in-pr-correction")
+BOTS = {"cursoragent", "dependabot", "renovate", "github-actions"}
+SKIP = re.compile(r"(?i)(?:^|/)(?:[^/]*\.lock|bun\.lockb|.*\.(?:svg|png|jpg|jpeg|gif|webp|ico))$")
+FIX_TITLE = re.compile(r"(?i)^(?:\[[^\]]+\]\s*)?(?:hot)?fix\b|^revert\b")
+HUMAN_FIX = re.compile(r"(?i)^(?:fix|hotfix|correct|undo|revert)\b")
+REVIEWISH = re.compile(r"(?i)\b(?:address review|review comments?|council finding|apply review|from the review)\b")
+REVERT_TITLE = re.compile(r'(?i)^Revert "(.+?)"(?:\s*\(#\d+\))?$')
+CLOSE_REF = re.compile(
+    r"(?i)(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s*(?:([A-Za-z0-9_.\-]+/[A-Za-z0-9_.\-]+)#|#)(\d+)"
+)
+LENS_WORDS = (
+    ("security", re.compile(r"(?i)\b(?:auth|token|secret|oauth|permission|credential|injection|xss|csrf|privilege|password)\b")),
+    ("performance", re.compile(r"(?i)\b(?:timeout|leak|latency|slow|memory|cache|n\+1|overhead|cpu)\b")),
+    ("scope", re.compile(r"(?i)out of scope|\bunrelated\b|\bextra\b|drive-by|shouldn't")),
+    ("maintainability", re.compile(r"(?i)\b(?:lint|rename|dead code|duplicate|complexity|format)\b")),
+)
+PATCHES = {}
+def die(msg):
+    sys.stderr.write(msg + "\n")
+    sys.exit(1)
+def is_bot(login, name=""):
+    for ident in (login, name):
+        if ident and (ident.lower().endswith(("[bot]", "-bot")) or ident.lower() in BOTS):
+            return True
+    return not (login or name)
+def src_files(paths):
+    return [p for p in paths if p and not SKIP.search(p)]
+def lens_for(*texts):
+    for blob in texts:
+        for name, rx in LENS_WORDS:
+            if blob and rx.search(blob):
+                return name
+    return "correctness"
+def first_line(patch):
+    m = re.search(r"\+(\d+)", patch or "")
+    return int(m.group(1)) if m else 1
+def signed_lines(patch, mark):
+    out = []
+    for line in (patch or "").splitlines():
+        if line.startswith(mark) and not line.startswith(mark * 3):
+            s = line[1:].strip()
+            if len(s) >= 10:
+                out.append(s)
+    return out
+def closing_refs(text, repo):
+    nums = []
+    for m in CLOSE_REF.finditer(text or ""):
+        if m.group(1) and m.group(1) != repo:
+            continue
+        nums.append(int(m.group(2)))
+    return nums
+def validate(doc):
+    errors, cases, seen = [], doc.get("cases"), set()
+    if not isinstance(cases, list):
+        return ["cases is not an array"]
+    for i, case in enumerate(cases):
+        miss = [k for k in ("id", "repository", "pr", "mergedAt", "diff", "defects") if k not in case]
+        if miss or not isinstance(case.get("pr"), int) or not case.get("diff"):
+            errors.append(f"case[{i}] invalid")
+        if case.get("id") in seen:
+            errors.append(f"duplicate id {case.get('id')}")
+        seen.add(case.get("id"))
+        defects = case.get("defects")
+        if not isinstance(defects, list) or not defects:
+            errors.append(f"case[{i}] has no defects")
+            continue
+        for j, d in enumerate(defects):
+            ev = d.get("labelEvidence") or {}
+            bad = (any(k not in d for k in ("id", "lens", "path", "line", "trigger", "labelEvidence"))
+                   or d.get("lens") not in LENSES or ev.get("kind") not in KINDS
+                   or not isinstance(d.get("line"), int) or d.get("line") < 1
+                   or not re.search(r"(?i)^given\b", d.get("trigger") or "") or len(d.get("trigger") or "") < 24
+                   or not str(ev.get("url") or "").startswith("https://github.com/"))
+            if bad:
+                errors.append(f"defect[{i}.{j}] invalid")
+    return errors
+def print_validation(doc, errors):
+    print(f"cases: {len(doc.get('cases') or [])}")
+    print(f"errors: {len(errors)}")
+    for err in errors:
+        print(err, file=sys.stderr)
+    return 0 if not errors else 1
+if VALIDATE:
+    try:
+        doc = json.load(open(VALIDATE))
+    except (OSError, json.JSONDecodeError) as e:
+        die(f"error: cannot read {VALIDATE}: {e}")
+    sys.exit(print_validation(doc, validate(doc)))
+def gh_json(args):
+    try:
+        out = subprocess.check_output(["gh", "api"] + args, text=True)
+    except subprocess.CalledProcessError as e:
+        die(f"error: gh api {' '.join(args[:3])} failed (exit {e.returncode})")
+    try:
+        return json.loads(out)
+    except json.JSONDecodeError as e:
+        die(f"error: invalid JSON: {e}")
+def as_list(payload):
+    return payload if isinstance(payload, list) else ([payload] if isinstance(payload, dict) else [])
+def fetch_prs(repo):
+    prs = []
+    for node in as_list(gh_json(["--paginate", f"repos/{repo}/pulls?state=closed&per_page=100&sort=created&direction=asc"])):
+        if not node or not node.get("merged_at") or not node.get("number"):
+            continue
+        num = int(node["number"])
+        commits = []
+        for c in as_list(gh_json(["--paginate", f"repos/{repo}/pulls/{num}/commits"])):
+            login = (c.get("author") or {}).get("login") or ""
+            name = ((c.get("commit") or {}).get("author") or {}).get("name") or ""
+            msg = ((c.get("commit") or {}).get("message") or "").split("\n", 1)[0]
+            commits.append({"oid": c.get("sha") or "", "subject": msg, "authors": [(login, name)]})
+        files = [n.get("path") for n in ((node.get("files") or {}).get("nodes") or []) if n.get("path")]
+        prs.append({
+            "repo": repo, "number": num, "title": node.get("title") or "",
+            "body": node.get("body") or "", "mergedAt": node["merged_at"],
+            "url": node.get("html_url") or f"https://github.com/{repo}/pull/{num}",
+            "author": (node.get("user") or {}).get("login") or "",
+            "files": files, "commits": commits,
+        })
+    prs.sort(key=lambda p: (p["mergedAt"], p["number"]))
+    return prs
+def fetch_patches(repo, number):
+    key = (repo, number)
+    if key not in PATCHES:
+        out = {}
+        for item in as_list(gh_json(["--paginate", f"repos/{repo}/pulls/{number}/files"])):
+            if item.get("filename"):
+                out[item["filename"]] = item.get("patch") or ""
+        PATCHES[key] = out
+    return PATCHES[key]
+def ensure_files(pr):
+    if not pr["files"]:
+        pr["files"] = list(fetch_patches(pr["repo"], pr["number"]))
+    return pr["files"]
+def human(commit):
+    return [(l, n) for l, n in commit.get("authors") or [] if not is_bot(l, n)]
+def in_pr_defects(pr):
+    out = []
+    for commit in pr["commits"][1:]:
+        subj = commit["subject"].strip()
+        if not (human(commit) and commit["oid"] and HUMAN_FIX.search(subj) and not REVIEWISH.search(subj)):
+            continue
+        path = (src_files(pr["files"]) or pr["files"] or ["unknown"])[0]
+        out.append({
+            "kind": "in-pr-correction",
+            "url": f"https://github.com/{pr['repo']}/commit/{commit['oid']}",
+            "summary": subj, "path": path, "line": 1,
+        })
+    return out
+def revert_target(pr, by_title, by_number):
+    for text in [pr["title"]] + [c["subject"] for c in pr["commits"]]:
+        m = REVERT_TITLE.match(text.strip())
+        if m:
+            hit = by_title.get(m.group(1).strip().lower())
+            if hit and hit["number"] != pr["number"] and hit["mergedAt"] <= pr["mergedAt"]:
+                return hit
+        low = text.lower()
+        for rx in (r"reverts #(\d+)", r"revert of #(\d+)"):
+            mm = re.search(rx, low)
+            if mm:
+                hit = by_number.get(int(mm.group(1)))
+                if hit and hit["number"] != pr["number"]:
+                    return hit
+    return None
+def undo_hit(prev, later, shared):
+    a, b = fetch_patches(prev["repo"], prev["number"]), fetch_patches(later["repo"], later["number"])
+    for path in sorted(p for p in (shared or (set(a) & set(b))) if p in a and p in b and not SKIP.search(p)):
+        added, deleted = set(signed_lines(a[path], "+")), set(signed_lines(b[path], "-"))
+        if added and deleted and added & deleted:
+            return path, first_line(a[path])
+    return None
+def later_fixes(pr, earlier):
+    if is_bot(pr["author"]) or any(is_bot(l, n) for c in pr["commits"] for l, n in c["authors"]):
+        return []
+    refs = set(closing_refs(pr["body"], pr["repo"])) | set(closing_refs(pr["title"], pr["repo"]))
+    hits = []
+    for prev in earlier:
+        if prev["number"] not in refs:
+            continue
+        ensure_files(pr); ensure_files(prev)
+        shared = set(src_files(pr["files"])).intersection(src_files(prev["files"]))
+        hit = undo_hit(prev, pr, shared)
+        if hit:
+            hits.append((prev, hit[0], hit[1]))
+    if hits:
+        return hits[:3]
+    if not FIX_TITLE.search(pr["title"].strip()):
+        return []
+    ensure_files(pr)
+    src = set(src_files(pr["files"]))
+    if not src:
+        return []
+    for prev in reversed(earlier[-20:]):
+        ensure_files(prev)
+        shared = src.intersection(src_files(prev["files"]))
+        hit = undo_hit(prev, pr, shared) if shared else None
+        if hit:
+            hits.append((prev, hit[0], hit[1]))
+    return hits
+def add_raw(bag, pr, kind, url, summary, path, line=1):
+    bag[(pr["repo"], pr["number"])].append(
+        {"kind": kind, "url": url, "summary": summary, "path": path, "line": line}
+    )
+all_prs, raw_cases = {}, defaultdict(list)
+for repo in REPOS:
+    print(f"mining {repo}", file=sys.stderr)
+    all_prs[repo] = fetch_prs(repo)
+for repo, prs in all_prs.items():
+    by_number = {p["number"]: p for p in prs}
+    by_title = {}
+    for p in prs:
+        by_title.setdefault(p["title"].strip().lower(), p)
+    for i, pr in enumerate(prs):
+        for raw in in_pr_defects(pr):
+            raw_cases[(repo, pr["number"])].append(raw)
+        target = revert_target(pr, by_title, by_number)
+        bot_rev = is_bot(pr["author"]) or any(is_bot(l, n) for c in pr["commits"] for l, n in c["authors"])
+        if target and not bot_rev:
+            ensure_files(pr); ensure_files(target)
+            shared = set(src_files(pr["files"])).intersection(src_files(target["files"]))
+            hit = undo_hit(target, pr, shared)
+            path = (hit[0] if hit else (src_files(target["files"]) or target["files"] or ["unknown"])[0])
+            add_raw(raw_cases, target, "revert", pr["url"], pr["title"], path, hit[1] if hit else 1)
+        if REVERT_TITLE.match(pr["title"].strip()):
+            continue
+        for prev, path, line in later_fixes(pr, prs[:i]):
+            add_raw(raw_cases, prev, "later-fix-commit", pr["url"], pr["title"], path, line)
+cases = []
+for (repo, number), extras in raw_cases.items():
+    pr = next(p for p in all_prs[repo] if p["number"] == number)
+    files = fetch_patches(repo, number)
+    extras.sort(key=lambda r: (r["kind"], r["url"], r["path"]))
+    seen, defects = set(), []
+    for raw in extras:
+        if raw["url"] in seen:
+            continue
+        seen.add(raw["url"])
+        path, line = raw["path"], raw["line"]
+        if path in files:
+            line = first_line(files[path])
+        elif files:
+            path = (src_files(files) or list(files))[0]
+            line = first_line(files[path])
+        ev = re.sub(r"(?i)^(fix|hotfix|correct|undo|revert)[:\s]+", "", raw["summary"]).strip().rstrip(".")
+        defects.append({
+            "id": f"{repo}#{number}.{len(defects)+1}",
+            "lens": lens_for(raw["summary"], path),
+            "path": path, "line": line,
+            "trigger": f'given {path} as landed in "{pr["title"]}", {ev or raw["summary"].strip().rstrip(".")}',
+            "labelEvidence": {"kind": raw["kind"], "url": raw["url"], "summary": raw["summary"]},
+        })
+    chunks = [f"--- a/{p}\n+++ b/{p}\n{files[p]}" for p in sorted(files) if files[p]]
+    diff = "\n".join(chunks) or "\n".join(f"--- a/{p}\n+++ b/{p}" for p in (src_files(pr["files"]) or pr["files"]))
+    if defects and diff:
+        cases.append({
+            "id": f"{repo}#{number}", "repository": repo, "pr": number,
+            "mergedAt": pr["mergedAt"], "diff": diff, "defects": defects,
+        })
+cases.sort(key=lambda c: (c["repository"], c["pr"]))
+if len(cases) > MAX:
+    buckets, picked, i = defaultdict(list), [], 0
+    for case in cases:
+        buckets[case["repository"]].append(case)
+    names = sorted(buckets)
+    while len(picked) < MAX and any(buckets[n] for n in names):
+        n = names[i % len(names)]
+        i += 1
+        if buckets[n]:
+            picked.append(buckets[n].pop(0))
+    cases = sorted(picked, key=lambda c: (c["repository"], c["pr"]))
+doc = {"cases": cases}
+errors = validate(doc)
+with open(OUT, "w") as f:
+    json.dump(doc, f, indent=2, sort_keys=True)
+    f.write("\n")
+by_repo, by_lens = defaultdict(int), defaultdict(int)
+for case in cases:
+    by_repo[case["repository"]] += 1
+    for d in case["defects"]:
+        by_lens[d["lens"]] += 1
+print(f"wrote {OUT}", file=sys.stderr)
+print(f"cases: {len(cases)}", file=sys.stderr)
+print("by_repo: " + ", ".join(f"{k}={v}" for k, v in sorted(by_repo.items())), file=sys.stderr)
+print("by_lens: " + ", ".join(f"{k}={v}" for k, v in sorted(by_lens.items())), file=sys.stderr)
+sys.exit(print_validation(doc, errors))
+PY
