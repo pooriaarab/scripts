@@ -1450,6 +1450,104 @@ test('python3 counts as a command, like pytest already did', () => {
   assert.equal(fails('The pythonic idiom was verified'), true);
 });
 
+test('bash is a command, and real tool output is a result', () => {
+  // The command list named node and python3 and missed the runner a shell-script
+  // suite actually uses. PR #205 recorded `bash worker-run.test.sh` and failed
+  // this check. The result vocabulary missed the strings those tools print when
+  // they succeed. Both halves produced the same message, so the author could
+  // not tell which to fix.
+  const body = (verified) => [
+    '## What', 'One sentence.',
+    '## Why', 'Because of the reason.',
+    '## How I verified', verified,
+    'Assisted-by: agent:model',
+  ].join('\n\n');
+  const fails = (text) => validateBody(body(text), 142, config)
+    .failures.some((f) => f.check === '## How I verified');
+  const finding = (text) => validateBody(body(text), 142, config)
+    .failures.find((f) => f.check === '## How I verified');
+
+  assert.equal(fails('bash tests/x.sh\nResults: 13 passed, 0 failed'), false, 'bash is a command');
+  assert.equal(fails('sh -c ./run.sh\nResults: 13 passed, 0 failed'), false, 'sh is a command');
+  assert.equal(fails('docker build .\nSuccessfully built'), false, 'docker is a command');
+  assert.equal(fails('curl -sSf http://127.0.0.1:8080/health\nok'), false, 'curl is a command');
+  assert.equal(fails('terraform plan\nNo changes.'), false, 'terraform is a command');
+  assert.equal(fails('./script.sh\nFound 0 warnings'), false, './script is a command');
+
+  assert.equal(fails('bunx oxlint@^1\nFound 0 warnings'), false, 'Found 0 warnings is a result');
+
+  // A count that means clean is zero, not any number. Widening the result
+  // vocabulary to `\d+ warnings` would let a red run through while the body
+  // still read as verified -- which is worse than the narrow rule this
+  // replaces, because the failure would be invisible rather than loud.
+  assert.equal(fails('bunx oxlint@^1\nFound 7 warnings'), true, '7 warnings is not a result');
+  assert.equal(fails('npx tsc --noEmit\n3 errors'), true, '3 errors is not a result');
+  // oxlint's real format prints both counts on one line. A nonzero warning
+  // count must not be masked by a clean "0 errors" alongside it.
+  assert.equal(fails('bunx oxlint@^1\nFound 7 warnings and 0 errors'), true, 'a nonzero warning count fails even next to 0 errors');
+  assert.equal(fails('python3 install-pr-hooks --apply\ninstalled=1 failed=2'), true, 'failed=2 is not a result');
+  assert.equal(fails('python3 install-pr-hooks --selfcheck\ninstalled=1 failed=0'), false, 'failed=0 is a result');
+  // The nonzero veto must not read a count across a `key=value` boundary: the
+  // 1 in `installed=1` counts installs, not failures.
+  assert.equal(fails('bunx x\n12 passed, 2 failed'), true, 'a nonzero failed count still vetoes');
+  assert.equal(fails('bunx x\nFound 7 warnings and 0 errors'), true, 'a clean errors count cannot mask warnings');
+  assert.equal(fails('npx tsc --noEmit\n0 errors'), false, '0 errors is a result');
+  assert.equal(fails('pytest -q\n12 passed'), false, 'pytest still counts');
+  assert.equal(fails('cargo test\n14 passed'), false, 'cargo still counts');
+
+  // Widening must not empty the rule. This phrase is the documented refusal.
+  assert.equal(fails('Tested locally.'), true);
+
+  const commandOnly = finding('$ bash x.sh\nit did a thing');
+  assert.ok(commandOnly, 'a command with no result still fails');
+  assert.match(commandOnly.expected, /result/i);
+  assert.doesNotMatch(commandOnly.expected, /a command and its result/i);
+
+  const resultOnly = finding('Results: 13 passed, 0 failed');
+  assert.ok(resultOnly, 'a result with no command still fails');
+  assert.match(resultOnly.expected, /command/i);
+  assert.doesNotMatch(resultOnly.expected, /a command and its result/i);
+});
+
+test('a nonzero failed count is not masked by "passed" in the same result', () => {
+  // "12 passed, 2 failed" matches `pass(?:ed)?` on its own, the same way
+  // "Found 7 warnings and 0 errors" matched a clean "0 errors" until the
+  // prior fix. A nonzero failure count next to a passing word is still a
+  // red run, in either spelling this repo's tools use.
+  const body = (verified) => [
+    '## What', 'One sentence.',
+    '## Why', 'Because of the reason.',
+    '## How I verified', verified,
+    'Assisted-by: agent:model',
+  ].join('\n\n');
+  const fails = (text) => validateBody(body(text), 142, config)
+    .failures.some((f) => f.check === '## How I verified');
+
+  assert.equal(fails('pytest -q\n12 passed, 2 failed'), true, '2 failed is not a result, even beside "passed"');
+  assert.equal(fails('bash tests/x.sh\n13 passed, 0 failed'), false, '0 failed stays a passing result');
+  assert.equal(fails('python3 install-pr-hooks --apply\ninstalled=1 failed=0 failed=2'), true, 'a later failed=2 is not masked by an earlier failed=0');
+});
+
+test('a count is not always spelled with the noun right against it', () => {
+  // go test prints "1 test failed", not "1 failed" -- the noun sits between
+  // the digit and the word the veto looks for. A count is also not always
+  // written without a leading zero. Neither should let a red run through.
+  const body = (verified) => [
+    '## What', 'One sentence.',
+    '## Why', 'Because of the reason.',
+    '## How I verified', verified,
+    'Assisted-by: agent:model',
+  ].join('\n\n');
+  const fails = (text) => validateBody(body(text), 142, config)
+    .failures.some((f) => f.check === '## How I verified');
+
+  assert.equal(fails('go test ./...\n13 passed, 1 test failed'), true, 'a noun between the count and "failed" still vetoes');
+  assert.equal(fails('go test ./...\n11 passed, 2 tests failed'), true, 'the plural noun still vetoes');
+  assert.equal(fails('pytest -q\n13 passed, 02 failed'), true, 'a leading zero does not hide a nonzero count');
+  assert.equal(fails('python3 install-pr-hooks --apply\ninstalled=1 failed=02'), true, 'a leading zero in a key=value count still vetoes');
+  assert.equal(fails('go test ./...\n13 passed, 0 tests failed'), false, 'an all-zero count with a noun stays a passing result');
+});
+
 test('prefix precedence holds on the CI path, not only in loadConfig', async () => {
   // #101 fixed the precedence and covered it through loadConfig, which is the
   // LOCAL path. The path that was broken is this one: runPr -> fetchRemoteConfig.
