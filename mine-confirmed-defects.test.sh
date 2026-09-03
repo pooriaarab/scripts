@@ -19,6 +19,10 @@ D="${FAKE_DATA_DIR:-/tmp}"; args="$*"
 [ -n "${GH_CALL_LOG:-}" ] && printf '%s\n' "$args" >> "$GH_CALL_LOG"
 if [[ "$args" == *"/pulls/"*"/files"* ]]; then
   n=$(echo "$args" | grep -oE 'pulls/[0-9]+' | head -1 | grep -oE '[0-9]+' || true)
+  if [[ -n "$n" && -f "$D/throttle_${n}" ]]; then
+    echo "gh: API rate limit exceeded for user ID 1 (HTTP 403)" >&2
+    exit 1
+  fi
   [[ -n "$n" && -f "$D/files_${n}.json" ]] && cat "$D/files_${n}.json" || echo "[]"
   exit 0
 fi
@@ -155,6 +159,22 @@ if (( kb > 0 )) && (( ka > kb )); then
   ok "a different query gets its own cache entry"
 else
   fail_msg "a different query gets its own cache entry ($kb -> $ka)"
+fi
+
+# The real run that motivated this PR was throttled while fetching a PR's
+# files, not while listing PRs: every repo's PR list had already been
+# fetched. That path must also pause and emit what was gathered, not crash
+# with an unhandled exception and no output file.
+pygql '[{"number":30,"title":"Add greeting","body":"","mergedAt":"2026-01-20T10:00:00Z","url":"https://github.com/owner/app/pull/30","author":{"login":"pooriaarab"},"files":{"nodes":[{"path":"src/g.ts"}]},"commits":{"nodes":[{"commit":{"oid":"f1","messageHeadline":"Add greeting","authors":{"nodes":[{"name":"Pooria","user":{"login":"pooriaarab"}}]}}}]}},{"number":31,"title":"Fix greeting bug","body":"Fixes #30","mergedAt":"2026-01-21T10:00:00Z","url":"https://github.com/owner/app/pull/31","author":{"login":"pooriaarab"},"files":{"nodes":[{"path":"src/g.ts"}]},"commits":{"nodes":[{"commit":{"oid":"f2","messageHeadline":"Fix greeting bug","authors":{"nodes":[{"name":"Pooria","user":{"login":"pooriaarab"}}]}}}]}}]'
+files 30 '[{"filename":"src/g.ts","patch":"@@ -1,1 +1,2 @@\n export const x = 1\n+export const greeting = 1\n"}]'
+files 31 '[{"filename":"src/g.ts","patch":"@@ -1,2 +1,1 @@\n export const x = 1\n-export const greeting = 1\n"}]'
+touch "$FAKE_DATA/throttle_30"
+rlout=$(run owner/app --out "$FAKE_DATA/rl.json" 2>&1); rlrc=$?
+rm -f "$FAKE_DATA/throttle_30"
+if (( rlrc == 0 )) && [ -f "$FAKE_DATA/rl.json" ] && echo "$rlout" | grep -q "rate limited on"; then
+  ok "a throttle while fetching patches still writes partial output"
+else
+  fail_msg "a throttle while fetching patches still writes partial output — rc=$rlrc $rlout"
 fi
 
 # A throttle pauses the run; every other failure must still fail loudly, or a

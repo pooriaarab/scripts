@@ -102,7 +102,7 @@ def numbered_added_lines(patch):
         if line.startswith("@@"):
             m = re.search(r"\+(\d+)", line)
             new_line = int(m.group(1)) - 1 if m else new_line
-        elif line.startswith("+++") or line.startswith("---"):
+        elif line.startswith("+++") or line.startswith("---") or line.startswith("\\"):
             continue
         elif line.startswith("+"):
             new_line += 1
@@ -198,7 +198,7 @@ def gh_json(args):
         # nothing, which is what loses an hour of paid-for calls.
         if "rate limit" in (e.stderr or "").lower():
             raise RateLimited(" ".join(args[:2]))
-        die(f"error: gh api {' '.join(args[:3])} failed (exit {e.returncode})")
+        die(f"error: gh api {' '.join(args[:3])} failed (exit {e.returncode}): {(e.stderr or '').strip()}")
     try:
         parsed = json.loads(out)
     except json.JSONDecodeError as e:
@@ -325,73 +325,81 @@ def add_raw(bag, pr, kind, url, summary, path, line=1, precise=False):
     )
 all_prs, raw_cases = {}, defaultdict(list)
 throttled = []
+def note_throttle(where):
+    # Emit what was already produced rather than dying with nothing.
+    # Responses are cached, so re-running resumes here instead of
+    # re-paying for every call made so far.
+    throttled.append(where)
+    print(
+        f"rate limited on {where}; keeping what was already gathered. "
+        "Re-run to resume — cached responses are reused.",
+        file=sys.stderr,
+    )
 for repo in REPOS:
     print(f"mining {repo}", file=sys.stderr)
     try:
         all_prs[repo] = fetch_prs(repo)
     except RateLimited:
-        # Emit what the earlier repos already produced rather than dying with
-        # nothing. Responses are cached, so re-running resumes here instead of
-        # re-paying for every call made so far.
-        throttled.append(repo)
-        print(
-            f"rate limited on {repo}; keeping {len(all_prs)} repo(s) already mined. "
-            "Re-run to resume — cached responses are reused.",
-            file=sys.stderr,
-        )
+        note_throttle(repo)
         break
-for repo, prs in all_prs.items():
-    by_number = {p["number"]: p for p in prs}
-    by_title = {}
-    for p in prs:
-        by_title.setdefault(p["title"].strip().lower(), p)
-    for i, pr in enumerate(prs):
-        for raw in in_pr_defects(pr):
-            raw_cases[(repo, pr["number"])].append(raw)
-        target = revert_target(pr, by_title, by_number)
-        bot_rev = is_bot(pr["author"]) or any(is_bot(l, n) for c in pr["commits"] for l, n in c["authors"])
-        if target and not bot_rev:
-            ensure_files(pr); ensure_files(target)
-            shared = set(src_files(pr["files"])).intersection(src_files(target["files"]))
-            hit = undo_hit(target, pr, shared)
-            path = (hit[0] if hit else (src_files(target["files"]) or target["files"] or ["unknown"])[0])
-            add_raw(raw_cases, target, "revert", pr["url"], pr["title"], path, hit[1] if hit else 1, bool(hit))
-        if REVERT_TITLE.match(pr["title"].strip()):
-            continue
-        for prev, path, line in later_fixes(pr, prs[:i]):
-            add_raw(raw_cases, prev, "later-fix-commit", pr["url"], pr["title"], path, line, True)
+try:
+    for repo, prs in all_prs.items():
+        by_number = {p["number"]: p for p in prs}
+        by_title = {}
+        for p in prs:
+            by_title.setdefault(p["title"].strip().lower(), p)
+        for i, pr in enumerate(prs):
+            for raw in in_pr_defects(pr):
+                raw_cases[(repo, pr["number"])].append(raw)
+            target = revert_target(pr, by_title, by_number)
+            bot_rev = is_bot(pr["author"]) or any(is_bot(l, n) for c in pr["commits"] for l, n in c["authors"])
+            if target and not bot_rev:
+                ensure_files(pr); ensure_files(target)
+                shared = set(src_files(pr["files"])).intersection(src_files(target["files"]))
+                hit = undo_hit(target, pr, shared)
+                path = (hit[0] if hit else (src_files(target["files"]) or target["files"] or ["unknown"])[0])
+                add_raw(raw_cases, target, "revert", pr["url"], pr["title"], path, hit[1] if hit else 1, bool(hit))
+            if REVERT_TITLE.match(pr["title"].strip()):
+                continue
+            for prev, path, line in later_fixes(pr, prs[:i]):
+                add_raw(raw_cases, prev, "later-fix-commit", pr["url"], pr["title"], path, line, True)
+except RateLimited:
+    note_throttle(f"{repo}#{pr['number']}")
 cases = []
-for (repo, number), extras in raw_cases.items():
-    pr = next(p for p in all_prs[repo] if p["number"] == number)
-    files = fetch_patches(repo, number)
-    extras.sort(key=lambda r: (r["kind"], r["url"], r["path"]))
-    seen, defects = set(), []
-    for raw in extras:
-        if raw["url"] in seen:
-            continue
-        seen.add(raw["url"])
-        path, line = raw["path"], raw["line"]
-        if path not in files:
-            if files:
-                path = (src_files(files) or list(files))[0]
+try:
+    for (repo, number), extras in raw_cases.items():
+        pr = next(p for p in all_prs[repo] if p["number"] == number)
+        files = fetch_patches(repo, number)
+        extras.sort(key=lambda r: (r["kind"], r["url"], r["path"]))
+        seen, defects = set(), []
+        for raw in extras:
+            if raw["url"] in seen:
+                continue
+            seen.add(raw["url"])
+            path, line = raw["path"], raw["line"]
+            if path not in files:
+                if files:
+                    path = (src_files(files) or list(files))[0]
+                    line = first_line(files[path])
+            elif not raw.get("precise"):
                 line = first_line(files[path])
-        elif not raw.get("precise"):
-            line = first_line(files[path])
-        ev = re.sub(r"(?i)^(fix|hotfix|correct|undo|revert)[:\s]+", "", raw["summary"]).strip().rstrip(".")
-        defects.append({
-            "id": f"{repo}#{number}.{len(defects)+1}",
-            "lens": lens_for(raw["summary"], path),
-            "path": path, "line": line,
-            "trigger": f'given {path} as landed in "{pr["title"]}", {ev or raw["summary"].strip().rstrip(".")}',
-            "labelEvidence": {"kind": raw["kind"], "url": raw["url"], "summary": raw["summary"]},
-        })
-    chunks = [f"--- a/{p}\n+++ b/{p}\n{files[p]}" for p in sorted(files) if files[p]]
-    diff = "\n".join(chunks) or "\n".join(f"--- a/{p}\n+++ b/{p}" for p in (src_files(pr["files"]) or pr["files"]))
-    if defects and diff:
-        cases.append({
-            "id": f"{repo}#{number}", "repository": repo, "pr": number,
-            "mergedAt": pr["mergedAt"], "diff": diff, "defects": defects,
-        })
+            ev = re.sub(r"(?i)^(fix|hotfix|correct|undo|revert)[:\s]+", "", raw["summary"]).strip().rstrip(".")
+            defects.append({
+                "id": f"{repo}#{number}.{len(defects)+1}",
+                "lens": lens_for(raw["summary"], path),
+                "path": path, "line": line,
+                "trigger": f'given {path} as landed in "{pr["title"]}", {ev or raw["summary"].strip().rstrip(".")}',
+                "labelEvidence": {"kind": raw["kind"], "url": raw["url"], "summary": raw["summary"]},
+            })
+        chunks = [f"--- a/{p}\n+++ b/{p}\n{files[p]}" for p in sorted(files) if files[p]]
+        diff = "\n".join(chunks) or "\n".join(f"--- a/{p}\n+++ b/{p}" for p in (src_files(pr["files"]) or pr["files"]))
+        if defects and diff:
+            cases.append({
+                "id": f"{repo}#{number}", "repository": repo, "pr": number,
+                "mergedAt": pr["mergedAt"], "diff": diff, "defects": defects,
+            })
+except RateLimited:
+    note_throttle(f"{repo}#{number}")
 cases.sort(key=lambda c: (c["repository"], c["pr"]))
 if len(cases) > MAX:
     buckets, picked, i = defaultdict(list), [], 0
