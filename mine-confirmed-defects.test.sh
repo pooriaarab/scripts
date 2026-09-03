@@ -28,6 +28,10 @@ if [[ "$args" == *"/pulls/"*"/files"* ]]; then
 fi
 if [[ "$args" == *"/commits"* ]]; then
   n=$(echo "$args" | grep -oE 'pulls/[0-9]+' | head -1 | grep -oE '[0-9]+' || true)
+  if [[ -n "$n" && -f "$D/throttle_commits_${n}" ]]; then
+    echo "gh: API rate limit exceeded for user ID 1 (HTTP 403)" >&2
+    exit 1
+  fi
   FAKE_PR="$n" python3 - "$D/gql.json" <<'PY'
 import json,os,sys
 data=json.load(open(sys.argv[1])); want=int(os.environ["FAKE_PR"]); out=[]
@@ -42,6 +46,10 @@ PY
   exit 0
 fi
 if [[ "$args" == *"/pulls"* ]]; then
+  if [[ -f "$D/throttle_pulls" ]]; then
+    echo "gh: API rate limit exceeded for user ID 1 (HTTP 403)" >&2
+    exit 1
+  fi
   python3 - "$D/gql.json" <<'PY'
 import json,sys
 data=json.load(open(sys.argv[1])); out=[]
@@ -130,7 +138,8 @@ CACHE="$(mktemp -d)"
 GH_CALL_LOG="$FAKE_DATA/n1.txt" MINE_CACHE_DIR="$CACHE" "$SCRIPT" owner/app --out "$FAKE_DATA/c1.json" >/dev/null 2>&1
 GH_CALL_LOG="$FAKE_DATA/n2.txt" MINE_CACHE_DIR="$CACHE" "$SCRIPT" owner/app --out "$FAKE_DATA/c2.json" >/dev/null 2>&1
 n1=$(wc -l < "$FAKE_DATA/n1.txt" 2>/dev/null | tr -d ' ')
-n2=$(wc -l < "$FAKE_DATA/n2.txt" 2>/dev/null | tr -d ' ')
+n2=0
+[ -f "$FAKE_DATA/n2.txt" ] && n2=$(wc -l < "$FAKE_DATA/n2.txt" | tr -d ' ')
 if (( n1 > 0 )) && (( ${n2:-0} == 0 )) && diff -q "$FAKE_DATA/c1.json" "$FAKE_DATA/c2.json" >/dev/null; then
   ok "a cached re-run makes no new upstream calls"
 else
@@ -165,21 +174,50 @@ fi
 # files, not while listing PRs: every repo's PR list had already been
 # fetched. That path must also pause and emit what was gathered, not crash
 # with an unhandled exception and no output file.
-pygql '[{"number":30,"title":"Add greeting","body":"","mergedAt":"2026-01-20T10:00:00Z","url":"https://github.com/owner/app/pull/30","author":{"login":"pooriaarab"},"files":{"nodes":[{"path":"src/g.ts"}]},"commits":{"nodes":[{"commit":{"oid":"f1","messageHeadline":"Add greeting","authors":{"nodes":[{"name":"Pooria","user":{"login":"pooriaarab"}}]}}}]}},{"number":31,"title":"Fix greeting bug","body":"Fixes #30","mergedAt":"2026-01-21T10:00:00Z","url":"https://github.com/owner/app/pull/31","author":{"login":"pooriaarab"},"files":{"nodes":[{"path":"src/g.ts"}]},"commits":{"nodes":[{"commit":{"oid":"f2","messageHeadline":"Fix greeting bug","authors":{"nodes":[{"name":"Pooria","user":{"login":"pooriaarab"}}]}}}]}}]'
+# PR 29 is an earlier, already-recorded defect. It proves the later throttle
+# preserves gathered output instead of merely avoiding a crash.
+pygql '[{"number":29,"title":"Add greeting validation","body":"","mergedAt":"2026-01-19T10:00:00Z","url":"https://github.com/owner/app/pull/29","author":{"login":"pooriaarab"},"files":{"nodes":[{"path":"src/g.ts"}]},"commits":{"nodes":[{"commit":{"oid":"e1","messageHeadline":"Add greeting validation","authors":{"nodes":[{"name":"Pooria","user":{"login":"pooriaarab"}}]}}},{"commit":{"oid":"e2","messageHeadline":"fix: reject an empty greeting","authors":{"nodes":[{"name":"Pooria","user":{"login":"pooriaarab"}}]}}}]}},{"number":30,"title":"Add greeting","body":"","mergedAt":"2026-01-20T10:00:00Z","url":"https://github.com/owner/app/pull/30","author":{"login":"pooriaarab"},"files":{"nodes":[{"path":"src/g.ts"}]},"commits":{"nodes":[{"commit":{"oid":"f1","messageHeadline":"Add greeting","authors":{"nodes":[{"name":"Pooria","user":{"login":"pooriaarab"}}]}}}]}},{"number":31,"title":"Fix greeting bug","body":"Fixes #30","mergedAt":"2026-01-21T10:00:00Z","url":"https://github.com/owner/app/pull/31","author":{"login":"pooriaarab"},"files":{"nodes":[{"path":"src/g.ts"}]},"commits":{"nodes":[{"commit":{"oid":"f2","messageHeadline":"Fix greeting bug","authors":{"nodes":[{"name":"Pooria","user":{"login":"pooriaarab"}}]}}}]}}]'
+files 29 '[{"filename":"src/g.ts","patch":"@@ -1,1 +1,2 @@\n export const x = 1\n+export const greeting = 1\n"}]'
 files 30 '[{"filename":"src/g.ts","patch":"@@ -1,1 +1,2 @@\n export const x = 1\n+export const greeting = 1\n"}]'
 files 31 '[{"filename":"src/g.ts","patch":"@@ -1,2 +1,1 @@\n export const x = 1\n-export const greeting = 1\n"}]'
 touch "$FAKE_DATA/throttle_30"
 rlout=$(run owner/app --out "$FAKE_DATA/rl.json" 2>&1); rlrc=$?
 rm -f "$FAKE_DATA/throttle_30"
-if (( rlrc == 0 )) && [ -f "$FAKE_DATA/rl.json" ] && echo "$rlout" | grep -q "rate limited on"; then
-  ok "a throttle while fetching patches still writes partial output"
+if (( rlrc == 0 )) \
+  && python3 -c 'import json,sys; assert any(c["pr"]==29 for c in json.load(open(sys.argv[1]))["cases"])' "$FAKE_DATA/rl.json" 2>/dev/null \
+  && echo "$rlout" | grep -q "rate limited on"; then
+  ok "a throttle while fetching patches preserves earlier output"
 else
-  fail_msg "a throttle while fetching patches still writes partial output — rc=$rlrc $rlout"
+  fail_msg "a throttle while fetching patches preserves earlier output — rc=$rlrc $rlout"
+fi
+
+# Listing PRs and fetching commits are separate throttle points in fetch_prs.
+touch "$FAKE_DATA/throttle_pulls"
+prout=$(run owner/app --out "$FAKE_DATA/rl-prs.json" 2>&1); prrc=$?
+rm -f "$FAKE_DATA/throttle_pulls"
+if (( prrc == 0 )) \
+  && python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$FAKE_DATA/rl-prs.json" 2>/dev/null \
+  && echo "$prout" | grep -q "rate limited on"; then
+  ok "a PR-list throttle writes valid output"
+else
+  fail_msg "a PR-list throttle writes valid output — rc=$prrc $prout"
+fi
+
+touch "$FAKE_DATA/throttle_commits_30"
+commitout=$(run owner/app --out "$FAKE_DATA/rl-commits.json" 2>&1); commitrc=$?
+rm -f "$FAKE_DATA/throttle_commits_30"
+if (( commitrc == 0 )) \
+  && python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$FAKE_DATA/rl-commits.json" 2>/dev/null \
+  && echo "$commitout" | grep -q "rate limited on"; then
+  ok "a commit-fetch throttle writes valid output"
+else
+  fail_msg "a commit-fetch throttle writes valid output — rc=$commitrc $commitout"
 fi
 
 # A throttle pauses the run; every other failure must still fail loudly, or a
 # 404 or auth error would silently produce a short dataset.
 CE="$(mktemp -d)"
+cp "$FAKE_BIN/gh" "$FAKE_ROOT/gh.real"
 cat > "$FAKE_BIN/gh" <<'BROKEN'
 #!/usr/bin/env bash
 echo "gh: Not Found (HTTP 404)" >&2
@@ -191,6 +229,7 @@ if MINE_CACHE_DIR="$CE" "$SCRIPT" owner/app --out "$FAKE_DATA/e1.json" >/dev/nul
 else
   ok "a non-throttle API failure still exits non-zero"
 fi
+mv "$FAKE_ROOT/gh.real" "$FAKE_BIN/gh"
 
 echo "---"; echo "$pass passed, $fail failed"
 (( fail == 0 ))

@@ -50,7 +50,7 @@ python3 - <<'PY'
 import os
 import tempfile
 import hashlib
-import json, os, re, subprocess, sys
+import json, os, re, stat, subprocess, sys
 from collections import defaultdict
 OUT, MAX = os.environ["OUT"], int(os.environ["MAX"])
 VALIDATE = os.environ.get("VALIDATE") or ""
@@ -173,8 +173,24 @@ if VALIDATE:
 # re-run starts from zero. Keyed on the exact argument list, so a changed query is
 # a different entry.
 CACHE_DIR = os.environ.get("MINE_CACHE_DIR") or os.path.join(
-    tempfile.gettempdir(), "mine-confirmed-defects-cache"
+    os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache"),
+    "mine-confirmed-defects",
 )
+
+
+def ensure_cache_dir():
+    """Create the cache privately and reject an untrusted existing directory."""
+    try:
+        os.makedirs(CACHE_DIR, mode=0o700, exist_ok=True)
+        info = os.lstat(CACHE_DIR)
+    except OSError as e:
+        die(f"error: cannot prepare cache directory {CACHE_DIR}: {e}")
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid():
+        die(f"error: cache directory {CACHE_DIR} must be a directory owned by the current user")
+    try:
+        os.chmod(CACHE_DIR, 0o700)
+    except OSError as e:
+        die(f"error: cannot secure cache directory {CACHE_DIR}: {e}")
 
 
 class RateLimited(Exception):
@@ -182,7 +198,7 @@ class RateLimited(Exception):
 
 
 def gh_json(args):
-    os.makedirs(CACHE_DIR, exist_ok=True)
+    ensure_cache_dir()
     key = hashlib.sha256("\x00".join(args).encode()).hexdigest()[:32]
     path = os.path.join(CACHE_DIR, key + ".json")
     if os.path.exists(path):
@@ -206,10 +222,19 @@ def gh_json(args):
         parsed = json.loads(out)
     except json.JSONDecodeError as e:
         die(f"error: invalid JSON: {e}")
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as fh:
-        json.dump(parsed, fh)
-    os.replace(tmp, path)
+    fd, tmp = tempfile.mkstemp(dir=CACHE_DIR, prefix=f".{key}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fd = -1
+            json.dump(parsed, fh)
+        os.replace(tmp, path)
+    finally:
+        if fd != -1:
+            os.close(fd)
+        try:
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass
     return parsed
 def as_list(payload):
     if isinstance(payload, list):
