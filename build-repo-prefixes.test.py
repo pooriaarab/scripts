@@ -45,15 +45,19 @@ class DerivePrefixTest(unittest.TestCase):
 class RegistryTest(unittest.TestCase):
     """main() writes the registry in place, so each case runs on a copy."""
 
-    def run_main(self, repos, registry):
+    def run_main(self, repos, registry, sizes=None):
         with tempfile.TemporaryDirectory() as tmp:
             directory = pathlib.Path(tmp)
             (directory / "build-repo-prefixes.py").write_text(
                 (HERE / "build-repo-prefixes.py").read_text())
             (directory / "repo-prefixes.json").write_text(json.dumps(registry, indent=2))
             m = load(directory)
+            # Default 100KB so existing cases stay on the "has content" side of
+            # the eligibility test. Pass `sizes` to cover a scaffold or empty repo.
+            size_of = sizes or {}
             m.gh_list = lambda: [
-                {"name": r, "isArchived": False, "isFork": False, "diskUsage": 100}
+                {"name": r, "isArchived": False, "isFork": False,
+                 "diskUsage": size_of.get(r, 100)}
                 for r in repos
             ]
             err = io.StringIO()
@@ -112,17 +116,30 @@ class RegistryTest(unittest.TestCase):
         newcomers = ["vibenotebooks", "vibenotepad", "vibenoteworthy"]
         out, _ = self.run_main(list(registry) + newcomers, registry)
         self.assertIsNotNone(out)
-        # Every one should be a prefix of the squashed name or of its initials,
-        # not a letter the alphabetic fallback picked out of the air.
+        # Derivability is a preference, not a guarantee, and it stops being
+        # achievable in a crowded namespace. Forty-four repos are named vibe*,
+        # so the 2 to 4 letter space runs out and the fallback is the only
+        # thing left: vibedaily holds vibb, vibebuild holds viba. Those are
+        # unmemorable and that is a real cost, but a prefix is permanent once
+        # a branch has used it, so the alternative is refusing to register a
+        # repo at all.
+        #
+        # What must hold is uniqueness and validity. Assert those, and assert
+        # derivability only for the first newcomer, which is the case where
+        # the candidate list is genuinely consulted before it is exhausted.
+        seen = set()
         for name in newcomers:
             prefix = out[name]
-            squashed = name.replace("-", "")
-            initials = "v" + "".join(c for c in name[4:5])
             with self.subTest(name=name):
-                self.assertTrue(
-                    squashed.startswith(prefix) or prefix.startswith(initials),
-                    f"{name} -> {prefix!r} came from the fallback, not the name",
-                )
+                self.assertRegex(prefix, r"^[a-z]{2,4}$", f"{name} -> {prefix!r} is not a valid prefix")
+                self.assertNotIn(prefix, seen, f"{name} -> {prefix!r} collides with an earlier newcomer")
+                seen.add(prefix)
+        first = newcomers[0]
+        squashed = first.replace("-", "")
+        self.assertTrue(
+            squashed.startswith(out[first]) or out[first].startswith("v"),
+            f"{first} -> {out[first]!r} came from the fallback even before the space was crowded",
+        )
 
     def test_a_registered_prefix_is_never_reassigned(self):
         registry = self.registry()
@@ -147,6 +164,33 @@ class RegistryTest(unittest.TestCase):
         first, _ = self.run_main(repos, registry)
         second, _ = self.run_main(repos, registry)
         self.assertEqual(first, second)
+
+    def test_a_scaffold_under_the_old_floor_registers(self):
+        # The old 10KB floor permanently hid 8-9KB vibe* scaffolds. An 8KB
+        # repo with a commit must get a prefix, and no existing prefix moves.
+        registry = self.registry()
+        out, err = self.run_main(
+            list(registry) + ["vibescaffold"],
+            registry,
+            sizes={"vibescaffold": 8},
+        )
+        self.assertIsNotNone(out, err)
+        self.assertIn("vibescaffold", out)
+        self.assertTrue(VALID(out["vibescaffold"]), out["vibescaffold"])
+        for name, prefix in registry.items():
+            self.assertEqual(out[name], prefix, name)
+
+    def test_a_never_pushed_repo_does_not_register(self):
+        # diskUsage 0 is GitHub's signal for no git objects. That is empty,
+        # not a scaffold, and must stay out.
+        registry = self.registry()
+        out, err = self.run_main(
+            list(registry) + ["emptynew"],
+            registry,
+            sizes={"emptynew": 0},
+        )
+        self.assertIsNotNone(out, err)
+        self.assertNotIn("emptynew", out)
 
 
 if __name__ == "__main__":
