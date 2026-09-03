@@ -398,7 +398,11 @@ function hasCommandAndResult(text) {
   // failed the rule, and the author met the regex by prefixing a pointless
   // `node -e` to the command that had already run.
   const command = lines.some((line) => /^(?:[$>`]\s*|\*\s*)?(?:bunx|bun|npm|pnpm|yarn|node|deno|cargo|go|pytest|python3|python|bash|zsh|sh|make|git|gh|npx|\.\/)\b[^\n]*/i.test(line));
-  const result = /(?:->|\b(?:pass(?:ed)?|success(?:ful)?|clean|green|ok|verified|complete|no issues|exit(?:ed)?\s+0)\b|\d+\s+(?:tests?|checks?)\s+(?:pass|passed|successful))/i.test(text);
+  // `passing` is here for the same reason `bash` is in the list above: two of
+  // this repo's own four suites print "all passing", so the checker rejected the
+  // output of the tools it ships. The command half still has to match, so a
+  // stray "passing" in prose cannot satisfy the rule on its own.
+  const result = /(?:->|\b(?:pass(?:ed|ing)?|success(?:ful)?|clean|green|ok|verified|complete|no issues|exit(?:ed)?\s+0)\b|\d+\s+(?:tests?|checks?)\s+(?:pass|passed|successful))/i.test(text);
   return command && result;
 }
 

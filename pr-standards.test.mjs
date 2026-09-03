@@ -1657,3 +1657,44 @@ test('--prefix narrows the check, it never widens it', () => {
     fs.rmSync(cwd, { recursive: true, force: true });
   }
 });
+
+test('the checker recognises the evidence its own suites produce', () => {
+  // Two rounds of this bug are already recorded above the regex: `bunx` and
+  // then `python3` were each added after a pull request whose evidence was a
+  // real run got rejected. This is the third and fourth, both found by running
+  // this repo's own four suites and pasting what they actually print.
+  //
+  // `bash …test.sh` is how two of them are invoked, and `all passing` is what
+  // two of them print. So the standard rejected the output of the tools it
+  // ships, and the fix an author reaches for is to decorate real evidence
+  // until it parses.
+  const pad = 'This body is padded so the minimum body length is not what decides these cases.';
+  const body = (verified) => [
+    'Closes #260', '', '## What', 'One sentence.', '', '## Why', pad, '',
+    '## How I verified', verified, '', 'Assisted-by: agent:model',
+  ].join('\n');
+  const cfg = { ...DEFAULT_CONFIG, prefix: 'scr' };
+  const passes = (verified) => validateBody(body(verified), 260, cfg).ok;
+
+  // Shell runners, in the three shapes an author writes them.
+  assert.equal(passes('$ bash worker-run.test.sh\nResults: 13 passed'), true);
+  assert.equal(passes('    $ bash t.sh\n    Results: 13 passed'), true);
+  assert.equal(passes('```\n$ bash t.sh\nResults: 13 passed\n```'), true);
+  assert.equal(passes('$ sh t.sh\nok'), true);
+  assert.equal(passes('$ zsh t.sh\nok'), true);
+
+  // The exact output of this repo's own suites.
+  assert.equal(passes('$ ./hooks/pr-standards-guard.test.sh\nall passing'), true);
+  assert.equal(passes('$ ./adopt-branch-pattern.test.sh\nALL PASS'), true);
+
+  // Widening the list must not let prose satisfy either half. `sh` sits after
+  // the longer names and `\b` follows the group, so a word merely ending in
+  // those letters is not a command.
+  assert.equal(passes('finish the migration\nok'), false);
+  assert.equal(passes('pushd /tmp\nok'), false);
+  assert.equal(passes('the work is passing muster\nand nothing else'), false);
+
+  // The cases the earlier two rounds added must keep working.
+  assert.equal(passes('$ bunx tsc\nclean'), true);
+  assert.equal(passes('$ python3 install-pr-hooks.test.py\nok'), true);
+});
