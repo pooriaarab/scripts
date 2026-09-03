@@ -1482,6 +1482,9 @@ test('bash is a command, and real tool output is a result', () => {
   // replaces, because the failure would be invisible rather than loud.
   assert.equal(fails('bunx oxlint@^1\nFound 7 warnings'), true, '7 warnings is not a result');
   assert.equal(fails('npx tsc --noEmit\n3 errors'), true, '3 errors is not a result');
+  // oxlint's real format prints both counts on one line. A nonzero warning
+  // count must not be masked by a clean "0 errors" alongside it.
+  assert.equal(fails('bunx oxlint@^1\nFound 7 warnings and 0 errors'), true, 'a nonzero warning count fails even next to 0 errors');
   assert.equal(fails('python3 install-pr-hooks --apply\ninstalled=1 failed=2'), true, 'failed=2 is not a result');
   assert.equal(fails('python3 install-pr-hooks --selfcheck\ninstalled=1 failed=0'), false, 'failed=0 is a result');
   assert.equal(fails('npx tsc --noEmit\n0 errors'), false, '0 errors is a result');

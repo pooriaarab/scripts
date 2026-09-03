@@ -421,12 +421,21 @@ const PROOF_COMMAND_RE = /^(?:[$>`]\s*|\*\s*)?(?:bunx|bun|npm|pnpm|yarn|node|den
 // form so the word boundary sits after the `y`, not inside the word.
 const PROOF_RESULT_RE = /(?:->|\b(?:pass(?:ed)?|success(?:ful(?:ly)?)?|clean|green|ok|verified|complete|no issues|no changes|exit(?:ed)?\s+0)\b|\d+\s+(?:tests?|checks?)\s+(?:pass|passed|successful)|\b0\s+(?:warnings?|errors?)\b|\bfailed\s*=\s*0\b)/i;
 
+// oxlint's actual output is "Found N warnings and M errors", both counts in
+// one line. `\b0\s+(?:warnings?|errors?)\b` alone would let a nonzero
+// warning count through on the back of a clean "0 errors" in the same
+// string — "Found 7 warnings and 0 errors" is not a passing result even
+// though it contains a zero count. A nonzero warnings/errors count anywhere
+// in the text means the run was not clean, full stop.
+const PROOF_NONZERO_RE = /\b[1-9]\d*\s+(?:warnings?|errors?)\b/i;
+
 function proofCommand(text) {
   const lines = String(text).split('\n').map((line) => line.trim()).filter(Boolean);
   return lines.some((line) => PROOF_COMMAND_RE.test(line));
 }
 
 function proofResult(text) {
+  if (PROOF_NONZERO_RE.test(text)) return false;
   return PROOF_RESULT_RE.test(text);
 }
 
