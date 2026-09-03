@@ -170,6 +170,33 @@ else
   fail_msg "a different query gets its own cache entry ($kb -> $ka)"
 fi
 
+# GH_HOST changes what a request actually targets, so a run against one host
+# must not be served cached data fetched for a different one.
+HK="$(mktemp -d)"
+MINE_CACHE_DIR="$HK" "$SCRIPT" owner/app --out "$FAKE_DATA/h1.json" >/dev/null 2>&1
+hb=$(ls -1 "$HK" 2>/dev/null | wc -l | tr -d ' ')
+MINE_CACHE_DIR="$HK" GH_HOST=example.internal "$SCRIPT" owner/app --out "$FAKE_DATA/h2.json" >/dev/null 2>&1
+ha=$(ls -1 "$HK" 2>/dev/null | wc -l | tr -d ' ')
+if (( hb > 0 )) && (( ha > hb )); then
+  ok "a different GH_HOST gets its own cache entry"
+else
+  fail_msg "a different GH_HOST gets its own cache entry ($hb -> $ha)"
+fi
+
+# The PR listing grows as PRs merge, so it must expire; commits and files are
+# immutable once merged and must NOT be refetched just because they aged.
+TTL_CACHE="$(mktemp -d)"
+MINE_CACHE_DIR="$TTL_CACHE" "$SCRIPT" owner/app --out "$FAKE_DATA/ttl1.json" >/dev/null 2>&1
+find "$TTL_CACHE" -name '*.json' -exec touch -d '@0' {} \;
+GH_CALL_LOG="$FAKE_DATA/ttl2.txt" MINE_CACHE_DIR="$TTL_CACHE" "$SCRIPT" owner/app --out "$FAKE_DATA/ttl2.json" >/dev/null 2>&1
+if grep -q "state=closed" "$FAKE_DATA/ttl2.txt" 2>/dev/null \
+  && ! grep -q "/commits" "$FAKE_DATA/ttl2.txt" \
+  && ! grep -q "/files" "$FAKE_DATA/ttl2.txt"; then
+  ok "an expired PR-listing cache entry is refetched, immutable entries are not"
+else
+  fail_msg "an expired PR-listing cache entry is refetched, immutable entries are not"
+fi
+
 # The real run that motivated this PR was throttled while fetching a PR's
 # files, not while listing PRs: every repo's PR list had already been
 # fetched. That path must also pause and emit what was gathered, not crash
@@ -189,6 +216,23 @@ if (( rlrc == 0 )) \
   ok "a throttle while fetching patches preserves earlier output"
 else
   fail_msg "a throttle while fetching patches preserves earlier output — rc=$rlrc $rlout"
+fi
+
+# The PR's actual claim is that removing the throttle and re-running with the
+# SAME cache reaches completion, not merely that a throttled run exits clean.
+# Reuses the PR 29/30/31 fixtures set up above.
+RESUME_CACHE="$(mktemp -d)"
+touch "$FAKE_DATA/throttle_30"
+MINE_CACHE_DIR="$RESUME_CACHE" "$SCRIPT" owner/app --out "$FAKE_DATA/resume1.json" >/dev/null 2>&1
+rm -f "$FAKE_DATA/throttle_30"
+GH_CALL_LOG="$FAKE_DATA/resume2.txt" MINE_CACHE_DIR="$RESUME_CACHE" "$SCRIPT" owner/app --out "$FAKE_DATA/resume2.json" >/dev/null 2>&1
+r2=$(wc -l < "$FAKE_DATA/resume2.txt" 2>/dev/null | tr -d ' ')
+if python3 -c 'import json,sys; c=json.load(open(sys.argv[1]))["cases"]; assert {x["pr"] for x in c} == {29, 30}' "$FAKE_DATA/resume2.json" 2>/dev/null \
+  && (( ${r2:-0} == 1 )) \
+  && grep -q "pulls/30/files" "$FAKE_DATA/resume2.txt"; then
+  ok "a resumed run with the same cache reaches completion, refetching only the throttled call"
+else
+  fail_msg "a resumed run with the same cache reaches completion — r2=${r2:-0}"
 fi
 
 # Listing PRs and fetching commits are separate throttle points in fetch_prs.

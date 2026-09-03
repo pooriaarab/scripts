@@ -50,7 +50,7 @@ python3 - <<'PY'
 import os
 import tempfile
 import hashlib
-import json, os, re, stat, subprocess, sys
+import json, os, re, stat, subprocess, sys, time
 from collections import defaultdict
 OUT, MAX = os.environ["OUT"], int(os.environ["MAX"])
 VALIDATE = os.environ.get("VALIDATE") or ""
@@ -197,11 +197,20 @@ class RateLimited(Exception):
     """gh refused the call because the API rate limit is exhausted."""
 
 
-def gh_json(args):
+# The open-PR listing grows as PRs merge, so a permanent cache entry would
+# silently omit anything merged after the first run. Commits and files are
+# immutable once a PR is merged, so they cache forever with no TTL.
+LISTING_TTL_SECONDS = 3600
+
+
+def gh_json(args, ttl=None):
     ensure_cache_dir()
-    key = hashlib.sha256("\x00".join(args).encode()).hexdigest()[:32]
+    # GH_HOST changes what a given `args` list actually fetches, so it must be
+    # part of the key or two hosts would share one entry.
+    key_material = "\x00".join(args) + "\x00" + os.environ.get("GH_HOST", "")
+    key = hashlib.sha256(key_material.encode()).hexdigest()[:32]
     path = os.path.join(CACHE_DIR, key + ".json")
-    if os.path.exists(path):
+    if os.path.exists(path) and (ttl is None or time.time() - os.path.getmtime(path) < ttl):
         try:
             with open(path, encoding="utf-8") as fh:
                 return json.load(fh)
@@ -248,7 +257,7 @@ def as_list(payload):
     return [payload] if isinstance(payload, dict) else []
 def fetch_prs(repo):
     prs = []
-    for node in as_list(gh_json(["--paginate", "--slurp", f"repos/{repo}/pulls?state=closed&per_page=100&sort=created&direction=asc"])):
+    for node in as_list(gh_json(["--paginate", "--slurp", f"repos/{repo}/pulls?state=closed&per_page=100&sort=created&direction=asc"], ttl=LISTING_TTL_SECONDS)):
         if not node or not node.get("merged_at") or not node.get("number"):
             continue
         num = int(node["number"])
