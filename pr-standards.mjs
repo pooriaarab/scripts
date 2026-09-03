@@ -381,25 +381,57 @@ function sentenceCount(text) {
 // a lazy body rather than a drifted regex.
 const PROOF_NA_LINE = /^\s*Proof:\s*n\/a\s*[—–-]\s*(\S.*)\s*$/i;
 
-function hasCommandAndResult(text) {
+// Names, not shape. Two pull requests already failed because a runner they
+// actually used was missing (`python3` in #145, `bunx` in #135), and #113 is
+// the third. Shape — "a line that looks like argv" — would stop that treadmill,
+// but an existing test requires `bunxx frobnicate -> 3 passed` to fail: that
+// string is the word-boundary check that `bun` not match inside a longer token.
+// A shape check has no allowlist, so it cannot tell `bunxx` from `bash`, and
+// any lowercase first word plus a success word would then count as evidence.
+// The next missing name is cheaper than emptying the rule. Add the runner
+// the evidence actually used.
+//
+// The word boundary goes AFTER the command name, not before it. Without it
+// `bun` matched inside `Bundle`, so "Bundle was verified" satisfied both the
+// command and the result check while naming no command at all.
+// Order in the alternation does NOT matter, despite what an earlier comment
+// here claimed: a failed `\b` makes the engine backtrack and try the other
+// branches, so `bun|bunx` matches "bunx" exactly as `bunx|bun` does. What
+// fixed the `bunx` failure was adding the name, not moving it. The longer
+// names are still written first, because that reads as intent.
+//
+// `python3` and `python` are here because the checker itself shells to
+// `python3` and three of its test suites are `python3` scripts, yet the list
+// named neither: a pull request whose evidence was a real `python3` run
+// failed the rule, and the author met the regex by prefixing a pointless
+// `node -e` to the command that had already run.
+//
+// `bash` and `sh` are here because a repo whose suite is a shell script
+// cannot state that evidence at all — live as PR #205, whose body recorded
+// `bash worker-run.test.sh` and failed this check. `docker`, `curl`, and
+// `terraform` are the other runners in that same table that the list skipped.
+const PROOF_COMMAND_RE = /^(?:[$>`]\s*|\*\s*)?(?:bunx|bun|npm|pnpm|yarn|node|deno|cargo|go|pytest|python3|python|make|git|gh|npx|bash|sh|docker|curl|terraform|\.\/)\b[^\n]*/i;
+
+// Real tools do not all print "passed". oxlint prints "Found 0 warnings",
+// tsc prints "0 errors", docker prints "Successfully built", terraform
+// prints "No changes.", and this repo's install-pr-hooks prints
+// "installed=1 failed=0". Those are passing results. Counting any number of
+// warnings or errors as success would let a red run through, so the counts
+// that mean clean are zero, not `\d+`. "Successfully" needs the adverb
+// form so the word boundary sits after the `y`, not inside the word.
+const PROOF_RESULT_RE = /(?:->|\b(?:pass(?:ed)?|success(?:ful(?:ly)?)?|clean|green|ok|verified|complete|no issues|no changes|exit(?:ed)?\s+0)\b|\d+\s+(?:tests?|checks?)\s+(?:pass|passed|successful)|\b0\s+(?:warnings?|errors?)\b|\bfailed\s*=\s*0\b)/i;
+
+function proofCommand(text) {
   const lines = String(text).split('\n').map((line) => line.trim()).filter(Boolean);
-  // The word boundary goes AFTER the command name, not before it. Without it
-  // `bun` matched inside `Bundle`, so "Bundle was verified" satisfied both the
-  // command and the result check while naming no command at all.
-  // Order in the alternation does NOT matter, despite what an earlier comment
-  // here claimed: a failed `\b` makes the engine backtrack and try the other
-  // branches, so `bun|bunx` matches "bunx" exactly as `bunx|bun` does. What
-  // fixed the `bunx` failure was adding the name, not moving it. The longer
-  // names are still written first, because that reads as intent.
-  //
-  // `python3` and `python` are here because the checker itself shells to
-  // `python3` and three of its test suites are `python3` scripts, yet the list
-  // named neither: a pull request whose evidence was a real `python3` run
-  // failed the rule, and the author met the regex by prefixing a pointless
-  // `node -e` to the command that had already run.
-  const command = lines.some((line) => /^(?:[$>`]\s*|\*\s*)?(?:bunx|bun|npm|pnpm|yarn|node|deno|cargo|go|pytest|python3|python|make|git|gh|npx|\.\/)\b[^\n]*/i.test(line));
-  const result = /(?:->|\b(?:pass(?:ed)?|success(?:ful)?|clean|green|ok|verified|complete|no issues|exit(?:ed)?\s+0)\b|\d+\s+(?:tests?|checks?)\s+(?:pass|passed|successful))/i.test(text);
-  return command && result;
+  return lines.some((line) => PROOF_COMMAND_RE.test(line));
+}
+
+function proofResult(text) {
+  return PROOF_RESULT_RE.test(text);
+}
+
+function hasCommandAndResult(text) {
+  return proofCommand(text) && proofResult(text);
 }
 
 // Proof helpers — an agent can type "tested locally" for free; a screenshot
@@ -712,12 +744,28 @@ export function validateBody(body, issueNumber, config = DEFAULT_CONFIG) {
         const hatch = PROOF_NA_LINE.exec(line);
         return hatch ? hatch[1] : line;
       }).join('\n');
-  if (!verified || /\b(?:N\/A|TODO|tested locally)\b/i.test(claimed) || !hasCommandAndResult(verified)) {
+  const command = Boolean(verified) && proofCommand(verified);
+  const result = Boolean(verified) && proofResult(verified);
+  const refused = claimed !== null && /\b(?:N\/A|TODO|tested locally)\b/i.test(claimed);
+  if (!verified || refused || !command || !result) {
+    // Name the half that fell short. Both halves used to produce the same
+    // message, so a bunx rejection was read as the command half failing when
+    // the result half was the one that missed (`Found 0 warnings`), and #125
+    // was filed against the wrong cause.
+    let expected = 'a command and its result, such as: bun test -> 214 passed';
+    let fix = 'Run a check and record the command and result under ## How I verified.';
+    if (verified && !refused && command && !result) {
+      expected = 'a result from that command, such as: 13 passed or Found 0 warnings';
+      fix = 'Record what the command printed. A command with no result is not evidence.';
+    } else if (verified && !refused && !command && result) {
+      expected = 'a command that produced that result, such as: bash tests/x.sh';
+      fix = 'Name the command you ran. A result with no command is not evidence.';
+    }
     failures.push(fail(
       '## How I verified',
       verified || 'missing',
-      'a command and its result, such as: bun test -> 214 passed',
-      'Run a check and record the command and result under ## How I verified.',
+      expected,
+      fix,
     ));
   }
   {
