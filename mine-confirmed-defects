@@ -47,7 +47,10 @@ command -v python3 >/dev/null || { echo "error: python3 not found" >&2; exit 3; 
 export OUT MAX VALIDATE REPOS_STR="${REPOS[*]+"${REPOS[*]}"}"
 
 python3 - <<'PY'
-import json, os, re, subprocess, sys
+import os
+import tempfile
+import hashlib
+import json, os, re, stat, subprocess, sys, time
 from collections import defaultdict
 OUT, MAX = os.environ["OUT"], int(os.environ["MAX"])
 VALIDATE = os.environ.get("VALIDATE") or ""
@@ -93,6 +96,25 @@ def lens_for(*texts):
 def first_line(patch):
     m = re.search(r"\+(\d+)", patch or "")
     return int(m.group(1)) if m else 1
+def numbered_added_lines(patch):
+    # gh's per-file `patch` is hunks only, never "--- a/" / "+++ b/" file
+    # headers, so those aren't stripped here: a line.startswith("+++") check
+    # misfires on an added line whose own text starts with "++" (e.g. "++i;").
+    out, new_line = {}, 0
+    for line in (patch or "").splitlines():
+        if line.startswith("@@"):
+            m = re.search(r"\+(\d+)", line)
+            new_line = int(m.group(1)) - 1 if m else new_line
+        elif line.startswith("\\"):
+            continue
+        elif line.startswith("+"):
+            new_line += 1
+            s = line[1:].strip()
+            if len(s) >= 10:
+                out.setdefault(s, new_line)
+        elif not line.startswith("-"):
+            new_line += 1
+    return out
 def signed_lines(patch, mark):
     out = []
     for line in (patch or "").splitlines():
@@ -145,25 +167,102 @@ if VALIDATE:
     except (OSError, json.JSONDecodeError) as e:
         die(f"error: cannot read {VALIDATE}: {e}")
     sys.exit(print_validation(doc, validate(doc)))
-def gh_json(args):
+# Responses are cached on disk because a full fleet mine costs roughly two API
+# calls per merged pull request, which is more than an hour's rate limit. Without
+# a cache a throttle three repos in loses every call already paid for, and the
+# re-run starts from zero. Keyed on the exact argument list, so a changed query is
+# a different entry.
+CACHE_DIR = os.environ.get("MINE_CACHE_DIR") or os.path.join(
+    os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache"),
+    "mine-confirmed-defects",
+)
+
+
+def ensure_cache_dir():
+    """Create the cache privately and reject an untrusted existing directory."""
     try:
-        out = subprocess.check_output(["gh", "api"] + args, text=True)
+        os.makedirs(CACHE_DIR, mode=0o700, exist_ok=True)
+        info = os.lstat(CACHE_DIR)
+    except OSError as e:
+        die(f"error: cannot prepare cache directory {CACHE_DIR}: {e}")
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid():
+        die(f"error: cache directory {CACHE_DIR} must be a directory owned by the current user")
+    try:
+        os.chmod(CACHE_DIR, 0o700)
+    except OSError as e:
+        die(f"error: cannot secure cache directory {CACHE_DIR}: {e}")
+
+
+class RateLimited(Exception):
+    """gh refused the call because the API rate limit is exhausted."""
+
+
+# The open-PR listing grows as PRs merge, so a permanent cache entry would
+# silently omit anything merged after the first run. Commits and files are
+# immutable once a PR is merged, so they cache forever with no TTL.
+LISTING_TTL_SECONDS = 3600
+
+
+def gh_json(args, ttl=None):
+    ensure_cache_dir()
+    # GH_HOST changes what a given `args` list actually fetches, so it must be
+    # part of the key or two hosts would share one entry.
+    key_material = "\x00".join(args) + "\x00" + os.environ.get("GH_HOST", "")
+    key = hashlib.sha256(key_material.encode()).hexdigest()[:32]
+    path = os.path.join(CACHE_DIR, key + ".json")
+    if os.path.exists(path) and (ttl is None or time.time() - os.path.getmtime(path) < ttl):
+        try:
+            with open(path, encoding="utf-8") as fh:
+                return json.load(fh)
+        except (OSError, json.JSONDecodeError):
+            os.unlink(path)
+    try:
+        out = subprocess.check_output(
+            ["gh", "api"] + args, text=True, stderr=subprocess.PIPE
+        )
     except subprocess.CalledProcessError as e:
-        die(f"error: gh api {' '.join(args[:3])} failed (exit {e.returncode})")
+        # A throttle is not a failure of this run, it is a pause. Raise so the
+        # caller can emit everything gathered so far instead of dying with
+        # nothing, which is what loses an hour of paid-for calls.
+        if "rate limit" in (e.stderr or "").lower():
+            raise RateLimited(" ".join(args[:2]))
+        die(f"error: gh api {' '.join(args[:3])} failed (exit {e.returncode}): {(e.stderr or '').strip()}")
     try:
-        return json.loads(out)
+        parsed = json.loads(out)
     except json.JSONDecodeError as e:
         die(f"error: invalid JSON: {e}")
+    fd, tmp = tempfile.mkstemp(dir=CACHE_DIR, prefix=f".{key}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fd = -1
+            json.dump(parsed, fh)
+        os.replace(tmp, path)
+    finally:
+        if fd != -1:
+            os.close(fd)
+        try:
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass
+    return parsed
 def as_list(payload):
-    return payload if isinstance(payload, list) else ([payload] if isinstance(payload, dict) else [])
+    if isinstance(payload, list):
+        out = []
+        for page in payload:
+            if isinstance(page, list):
+                out.extend(page)
+            elif isinstance(page, dict):
+                out.append(page)
+        return out
+    return [payload] if isinstance(payload, dict) else []
 def fetch_prs(repo):
     prs = []
-    for node in as_list(gh_json(["--paginate", f"repos/{repo}/pulls?state=closed&per_page=100&sort=created&direction=asc"])):
+    for node in as_list(gh_json(["--paginate", "--slurp", f"repos/{repo}/pulls?state=closed&per_page=100&sort=created&direction=asc"], ttl=LISTING_TTL_SECONDS)):
         if not node or not node.get("merged_at") or not node.get("number"):
             continue
         num = int(node["number"])
         commits = []
-        for c in as_list(gh_json(["--paginate", f"repos/{repo}/pulls/{num}/commits"])):
+        for c in as_list(gh_json(["--paginate", "--slurp", f"repos/{repo}/pulls/{num}/commits"])):
             login = (c.get("author") or {}).get("login") or ""
             name = ((c.get("commit") or {}).get("author") or {}).get("name") or ""
             msg = ((c.get("commit") or {}).get("message") or "").split("\n", 1)[0]
@@ -182,7 +281,7 @@ def fetch_patches(repo, number):
     key = (repo, number)
     if key not in PATCHES:
         out = {}
-        for item in as_list(gh_json(["--paginate", f"repos/{repo}/pulls/{number}/files"])):
+        for item in as_list(gh_json(["--paginate", "--slurp", f"repos/{repo}/pulls/{number}/files"])):
             if item.get("filename"):
                 out[item["filename"]] = item.get("patch") or ""
         PATCHES[key] = out
@@ -224,9 +323,10 @@ def revert_target(pr, by_title, by_number):
 def undo_hit(prev, later, shared):
     a, b = fetch_patches(prev["repo"], prev["number"]), fetch_patches(later["repo"], later["number"])
     for path in sorted(p for p in (shared or (set(a) & set(b))) if p in a and p in b and not SKIP.search(p)):
-        added, deleted = set(signed_lines(a[path], "+")), set(signed_lines(b[path], "-"))
-        if added and deleted and added & deleted:
-            return path, first_line(a[path])
+        added, deleted = numbered_added_lines(a[path]), set(signed_lines(b[path], "-"))
+        match = added.keys() & deleted
+        if match:
+            return path, added[sorted(match)[0]]
     return None
 def later_fixes(pr, earlier):
     if is_bot(pr["author"]) or any(is_bot(l, n) for c in pr["commits"] for l, n in c["authors"]):
@@ -256,65 +356,87 @@ def later_fixes(pr, earlier):
         if hit:
             hits.append((prev, hit[0], hit[1]))
     return hits
-def add_raw(bag, pr, kind, url, summary, path, line=1):
+def add_raw(bag, pr, kind, url, summary, path, line=1, precise=False):
     bag[(pr["repo"], pr["number"])].append(
-        {"kind": kind, "url": url, "summary": summary, "path": path, "line": line}
+        {"kind": kind, "url": url, "summary": summary, "path": path, "line": line, "precise": precise}
     )
 all_prs, raw_cases = {}, defaultdict(list)
+throttled = []
+def note_throttle(where):
+    # Emit what was already produced rather than dying with nothing.
+    # Responses are cached, so re-running resumes here instead of
+    # re-paying for every call made so far.
+    throttled.append(where)
+    print(
+        f"rate limited on {where}; keeping what was already gathered. "
+        "Re-run to resume — cached responses are reused.",
+        file=sys.stderr,
+    )
 for repo in REPOS:
     print(f"mining {repo}", file=sys.stderr)
-    all_prs[repo] = fetch_prs(repo)
-for repo, prs in all_prs.items():
-    by_number = {p["number"]: p for p in prs}
-    by_title = {}
-    for p in prs:
-        by_title.setdefault(p["title"].strip().lower(), p)
-    for i, pr in enumerate(prs):
-        for raw in in_pr_defects(pr):
-            raw_cases[(repo, pr["number"])].append(raw)
-        target = revert_target(pr, by_title, by_number)
-        bot_rev = is_bot(pr["author"]) or any(is_bot(l, n) for c in pr["commits"] for l, n in c["authors"])
-        if target and not bot_rev:
-            ensure_files(pr); ensure_files(target)
-            shared = set(src_files(pr["files"])).intersection(src_files(target["files"]))
-            hit = undo_hit(target, pr, shared)
-            path = (hit[0] if hit else (src_files(target["files"]) or target["files"] or ["unknown"])[0])
-            add_raw(raw_cases, target, "revert", pr["url"], pr["title"], path, hit[1] if hit else 1)
-        if REVERT_TITLE.match(pr["title"].strip()):
-            continue
-        for prev, path, line in later_fixes(pr, prs[:i]):
-            add_raw(raw_cases, prev, "later-fix-commit", pr["url"], pr["title"], path, line)
+    try:
+        all_prs[repo] = fetch_prs(repo)
+    except RateLimited:
+        note_throttle(repo)
+        break
+try:
+    for repo, prs in all_prs.items():
+        by_number = {p["number"]: p for p in prs}
+        by_title = {}
+        for p in prs:
+            by_title.setdefault(p["title"].strip().lower(), p)
+        for i, pr in enumerate(prs):
+            for raw in in_pr_defects(pr):
+                raw_cases[(repo, pr["number"])].append(raw)
+            target = revert_target(pr, by_title, by_number)
+            bot_rev = is_bot(pr["author"]) or any(is_bot(l, n) for c in pr["commits"] for l, n in c["authors"])
+            if target and not bot_rev:
+                ensure_files(pr); ensure_files(target)
+                shared = set(src_files(pr["files"])).intersection(src_files(target["files"]))
+                hit = undo_hit(target, pr, shared)
+                path = (hit[0] if hit else (src_files(target["files"]) or target["files"] or ["unknown"])[0])
+                add_raw(raw_cases, target, "revert", pr["url"], pr["title"], path, hit[1] if hit else 1, bool(hit))
+            if REVERT_TITLE.match(pr["title"].strip()):
+                continue
+            for prev, path, line in later_fixes(pr, prs[:i]):
+                add_raw(raw_cases, prev, "later-fix-commit", pr["url"], pr["title"], path, line, True)
+except RateLimited:
+    note_throttle(f"{repo}#{pr['number']}")
 cases = []
-for (repo, number), extras in raw_cases.items():
-    pr = next(p for p in all_prs[repo] if p["number"] == number)
-    files = fetch_patches(repo, number)
-    extras.sort(key=lambda r: (r["kind"], r["url"], r["path"]))
-    seen, defects = set(), []
-    for raw in extras:
-        if raw["url"] in seen:
-            continue
-        seen.add(raw["url"])
-        path, line = raw["path"], raw["line"]
-        if path in files:
-            line = first_line(files[path])
-        elif files:
-            path = (src_files(files) or list(files))[0]
-            line = first_line(files[path])
-        ev = re.sub(r"(?i)^(fix|hotfix|correct|undo|revert)[:\s]+", "", raw["summary"]).strip().rstrip(".")
-        defects.append({
-            "id": f"{repo}#{number}.{len(defects)+1}",
-            "lens": lens_for(raw["summary"], path),
-            "path": path, "line": line,
-            "trigger": f'given {path} as landed in "{pr["title"]}", {ev or raw["summary"].strip().rstrip(".")}',
-            "labelEvidence": {"kind": raw["kind"], "url": raw["url"], "summary": raw["summary"]},
-        })
-    chunks = [f"--- a/{p}\n+++ b/{p}\n{files[p]}" for p in sorted(files) if files[p]]
-    diff = "\n".join(chunks) or "\n".join(f"--- a/{p}\n+++ b/{p}" for p in (src_files(pr["files"]) or pr["files"]))
-    if defects and diff:
-        cases.append({
-            "id": f"{repo}#{number}", "repository": repo, "pr": number,
-            "mergedAt": pr["mergedAt"], "diff": diff, "defects": defects,
-        })
+try:
+    for (repo, number), extras in raw_cases.items():
+        pr = next(p for p in all_prs[repo] if p["number"] == number)
+        files = fetch_patches(repo, number)
+        extras.sort(key=lambda r: (r["kind"], r["url"], r["path"]))
+        seen, defects = set(), []
+        for raw in extras:
+            if raw["url"] in seen:
+                continue
+            seen.add(raw["url"])
+            path, line = raw["path"], raw["line"]
+            if path not in files:
+                if files:
+                    path = (src_files(files) or list(files))[0]
+                    line = first_line(files[path])
+            elif not raw.get("precise"):
+                line = first_line(files[path])
+            ev = re.sub(r"(?i)^(fix|hotfix|correct|undo|revert)[:\s]+", "", raw["summary"]).strip().rstrip(".")
+            defects.append({
+                "id": f"{repo}#{number}.{len(defects)+1}",
+                "lens": lens_for(raw["summary"], path),
+                "path": path, "line": line,
+                "trigger": f'given {path} as landed in "{pr["title"]}", {ev or raw["summary"].strip().rstrip(".")}',
+                "labelEvidence": {"kind": raw["kind"], "url": raw["url"], "summary": raw["summary"]},
+            })
+        chunks = [f"--- a/{p}\n+++ b/{p}\n{files[p]}" for p in sorted(files) if files[p]]
+        diff = "\n".join(chunks) or "\n".join(f"--- a/{p}\n+++ b/{p}" for p in (src_files(pr["files"]) or pr["files"]))
+        if defects and diff:
+            cases.append({
+                "id": f"{repo}#{number}", "repository": repo, "pr": number,
+                "mergedAt": pr["mergedAt"], "diff": diff, "defects": defects,
+            })
+except RateLimited:
+    note_throttle(f"{repo}#{number}")
 cases.sort(key=lambda c: (c["repository"], c["pr"]))
 if len(cases) > MAX:
     buckets, picked, i = defaultdict(list), [], 0
