@@ -10,6 +10,7 @@ import {
   ConfigurationError,
   DEFAULT_CONFIG,
   checkProof,
+  checkBaseBranchAge,
   checkSize,
   countClosingReferences,
   validateCommits,
@@ -318,6 +319,35 @@ test('enforces size failures without a label escape', () => {
   assert.equal(result.warnings.length, 1);
 });
 
+test('reports stale branch points at the configured threshold', () => {
+  const compare = { behind_by: 11, merge_base_commit: { sha: '1234567890' } };
+  const baseChanges = {
+    commits: [{ sha: 'abcdef123', commit: { message: 'Remove the escape hatch\n\nDetails' } }],
+    files: [{ filename: 'pr-standards.mjs' }],
+  };
+
+  assert.deepEqual(checkBaseBranchAge({ ...compare, behind_by: 0 }, baseChanges, [], config), {
+    failures: [], warnings: [],
+  }, 'an up-to-date branch is silent');
+
+  const stale = checkBaseBranchAge(compare, baseChanges, [{ filename: 'README.md' }], config);
+  assert.equal(stale.failures.length, 0);
+  assert.equal(stale.warnings.length, 1);
+  assert.match(stale.warnings[0].got, /abcdef1 Remove the escape hatch/);
+
+  const overlap = checkBaseBranchAge(compare, baseChanges, [{ filename: 'pr-standards.mjs' }], config);
+  assert.equal(overlap.failures.length, 1, 'overlap must fail, not warn');
+  assert.match(overlap.failures[0].got, /pr-standards\.mjs/);
+
+  const raised = checkBaseBranchAge(compare, baseChanges, [], { ...config, maxBaseCommitsBehind: 11 });
+  assert.deepEqual(raised, { failures: [], warnings: [] }, 'the threshold is configurable');
+  assert.throws(
+    () => validateConfig({ ...config, maxBaseCommitsBehind: -1 }),
+    ConfigurationError,
+    'the configured threshold must be a non-negative integer',
+  );
+});
+
 test('prevents size-cap escape resurrection', () => {
   // A deletion is not self-enforcing. This keeps stale branches from restoring
   // the escape while leaving every behavioral test green.
@@ -375,8 +405,11 @@ test('issues/{n} returning an object with a pull_request field fails', async () 
     if (url.includes('pulls/12/files')) {
       return { ok: true, json: async () => ([]) };
     }
+    if (url.includes('/compare/')) {
+      return { ok: true, json: async () => ({ behind_by: 0, merge_base_commit: { sha: '1234567' } }) };
+    }
     if (url.includes('pulls/12')) {
-      return { ok: true, json: async () => ({ head: { ref: 'cr-12-test' }, title: '[CR-12] Test PR', body: validBody.replace('142', '12').replace('142', '12').replace('142', '12') }) };
+      return { ok: true, json: async () => ({ head: { ref: 'cr-12-test', sha: 'deadbee' }, base: { ref: 'main' }, title: '[CR-12] Test PR', body: validBody.replace('142', '12').replace('142', '12').replace('142', '12') }) };
     }
     if (url.includes('issues/12')) {
       return { ok: true, json: async () => ({ state: 'open', pull_request: {} }) };
@@ -423,8 +456,11 @@ test('an exempt branch skips proof of work along with title and body', async () 
       // to write.
       return { ok: true, json: async () => ([{ filename: 'src/components/Button.tsx', status: 'modified' }]) };
     }
+    if (url.includes('/compare/')) {
+      return { ok: true, json: async () => ({ behind_by: 0, merge_base_commit: { sha: '1234567' } }) };
+    }
     if (url.includes('pulls/13')) {
-      return { ok: true, json: async () => ({ head: { ref: 'refactor' }, title: 'Move things around', body: 'no structured body at all' }) };
+      return { ok: true, json: async () => ({ head: { ref: 'refactor', sha: 'deadbee' }, base: { ref: 'main' }, title: 'Move things around', body: 'no structured body at all' }) };
     }
     throw new Error(`Unexpected fetch URL: ${url}`);
   };
@@ -464,8 +500,11 @@ test('config resolution prefers the target repo over the local checkout', async 
     if (url.includes('pulls/12/files')) {
       return { ok: true, json: async () => ([]) };
     }
+    if (url.includes('/compare/')) {
+      return { ok: true, json: async () => ({ behind_by: 0, merge_base_commit: { sha: '1234567' } }) };
+    }
     if (url.includes('pulls/12')) {
-      return { ok: true, json: async () => ({ head: { ref: 'rmt-12-test' }, title: '[RMT-12] Test PR that works', body: validBody.replace('142', '12').replace('142', '12').replace('142', '12') }) };
+      return { ok: true, json: async () => ({ head: { ref: 'rmt-12-test', sha: 'deadbee' }, base: { ref: 'main' }, title: '[RMT-12] Test PR that works', body: validBody.replace('142', '12').replace('142', '12').replace('142', '12') }) };
     }
     if (url.includes('issues/12')) {
       return { ok: true, json: async () => ({ state: 'open' }) };
@@ -478,7 +517,225 @@ test('config resolution prefers the target repo over the local checkout', async 
     assert.equal(exitCode, 0);
     const result = JSON.parse(output);
     assert.equal(result.prefix, 'rmt');
-    assert.equal(result.provenance, 'from test/repo .github/pr-standards.json');
+    assert.equal(result.provenance, 'from test/repo .github/pr-standards.json @ main');
+  } finally {
+    process.stdout.write = originalWrite;
+    process.env.PATH = originalPath;
+    process.env.GITHUB_TOKEN = originalToken;
+    globalThis.fetch = originalFetch;
+    delete process.env.GITHUB_REPOSITORY;
+  }
+});
+
+test('compares a fork PR by head sha, not by a head branch name the base repo may not have', async () => {
+  const originalWrite = process.stdout.write;
+  const originalPath = process.env.PATH;
+  const originalToken = process.env.GITHUB_TOKEN;
+  const originalFetch = globalThis.fetch;
+  let output = '';
+  process.stdout.write = (chunk) => { output += chunk; return true; };
+  process.env.PATH = '';
+  process.env.GITHUB_TOKEN = 'test-token';
+  process.env.GITHUB_REPOSITORY = 'other/repo';
+
+  globalThis.fetch = async (url) => {
+    if (url.includes('contents/.github/pr-standards.json')) {
+      return { ok: true, json: async () => ({ content: Buffer.from(JSON.stringify({ prefix: 'cr' })).toString('base64'), encoding: 'base64' }) };
+    }
+    if (url.includes('pulls/12/commits')) {
+      return { ok: true, json: async () => ([{ sha: 'abc1234', commit: { message: 'Fix the thing' } }]) };
+    }
+    if (url.includes('pulls/12/files')) {
+      return { ok: true, json: async () => ([]) };
+    }
+    // A fork PR's head sha does not exist as a branch name in the base repo.
+    // Only a compare keyed on the sha can succeed here; one keyed on the
+    // ref would 404 or match an unrelated same-named branch in the base repo.
+    if (url.includes('/compare/main...forksha123')) {
+      return { ok: true, json: async () => ({ behind_by: 0, merge_base_commit: { sha: '1234567' } }) };
+    }
+    if (url.includes('pulls/12')) {
+      return { ok: true, json: async () => ({ head: { ref: 'cr-12-test', sha: 'forksha123' }, base: { ref: 'main' }, title: '[CR-12] Compare a fork by its head sha', body: validBody.replace('142', '12').replace('142', '12').replace('142', '12') }) };
+    }
+    if (url.includes('issues/12')) {
+      return { ok: true, json: async () => ({ state: 'open' }) };
+    }
+    throw new Error(`Unexpected fetch URL: ${url}`);
+  };
+
+  try {
+    const exitCode = await main(['pr', '--repo', 'test/repo', '--number', '12', '--json']);
+    assert.equal(exitCode, 0);
+  } finally {
+    process.stdout.write = originalWrite;
+    process.env.PATH = originalPath;
+    process.env.GITHUB_TOKEN = originalToken;
+    globalThis.fetch = originalFetch;
+    delete process.env.GITHUB_REPOSITORY;
+  }
+});
+
+test('a malformed behind_by does not silently skip the branch-age check', async () => {
+  const originalWrite = process.stdout.write;
+  const originalPath = process.env.PATH;
+  const originalToken = process.env.GITHUB_TOKEN;
+  const originalFetch = globalThis.fetch;
+  let output = '';
+  process.stdout.write = (chunk) => { output += chunk; return true; };
+  process.env.PATH = '';
+  process.env.GITHUB_TOKEN = 'test-token';
+  process.env.GITHUB_REPOSITORY = 'other/repo';
+
+  globalThis.fetch = async (url) => {
+    if (url.includes('contents/.github/pr-standards.json')) {
+      return { ok: true, json: async () => ({ content: Buffer.from(JSON.stringify({ prefix: 'cr' })).toString('base64'), encoding: 'base64' }) };
+    }
+    if (url.includes('pulls/12/commits')) {
+      return { ok: true, json: async () => ([{ sha: 'abc1234', commit: { message: 'Fix the thing' } }]) };
+    }
+    if (url.includes('pulls/12/files')) {
+      return { ok: true, json: async () => ([]) };
+    }
+    // -1 is not a value GitHub should ever send, but a naive `behind_by <=
+    // threshold` early return would treat it as "up to date" and skip the
+    // check entirely instead of surfacing the bad data.
+    if (url.includes('/compare/main...deadbee')) {
+      return { ok: true, json: async () => ({ behind_by: -1, merge_base_commit: { sha: '1234567' } }) };
+    }
+    // Reached only if the malformed behind_by above is mistakenly treated
+    // as "in range" and never re-validated.
+    if (url.includes('/compare/1234567...main')) {
+      return { ok: true, json: async () => ({ commits: [], files: [] }) };
+    }
+    if (url.includes('pulls/12')) {
+      return { ok: true, json: async () => ({ head: { ref: 'cr-12-test', sha: 'deadbee' }, base: { ref: 'main' }, title: '[CR-12] Test PR', body: validBody.replace('142', '12').replace('142', '12').replace('142', '12') }) };
+    }
+    if (url.includes('issues/12')) {
+      return { ok: true, json: async () => ({ state: 'open' }) };
+    }
+    throw new Error(`Unexpected fetch URL: ${url}`);
+  };
+
+  try {
+    const exitCode = await main(['pr', '--repo', 'test/repo', '--number', '12', '--json']);
+    assert.equal(exitCode, 1);
+    const result = JSON.parse(output);
+    assert.equal(result.failures.some((f) => /invalid branch comparison/.test(f.got)), true);
+  } finally {
+    process.stdout.write = originalWrite;
+    process.env.PATH = originalPath;
+    process.env.GITHUB_TOKEN = originalToken;
+    globalThis.fetch = originalFetch;
+    delete process.env.GITHUB_REPOSITORY;
+  }
+});
+
+test('a stale branch point reaches the base comparison and fails on overlap end to end', async () => {
+  const originalWrite = process.stdout.write;
+  const originalPath = process.env.PATH;
+  const originalToken = process.env.GITHUB_TOKEN;
+  const originalFetch = globalThis.fetch;
+  let output = '';
+  process.stdout.write = (chunk) => { output += chunk; return true; };
+  process.env.PATH = '';
+  process.env.GITHUB_TOKEN = 'test-token';
+  process.env.GITHUB_REPOSITORY = 'other/repo';
+
+  globalThis.fetch = async (url) => {
+    if (url.includes('contents/.github/pr-standards.json')) {
+      return { ok: true, json: async () => ({ content: Buffer.from(JSON.stringify({ prefix: 'cr' })).toString('base64'), encoding: 'base64' }) };
+    }
+    if (url.includes('pulls/12/commits')) {
+      return { ok: true, json: async () => ([{ sha: 'abc1234', commit: { message: 'Fix the thing' } }]) };
+    }
+    if (url.includes('pulls/12/files')) {
+      return { ok: true, json: async () => ([{ filename: 'pr-standards.mjs' }]) };
+    }
+    // The first compare reports the branch is behind by more than the
+    // default threshold, which must trigger the second compare below
+    // rather than stopping at this pure-unit-tested decision.
+    if (url.includes('/compare/main...deadbee')) {
+      return { ok: true, json: async () => ({ behind_by: 11, merge_base_commit: { sha: '1234567' } }) };
+    }
+    if (url.includes('/compare/1234567...main')) {
+      return {
+        ok: true,
+        json: async () => ({
+          commits: [{ sha: 'abcdef1', commit: { message: 'Remove the escape hatch' } }],
+          files: [{ filename: 'pr-standards.mjs' }],
+        }),
+      };
+    }
+    if (url.includes('pulls/12')) {
+      return { ok: true, json: async () => ({ head: { ref: 'cr-12-test', sha: 'deadbee' }, base: { ref: 'main' }, title: '[CR-12] Test PR', body: validBody.replace('142', '12').replace('142', '12').replace('142', '12') }) };
+    }
+    if (url.includes('issues/12')) {
+      return { ok: true, json: async () => ({ state: 'open' }) };
+    }
+    throw new Error(`Unexpected fetch URL: ${url}`);
+  };
+
+  try {
+    const exitCode = await main(['pr', '--repo', 'test/repo', '--number', '12', '--json']);
+    assert.equal(exitCode, 1);
+    const result = JSON.parse(output);
+    assert.equal(result.failures.some((f) => f.check === 'branch point overlaps base changes'), true);
+  } finally {
+    process.stdout.write = originalWrite;
+    process.env.PATH = originalPath;
+    process.env.GITHUB_TOKEN = originalToken;
+    globalThis.fetch = originalFetch;
+    delete process.env.GITHUB_REPOSITORY;
+  }
+});
+
+test('a stale branch point with no overlapping files warns rather than fails end to end', async () => {
+  const originalWrite = process.stdout.write;
+  const originalPath = process.env.PATH;
+  const originalToken = process.env.GITHUB_TOKEN;
+  const originalFetch = globalThis.fetch;
+  let output = '';
+  process.stdout.write = (chunk) => { output += chunk; return true; };
+  process.env.PATH = '';
+  process.env.GITHUB_TOKEN = 'test-token';
+  process.env.GITHUB_REPOSITORY = 'other/repo';
+
+  globalThis.fetch = async (url) => {
+    if (url.includes('contents/.github/pr-standards.json')) {
+      return { ok: true, json: async () => ({ content: Buffer.from(JSON.stringify({ prefix: 'cr' })).toString('base64'), encoding: 'base64' }) };
+    }
+    if (url.includes('pulls/12/commits')) {
+      return { ok: true, json: async () => ([{ sha: 'abc1234', commit: { message: 'Fix the thing' } }]) };
+    }
+    if (url.includes('pulls/12/files')) {
+      return { ok: true, json: async () => ([{ filename: 'README.md' }]) };
+    }
+    if (url.includes('/compare/main...deadbee')) {
+      return { ok: true, json: async () => ({ behind_by: 11, merge_base_commit: { sha: '1234567' } }) };
+    }
+    if (url.includes('/compare/1234567...main')) {
+      return {
+        ok: true,
+        json: async () => ({
+          commits: [{ sha: 'abcdef1', commit: { message: 'Remove the escape hatch' } }],
+          files: [{ filename: 'pr-standards.mjs' }],
+        }),
+      };
+    }
+    if (url.includes('pulls/12')) {
+      return { ok: true, json: async () => ({ head: { ref: 'cr-12-test', sha: 'deadbee' }, base: { ref: 'main' }, title: '[CR-12] Warn on a stale branch point', body: validBody.replace('142', '12').replace('142', '12').replace('142', '12') }) };
+    }
+    if (url.includes('issues/12')) {
+      return { ok: true, json: async () => ({ state: 'open' }) };
+    }
+    throw new Error(`Unexpected fetch URL: ${url}`);
+  };
+
+  try {
+    const exitCode = await main(['pr', '--repo', 'test/repo', '--number', '12', '--json']);
+    assert.equal(exitCode, 0);
+    const result = JSON.parse(output);
+    assert.equal(result.warnings.some((w) => w.check === 'branch point is behind base'), true);
   } finally {
     process.stdout.write = originalWrite;
     process.env.PATH = originalPath;
@@ -1229,8 +1486,9 @@ test('prefix precedence holds on the CI path, not only in loadConfig', async () 
       }
       if (url.includes('/commits')) return { ok: true, json: async () => ([{ sha: 'abc1234', commit: { message: 'Do one thing' } }]) };
       if (url.includes('/files')) return { ok: true, json: async () => ([]) };
+      if (url.includes('/compare/')) return { ok: true, json: async () => ({ behind_by: 0, merge_base_commit: { sha: '1234567' } }) };
       if (url.match(/pulls\/\d+$/)) {
-        return { ok: true, json: async () => ({ head: { ref: branch }, base: { ref: 'main' }, title: 'x', body: 'x', labels: [] }) };
+        return { ok: true, json: async () => ({ head: { ref: branch, sha: 'deadbee' }, base: { ref: 'main' }, title: 'x', body: 'x', labels: [] }) };
       }
       if (url.includes('issues/')) return { ok: true, json: async () => ({ state: 'open' }) };
       throw new Error(`Unexpected fetch URL: ${url}`);
