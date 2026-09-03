@@ -147,12 +147,13 @@ fi
 check_repo() {
   local repo="$1" is_private="$2" has_issues="$3" out="$4"
   local has_prefix=0 has_workflow=0 has_forms=0 has_labels=0
-  local slug actual_raw actual missing_count err label_err
+  local slug actual_raw actual diff_out missing_count err label_err
 
   # slug replaces the slash in owner/name so it is safe as a filename.
   slug=$(printf '%s' "$repo" | tr '/' '_')
   actual_raw="$tmp/labels/${slug}.raw"
   actual="$tmp/labels/${slug}.sorted"
+  diff_out="$tmp/labels/${slug}.diff"
   label_err="$tmp/labels/${slug}.err"
 
   if err=$(gh api "repos/$repo/contents/.github/pr-standards.json" 2>&1 >/dev/null); then
@@ -189,9 +190,16 @@ check_repo() {
       printf '%s\tlabel sort\t%s\n' "$repo" "$(cat "$label_err")" >> "$tmp/probe-errors.log"
     fi
   fi
-  missing_count=$(LC_ALL=C comm -23 "$EXPECTED_FILE" "$actual" 2>/dev/null | wc -l | tr -d ' ')
-  if [ "$missing_count" -eq 0 ]; then
-    has_labels=1
+  # comm's exit status is checked like every other probe here: if comm itself
+  # fails, its empty stdout must not be read as "no labels missing", which
+  # would silently report has_labels=1 for a repo we never actually compared.
+  if LC_ALL=C comm -23 "$EXPECTED_FILE" "$actual" > "$diff_out" 2>"$label_err"; then
+    missing_count=$(wc -l < "$diff_out" | tr -d ' ')
+    if [ "$missing_count" -eq 0 ]; then
+      has_labels=1
+    fi
+  elif [ -s "$label_err" ]; then
+    printf '%s\tlabel diff\t%s\n' "$repo" "$(cat "$label_err")" >> "$tmp/probe-errors.log"
   fi
 
   # Write the per-repo result as JSON. This is the only local write the script
