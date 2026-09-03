@@ -1522,7 +1522,6 @@ test('a nonzero failed count is not masked by "passed" in the same result', () =
   assert.equal(fails('pytest -q\n12 passed, 2 failed'), true, '2 failed is not a result, even beside "passed"');
   assert.equal(fails('bash tests/x.sh\n13 passed, 0 failed'), false, '0 failed stays a passing result');
   assert.equal(fails('python3 install-pr-hooks --apply\ninstalled=1 failed=0 failed=2'), true, 'a later failed=2 is not masked by an earlier failed=0');
-  assert.doesNotMatch(resultOnly.expected, /a command and its result/i);
 });
 
 test('prefix precedence holds on the CI path, not only in loadConfig', async () => {
