@@ -183,7 +183,12 @@ check_repo() {
       printf '%s\tlabel list\t%s\n' "$repo" "$(cat "$label_err")" >> "$tmp/probe-errors.log"
     fi
   fi
-  LC_ALL=C sort "$actual_raw" > "$actual" 2>/dev/null || { : > "$actual"; }
+  if ! LC_ALL=C sort "$actual_raw" > "$actual" 2>"$label_err"; then
+    : > "$actual"
+    if [ -s "$label_err" ]; then
+      printf '%s\tlabel sort\t%s\n' "$repo" "$(cat "$label_err")" >> "$tmp/probe-errors.log"
+    fi
+  fi
   missing_count=$(LC_ALL=C comm -23 "$EXPECTED_FILE" "$actual" 2>/dev/null | wc -l | tr -d ' ')
   if [ "$missing_count" -eq 0 ]; then
     has_labels=1
