@@ -21,6 +21,13 @@ model="${3:-glm-5.3-flash}"
 [ -n "$BIN" ] || { echo "w-pi: pi not found in /opt/homebrew/bin, /usr/local/bin or ~/.local/bin" >&2; exit 127; }
 export PATH="$HOME/.local/bin:/opt/homebrew/bin:$PATH"
 
+# Resolve the key here rather than letting pi shell out for it. Its models.json
+# holds `!zsh -lc "pi auth print-api-key --provider zai"`, and that nested login
+# shell fails whenever the environment it inherits cannot find pi — which then
+# prints an auth error AND EXITS 0, so the job reads as done having done nothing.
+key=$(zsh -lc 'pi auth print-api-key --provider zai' 2>/dev/null | tr -d '[:space:]')
+[ -n "$key" ] || { echo "w-pi: could not resolve the zai key" >&2; exit 78; }
+
 cd "$dir" || exit 1
-PI_WORKER=1 exec "$BIN" -p --no-extensions --provider zai-api --model "$model" \
-  -a --tools read,grep,find,ls,edit,write,bash "$prompt"
+PI_WORKER=1 exec "$BIN" -p --no-extensions --provider zai-api --api-key "$key" \
+  --model "$model" -a --tools read,grep,find,ls,edit,write,bash "$prompt"
