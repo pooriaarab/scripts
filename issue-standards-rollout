@@ -1,16 +1,23 @@
 #!/usr/bin/env bash
 # issue-standards-rollout — adopt the issue standard across the fleet.
 #
-#   issue-standards-rollout [--apply] [--labels-only] [--repo owner/name]
+#   issue-standards-rollout [--apply] [--labels-only] [--milestones-only] [--repo owner/name]
 #
 # Dry by default, like pr-standards-rollout. Without --apply it prints the plan
 # and writes nothing, locally or remotely.
 #
 # What it plans per repo: the four issue forms and config.yml, the 13 labels,
-# the AGENTS.md marker block, and a .agents/issues.md stub.
+# the milestones named in that repo's .agents/issues.md, the AGENTS.md marker
+# block, and a .agents/issues.md stub.
 #
 # --labels-only plans only the 13 labels. Labels need no branch and no prefix,
 # so this reaches repos the full rollout skips for lacking pr-standards.json.
+#
+# --milestones-only plans only the milestones named in that repo
+# .agents/issues.md. Milestones need no branch and no prefix, so this
+# reaches repos the full rollout skips for lacking pr-standards.json.
+# A repo that defines no set gets none created; the names cannot be guessed.
+# Full mode creates the same milestones alongside labels and forms.
 #
 # What it does NOT do: fill in that stub. The stub names the repo's analytics
 # helper and its high-stakes paths, and neither can be derived from outside the
@@ -25,15 +32,16 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 TEMPLATES_DIR="$SCRIPT_DIR/issue-standards-templates"
 OWNER="pooriaarab"
 
-DRY=1; TARGET_REPO=""; LABELS_ONLY=0
+DRY=1; TARGET_REPO=""; LABELS_ONLY=0; MILESTONES_ONLY=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --apply) DRY=0; shift ;;
     --labels-only) LABELS_ONLY=1; shift ;;
+    --milestones-only) MILESTONES_ONLY=1; shift ;;
     --repo)
       [ $# -ge 2 ] || { echo "ERROR: --repo requires a value" >&2; exit 1; }
       TARGET_REPO="$2"; shift 2 ;;
-    --help|-h) sed -n '2,20p' "$0"; exit 0 ;;
+    --help|-h) sed -n '2,26p' "$0"; exit 0 ;;
     *) echo "unknown flag: $1" >&2; exit 1 ;;
   esac
 done
@@ -103,6 +111,147 @@ except Exception:
 "
 }
 
+# Titles come from the repo, never from this script: a guessed name would
+# create the same wrong milestone on every rerun, and 422 would then
+# preserve it. Empty stdout means the file was read and defines no set.
+# A failed read (rate limit, auth, network) returns 2 instead, so it is
+# never reported as "no milestone set" the way repo_already_adopted keeps
+# "unknown" apart from a confirmed 404.
+# Decode in Python for the same reason repo_prefix does: GitHub wraps
+# base64 across lines, and macOS base64 is the portability trap.
+repo_milestone_names() {
+  local resp
+  if ! resp=$(gh api "repos/$1/contents/.agents/issues.md" 2>&1); then
+    printf '%s' "$resp" | grep -q '"Not Found"' && return 0
+    return 2
+  fi
+  printf '%s' "$resp" | python3 -c '
+import sys, json, base64, re
+try:
+    d = json.load(sys.stdin)
+    text = base64.b64decode(d["content"]).decode()
+except Exception:
+    raise SystemExit(0)
+heading_re = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
+fence_re = re.compile(r"^\s*(```|~~~)")
+item_re = re.compile(r"^\s*(?:[-*+]|\d+\.)\s+(.+?)\s*$")
+table_re = re.compile(r"^\s*\|(.+)\|\s*$")
+lines = text.splitlines()
+fenced = False
+start = None
+level = None
+for i, line in enumerate(lines):
+    if fence_re.match(line):
+        fenced = not fenced
+        continue
+    if fenced:
+        continue
+    m = heading_re.match(line)
+    if m and "milestone" in m.group(2).lower():
+        start = i + 1
+        level = len(m.group(1))
+        break
+if start is None:
+    raise SystemExit(0)
+
+def clean(name):
+    name = name.strip()
+    if len(name) > 2 and name[0] == "`" and name[-1] == "`":
+        name = name[1:-1].strip()
+    return name
+
+fenced = False
+for line in lines[start:]:
+    if fence_re.match(line):
+        fenced = not fenced
+        continue
+    if fenced:
+        continue
+    m = heading_re.match(line)
+    if m and len(m.group(1)) <= level:
+        break
+    im = item_re.match(line)
+    if im:
+        name = clean(im.group(1))
+        if name:
+            print(name)
+        continue
+    tm = table_re.match(line)
+    if not tm:
+        continue
+    cells = [c.strip() for c in tm.group(1).split("|")]
+    if not cells:
+        continue
+    cell = cells[0]
+    if not cell or set(cell) <= set("-: ") or "milestone" in cell.lower():
+        continue
+    name = clean(cell)
+    if name:
+        print(name)
+'
+}
+
+# Shared by --milestones-only and full mode: the issue asks for milestone
+# creation in both, and it needs no branch or prefix in either.
+apply_milestones() {
+  repo="$1"
+  names=$(repo_milestone_names "$repo")
+  fetch_status=$?
+  if [ "$fetch_status" -eq 2 ]; then
+    say "SKIP    $repo — cannot read .agents/issues.md"
+    return
+  fi
+  names=$(printf '%s\n' "$names" | awk '!seen[$0]++')
+  if [ -z "$names" ]; then
+    say "SKIP    $repo - .agents/issues.md defines no milestone set"
+    return
+  fi
+  say "MILESTONES  $repo"
+  if [ "$DRY" -eq 1 ]; then
+    while IFS= read -r name; do
+      [ -n "$name" ] || continue
+      say "          milestone  $name"
+    done < <(printf '%s\n' "$names")
+    return
+  fi
+  # -X GET is not optional: -f adds a body parameter, and gh api switches
+  # a request with body parameters to POST unless the method is pinned.
+  # An unpinned request here would silently POST to the create endpoint
+  # instead of listing, so "existing" would always come back empty.
+  #
+  # Read via process substitution, not a pipe: a pipe would run this loop
+  # in a subshell, and milestone_failures set there would never reach the
+  # tally below. Existing titles are listed first so a rerun is told apart
+  # from a real create: matching "422" in the POST error would also match
+  # validation failures that are not "already exists".
+  if ! existing=$(gh api "repos/${repo}/milestones" -X GET -f state=all --paginate --jq '.[].title' 2>/dev/null); then
+    say "SKIP    $repo — cannot list existing milestones"
+    return
+  fi
+  milestone_failures=0
+  milestone_created=0
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    if printf '%s\n' "$existing" | grep -qxF "$name"; then
+      say "          milestone  $name (already exists)"
+      continue
+    fi
+    if gh api "repos/${repo}/milestones" -X POST -f title="${name}" >/dev/null 2>&1; then
+      say "          milestone  $name"
+      milestone_created=$((milestone_created + 1))
+    else
+      say "          FAILED  milestone $name"
+      milestone_failures=$((milestone_failures + 1))
+    fi
+  done < <(printf '%s\n' "$names")
+  if [ "$milestone_failures" -gt 0 ]; then
+    say "          NOTE    $milestone_failures milestone(s) failed; rerun --apply --repo $repo to retry."
+    ANY_MILESTONE_FAILURE=1
+  elif [ "$milestone_created" -eq 0 ]; then
+    say "          NOTE    no change: all named milestones already exist."
+  fi
+}
+
 target_repos() {
   if [ -n "$TARGET_REPO" ]; then
     printf '%s\n' "$TARGET_REPO"
@@ -121,6 +270,15 @@ plan_repo() {
   fi
   if [ "$has_issues" != "true" ]; then
     say "SKIP    $repo — issues are disabled, so there is nothing to standardise"
+    return
+  fi
+
+  # Milestones need no branch and no prefix, so --milestones-only skips only
+  # a repo whose issues are disabled. No branch name is derived so no prefix
+  # is needed, which is why this mode does not require pr-standards.json.
+  # Same argument --labels-only makes.
+  if [ "$MILESTONES_ONLY" -eq 1 ]; then
+    apply_milestones "$repo"
     return
   fi
 
@@ -150,6 +308,7 @@ plan_repo() {
     say "          labels  13, created with --force so a rerun changes nothing"
     say "          block   AGENTS.md issue-standards marker block"
     say "          stub    .agents/issues.md, with TODOs for a human to fill in"
+    apply_milestones "$repo"
   else
     say "LABELS  $repo"
   fi
@@ -192,6 +351,7 @@ REPOS=$(target_repos) || { echo "ERROR: could not list repos for $OWNER" >&2; ex
 
 count=0
 ANY_LABEL_FAILURE=0
+ANY_MILESTONE_FAILURE=0
 while IFS= read -r repo; do
   [ -n "$repo" ] || continue
   plan_repo "$repo"
@@ -201,17 +361,26 @@ $REPOS
 EOF
 
 say ""
-# The tally counts repos, not labels, in both modes. Saying "label(s)" here
+# The tally counts repos, not labels or milestones. Saying "label(s)" here
 # would report 13 labels across one repo as "1 label(s)".
-if [ "$LABELS_ONLY" -eq 1 ]; then
+if [ "$MILESTONES_ONLY" -eq 1 ]; then
+  scope="repo(s), milestones only"
+elif [ "$LABELS_ONLY" -eq 1 ]; then
   scope="repo(s), labels only"
 else
   scope="repo(s)"
 fi
 if [ "$DRY" -eq 1 ]; then
   say "$count $scope considered. Dry run: nothing was written. Re-run with --apply."
-elif [ "$ANY_LABEL_FAILURE" -eq 1 ]; then
-  say "$count $scope considered. Some labels FAILED — see FAILED lines above."
+elif [ "$MILESTONES_ONLY" -eq 1 ]; then
+  if [ "$ANY_MILESTONE_FAILURE" -eq 1 ]; then
+    say "$count $scope considered. Some milestones FAILED. See FAILED lines above."
+    exit 1
+  else
+    say "$count $scope considered. Milestones applied where planned."
+  fi
+elif [ "$ANY_LABEL_FAILURE" -eq 1 ] || [ "$ANY_MILESTONE_FAILURE" -eq 1 ]; then
+  say "$count $scope considered. Some labels or milestones FAILED — see FAILED lines above."
   exit 1
 else
   say "$count $scope considered. Labels applied where planned."
