@@ -1,9 +1,30 @@
 #!/usr/bin/env bash
-# Meta Muse, non-interactive. The only route here with no auth or flag trap;
-# it needs its absolute path because ~/.local/bin is often missing from a
+# Meta Muse, non-interactive.
+#
+# Three flags, and the run is useless without them:
+#
+#   --approval-mode never        The default is `on-request`, which blocks
+#                                forever headless. The symptom is the worst in
+#                                the fleet: skills load, some files get written,
+#                                and then NO model output ever appears, so it
+#                                reads as a crash on startup. It is a tool call
+#                                waiting for an approval nobody can give.
+#   --user-input-auto-resolve    Cancels a request_user_input prompt instead of
+#                                waiting on one.
+#   --trust-workspace            Without it the repo's own AGENTS.md is silently
+#                                skipped, so the worker runs without the
+#                                project's rules and looks like it ignored them.
+#
+# When a Muse run does die, check `git status` in the workspace before
+# concluding it did nothing. It leaves real work uncommitted, and that work can
+# be good -- one such run had two usable tests sitting modified but uncommitted
+# after being written off as a failure.
+#
+# It needs its absolute path because ~/.local/bin is often missing from a
 # non-interactive PATH.
 set -uo pipefail
 BIN="$HOME/.local/bin/muse"
 dir="${1:?usage: w-muse <dir> "<prompt>"}"; prompt="${2:?prompt required}"
 [ -x "$BIN" ] || { echo "w-muse: no binary at $BIN" >&2; exit 127; }
-exec "$BIN" exec --workspace "$dir" "$prompt"
+exec "$BIN" exec --trust-workspace --approval-mode never --user-input-auto-resolve \
+  --workspace "$dir" "$prompt"
