@@ -1943,3 +1943,32 @@ test('a Proof n/a hatch inside an HTML comment is not an answer', () => {
   assert.equal(failed(checkProof(body(reason), uiFiles, config)), false);
   assert.equal(failed(checkProof(body(`<!-- ${reason} -->`), uiFiles, config)), true);
 });
+
+test('proof: the body reader keeps what renders around a comment', () => {
+  // Three cases the fence/comment tests did not reach. Each one hid or exposed
+  // the wrong thing, and each fails against the first version of the reader.
+  const uiFiles = [{ filename: 'src/components/Button.tsx', status: 'modified' }];
+  const url = (id) => `![shot](https://github.com/user-attachments/assets/${id})`;
+  const failed = (r) => r.failures.some((f) => f.check === 'proof of a visible change');
+  const warned = (r) => r.warnings.some((w) => w.check === 'proof of a visible change');
+  const body = (...lines) => [
+    '## What', 'x', '## Why', 'y', '## How I verified', 'bun test -> pass',
+    ...lines,
+  ].join('\n');
+  const hatch = 'Proof: n/a — a checker with no user-visible surface at all';
+
+  // An unterminated comment hides what follows it, not what precedes it on the
+  // same line. GitHub still renders the text before the marker.
+  assert.equal(failed(checkProof(body(`${hatch} <!-- leftover`), uiFiles, config)), false);
+  assert.equal(failed(checkProof(body(`${url('aaa')} ${url('bbb')} <!--`), uiFiles, config)), false);
+
+  // Every comment on a line is resolved, not just the first. Here only `aaa`
+  // renders, so this is one image and warns rather than clearing the pair.
+  const two = checkProof(body(`see <!-- x --> ${url('aaa')} <!-- ${url('bbb')} -->`), uiFiles, config);
+  assert.equal(failed(two), false);
+  assert.equal(warned(two), true);
+
+  // A fence opened inside a blockquote ends with the quote container, so a
+  // hatch written after the quote is visible rather than swallowed.
+  assert.equal(failed(checkProof(body('> ```', '> example', hatch), uiFiles, config)), false);
+});

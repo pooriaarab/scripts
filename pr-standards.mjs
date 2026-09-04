@@ -572,30 +572,43 @@ function visibleBody(body, { unmatchedFenceHides }) {
       const body = fenceQuoted ? rest.replace(QUOTE_PREFIX, '') : rest;
       // A quoted closer cannot close a fence opened outside the quote: GitHub
       // renders it as literal content inside the still-open fence.
-      const closes = fenceQuoted
-        ? isQuoted(rest) && isFenceCloser(body, fence)
-        : !isQuoted(rest) && isFenceCloser(body, fence);
-      hidden[index] = true;
-      if (closes) fence = null;
-      continue;
-    }
-
-    // Only an unescaped marker opens a comment. Backslashes escape in pairs, so
-    // an even run leaves the marker live.
-    const marker = rest.indexOf('<!--');
-    if (marker !== -1) {
-      let slashes = 0;
-      for (let at = marker - 1; at >= 0 && rest[at] === '\\'; at -= 1) slashes += 1;
-      if (slashes % 2 === 0) {
-        const close = rest.indexOf('-->', marker + 4);
-        if (close === -1) { hidden[index] = true; inComment = true; continue; }
-        // A comment that opens and closes on one line leaves the text around
-        // it visible. Record the stripped text, or a URL inside the comment
-        // would still be emitted and counted as evidence.
-        rest = rest.slice(0, marker) + rest.slice(close + 3);
-        text[index] = rest;
+      // A fence opened inside a blockquote ends when the quote container does:
+      // GitHub cannot continue it outside the quote. Leaving it open swallowed
+      // every later line and read real proof as hidden.
+      if (fenceQuoted && !isQuoted(rest)) { fence = null; }
+      else {
+        const closes = fenceQuoted
+          ? isFenceCloser(body, fence)
+          : !isQuoted(rest) && isFenceCloser(body, fence);
+        hidden[index] = true;
+        if (closes) fence = null;
+        continue;
       }
     }
+
+    // Only an unescaped marker opens a comment, and backslashes escape in pairs
+    // so an even run leaves the marker live. A line can carry more than one
+    // comment, so keep going until none is left -- stopping at the first let a
+    // second comment's contents through as visible evidence.
+    let opened = false;
+    for (let marker = rest.indexOf('<!--'); marker !== -1; marker = rest.indexOf('<!--', marker + 1)) {
+      let slashes = 0;
+      for (let at = marker - 1; at >= 0 && rest[at] === '\\'; at -= 1) slashes += 1;
+      if (slashes % 2 !== 0) continue;
+      const close = rest.indexOf('-->', marker + 4);
+      if (close === -1) {
+        // An unterminated comment runs to the end of the document, but whatever
+        // sat BEFORE the marker on this line still renders. Dropping the whole
+        // line lost a hatch or a screenshot written ahead of it.
+        rest = rest.slice(0, marker);
+        opened = true;
+        break;
+      }
+      rest = rest.slice(0, marker) + rest.slice(close + 3);
+      marker -= 1;
+    }
+    text[index] = rest;
+    if (opened) { inComment = true; if (!rest.trim()) hidden[index] = true; continue; }
 
     const quoted = isQuoted(rest);
     const opener = fenceOpener(quoted ? rest.replace(QUOTE_PREFIX, '') : rest);
