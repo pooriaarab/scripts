@@ -1,0 +1,12 @@
+{
+  "name": "scripts Cloud Environment",
+  "install": "echo 'No install step detected'",
+  "start": "echo 'Environment ready for cloud agents'",
+  "terminals": [
+    {
+      "name": "Verify",
+      "command": "echo 'No test command detected'",
+      "description": "Run tests/lint before opening PRs"
+    }
+  ]
+}

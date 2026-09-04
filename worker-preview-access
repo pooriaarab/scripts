@@ -1,0 +1,352 @@
+#!/usr/bin/env python3
+"""Provision a PR Preview's exact Cloudflare Access boundary."""
+import argparse, copy, fcntl, hashlib, json, os, re, stat, sys, tempfile, time, urllib.error, urllib.parse, urllib.request
+from pathlib import Path
+API = "https://api.cloudflare.com/client/v4"
+TOP = {"schema", "owner", "intended", "acquired"}
+INTENDED = {"target_worker", "preview", "d1", "kv", "r2", "access", "test_identity"}
+ACQUIRED = {"preview", "d1", "kv", "r2", "access", "test_identity"}
+ACCESS = {"application_name", "hostname", "policy_name", "service_token_name"}
+CONFIG = {"schema", "repository", "account_id", "preview_domain", "preview_urls", "reviewer_emails", "identity_provider_id"}
+STATE_IDS = {"application_id", "human_policy_id", "service_policy_id", "service_token_id"}
+ACCOUNT = re.compile(r"[0-9a-f]{32}")
+OPAQUE = re.compile(r"[A-Za-z0-9_-]{8,128}")
+REPOSITORY = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
+BRANCH = re.compile(r"[a-z]{2,4}-[1-9][0-9]*-[a-z0-9]+(?:-[a-z0-9]+)*")
+EMAIL = re.compile(r"[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?")
+DNS_LABEL = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
+MAX_INPUT = 1024 * 1024
+class AccessError(Exception): pass
+class AmbiguousCreate(AccessError): pass
+def no_duplicates(pairs):
+    value = {}
+    for key, item in pairs:
+        if key in value: raise AccessError(f"duplicate JSON key: {key}")
+        value[key] = item
+    return value
+def load_json(path, label):
+    try:
+        if path.is_symlink() or not path.is_file() or path.stat().st_size > MAX_INPUT: raise AccessError(f"{label} must be a regular JSON file of at most 1 MiB")
+        value = json.loads(path.read_bytes(), object_pairs_hook=no_duplicates)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+        raise AccessError(f"{label} is not valid UTF-8 JSON") from error
+    if not isinstance(value, dict): raise AccessError(f"{label} root must be an object")
+    return value
+def resource_name(repository, branch, kind):
+    candidate = f"{branch}-{hashlib.sha256(repository.encode()).hexdigest()[:16]}-{kind}"
+    if len(candidate) <= 350: return candidate
+    digest = hashlib.sha256(candidate.encode()).hexdigest()[:16]
+    return f"{branch[:331 - len(kind)].rstrip('-')}-{kind}-{digest}"
+def validate(plan, config):
+    if set(plan) != TOP or type(plan.get("schema")) is not int or plan["schema"] != 1: raise AccessError("ownership plan has an unexpected schema")
+    owner, intended, acquired = plan["owner"], plan["intended"], plan["acquired"]
+    owner_keys = {"repository", "pull_request", "branch", "head_sha", "workflow", "run_id",
+                  "artifact", "artifact_id", "artifact_digest"}
+    if not isinstance(owner, dict) or set(owner) != owner_keys: raise AccessError("ownership plan has an invalid owner")
+    if (not isinstance(owner["repository"], str) or not REPOSITORY.fullmatch(owner["repository"])
+            or not isinstance(owner["branch"], str) or not BRANCH.fullmatch(owner["branch"])
+            or len(owner["branch"]) > 63 or type(owner["pull_request"]) is not int
+            or owner["pull_request"] < 1 or not isinstance(owner["head_sha"], str)
+            or not re.fullmatch(r"[0-9a-f]{40}", owner["head_sha"])
+            or owner["workflow"] != "Worker Preview Build" or owner["artifact"] != "worker-preview-bundle"
+            or any(type(owner[key]) is not int or owner[key] < 1 for key in ("run_id", "artifact_id"))
+            or not isinstance(owner["artifact_digest"], str)
+            or not re.fullmatch(r"sha256:[0-9a-f]{64}", owner["artifact_digest"])): raise AccessError("ownership plan has an invalid PR owner")
+    if not isinstance(intended, dict) or set(intended) != INTENDED: raise AccessError("ownership plan has invalid intended resources")
+    if not isinstance(acquired, dict) or set(acquired) != ACQUIRED: raise AccessError("ownership plan has invalid acquired resources")
+    worker, preview, access = intended["target_worker"], intended["preview"], intended["access"]
+    if (not isinstance(worker, dict) or set(worker) != {"name", "workers_dev"}
+            or not isinstance(worker["name"], str) or not re.fullmatch(r"[A-Za-z0-9-]{1,255}", worker["name"])
+            or type(worker["workers_dev"]) is not bool or worker["workers_dev"] is not False): raise AccessError("target Worker must disable workers.dev before Access provisioning")
+    domain = preview.get("preview_domain") if isinstance(preview, dict) else None
+    labels = domain.split(".") if isinstance(domain, str) else []
+    domain_ok = (len(labels) >= 3 and all(DNS_LABEL.fullmatch(label) for label in labels)
+                 and labels[0] == "preview" and (labels[1] != "staging" or len(labels) >= 4))
+    if (not isinstance(preview, dict) or set(preview) != {"name", "hostname", "preview_domain"}
+            or not all(isinstance(item, str) for item in preview.values())
+            or not domain_ok
+            or preview["name"] != owner["branch"]
+            or preview["hostname"] != f"{owner['branch']}.{preview['preview_domain']}"
+            or len(preview["hostname"]) > 253): raise AccessError("ownership plan has inconsistent Preview intent")
+    if (not isinstance(access, dict) or set(access) != ACCESS
+            or not all(isinstance(item, str) and item for item in access.values())
+            or access["hostname"] != preview["hostname"]
+            or access["application_name"] != resource_name(owner["repository"], owner["branch"], "access")
+            or access["policy_name"] != resource_name(owner["repository"], owner["branch"], "policy")
+            or access["service_token_name"] != resource_name(owner["repository"], owner["branch"], "ci")): raise AccessError("ownership plan has invalid Access intent")
+    access_owned = acquired.get("access")
+    if (not isinstance(access_owned, dict)
+            or set(access_owned) != {"application_id", "policy_id", "service_token_id"}
+            or any(value is not None for value in access_owned.values())): raise AccessError("Access input must not contain acquired identifiers")
+    if set(config) != CONFIG or type(config.get("schema")) is not int or config["schema"] != 1: raise AccessError("trusted configuration has an unexpected schema")
+    emails, identity = config["reviewer_emails"], config["identity_provider_id"]; emails = [email.lower() for email in emails] if isinstance(emails, list) and all(isinstance(email, str) for email in emails) else emails
+    if (config["repository"] != owner["repository"] or config["preview_domain"] != preview["preview_domain"] or type(config["preview_urls"]) is not bool or config["preview_urls"] is not False or not isinstance(config["account_id"], str)
+            or not ACCOUNT.fullmatch(config["account_id"])
+            or not isinstance(emails, list) or not 1 <= len(emails) <= 25
+            or any(not isinstance(email, str) or not EMAIL.fullmatch(email) for email in emails)
+            or len(set(emails)) != len(emails) or not isinstance(identity, str)
+            or not OPAQUE.fullmatch(identity)): raise AccessError("trusted Access configuration is invalid")
+    human_name, service_name = access["policy_name"] + "-human", access["policy_name"] + "-service"
+    if max(len(human_name), len(service_name)) > 350: raise AccessError("derived Access policy name is too long")
+    desired = {"preview_urls": False,
+        "service_token": {"name": access["service_token_name"], "duration": "720h", "enabled": True},
+        "application": {"name": access["application_name"], "domain": access["hostname"],
+                        "type": "self_hosted", "destinations": [{"type": "public", "uri": access["hostname"]}], "service_auth_401_redirect": True,
+                        "app_launcher_visible": False, "allowed_idps": [identity], "auto_redirect_to_identity": True, "session_duration": "1h"},
+        "human_policy": {"name": human_name, "decision": "allow", "precedence": 2,
+                         "include": [{"email": {"email": email}} for email in sorted(emails)], "require": [{"login_method": {"id": identity}}]},
+        "service_policy": {"name": service_name, "decision": "non_identity", "precedence": 1, "include": [{"service_token": {"token_id": None}}]},
+    }; return desired
+def secure_directory(path):
+    path = path.expanduser()
+    if path.is_symlink(): raise AccessError("state directory must not be a symbolic link")
+    path = path.resolve(strict=False)
+    if any((parent / ".git").exists() for parent in (path, *path.parents)): raise AccessError("state directory must stay outside a Git repository")
+    if not path.is_dir(): raise AccessError("state directory must already exist on durable storage")
+    info = path.stat()
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+        raise AccessError("state directory must be owner-only and owned by the current user")
+    return path
+def write_json(path, value, create=False):
+    data = (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    temporary = tempfile.NamedTemporaryFile(prefix=f".{path.name}.", dir=path.parent, delete=False)
+    try:
+        with temporary:
+            os.fchmod(temporary.fileno(), 0o600)
+            temporary.write(data); temporary.flush(); os.fsync(temporary.fileno())
+        if create:
+            try: os.link(temporary.name, path)
+            except FileExistsError as error: raise AccessError(f"{path.name} appeared during creation") from error
+        else:
+            if path.is_symlink() or not path.is_file(): raise AccessError(f"{path.name} must be a regular file")
+            os.replace(temporary.name, path)
+        directory = os.open(path.parent, os.O_RDONLY)
+        try: os.fsync(directory)
+        finally: os.close(directory)
+    finally:
+        Path(temporary.name).unlink(missing_ok=True)
+def identity(desired):
+    return hashlib.sha256(json.dumps(desired, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+def initial_state(owner, access_identity):
+    return {"schema": 1, "owner": owner, "identity": access_identity, "access": {key: None for key in STATE_IDS}, "pending": None, "token_snapshot": None, "token_candidate": None, "reconcile_after": 0}
+def load_state(path, owner, access_identity):
+    if not path.exists():
+        state = initial_state(owner, access_identity); write_json(path, state, create=True); return state
+    state = load_json(path, "Access state")
+    stable = ("repository", "pull_request", "branch")
+    snapshot, candidate, reconcile_after = state.get("token_snapshot"), state.get("token_candidate"), state.get("reconcile_after")
+    if (set(state) != {"schema", "owner", "identity", "access", "pending", "token_snapshot", "token_candidate", "reconcile_after"}
+            or type(state["schema"]) is not int or state["schema"] != 1
+            or not isinstance(state["owner"], dict) or any(state["owner"].get(key) != owner[key] for key in stable)
+            or state["identity"] != access_identity or not isinstance(state["access"], dict)
+            or set(state["access"]) != STATE_IDS
+            or any(value is not None and (not isinstance(value, str) or not OPAQUE.fullmatch(value))
+                   for value in state["access"].values())
+            or not isinstance(state["pending"], (str, type(None))) or state["pending"] not in {None, "service_token", "application", "human_policy", "service_policy"}
+            or snapshot is not None and (not isinstance(snapshot, list) or any(not isinstance(item, str) or not OPAQUE.fullmatch(item) for item in snapshot) or len(snapshot) != len(set(snapshot)))
+            or candidate is not None and (not isinstance(candidate, str) or not OPAQUE.fullmatch(candidate) or not isinstance(snapshot, list) or candidate in snapshot)
+            or type(reconcile_after) is not int or reconcile_after < 0
+            or state["pending"] == "service_token" and not isinstance(snapshot, list) or state["pending"] != "service_token" and (snapshot is not None or candidate is not None)
+            or (state["pending"] is None) != (reconcile_after == 0) or state["pending"] is not None and state["access"][state["pending"] + "_id"] is not None):
+        raise AccessError("Access state does not match this ownership plan")
+    if path.stat().st_mode & 0o077:
+        raise AccessError("Access state must have mode 0600")
+    if state["owner"] != owner: state["owner"] = owner; write_json(path, state)
+    return state
+class Cloudflare:
+    def __init__(self, account, token): self.account, self.token = account, token
+    def request(self, method, path, body=None):
+        data = json.dumps(body).encode() if body is not None else None
+        request = urllib.request.Request(API + path, data=data, method=method, headers={
+            "Authorization": f"Bearer {self.token}", "Content-Type": "application/json",
+            "User-Agent": "worker-preview-access/1"})
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response: value = json.load(response)
+        except urllib.error.HTTPError as error:
+            if method == "DELETE" and error.code == 404: return {"success": True, "result": None}
+            if method == "POST" and (error.code >= 500 or error.code == 408): raise AmbiguousCreate("Access create result is ambiguous") from error
+            raise AccessError(f"Cloudflare API returned HTTP {error.code}") from error
+        except (urllib.error.URLError, TimeoutError, OSError, ValueError, UnicodeDecodeError) as error:
+            if method == "POST": raise AmbiguousCreate("Access create result is ambiguous") from error
+            raise AccessError("Cloudflare API request failed") from error
+        if not isinstance(value, dict) or value.get("success") is not True:
+            raise AccessError("Cloudflare API rejected the request")
+        return value
+    def list(self, path):
+        items, page = [], 1
+        while True:
+            query = urllib.parse.urlencode({"page": page, "per_page": 1000})
+            value = self.request("GET", f"/accounts/{self.account}/{path}?{query}")
+            result, info = value.get("result"), value.get("result_info")
+            if not isinstance(result, list) or not isinstance(info, dict) or type(info.get("total_pages")) is not int:
+                raise AccessError("Cloudflare returned invalid Access pagination")
+            items.extend(result)
+            if page >= info["total_pages"]: return items
+            if not result: raise AccessError("Cloudflare truncated an Access list")
+            page += 1
+    def get(self, path):
+        result = self.request("GET", f"/accounts/{self.account}/{path}").get("result")
+        if not isinstance(result, dict): raise AccessError("Cloudflare returned an invalid Access resource")
+        return result
+    def create(self, path, body):
+        result = self.request("POST", f"/accounts/{self.account}/{path}", body).get("result")
+        if not isinstance(result, dict): raise AmbiguousCreate("Access create returned no recoverable result")
+        return result
+    def delete(self, path): self.request("DELETE", f"/accounts/{self.account}/{path}")
+def paths(kind, app_id=None, resource_id=None):
+    base = {"service_token": "access/service_tokens", "application": "access/apps"}.get(kind)
+    if kind.endswith("policy"): base = f"access/apps/{app_id}/policies"
+    return base if resource_id is None else f"{base}/{resource_id}"
+def matches(item, desired):
+    return isinstance(item, dict) and all(item.get(key) == value for key, value in desired.items())
+def secret(path):
+    if path.is_symlink():
+        raise AccessError("service token secret must not be a symbolic link")
+    if not path.exists(): return None
+    value = load_json(path, "service token secret")
+    if (set(value) != {"schema", "service_token_id", "client_id", "client_secret"}
+            or type(value["schema"]) is not int or value["schema"] != 1
+            or not isinstance(value["service_token_id"], str) or not OPAQUE.fullmatch(value["service_token_id"])
+            or any(not isinstance(value[key], str) or not value[key] or len(value[key]) > 2048
+                   for key in ("client_id", "client_secret")) or path.stat().st_mode & 0o077):
+        raise AccessError("service token secret is invalid or not mode 0600")
+    return value
+def scope_paths(root, account, owner):
+    scope = f"{account}-{hashlib.sha256(owner['repository'].encode()).hexdigest()[:16]}-pr-{owner['pull_request']}"
+    return root / f".access-{scope}.lock", root / f"access-{scope}.json", root / f"service-token-{scope}.json"
+def recover_token(api, base, desired, state, state_path):
+    candidate = state["token_candidate"]
+    if candidate is None:
+        fresh = [item["id"] for item in api.list(base) if isinstance(item, dict) and item.get("name") == desired["name"] and isinstance(item.get("id"), str) and OPAQUE.fullmatch(item["id"]) and item["id"] not in state["token_snapshot"]]
+        if not fresh:
+            if time.time() < state["reconcile_after"]: raise AccessError("lost service token is not visible; retry after its consistency window")
+            state["pending"] = state["token_snapshot"] = state["token_candidate"] = None; state["reconcile_after"] = 0; write_json(state_path, state)
+            raise AccessError("no lost service token appeared after one hour; retry provisioning once")
+        if len(fresh) != 1: raise AccessError("lost service token cannot be identified exactly")
+        candidate = fresh[0]; state["token_candidate"] = candidate; write_json(state_path, state)
+    api.delete(f"{base}/{candidate}")
+    state["pending"] = state["token_snapshot"] = state["token_candidate"] = None; state["reconcile_after"] = 0; write_json(state_path, state)
+    raise AccessError("lost service token was deleted; retry provisioning once")
+def provision(plan, desired, api, state_path, secret_path):
+    state = load_state(state_path, plan["owner"], identity(desired))
+    token_secret = secret(secret_path)
+    owned_token, pending = state["access"]["service_token_id"], state["pending"]
+    if ((owned_token is None and token_secret is not None and pending != "service_token")
+            or owned_token is not None and (token_secret is None or token_secret["service_token_id"] != owned_token)):
+        raise AccessError("stale or missing service token secret")
+    worker = urllib.parse.quote(plan["intended"]["target_worker"]["name"], safe="")
+    subdomain = api.get(f"workers/scripts/{worker}/subdomain")
+    if type(subdomain.get("enabled")) is not bool or subdomain["enabled"] is not False or type(subdomain.get("previews_enabled")) is not bool or subdomain["previews_enabled"] is not False:
+        raise AccessError("Worker subdomain and Preview URLs must both be disabled")
+    specs = [("service_token", "service_token_id"), ("application", "application_id"), ("service_policy", "service_policy_id"), ("human_policy", "human_policy_id")]
+    actions = []
+    for kind, field in specs:
+        if kind.endswith("policy"):
+            desired[kind]["include"] = copy.deepcopy(desired[kind]["include"])
+            if kind == "service_policy":
+                token_id = state["access"]["service_token_id"]
+                desired[kind]["include"][0]["service_token"]["token_id"] = token_id
+        owned, pending = state["access"][field], state["pending"]
+        app_id = state["access"]["application_id"]
+        base = paths(kind, app_id)
+        if owned is not None:
+            if not matches(api.get(paths(kind, app_id, owned)), desired[kind]):
+                raise AccessError(f"owned {kind} no longer matches Cloudflare")
+            if kind == "service_token" and (token_secret is None or token_secret["service_token_id"] != owned):
+                raise AccessError("owned service token is missing its exact local secret")
+            actions.append({"resource": kind, "action": "unchanged"}); continue
+        if pending not in {None, kind}:
+            raise AccessError("pending Access mutation does not match the next resource")
+        if kind == "service_token" and pending == kind and token_secret is not None:
+            if not matches(api.get(paths(kind, None, token_secret["service_token_id"])), desired[kind]):
+                raise AccessError("persisted service token secret does not match Cloudflare")
+            identifier = token_secret["service_token_id"]
+        else:
+            listed = api.list(base)
+            if kind.endswith("policy"):
+                allowed = {}
+                for policy_kind, policy_field in (("service_policy", "service_policy_id"),
+                                                  ("human_policy", "human_policy_id")):
+                    policy_id = state["access"][policy_field]
+                    if policy_id is not None: allowed[policy_id] = desired[policy_kind]
+                for item in listed:
+                    item_id = item.get("id") if isinstance(item, dict) else None
+                    if item_id not in allowed and not (pending == kind and matches(item, desired[kind])):
+                        raise AccessError("Access application contains an unowned policy")
+                    if item_id in allowed and not matches(item, allowed[item_id]):
+                        raise AccessError("owned Access policy no longer matches Cloudflare")
+            named = [item for item in listed if isinstance(item, dict) and (item.get("name") == desired[kind]["name"] or kind == "application" and item.get("domain") == desired[kind]["domain"])]
+            if pending == kind:
+                if kind == "service_token": recover_token(api, base, desired[kind], state, state_path)
+                if len(named) != 1 or not matches(named[0], desired[kind]):
+                    if not named and time.time() >= state["reconcile_after"]:
+                        state["pending"], state["reconcile_after"] = None, 0; write_json(state_path, state)
+                        raise AccessError(f"no lost {kind} appeared after one hour; retry provisioning once")
+                    raise AccessError(f"ambiguous {kind} cannot be recovered by name")
+                identifier = named[0].get("id")
+            else:
+                if named: raise AccessError(f"existing {kind} is not owned by this PR")
+                if kind == "service_token":
+                    identifiers = [item.get("id") for item in listed if isinstance(item, dict)]
+                    if len(identifiers) != len(listed) or any(not isinstance(item, str) or not OPAQUE.fullmatch(item) for item in identifiers): raise AccessError("Cloudflare returned an invalid service token snapshot")
+                    state["token_snapshot"] = sorted(identifiers)
+                state["pending"], state["reconcile_after"] = kind, int(time.time()) + 3600; write_json(state_path, state)
+                try: result = api.create(base, desired[kind])
+                except AmbiguousCreate:
+                    if kind == "service_token": recover_token(api, base, desired[kind], state, state_path)
+                    named = [item for item in api.list(base) if isinstance(item, dict) and (item.get("name") == desired[kind]["name"] or kind == "application" and item.get("domain") == desired[kind]["domain"])]
+                    if len(named) != 1 or not matches(named[0], desired[kind]): raise
+                    result = named[0]
+                except AccessError:
+                    state["pending"] = state["token_snapshot"] = state["token_candidate"] = None; state["reconcile_after"] = 0; write_json(state_path, state)
+                    raise
+                identifier = result.get("id")
+                if not isinstance(identifier, str) or not OPAQUE.fullmatch(identifier) or not matches(result, desired[kind]):
+                    raise AccessError(f"Cloudflare returned an invalid {kind}")
+                if kind == "service_token":
+                    token_secret = {"schema": 1, "service_token_id": identifier,
+                                    "client_id": result.get("client_id"), "client_secret": result.get("client_secret")}
+                    if any(not isinstance(token_secret[key], str) or not token_secret[key]
+                           for key in ("client_id", "client_secret")):
+                        raise AccessError("Cloudflare omitted the one-time service token secret")
+                    write_json(secret_path, token_secret, create=True)
+        if not isinstance(identifier, str) or not OPAQUE.fullmatch(identifier):
+            raise AccessError(f"Cloudflare returned an invalid {kind} ID")
+        state["access"][field], state["pending"], state["reconcile_after"] = identifier, None, 0
+        if kind == "service_token": state["token_snapshot"] = state["token_candidate"] = None
+        write_json(state_path, state); actions.append({"resource": kind, "action": "acquired"})
+    apps = [item for item in api.list(paths("application")) if isinstance(item, dict) and item.get("domain") == desired["application"]["domain"]]
+    if len(apps) != 1 or apps[0].get("id") != state["access"]["application_id"] or not matches(apps[0], desired["application"]):
+        raise AccessError("Preview hostname does not have exactly one owned Access application")
+    policy_base = paths("human_policy", state["access"]["application_id"])
+    expected = {state["access"]["service_policy_id"]: desired["service_policy"], state["access"]["human_policy_id"]: desired["human_policy"]}
+    policies = api.list(policy_base)
+    if (len(policies) != 2 or any(not isinstance(item, dict) or item.get("id") not in expected
+                                  or not matches(item, expected[item["id"]]) for item in policies)):
+        raise AccessError("Access application does not contain exactly the two owned policies")
+    return actions
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("ownership_plan", type=Path); parser.add_argument("trusted_config", type=Path)
+    parser.add_argument("state_directory", type=Path); parser.add_argument("--dry-run", action="store_true")
+    args = parser.parse_args()
+    try:
+        plan, config = load_json(args.ownership_plan, "ownership plan"), load_json(args.trusted_config, "trusted configuration")
+        desired = validate(plan, config)
+        if args.dry_run:
+            print(json.dumps({"schema": 1, "owner": plan["owner"], "desired": desired}, sort_keys=True)); return 0
+        account, token = os.environ.get("CLOUDFLARE_ACCOUNT_ID"), os.environ.get("CLOUDFLARE_API_TOKEN")
+        if account != config["account_id"] or not token:
+            raise AccessError("local Cloudflare account and API token are required")
+        root = secure_directory(args.state_directory)
+        lock_path, state_path, secret_path = scope_paths(root, account, plan["owner"])
+        lock = os.open(lock_path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            actions = provision(plan, desired, Cloudflare(account, token), state_path, secret_path)
+        finally: os.close(lock)
+        print(json.dumps({"schema": 1, "actions": actions}, sort_keys=True)); return 0
+    except (AccessError, OSError) as error:
+        print(f"error: {error}", file=sys.stderr); return 1
+if __name__ == "__main__":
+    raise SystemExit(main())
