@@ -419,6 +419,55 @@ Two failures to avoid:
   whose bet has not moved in a year is either finished or abandoned, and the
   vision should say which.
 
+## Post-merge verify
+
+Merged is not live. CI proves the change is good on a runner. This job proves
+the change reached production. It runs on every `push` and on
+`workflow_dispatch`, but the job itself skips unless the push landed on the
+repo's actual default branch — not every repo in the fleet defaults to `main`.
+It uses the `ubicloud-standard-2` runner and one concurrency group per repo.
+
+Add `postMergeVerify` to `.github/pr-standards.json` to enable it:
+
+```json
+{
+  "postMergeVerify": {
+    "url": "https://example.com",
+    "shaPath": "/api/version",
+    "shaJsonKey": "sha",
+    "timeoutSeconds": 900
+  }
+}
+```
+
+- `url` — the live URL. The job requests it and requires a 2xx.
+- `shaPath` — path appended to `url` to poll for the live SHA. When absent,
+  the job skips the poll step.
+- `shaJsonKey` — JSON key that holds the SHA in the version response. Default
+  is `sha`.
+- `timeoutSeconds` — how long to poll before the job fails. Default is `900`,
+  capped at `1000` regardless of the configured value so the check always
+  fails through its own logic before the job's 20-minute timeout cancels it
+  out from under the reporting step.
+
+When `postMergeVerify` is absent, every step is skipped and the job passes. A
+repo that does not deploy stays green. Malformed JSON in `pr-standards.json`
+is not treated as absent — the job fails so a broken config is never silently
+green.
+
+When the job fails, it opens an issue titled `Deploy did not go live: <short sha>`
+with the failing step, the expected SHA, what the endpoint returned, and a link
+to the run. When an open issue with that title prefix already exists, the job
+comments on that issue instead of opening a new one.
+
+Install the workflow with `pr-standards-rollout --with-post-merge-verify`. The
+flag is opt-in because most repos in the fleet do not deploy.
+
+`pr-standards-templates/post-merge-verify.test.sh` runs the check the workflow
+embeds against a local server. It pins the two cases that decide whether the job
+is worth having: a repo with no config stays green, and a SHA that never appears
+goes red.
+
 ## Usage
 
 ```bash
