@@ -46,6 +46,11 @@ PROVIDER="${1:-}"; shift || true
 MODEL=""; EFFORT=""; REUSE=""; KEEP=0; REPO=""; PROMPT=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --model|--reasoning-effort|--reuse|--repo)
+      [[ $# -ge 2 ]] || { echo "box-agent: $1 needs a value" >&2; exit 2; }
+      ;;
+  esac
+  case "$1" in
     --model) MODEL="$2"; shift 2 ;;
     --reasoning-effort) EFFORT="$2"; shift 2 ;;
     --reuse) REUSE="$2"; shift 2 ;;
@@ -132,13 +137,34 @@ if [[ "$PROVIDER" == claude || "$PROVIDER" == codex ]]; then
         > /tmp/box-agent-codex-$$.out 2>&1 ) & PP=$!
     for _ in $(seq 1 "${CODEX_MAX_SECS:-360}"); do kill -0 "$PP" 2>/dev/null || break; sleep 1; done
     if kill -0 "$PP" 2>/dev/null; then echo "box-agent: codex still running after ${CODEX_MAX_SECS:-360}s — interrupting"; box interrupt "$BOX" >/dev/null 2>&1; kill "$PP" 2>/dev/null; fi
-    sed -n 's/.*"content":"\(.*\)","is_reverted.*/\1/p' /tmp/box-agent-codex-$$.out 2>/dev/null | tail -1; rm -f /tmp/box-agent-codex-$$.out
+    CODEX_LAST="$(sed -n 's/.*"content":"\(.*\)","is_reverted.*/\1/p' /tmp/box-agent-codex-$$.out 2>/dev/null | tail -1)"
+    if [[ -n "$CODEX_LAST" ]]; then
+      printf '%s\n' "$CODEX_LAST"
+    else
+      # No parsable content line means `box prompt` itself errored (bad model,
+      # network, auth) before producing JSON -- that error text doesn't match
+      # the sed pattern and was otherwise silently dropped, making a real
+      # failure indistinguishable from "the agent made no changes".
+      echo "box-agent: codex produced no parsable output; raw output:" >&2
+      tail -20 /tmp/box-agent-codex-$$.out >&2 2>/dev/null
+    fi
+    rm -f /tmp/box-agent-codex-$$.out
   else
     # Never trust this exit code either: a failed/errored prompt call must not
     # skip the on-Box verification below, since the agent may have already
     # made edits (the box-claude lesson).
-    box prompt --provider "$PROVIDER" ${MODEL_ARG[@]+"${MODEL_ARG[@]}"} ${EFFORT_ARG[@]+"${EFFORT_ARG[@]}"} --json "$BOX" \
-      "$SETUP $PROMPT" 2>&1 | sed -n 's/.*"content":"\(.*\)","is_reverted.*/\1/p' | tail -1 || true
+    PROMPT_RAW="$(box prompt --provider "$PROVIDER" ${MODEL_ARG[@]+"${MODEL_ARG[@]}"} ${EFFORT_ARG[@]+"${EFFORT_ARG[@]}"} --json "$BOX" \
+      "$SETUP $PROMPT" 2>&1)" || true
+    PROMPT_LAST="$(printf '%s' "$PROMPT_RAW" | sed -n 's/.*"content":"\(.*\)","is_reverted.*/\1/p' | tail -1)"
+    if [[ -n "$PROMPT_LAST" ]]; then
+      printf '%s\n' "$PROMPT_LAST"
+    else
+      # Same reasoning as codex above: surface the raw output instead of
+      # silently falling through to a "NO diff" that could really mean
+      # "box prompt failed".
+      echo "box-agent: $PROVIDER prompt produced no parsable output; raw output:" >&2
+      printf '%s\n' "$PROMPT_RAW" | tail -20 >&2
+    fi
   fi
 else
   # ON-BOX CLI path. Clone with DIRECT-ARGV box exec (no shell string to mangle),
@@ -174,7 +200,16 @@ RUNNER
     || { rm -f "$runner"; echo "box-agent: could not copy the runner to the Box" >&2; exit 4; }
   rm -f "$runner"
   B64PROMPT="$(printf '%s' "$PROMPT" | base64 | tr -d '\n')"
-  RUN_RAW="$(box exec "$BOX" --json --timeout 600 -- bash /home/user/box-agent-run.sh "$B64PROMPT" 2>/dev/null)" || true
+  RUN_EXEC_ERR="$(mktemp)"
+  RUN_RAW="$(box exec "$BOX" --json --timeout 600 -- bash /home/user/box-agent-run.sh "$B64PROMPT" 2>"$RUN_EXEC_ERR")" || true
+  if [[ -z "$RUN_RAW" ]]; then
+    # `box exec` itself failed (timeout, transport error) before returning any
+    # JSON -- its own stderr was the only diagnostic, and discarding it left
+    # this indistinguishable from "the CLI legitimately made no changes".
+    echo "box-agent: box exec returned no output for the $PROVIDER run; box exec stderr:" >&2
+    cat "$RUN_EXEC_ERR" >&2 2>/dev/null
+  fi
+  rm -f "$RUN_EXEC_ERR"
   printf '%s' "$RUN_RAW" | jq -r '.stdout // empty' 2>/dev/null | tail -20 || true
   RUN_ERR="$(printf '%s' "$RUN_RAW" | jq -r '.stderr // empty' 2>/dev/null)" || RUN_ERR=""
   # The preflight only checks the binary exists, not that it's authed/funded
@@ -212,8 +247,12 @@ TRUNCATED="$(printf '%s' "$RAW" | jq -r '.stdoutTruncated // false' 2>/dev/null)
 if [[ -z "$DIFF" ]]; then
   echo "box-agent: NO diff on the Box — the agent changed nothing."
 elif [[ "$TRUNCATED" == "true" ]]; then
+  # Leave the Box running: the cleanup trap stops it on EXIT by default, which
+  # would make the "pull it manually" instruction below unusable seconds later.
+  KEEP=1
   echo "box-agent: diff on the Box was TRUNCATED — refusing to save a partial patch." >&2
-  echo "box-agent: pull it manually:  box exec $BOX --cwd $DIR -- git diff" >&2
+  echo "box-agent: leaving $BOX running — pull it manually:  box exec $BOX --cwd $DIR -- git diff" >&2
+  exit 7
 else
   PATCH="$(mktemp "/tmp/box-agent-$SLUG-XXXXXX.patch")"; printf '%s\n' "$DIFF" > "$PATCH"
   # Preview from the file, not a pipe from $DIFF: under `set -o pipefail`, a
