@@ -62,8 +62,22 @@ check 2 'sees a git call on the next line'             $'echo ready\ngit checkou
 check 2 'sees a git call after an env var assignment'  'FOO=bar git checkout -b my-cool-feature'
 check 2 'treats -- as end of options for git branch'   'git branch -- my-cool-feature'
 check 2 'sees a branch created via git worktree add'   'git worktree add -b my-cool-feature /tmp/tree'
+# Fail-open holes the heredoc and comment scanner opened on its first pass. Each
+# swallowed the REST of the command, so a real bad branch on a later line went
+# unjudged and the hook exited 0 -- the dangerous direction for a guard.
+check 2 'an arithmetic shift does not open a heredoc'  $'n=$((1 << 2))\ngit checkout -b my-cool-feature'
+# A `<<` inside `$(( ))` or `(( ))` is a shift, not a heredoc opener. Filtering
+# only a DIGIT after `<<` left every variable shift opening a heredoc that
+# swallowed the real command on the next line, so the hook exited 0.
+check 2 'a variable arithmetic shift is not a heredoc'  $'n=$((1 << n))\ngit checkout -b my-cool-feature'
+check 2 'an all-variable arithmetic shift is not a heredoc' $'n=$((x << y))\ngit checkout -b my-cool-feature'
+check 2 'an unspaced arithmetic shift is not a heredoc'  $'n=$((x<<y))\ngit checkout -b my-cool-feature'
+check 2 'a bare (( )) shift is not a heredoc'            $'((x << y))\ngit checkout -b my-cool-feature'
+check 2 'a quoted <<EOF does not open a heredoc'       $'echo \'use cat <<EOF\'\ngit checkout -b my-cool-feature'
+check 2 'a # inside quotes is not a comment'           'echo "see #118"; git checkout -b my-cool-feature'
 check 0 'allows a conforming cross-repo PR head'       'gh pr create --repo pooriaarab/target-standard --head tar-12-do-one-thing'
 check 2 'blocks a bad cross-repo PR head'              'gh pr create --repo pooriaarab/target-standard --head my-cool-feature'
+check 0 'allows a heredoc containing gh pr create'      $'cat <<\'EOF\'\ngh pr create --title "Added the thing"\nEOF'
 check 0 'ignores a non-pooriaarab PR target'           'gh pr create --repo acme/work --head my-cool-feature'
 check 2 'blocks a host-qualified cross-repo PR head'   'gh pr create --repo github.com/pooriaarab/target-standard --head my-cool-feature'
 check 0 'strips the owner: fork qualifier from a head' 'gh pr create --repo pooriaarab/target-standard --head alice:tar-12-do-one-thing'
@@ -76,6 +90,36 @@ check 2 'uses the last of a repeated --head, not the first' \
                                                         'gh pr create --repo pooriaarab/target-standard --head tar-12-good --head my-cool-feature'
 check 2 'blocks a mixed-case cross-repo owner, not skips it' \
                                                         'gh pr create --repo PoOrIaArAb/target-standard --head my-cool-feature'
+
+# `--head owner:` names no branch. The guard used to fall through to the
+# CHECKOUT's current branch and judge THAT, so a conforming PR was refused
+# because of the name of whatever branch happened to be checked out. This runs
+# from a throwaway repo deliberately sitting on a non-conforming branch, so the
+# case cannot pass by accident the way it does from a conforming checkout.
+undetermined_head() {
+  local tmp got payload
+  payload=$(python3 -c 'import json,sys; print(json.dumps({"tool_name":"Bash","tool_input":{"command":sys.argv[1]}}))' \
+    'gh pr create --head owner: --title "[SCR-118] Fix the guard"')
+  tmp="$(mktemp -d)"
+  (
+    cd "$tmp" || exit 1
+    git init -q . 2>/dev/null
+    git remote add origin https://github.com/pooriaarab/scripts.git 2>/dev/null
+    mkdir -p .github && printf '{"prefix":"scr"}' > .github/pr-standards.json
+    git -c user.email=t@t -c user.name=t commit -q --allow-empty -m init 2>/dev/null
+    git checkout -q -b definitely-not-conforming 2>/dev/null
+    printf '%s' "$payload" | "$GUARD" >/dev/null 2>&1
+  )
+  got=$?
+  rm -rf "$tmp"
+  if [ "$got" = 0 ]; then
+    printf 'ok    allows an undetermined PR head from a non-conforming checkout\n'
+  else
+    printf 'FAIL  allows an undetermined PR head from a non-conforming checkout (want exit 0, got %s)\n' "$got"
+    fails=$((fails + 1))
+  fi
+}
+undetermined_head
 
 # The three environment shapes this hook actually runs in. Every case below was
 # a real defect: the engine's verdict was trusted when it had not run, a quoted
