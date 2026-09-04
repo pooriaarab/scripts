@@ -22,7 +22,8 @@
 #   kimi    Moonshot account suspended/unfunded (429) — no diff until funded.
 #   cursor  not logged in on the Box (no CURSOR_API_KEY) — needs auth on the Box.
 #   devin   not installed; needs the OAuth credentials.toml on the Box (NOT the
-#           exhausted .secrets api key). Feasible, not wired here.
+#           exhausted .secrets api key). Command is wired below but UNTESTED —
+#           no Box has had working devin credentials yet.
 # So today the reliable providers are: claude, pi. The rest are wired but gated by
 # funding/auth ON the Box — the preflight will tell you which.
 #
@@ -173,7 +174,13 @@ RUNNER
     || { rm -f "$runner"; echo "box-agent: could not copy the runner to the Box" >&2; exit 4; }
   rm -f "$runner"
   B64PROMPT="$(printf '%s' "$PROMPT" | base64 | tr -d '\n')"
-  box exec "$BOX" --json --timeout 600 -- bash /home/user/box-agent-run.sh "$B64PROMPT" 2>/dev/null | jq -r '.stdout' | tail -20 || true
+  RUN_RAW="$(box exec "$BOX" --json --timeout 600 -- bash /home/user/box-agent-run.sh "$B64PROMPT" 2>/dev/null)" || true
+  printf '%s' "$RUN_RAW" | jq -r '.stdout // empty' 2>/dev/null | tail -20 || true
+  RUN_ERR="$(printf '%s' "$RUN_RAW" | jq -r '.stderr // empty' 2>/dev/null)" || RUN_ERR=""
+  # The preflight only checks the binary exists, not that it's authed/funded
+  # (see PROVIDER STATUS above) -- surface stderr so an auth/funding failure
+  # isn't indistinguishable from the CLI legitimately making no changes.
+  [[ -n "$RUN_ERR" ]] && echo "box-agent: $PROVIDER CLI stderr: $RUN_ERR" >&2
 fi
 
 # --- Verify ON the Box + pull patch ---
@@ -190,8 +197,17 @@ fi
 box exec "$BOX" --cwd "$DIR" -- git add -N -- . >/dev/null 2>&1 || true
 # --binary: without it, a patch touching a binary file can't be reapplied with
 # `git apply` (the payload is simply omitted from a plain diff).
-RAW="$(box exec "$BOX" --json --cwd "$DIR" -- git --no-pager diff --binary 2>/dev/null)" || RAW=""
-DIFF="$(printf '%s' "$RAW" | jq -r '.stdout // empty' 2>/dev/null)" || DIFF=""
+# diff HEAD, not a bare diff: a bare `git diff` only compares the working tree
+# to the index, so any edits the agent already `git add`ed (fully staged, not
+# just the intent-to-add above) would be invisible and wrongly read as "no diff".
+if ! RAW="$(box exec "$BOX" --json --cwd "$DIR" -- git --no-pager diff HEAD --binary 2>/dev/null)" || [[ -z "$RAW" ]]; then
+  echo "box-agent: could not read the diff from the Box (box exec failed) — this is a verification failure, not confirmation of no changes." >&2
+  exit 6
+fi
+if ! DIFF="$(printf '%s' "$RAW" | jq -r '.stdout // empty' 2>/dev/null)"; then
+  echo "box-agent: could not parse the diff JSON from the Box — this is a verification failure, not confirmation of no changes." >&2
+  exit 6
+fi
 TRUNCATED="$(printf '%s' "$RAW" | jq -r '.stdoutTruncated // false' 2>/dev/null)" || TRUNCATED="false"
 if [[ -z "$DIFF" ]]; then
   echo "box-agent: NO diff on the Box — the agent changed nothing."
