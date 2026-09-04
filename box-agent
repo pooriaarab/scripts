@@ -26,7 +26,7 @@
 #
 # In every case the agent works on a fresh clone from origin (committed state),
 # the diff is verified ON the Box (never trust exit code), pulled back as a patch,
-# and the Box is always stopped with confirmation.
+# and the Box is stopped with confirmation (unless --keep/--reuse asks to leave it).
 #
 # USAGE (run inside the personal repo, or pass --repo owner/name):
 #   box-agent codex "add a --json flag and update the README"
@@ -74,7 +74,10 @@ if [[ -z "$REPO" ]]; then
   REPO="$(printf '%s' "$REMOTE" | sed -E 's#(git@github.com:|https://github.com/)##; s#\.git$##')"
 fi
 case "$REPO" in *[Mm]ozilla*|*moz-ocho*) echo "box-agent: REFUSING work repo ($REPO). Boxes are personal-only." >&2; exit 1 ;; esac
-SLUG="${REPO##*/}"; DIR="/home/user/work/$SLUG"
+[[ "$REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || { echo "box-agent: invalid --repo '$REPO' (want owner/name)" >&2; exit 2; }
+SLUG="${REPO##*/}"
+case "$SLUG" in .|..) echo "box-agent: invalid repo slug from '$REPO'" >&2; exit 2 ;; esac
+DIR="/home/user/work/$SLUG"
 
 # --- Box lifecycle ---
 if [[ -n "$REUSE" ]]; then BOX="$REUSE"; echo "box-agent: reusing $BOX"; else
@@ -93,7 +96,9 @@ cleanup() {
   echo "box-agent: WARNING could not confirm $BOX stopped — run 'box stop $BOX'" >&2
 }
 trap cleanup EXIT
-for _ in $(seq 1 40); do box exec "$BOX" --timeout 20 -- true >/dev/null 2>&1 && break; sleep 2; done
+READY=0
+for _ in $(seq 1 40); do box exec "$BOX" --timeout 20 -- true >/dev/null 2>&1 && { READY=1; break; }; sleep 2; done
+[[ "$READY" -eq 1 ]] || { echo "box-agent: $BOX never became ready — aborting." >&2; exit 1; }
 
 if [[ "$PROVIDER" == claude || "$PROVIDER" == codex ]]; then
   # NATIVE path: the agent clones + works itself (box exec bash -lc mangles multi-
@@ -112,28 +117,44 @@ if [[ "$PROVIDER" == claude || "$PROVIDER" == codex ]]; then
     if kill -0 "$PP" 2>/dev/null; then echo "box-agent: codex still running after ${CODEX_MAX_SECS:-360}s — interrupting"; box interrupt "$BOX" >/dev/null 2>&1; kill "$PP" 2>/dev/null; fi
     sed -n 's/.*"content":"\(.*\)","is_reverted.*/\1/p' /tmp/box-agent-codex-$$.out 2>/dev/null | tail -1; rm -f /tmp/box-agent-codex-$$.out
   else
+    # Never trust this exit code either: a failed/errored prompt call must not
+    # skip the on-Box verification below, since the agent may have already
+    # made edits (the box-claude lesson).
     box prompt --provider "$PROVIDER" ${MODEL_ARG[@]+"${MODEL_ARG[@]}"} ${EFFORT_ARG[@]+"${EFFORT_ARG[@]}"} --json "$BOX" \
-      "$SETUP $PROMPT" 2>&1 | sed -n 's/.*"content":"\(.*\)","is_reverted.*/\1/p' | tail -1
+      "$SETUP $PROMPT" 2>&1 | sed -n 's/.*"content":"\(.*\)","is_reverted.*/\1/p' | tail -1 || true
   fi
 else
   # ON-BOX CLI path. Clone with DIRECT-ARGV box exec (no shell string to mangle),
   # then run the CLI. Requires the CLI already authed on the Box.
   CLI="${PROVIDER}"; [[ "$PROVIDER" == cursor ]] && CLI="cursor-agent"
-  have="$(box exec "$BOX" --json -- command -v "$CLI" 2>/dev/null | jq -r '.stdout' | tr -d '[:space:]')"
+  have="$(box exec "$BOX" --json -- command -v "$CLI" 2>/dev/null | jq -r '.stdout' | tr -d '[:space:]')" || true
   [[ -z "$have" ]] && { echo "box-agent: $CLI not found on the Box — install/auth it there first." >&2; exit 3; }
   box exec "$BOX" -- mkdir -p /home/user/work >/dev/null 2>&1 || true
   box exec "$BOX" -- rm -rf "$DIR" >/dev/null 2>&1 || true
   box exec "$BOX" --json --timeout 180 -- gh repo clone "$REPO" "$DIR" >/dev/null 2>&1 || { echo "box-agent: clone failed" >&2; exit 4; }
   CMD="$(onbox_cmd "$PROVIDER")"
   echo "box-agent: running $PROVIDER CLI on the Box ($CLI) in $DIR"
-  box exec "$BOX" --json --timeout 600 -- bash -lc "cd $DIR && $CMD \"$PROMPT\"" 2>/dev/null | jq -r '.stdout' | tail -20
+  # box exec joins argv into a remote shell command string, so the prompt travels
+  # base64-encoded and is decoded on the Box -- raw interpolation would let prompt
+  # text like $(...), backticks or quotes run as remote shell syntax (box-work's
+  # "one shell-safe word" lesson).
+  B64PROMPT="$(printf '%s' "$PROMPT" | base64 | tr -d '\n')"
+  box exec "$BOX" --json --timeout 600 -- bash -lc "cd $DIR && P=\$(printf %s $B64PROMPT | base64 -d) && $CMD \"\$P\"" 2>/dev/null | jq -r '.stdout' | tail -20 || true
 fi
 
 # --- Verify ON the Box + pull patch ---
 echo "box-agent: === git diff ON the Box ($DIR) ==="
-DIFF="$(box exec "$BOX" --json --cwd "$DIR" -- git --no-pager diff 2>/dev/null | jq -r '.stdout')"
-if [[ -z "$DIFF" || "$DIFF" == "null" ]]; then
+# Mark new files intent-to-add so they show up in `git diff` too -- otherwise a
+# task that only creates untracked files produces an empty diff and no patch.
+box exec "$BOX" --cwd "$DIR" -- git add -N -- . >/dev/null 2>&1 || true
+RAW="$(box exec "$BOX" --json --cwd "$DIR" -- git --no-pager diff 2>/dev/null)" || RAW=""
+DIFF="$(printf '%s' "$RAW" | jq -r '.stdout // empty' 2>/dev/null)" || DIFF=""
+TRUNCATED="$(printf '%s' "$RAW" | jq -r '.stdoutTruncated // false' 2>/dev/null)" || TRUNCATED="false"
+if [[ -z "$DIFF" ]]; then
   echo "box-agent: NO diff on the Box — the agent changed nothing."
+elif [[ "$TRUNCATED" == "true" ]]; then
+  echo "box-agent: diff on the Box was TRUNCATED — refusing to save a partial patch." >&2
+  echo "box-agent: pull it manually:  box exec $BOX --cwd $DIR -- git diff" >&2
 else
   PATCH="/tmp/box-agent-$SLUG-$(date +%s).patch"; printf '%s\n' "$DIFF" > "$PATCH"
   printf '%s\n' "$DIFF" | head -40
