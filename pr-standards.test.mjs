@@ -453,6 +453,23 @@ test('drift reports a duplicated managed block as malformed, not a false pass', 
   }
 });
 
+test('drift ignores a marker documented inside inline code, single or double backtick', () => {
+  const root = driftFixture();
+  try {
+    const agentsPath = path.join(root, 'AGENTS.md');
+    // Mentioning the marker to explain the rule -- in a single-backtick span,
+    // as AGENTS.md itself already does, or in a double-backtick span, valid
+    // Markdown for the same thing -- must not read as a second real marker.
+    fs.appendFileSync(agentsPath, '\nSee the `<!-- pr-standards:start -->` marker.\n');
+    fs.appendFileSync(agentsPath, 'See the ``<!-- pr-standards:start -->`` marker.\n');
+    const result = runDrift(root);
+    const failure = result.json.failures.find((item) => item.check === 'managed AGENTS.md block');
+    assert.equal(failure, undefined, result.stdout + result.stderr);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('drift leaves a repository without config unadopted', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'prs-no-drift-config-'));
   try {
@@ -1942,4 +1959,8 @@ test('a Proof n/a hatch inside an HTML comment is not an answer', () => {
   const reason = 'Proof: n/a — a checker with no user-visible surface at all';
   assert.equal(failed(checkProof(body(reason), uiFiles, config)), false);
   assert.equal(failed(checkProof(body(`<!-- ${reason} -->`), uiFiles, config)), true);
+  // An unterminated comment is what GitHub's own renderer treats as hiding
+  // everything after it, so a hatch left inside one must not read as a
+  // visible answer just because the stripping regex found no closing `-->`.
+  assert.equal(failed(checkProof(body(`<!-- ${reason}`), uiFiles, config)), true);
 });
