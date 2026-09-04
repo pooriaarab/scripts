@@ -110,6 +110,40 @@ if (( seen == 1 )); then kill -INT "$pid"; wait "$pid"; rc=$?; else rc=99; kill 
 if (( seen == 1 && rc == 130 )) && grep -q 'SWITCH=false' "$FIX/app.sh" && ! grep -q 'SWITCH=true' "$FIX/app.sh" \
   && [ -z "$(git -C "$FIX" diff -- app.sh)" ] && grep -q 'interrupted.*restored' "$TMPALL/sigint.log"; then ok "SIGINT mid-run restores the tree"; else fail_msg "sigint — seen=$seen rc=$rc app=$(cat "$FIX/app.sh") log=$(cat "$TMPALL/sigint.log" 2>/dev/null)"; fi
 
+# 14c: a path that resolves outside the repo through a symlinked directory must
+# be rejected before the file is touched. The lexical `..` guard cannot see it.
+# Reachable through --diff, where the diff is supplied by the caller rather than
+# produced by git: git names real paths, a hand-written patch need not.
+new_repo
+OUTSIDE=$(mktemp -d -p "$TMPALL")
+printf 'function g(a){ if (a === 1) { return 1 } return 2 }\n' > "$OUTSIDE/victim.js"
+mkdir -p "$FIX/realsrc" "$FIX/tests"
+printf 'function f(a){ if (a === 1) { return 1 } return 2 }\n' > "$FIX/realsrc/lib.js"
+printf 'ok\n' > "$FIX/tests/x.test.js"
+commit_all
+ln -s "$OUTSIDE" "$FIX/src"
+wcfg "true" 5 5
+cat > "$TMPALL/attack.patch" <<PATCH
+diff --git a/tests/x.test.js b/tests/x.test.js
+--- a/tests/x.test.js
++++ b/tests/x.test.js
+@@ -1 +1 @@
+-ok
++ok2
+diff --git a/src/victim.js b/src/victim.js
+--- a/src/victim.js
++++ b/src/victim.js
+@@ -1 +1 @@
+-function g(a){ if (a === 1) { return 1 } return 2 }
++function g(a){ if (a === 0) { return 1 } return 2 }
+PATCH
+out=$("$SCRIPT" --repo "$FIX" --diff "$TMPALL/attack.patch" 2>&1); rc=$?
+if [[ "$out" == *"resolves outside repo"* ]]; then
+  ok "a path resolving outside the repo is rejected before it is read"
+else
+  fail_msg "symlinked path was not rejected on containment — rc=$rc out=$out"
+fi
+
 # 14b: a timed-out test's CHILD must die too. Killing only the wrapper subshell
 # orphans `bash -c "$cmd"` and anything it spawned, and an orphan can write into
 # the file under mutation after the runner has restored it and reported it clean.
