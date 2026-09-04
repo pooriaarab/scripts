@@ -503,9 +503,11 @@ function countUserAttachments(body) {
 // that no longer exists in this file -- the merge of #153 kept this call and
 // dropped the function, so every proof check threw ReferenceError and 18 tests
 // went red on main. A hatch inside an HTML comment is not an answer, so the
-// comments come out before the scan.
+// comments come out before the scan. An opened comment with no closing `-->`
+// is what GitHub's own renderer treats as swallowing the rest of the body, so
+// this reads it the same way rather than leaving the "hidden" line visible.
 function hasValidProofNa(text) {
-  const visible = String(text || '').replace(/<!--[\s\S]*?-->/g, '');
+  const visible = String(text || '').replace(/<!--[\s\S]*?(?:-->|$)/g, '');
   const lines = visible.split('\n');
   for (const line of lines) {
     const match = PROOF_NA_LINE.exec(line);
@@ -1499,12 +1501,31 @@ const MALFORMED_BLOCK = Symbol('malformed-managed-block');
 // not-a-claim by the proof check above; the marker scan needs the same rule.
 // A real marker occupies its own line, so requiring the occurrence to be
 // outside inline code costs nothing a rollout writes.
+//
+// A code span's delimiters are a run of backticks, and only a run of the SAME
+// length closes it -- a single backtick inside a double-backtick span (``a`b``)
+// is span content, not a delimiter. Counting individual ticks and checking
+// parity gets this wrong both ways: an even-length run before the marker
+// (``marker``) parity-counts as "outside" when the marker is really inside,
+// and one stray unmatched backtick anywhere earlier in the line flips every
+// later position's parity regardless of whether a span is actually open.
 function insideInlineCode(line, column) {
-  let ticks = 0;
-  for (let at = 0; at < column; at += 1) {
-    if (line[at] === '`') ticks += 1;
+  const runs = [...line.matchAll(/`+/g)];
+  let i = 0;
+  while (i < runs.length) {
+    const open = runs[i];
+    let j = i + 1;
+    while (j < runs.length && runs[j][0].length !== open[0].length) j += 1;
+    if (j >= runs.length) {
+      i += 1;
+      continue;
+    }
+    const openEnd = open.index + open[0].length;
+    const closeStart = runs[j].index;
+    if (column >= openEnd && column < closeStart) return true;
+    i = j + 1;
   }
-  return ticks % 2 === 1;
+  return false;
 }
 
 // Extracting the first start/end pair and ignoring the rest would let a
