@@ -316,6 +316,11 @@ run_test() { # timeout-secs, command, outfile; sets RUN_RC, RUN_TIMEDOUT
   done
   if (( RUN_TIMEDOUT == 0 )); then RUN_RC=$(cat "$TMPD/rc" 2>/dev/null); fi
   [[ "$RUN_RC" =~ ^[0-9]+$ ]] || RUN_RC=1
+  # The wrapper subshell exiting only means `bash -c "$cmd"` returned; a
+  # command that backgrounds a child leaves it running in the same process
+  # group. Kill the group even on a clean exit, or that child survives past
+  # this call and can write into the file after it has been restored.
+  kill_test_tree
   wait "$TEST_PID" 2>/dev/null || true
   TEST_PID=""
 }
@@ -346,7 +351,10 @@ for cline in "${CAND_LINES[@]}"; do
   esac
   target="$REPO/$mfile"
   if [ ! -f "$target" ]; then echo "mutation-run: stale mutation, file gone: $mfile" >&2; continue; fi
-  cp -f "$target" "$TMPD/bak"
+  if ! cp -f "$target" "$TMPD/bak"; then
+    echo "mutation-run: cannot back up $mfile — skipping mutation" >&2
+    continue
+  fi
   CURRENT_FILE="$target"; CURRENT_BAK="$TMPD/bak"
   if ! python3 - "$target" "$mline" "$morig" "$mnew" <<'PY'
 import sys
