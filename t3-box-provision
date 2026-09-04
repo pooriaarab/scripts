@@ -9,8 +9,12 @@
 #  - Over `box exec` you MUST export XDG_RUNTIME_DIR=/run/user/<uid> (and
 #    DBUS_SESSION_BUS_ADDRESS) or systemctl --user says "Failed to connect to bus".
 #  - box exec `bash -lc "…$var…"` MANGLES multi-step strings -> run a scp'd script.
-#  - box host MUST be --public: T3 fetches /.well-known/t3/environment with no
-#    token, so a private (token-gated) host gives "Transport error" in the client.
+#  - box host --public carries HTTP + PAIRING, but NOT T3's live WebSocket: the
+#    ascii/Caddy edge answers a WS upgrade with 200 HTML, never 101, so the client
+#    pairs then fails "could not establish a WebSocket". To actually connect the
+#    GUI, reach T3 over an SSH TUNNEL: on the laptop run
+#      box ssh -L 3773:localhost:3773 <box>
+#    and add the environment as http://localhost:3773 (WS runs over raw TCP).
 #  - systemctl --user (not a detached process): survives ssh disconnect + resume.
 #  - T3 logs its FULL ENV (injected CLAUDE_CODE_OAUTH_TOKEN/OPENAI_API_KEY/…) at
 #    boot -> NEVER dump journalctl wholesale; grep only the pairingUrl line.
@@ -67,6 +71,9 @@ echo "================ T3 BOX READY ================"
 echo "Box:          $BOX   (standing, --no-auto-stop)"
 echo "Public URL:   $URL"
 [[ -n "$PAIR" ]] && echo "Pair URL:     ${URL}${PAIR}" || echo "Pair code:    (reuses ~/.t3 auth; if prompted, box ssh $BOX -> journalctl --user -u t3code -o cat | grep pairingUrl)"
-echo "Add Environment -> Remote link -> paste the Pair URL (or Host=$URL + code)."
+echo "NOTE: the GUI WebSocket does NOT connect through this public URL (the edge"
+echo "      drops the WS upgrade). To connect the T3 client, tunnel instead:"
+echo "        box ssh -L 3773:localhost:3773 $BOX"
+echo "      then Add Environment -> Remote link -> Host=http://localhost:3773 + code."
 echo "Stop when done:  box stop $BOX   (it bills while up)"
 echo "============================================="
