@@ -5,6 +5,7 @@ import {
   ConfigurationError,
   DEFAULT_CONFIG,
   checkProof,
+  checkDestructive,
   checkSize,
   countClosingReferences,
   validateCommits,
@@ -677,4 +678,43 @@ test('proof: evidence has to point at something outside the body', () => {
   const uiResult = checkProof(validBody, uiFile, [], strict);
   assert.equal(uiResult.failures.filter((f) => f.check === 'attributable proof').length, 0);
   assert.equal(uiResult.failures.some((f) => f.check === 'proof of a visible change'), true);
+});
+
+test('destructive: a change that cannot be undone stops for a person', () => {
+  const config = { ...DEFAULT_CONFIG, prefix: 'cr' };
+  const migration = [{ filename: 'apps/website/src/db/migrations/0110_drop_old.sql' }];
+
+  const stopped = checkDestructive(migration, [], config);
+  assert.equal(stopped.failures.length, 1);
+  assert.equal(stopped.failures[0].check, 'destructive change');
+  assert.equal(stopped.matched.length, 1);
+
+  // The owner clears it with a label. resolveOverrideLabels has already
+  // stripped a label the author applied to its own pull request, so by the time
+  // this check sees the list, the label means the owner really applied it.
+  assert.equal(checkDestructive(migration, ['human-reviewed'], config).failures.length, 0);
+
+  // Ordinary code is untouched. Every glob here costs a human decision on every
+  // PR that matches it, so a list that catches everything trains the owner to
+  // apply the label without reading.
+  assert.equal(checkDestructive([{ filename: 'src/components/Card.tsx' }], [], config).failures.length, 0);
+  assert.equal(checkDestructive([{ filename: 'README.md' }], [], config).failures.length, 0);
+
+  // A repo with an empty list opts out entirely.
+  assert.equal(checkDestructive(migration, [], { ...config, destructiveGlobs: [] }).failures.length, 0);
+
+  // Money and credentials count for the same reason data loss does.
+  for (const filename of ['src/server/billing/price.ts', 'infra/main.tf', 'scripts/rotate-secret.sh']) {
+    assert.equal(checkDestructive([{ filename }], [], config).failures.length, 1, filename);
+  }
+
+  // The message names the files, and does not paste a hundred of them.
+  const many = Array.from({ length: 9 }, (_, i) => ({ filename: `db/migrations/${i}.sql` }));
+  const message = checkDestructive(many, [], config).failures[0].got;
+  assert.equal(message.includes('and 4 more'), true);
+
+  // A migration renamed out of migrations/** still matches on its old path,
+  // the same way hasUiDiff catches a component moved out of components/.
+  const renamed = [{ filename: 'archive/0110_drop_old.txt', previous_filename: 'db/migrations/0110_drop_old.sql' }];
+  assert.equal(checkDestructive(renamed, [], config).failures.length, 1);
 });
