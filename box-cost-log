@@ -9,20 +9,22 @@
 set -uo pipefail
 export PATH="$HOME/.ascii/bin:$PATH"
 LOG="${BOX_COST_LOG:-$HOME/.local/state/box-cost/usage.jsonl}"
-mkdir -p "$(dirname "$LOG")"
+mkdir -p "$(dirname "$LOG")" || { echo "box-cost-log: failed to create $(dirname "$LOG")" >&2; exit 1; }
 
 snapshot() {
   local j; j="$(box limits --json 2>/dev/null)" || { echo "box-cost-log: box limits failed" >&2; exit 1; }
-  printf '%s\n' "$j" | jq -c --arg ts "$(date -u +%FT%TZ)" '{
-    ts: $ts,
-    activeBoxes,
-    creditUsedSeconds,
-    creditBalanceSeconds,
-    last24hUsageSeconds,
-    liveUsageSeconds,
-    perDollar: .creditSecondsPerDollar,
-    subRemainingSeconds: .subscriptionRemainingSeconds
-  }' >> "$LOG" || { echo "box-cost-log: failed to record snapshot" >&2; exit 1; }
+  printf '%s\n' "$j" | jq -ce --arg ts "$(date -u +%FT%TZ)" '
+    select(([.activeBoxes, .creditUsedSeconds, .creditBalanceSeconds, .last24hUsageSeconds, .liveUsageSeconds, .creditSecondsPerDollar, .subscriptionRemainingSeconds] | all(. != null)))
+    | {
+      ts: $ts,
+      activeBoxes,
+      creditUsedSeconds,
+      creditBalanceSeconds,
+      last24hUsageSeconds,
+      liveUsageSeconds,
+      perDollar: .creditSecondsPerDollar,
+      subRemainingSeconds: .subscriptionRemainingSeconds
+    }' >> "$LOG" || { echo "box-cost-log: box limits response missing required fields, snapshot not recorded" >&2; exit 1; }
   echo "box-cost-log: snapshot appended to $LOG"
 }
 
@@ -32,10 +34,11 @@ report() {
     (.[-1].perDollar // 100000) as $pd
     | .[0] as $first | .[-1] as $last
     | ($last.creditUsedSeconds - $first.creditUsedSeconds) as $usedDelta
+    | (if $usedDelta < 0 then "unknown (counter reset during window)" else "\($usedDelta) sec  = $\(($usedDelta/$pd)*100|round/100)" end) as $usedStr
     | "Window:        \($first.ts)  ->  \($last.ts)",
       "Samples:       \(length)",
       "Active Boxes:  now \($last.activeBoxes)  (max \([.[].activeBoxes] | max))",
-      "Credit used in window: \($usedDelta) sec  = $\(($usedDelta/$pd)*100|round/100)",
+      "Credit used in window: \($usedStr)",
       "Last 24h usage:        \($last.last24hUsageSeconds) sec = $\((($last.last24hUsageSeconds)/$pd)*100|round/100)",
       "Credit remaining:      \($last.creditBalanceSeconds) sec = $\((($last.creditBalanceSeconds)/$pd)*100|round/100)",
       "Sub remaining (month): \($last.subRemainingSeconds) sec"
