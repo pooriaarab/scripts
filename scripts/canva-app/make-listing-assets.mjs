@@ -23,8 +23,9 @@ const [dir = "./listing", background = "#ffffff"] = process.argv.slice(2);
 let sharp;
 try {
   sharp = createRequire(join(process.cwd(), "package.json"))("sharp");
-} catch {
-  console.error("sharp not found. Install it in this project: npm i -D sharp");
+} catch (cause) {
+  console.error(cause instanceof Error ? cause.message : cause);
+  console.error("Could not load sharp. If it's not installed: npm i -D sharp");
   process.exit(1);
 }
 
