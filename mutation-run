@@ -61,12 +61,12 @@ done
 
 CFG_VALS="$(python3 - "$REPO/.github/pr-standards.json" <<'PY'
 import json, sys
+path = sys.argv[1]
 cfg = {}
 try:
-    with open(sys.argv[1]) as fh:
-        cfg = json.load(fh)
-except Exception:
-    cfg = {}
+    with open(path) as fh: cfg = json.load(fh)
+except FileNotFoundError: cfg = {}
+except Exception as e: sys.exit("mutation-run: cannot parse %s: %s" % (path, e))
 m = cfg.get('mutation')
 if not isinstance(m, dict):
     m = {}
@@ -154,7 +154,7 @@ def is_test(p):
     if any(s in ('test', 'tests', '__tests__', 'spec') for s in segs[:-1]):
         return True
     b = segs[-1]
-    if b in ('conftest.py', 'test', 'tests') or b.startswith('test_') or b.startswith('test-') or b.startswith('test.'):
+    if b in ('conftest.py', 'test', 'tests') or b.startswith('test_') or b.startswith('test-') or b.startswith('test.') or b.split('.')[0] in ('test', 'tests', 'spec', 'specs'):
         return True
     if '.test.' in b or '.spec.' in b:
         return True
