@@ -3,7 +3,9 @@
 #
 # Every repo gets .github/pr-standards.json (with its prefix),
 # .github/pull_request_template.md, and .github/workflows/pr-standards.yml.
-# With --with-generated-drift, also .github/workflows/generated-drift.yml.
+# Each --with-* flag adds one more optional workflow:
+#   --with-generated-drift    .github/workflows/generated-drift.yml
+#   --with-post-merge-verify  .github/workflows/post-merge-verify.yml
 #
 # Dry-run is the default.  Use --apply to write anything.
 #
@@ -12,6 +14,7 @@
 #   ./pr-standards-rollout --repo content-rabbit  # dry-run one repo
 #   ./pr-standards-rollout --repo content-rabbit --apply  # PR everything
 #   ./pr-standards-rollout --with-generated-drift  # also deploy the drift check
+#   ./pr-standards-rollout --with-post-merge-verify  # also deploy the live check
 #
 set -u
 SCRIPT_DIR="$(dirname "$0")"
@@ -28,15 +31,31 @@ PREFIXES_FILE="$SCRIPT_DIR/repo-prefixes.json"
 TEMPLATES_DIR="$SCRIPT_DIR/pr-standards-templates"
 OWNER="pooriaarab"
 
-DRY=1; TARGET_REPO=""; WITH_GENERATED_DRIFT=0
+# Adding a path at most once. The flags used to be booleans, so repeating one
+# was harmless; appending to a list is not. A repeated flag looked up and wrote
+# the same file twice, which is a wasted API call and a second no-op commit on
+# the rollout branch.
+want_optional() {
+  local candidate="$1" existing
+  for existing in ${OPTIONAL_FILES[@]+"${OPTIONAL_FILES[@]}"}; do
+    [ "$existing" = "$candidate" ] && return 0
+  done
+  OPTIONAL_FILES+=("$candidate")
+}
+
+DRY=1; TARGET_REPO=""; OPTIONAL_FILES=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --apply) DRY=0; shift ;;
-    --with-generated-drift) WITH_GENERATED_DRIFT=1; shift ;;
+    # Every optional workflow lands in one list. Each flag used to add its own
+    # variable and its own copy of four separate blocks, and the fourth flag
+    # would have added four more.
+    --with-generated-drift) want_optional ".github/workflows/generated-drift.yml"; shift ;;
+    --with-post-merge-verify) want_optional ".github/workflows/post-merge-verify.yml"; shift ;;
     --repo)
       [ $# -ge 2 ] || { echo "ERROR: --repo requires a value"; exit 1; }
       TARGET_REPO="$2"; shift 2 ;;
-    --help|-h) sed -n '2,14p' "$0"; exit 0 ;;
+    --help|-h) sed -n '2,17p' "$0"; exit 0 ;;
     *) echo "unknown flag: $1"; exit 1 ;;
   esac
 done
@@ -69,9 +88,14 @@ PR_CONFIG_TPL=$(read_template pr-standards.json) || exit 1
 PR_TEMPLATE_MD=$(read_template pull_request_template.md) || exit 1
 WORKFLOW_YML=$(read_template pr-standards.yml) || exit 1
 AGENTS_BLOCK_TPL=$(read_template agents-block.md) || exit 1
-if [ "$WITH_GENERATED_DRIFT" -eq 1 ]; then
-  GENERATED_DRIFT_YML=$(read_template generated-drift.yml) || exit 1
-fi
+# An optional template is read only when its flag asked for it. Reading them all
+# would fail the whole run on a template a caller never wanted.
+for OPT in ${OPTIONAL_FILES[@]+"${OPTIONAL_FILES[@]}"}; do
+  case "$OPT" in
+    *generated-drift.yml)   GENERATED_DRIFT_YML=$(read_template generated-drift.yml) || exit 1 ;;
+    *post-merge-verify.yml) POST_MERGE_VERIFY_YML=$(read_template post-merge-verify.yml) || exit 1 ;;
+  esac
+done
 
 # GitHub's secondary rate limit for content-creating requests is about 500
 # per hour. The rate_limit endpoint does not expose it: core stays 5000/5000
@@ -288,8 +312,7 @@ print(p)
           REPAIR_MISSING+="$F "
         }
       done
-      if [ "$WITH_GENERATED_DRIFT" -eq 1 ]; then
-        F=".github/workflows/generated-drift.yml"
+      for F in ${OPTIONAL_FILES[@]+"${OPTIONAL_FILES[@]}"}; do
         F_RESP=$(gh api "repos/$OWNER/$repo/contents/$F" --jq '.sha' 2>&1) || {
           if ! echo "$F_RESP" | grep -q '"Not Found"'; then
             echo "WARN  $repo  (companion lookup failed for $F)" >&2
@@ -298,7 +321,7 @@ print(p)
           fi
           REPAIR_MISSING+="$F "
         }
-      fi
+      done
 
       # AGENTS.md needs its CONTENT checked, not just its existence. A repo with
       # a hand-written AGENTS.md that has no markers, or one carrying a block
@@ -447,8 +470,9 @@ print(json.dumps(cfg, indent=2))
           *.json)               FC="$CONFIG_JSON" ;;
           *_template.md)        FC="$PR_BODY" ;;
           AGENTS.md)            FC="$AGENTS_MD" ;;
-          *generated-drift.yml) FC="$GENERATED_DRIFT_YML" ;;
-          *)                    FC="$WORKFLOW_YML" ;;
+          *generated-drift.yml)   FC="$GENERATED_DRIFT_YML" ;;
+          *post-merge-verify.yml) FC="$POST_MERGE_VERIFY_YML" ;;
+          *)                      FC="$WORKFLOW_YML" ;;
         esac
         # A 404 means the file is new and no sha belongs in the payload. Any
         # other failure means we could not read a file that may well exist, and
@@ -588,9 +612,7 @@ $ISSUE_MARKER
 
   WRITE_FAIL=0; WRITE_FAIL_FILE=""
   FILES=(".github/pr-standards.json" ".github/pull_request_template.md" ".github/workflows/pr-standards.yml" "AGENTS.md")
-  if [ "$WITH_GENERATED_DRIFT" -eq 1 ]; then
-    FILES+=(".github/workflows/generated-drift.yml")
-  fi
+  FILES+=(${OPTIONAL_FILES[@]+"${OPTIONAL_FILES[@]}"})
   for item in "${FILES[@]}"; do
     FP="$item"
 
@@ -599,8 +621,9 @@ $ISSUE_MARKER
       *.json)               FC="$CONFIG_JSON" ;;
       *_template.md)        FC="$PR_BODY" ;;
       AGENTS.md)            FC="$AGENTS_MD" ;;
-      *generated-drift.yml) FC="$GENERATED_DRIFT_YML" ;;
-      *)                    FC="$WORKFLOW_YML" ;;
+      *generated-drift.yml)   FC="$GENERATED_DRIFT_YML" ;;
+      *post-merge-verify.yml) FC="$POST_MERGE_VERIFY_YML" ;;
+      *)                      FC="$WORKFLOW_YML" ;;
     esac
 
     EXISTING_SHA=$(gh api "repos/$OWNER/$repo/contents/$FP?ref=$BRANCH" \
