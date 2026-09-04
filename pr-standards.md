@@ -261,6 +261,44 @@ branch. The obvious implementation gets this wrong. Written as "there is no issu
 number, so skip the checks that need one", the knob quietly disables the title and
 body rules too, and becomes a way to opt out of the whole standard.
 
+## What proof looks like, by kind of work
+
+The rule is one sentence: **show the thing a reader cannot otherwise check.** A
+reviewer can read your code. A reviewer cannot see your screen, run your query,
+open your email in Outlook, or watch your deploy. Proof covers the gap between
+what the diff says and what a reader can confirm.
+
+This fleet does not only ship code. A landing page, an ad, a pricing table and a
+schema change are all pull requests, and each has a different gap.
+
+| Kind of work | What the reader cannot check | So show |
+|---|---|---|
+| Product UI | your screen | Before and after, same viewport, same data |
+| Landing or marketing page | the rendered page | The preview URL, plus a capture at every breakpoint you touched |
+| Design system or component | every state | The component in both themes, and the states you changed |
+| Ad or social copy | how the platform renders it | The platform's own preview, captured |
+| Email | how a client renders it | The rendered email in one dark and one light client |
+| API | what it answers | The request and the response, as a `curl` a reader can run |
+| Query, report or analytics | the numbers | The query, its output, and the row count |
+| Schema or migration | that it is reversible | Up and down, run against a copy, with the row counts either side |
+| Deploy or infrastructure | that it landed | The plan output, or the deployed SHA answering |
+| Backend logic | that it was broken before | The test that fails without the change and passes with it |
+| Docs prose | nothing — they can read it | The diff. `Proof: n/a` is right here |
+
+Three things this table is saying that are easy to miss:
+
+- **A screenshot of the result is not proof of a change.** One image shows what
+  the screen looks like now. It cannot show that your diff is why. That is the
+  whole reason the checker warns on exactly one attachment.
+- **For work that is not code, the artifact is the deliverable.** An ad's render
+  is not evidence *about* the work, it *is* the work. Reviewing the copy in a
+  diff and never seeing it rendered is reviewing half of it.
+- **`Proof: n/a` is a real answer, and it is rare.** A type-level refactor, a
+  comment fix, a prose edit: nothing to show. Anything a person will see, click,
+  read, or be billed for has a capture. When `Proof: n/a` becomes routine in a
+  repo, the honest fix is `requireProof: false` in that repo's config, not a
+  habit of writing a reason nobody reads.
+
 ## A new dependency states its case
 
 A dependency is the cheapest line an agent can write and the most expensive one
