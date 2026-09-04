@@ -105,10 +105,20 @@ restore_current() {
   fi
   CURRENT_FILE=""; CURRENT_BAK=""
 }
-cleanup() { restore_current; [ -n "$TMPD" ] && rm -rf "$TMPD"; TMPD=""; }
+# Kill the whole process group, then the wrapper as a fallback for a shell
+# that gave it no group of its own.
+kill_test_tree() {
+  [ -n "$TEST_PID" ] || return 0
+  kill -KILL -- "-$TEST_PID" 2>/dev/null || true
+  kill -KILL "$TEST_PID" 2>/dev/null || true
+}
+cleanup() { kill_test_tree; restore_current; [ -n "$TMPD" ] && rm -rf "$TMPD"; TMPD=""; }
 on_signal() {
+  # Kill first, restore second. A test process still running can write into
+  # the mutated file, so restoring before it is dead can hand back a file that
+  # is corrupted a moment later and reported as restored.
+  kill_test_tree
   restore_current
-  if [ -n "$TEST_PID" ] && kill -0 "$TEST_PID" 2>/dev/null; then kill "$TEST_PID" 2>/dev/null; fi
   if [ "$RESTORE_FAILED" -eq 1 ]; then
     echo "mutation-run: interrupted — worktree NOT fully restored, see errors above." >&2
   else
@@ -287,11 +297,18 @@ run_test() { # timeout-secs, command, outfile; sets RUN_RC, RUN_TIMEDOUT
   local t="$1" cmd="$2" out="$3" deadline
   RUN_RC=0; RUN_TIMEDOUT=0
   rm -f "$TMPD/rc"
+  # Job control gives the subshell its own process group, so `kill -PGID`
+  # reaches the test command and anything it spawned. Killing $TEST_PID alone
+  # kills the wrapper subshell and orphans `bash -c "$cmd"`, which then keeps
+  # running -- and can write into the mutated file after it has been restored,
+  # which is the one property this tool must not get wrong.
+  set -m
   ( cd "$REPO" && bash -c "$cmd" >"$out" 2>&1; echo "$?" >"$TMPD/rc" ) & TEST_PID=$!
+  set +m
   deadline=$((SECONDS + t))
   while [ ! -f "$TMPD/rc" ]; do
     if (( SECONDS >= deadline )); then
-      kill -KILL "$TEST_PID" 2>/dev/null || true
+      kill_test_tree
       RUN_TIMEDOUT=1
       break
     fi
