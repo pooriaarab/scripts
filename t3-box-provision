@@ -61,7 +61,7 @@ DROP="$HOME/.config/systemd/user/t3code.service.d"; mkdir -p "$DROP"
 printf '[Service]\nEnvironment=T3CODE_HOST=0.0.0.0\nEnvironment=T3CODE_PORT=3773\nEnvironment=PATH=%%h/.local/bin:/usr/local/bin:/usr/bin:/bin\n' > "$DROP/override.conf"
 pkill -f "t3@latest" 2>/dev/null; sleep 1        # free 3773 from any foreground run
 systemctl --user daemon-reload
-systemctl --user enable t3code
+systemctl --user enable t3code || { echo "could not enable t3code — it would not survive a reboot" >&2; exit 1; }
 systemctl --user restart t3code   # restart (not just enable --now) so a reused box picks up the drop-in
 for _ in $(seq 1 15); do systemctl --user is-active --quiet t3code && ss -ltn 2>/dev/null | grep -q '0.0.0.0:3773' && break; sleep 2; done
 systemctl --user is-active --quiet t3code && ss -ltn 2>/dev/null | grep -q '0.0.0.0:3773' && echo T3_LISTENING || echo T3_NOT_LISTENING
