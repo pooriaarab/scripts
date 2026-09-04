@@ -72,6 +72,23 @@ python3 install-pr-hooks.test.py
 ./pr-standards-rollout-labels.test.sh
 ```
 
+## spec-audit
+
+Scores every open issue on whether a delegate could implement it without
+guessing, and prints what each one is missing.
+
+```bash
+./spec-audit                      # every repo that adopted the standard
+./spec-audit --repo content-rabbit
+./spec-audit --ready              # only the dispatchable ones
+```
+
+Four things a weak model cannot supply for itself: a file to change, an existing
+thing to copy, a testable finish line, a named verification command. Measured
+across this fleet's 145 open issues, 10 had three or more. The rule and the two
+extra requirements for human-facing decisions are in
+[pr-standards.md](pr-standards.md).
+
 ## pr-standards
 
 Checks a branch or a pull request against the [PR standard](pr-standards.md): one
