@@ -33,6 +33,12 @@ WT_PORCELAIN="$(git worktree list --porcelain)" || { echo "error: git worktree l
 # instead report whichever worktree we're standing in).
 MAIN_TOP="${WT_PORCELAIN%%$'\n'*}"
 MAIN_TOP="${MAIN_TOP#worktree }"
+# The shared gitdir every linked worktree hangs off of, as
+# "<common-git-dir>/worktrees/<name>". Resolved once, absolute, so the
+# per-worktree check below can't be fooled by an unrelated repo whose own
+# path merely contains the substring "/worktrees/" (see below).
+COMMON_GITDIR="$(git rev-parse --git-common-dir)"
+COMMON_GITDIR="$(cd "$COMMON_GITDIR" && pwd)"
 # Scratch files that alone do not block removal.
 SCRATCH_RE='^(WORKER_BRIEF\.md|CONTINUE\.md|BRIEF\.md)$'
 
@@ -43,10 +49,13 @@ removed_list=()
 skipped_list=()
 review_list=()
 
-# Refresh the remote tracking ref once up front; ignore fetch failures
-# (offline). Doing this per-worktree below would be an N-fetch penalty
-# for data that doesn't change between worktrees.
-git fetch origin main --quiet 2>/dev/null || true
+# Refresh the remote tracking ref once up front. Doing this per-worktree
+# below would be an N-fetch penalty for data that doesn't change between
+# worktrees. Track whether it actually succeeded (offline is fine, but if
+# it fails we can't trust a possibly-stale origin/main to prove "merged"
+# after a remote history rewrite).
+FETCH_OK=1
+git fetch origin main --quiet 2>/dev/null || FETCH_OK=0
 
 # --- Enumerate linked worktrees via porcelain output ---
 # Blocks look like: "worktree <path>", "branch refs/heads/<name>", ...
@@ -63,8 +72,12 @@ process_worktree() {
   fi
 
   # SAFETY: verify this is a genuine LINKED worktree before touching it.
-  # A linked worktree's gitdir lives under <main>/.git/worktrees/<name>.
-  # A main clone's gitdir is <dir>/.git — never delete those.
+  # A linked worktree's gitdir is exactly <common-gitdir>/worktrees/<name>.
+  # A main clone's gitdir is <dir>/.git — never delete those. Anchor on
+  # COMMON_GITDIR (not a bare "*/worktrees/*" substring test) so a stale
+  # worktree slot that got manually replaced by an unrelated clone isn't
+  # mistaken for a real linked worktree just because its own path happens
+  # to contain a "worktrees" directory component (e.g. /srv/worktrees/foo).
   local gitdir
   if ! gitdir="$(git -C "$wt" rev-parse --absolute-git-dir 2>/dev/null)"; then
     skipped_list+=("$wt (not a git worktree)")
@@ -72,7 +85,7 @@ process_worktree() {
     return 0
   fi
   case "$gitdir" in
-    *"/worktrees/"*) ;; # genuine linked worktree, proceed
+    "$COMMON_GITDIR/worktrees/"*) ;; # genuine linked worktree, proceed
     *)
       skipped_list+=("$wt (main clone, gitdir=$gitdir)")
       skipped=$((skipped + 1))
@@ -112,6 +125,15 @@ process_worktree() {
   if [ "$merged" -eq 0 ]; then
     skipped_list+=("$wt ($short not merged)")
     skipped=$((skipped + 1))
+    return 0
+  fi
+  # A "merged" verdict from a stale origin/main (fetch failed above, e.g.
+  # offline) can't be trusted after a remote history rewrite: the branch
+  # may look merged against the old cached ref while current main no
+  # longer contains it. Route to needs-review instead of removing.
+  if [ "$intobranch" = "origin/main" ] && [ "$FETCH_OK" -eq 0 ]; then
+    review_list+=("$wt ($short merged per stale origin/main; fetch failed, verify manually)")
+    needs_review=$((needs_review + 1))
     return 0
   fi
 
@@ -154,8 +176,13 @@ process_worktree() {
     # Clear the verified scratch-only files first: `git worktree remove`
     # refuses any dirty worktree, scratch files included, and we deliberately
     # don't pass --force, since --force also bypasses `git worktree lock` —
-    # a locked worktree must still block removal.
+    # a locked worktree must still block removal. Unstage before restoring:
+    # `checkout -- <path>` only ever restores the worktree from the index,
+    # so a *staged* scratch-file change (index differs from HEAD, working
+    # tree already matches index) would otherwise survive untouched and
+    # `git worktree remove` would still see it as dirty.
     for f in ${scratch_paths[@]+"${scratch_paths[@]}"}; do
+      git -C "$wt" reset -q -- "$f" 2>/dev/null || true
       git -C "$wt" checkout -- "$f" 2>/dev/null || rm -f -- "$wt/$f"
     done
     # Never rm -rf as a fallback: git owns removal or nothing happens.
