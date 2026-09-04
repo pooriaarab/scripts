@@ -22,7 +22,7 @@ snapshot() {
     liveUsageSeconds,
     perDollar: .creditSecondsPerDollar,
     subRemainingSeconds: .subscriptionRemainingSeconds
-  }' >> "$LOG"
+  }' >> "$LOG" || { echo "box-cost-log: failed to record snapshot" >&2; exit 1; }
   echo "box-cost-log: snapshot appended to $LOG"
 }
 
