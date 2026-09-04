@@ -472,8 +472,12 @@ function hasCommandAndResult(text) {
 //
 // Fenced code remains outside this check's scope. Inline code is allowed to
 // carry a real URL, so its backticks must not become part of the asset id.
+// Both callers pass text the body reader has already been through, so comments
+// are gone before this sees them. Stripping them again here was not just
+// redundant, it was wrong: a plain regex cannot tell a live `<!--` from an
+// escaped `\<!--`, so it deleted the attachments on a line GitHub renders.
 function countUserAttachments(body) {
-  const visible = String(body || '').replace(/<!--[\s\S]*?-->/g, '');
+  const visible = String(body || '');
   // No indentation filter here, deliberately. Four leading spaces mark an
   // indented code block only OUTSIDE a list; inside one they are continuation
   // content that renders normally, and a line-start test cannot tell the two
@@ -498,16 +502,127 @@ function countUserAttachments(body) {
   return new Set(matches.map((url) => url.split(/[?#]/)[0].replace(/[.,;:!?]+$/, ''))).size;
 }
 
-// Every caller passes the already-extracted "How I verified" section, so this
-// scans the text it is given. It used to call a `verificationSection()` reader
-// that no longer exists in this file -- the merge of #153 kept this call and
-// dropped the function, so every proof check threw ReferenceError and 18 tests
-// went red on main. A hatch inside an HTML comment is not an answer, so the
-// comments come out before the scan.
+
+// A comment is not visible text, and neither is a fenced code block. A body that
+// documents this checker quotes its own escape hatch, and a quoted rule must not
+// satisfy the rule it quotes. Both callers read the "How I verified" section
+// through here, and they answer an UNTERMINATED fence in opposite directions:
+//
+//   - The hatch fails CLOSED. A `Proof: n/a` inside a fence that never closes
+//     must not grant a waiver, the same way a label nobody can attribute is
+//     dropped rather than honoured.
+//   - The evidence fails OPEN. A stray ``` above a screenshot must not swallow
+//     it and fail a pull request that did nothing wrong.
+const QUOTE_PREFIX = /^(?:\s{0,3}>\s?)+/;
+
+function isQuoted(line) {
+  return QUOTE_PREFIX.test(line);
+}
+
+// A fence may follow a list marker, and it then closes at its own column rather
+// than at column zero. Four or more leading spaces is indented code, never a
+// fence. A backtick fence cannot carry a backtick in its info string -- GitHub
+// reads such a line as plain text, so it never opens anything.
+function fenceOpener(line) {
+  const match = /^( {0,3})((?:[-*+]|\d{1,9}[.)])[ \t]+)?(`{3,}|~{3,})(.*)$/.exec(line);
+  if (!match) return null;
+  const [, indent, marker, run, info] = match;
+  if (run[0] === '`' && info.includes('`')) return null;
+  return { char: run[0], len: run.length, indent: indent.length + (marker || '').length };
+}
+
+// The closer sits at the fence's own column, give or take the three spaces
+// GitHub always forgives -- measured from column zero, not from the opener's
+// indent, so a six-space line never closes a three-space fence.
+function isFenceCloser(line, fence) {
+  return new RegExp(`^ {0,3}[${fence.char}]{${fence.len},}[ \\t]*$`).test(line);
+}
+
+function visibleBody(body, { unmatchedFenceHides }) {
+  // Normalise CRLF first: a closer ending in a bare \r never matched, so a
+  // CRLF body left a closed fence looking unterminated.
+  const lines = String(body || '').replace(/\r\n/g, '\n').split('\n');
+  const hidden = new Array(lines.length).fill(false);
+  // Lines can be emitted MODIFIED, not just kept or dropped: an inline comment
+  // is removed from its line while the rest of that line stays visible.
+  const text = lines.slice();
+  let fence = null;
+  let fenceStart = -1;
+  let fenceQuoted = false;
+  let inComment = false;
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const raw = lines[index];
+    let rest = raw;
+
+    // An HTML comment is raw text on GitHub: nothing inside it is parsed, so a
+    // fence marker within one never opens a fence. An unterminated comment runs
+    // to the end of the document.
+    if (inComment) {
+      hidden[index] = true;
+      const close = rest.indexOf('-->');
+      if (close === -1) continue;
+      rest = rest.slice(close + 3);
+      text[index] = rest;
+      hidden[index] = false;
+      inComment = false;
+    }
+
+    if (fence) {
+      const body = fenceQuoted ? rest.replace(QUOTE_PREFIX, '') : rest;
+      // A quoted closer cannot close a fence opened outside the quote: GitHub
+      // renders it as literal content inside the still-open fence.
+      const closes = fenceQuoted
+        ? isQuoted(rest) && isFenceCloser(body, fence)
+        : !isQuoted(rest) && isFenceCloser(body, fence);
+      hidden[index] = true;
+      if (closes) fence = null;
+      continue;
+    }
+
+    // Only an unescaped marker opens a comment. Backslashes escape in pairs, so
+    // an even run leaves the marker live.
+    const marker = rest.indexOf('<!--');
+    if (marker !== -1) {
+      let slashes = 0;
+      for (let at = marker - 1; at >= 0 && rest[at] === '\\'; at -= 1) slashes += 1;
+      if (slashes % 2 === 0) {
+        const close = rest.indexOf('-->', marker + 4);
+        if (close === -1) { hidden[index] = true; inComment = true; continue; }
+        // A comment that opens and closes on one line leaves the text around
+        // it visible. Record the stripped text, or a URL inside the comment
+        // would still be emitted and counted as evidence.
+        rest = rest.slice(0, marker) + rest.slice(close + 3);
+        text[index] = rest;
+      }
+    }
+
+    const quoted = isQuoted(rest);
+    const opener = fenceOpener(quoted ? rest.replace(QUOTE_PREFIX, '') : rest);
+    if (opener) {
+      fence = opener;
+      fenceStart = index;
+      fenceQuoted = quoted;
+      hidden[index] = true;
+    }
+  }
+
+  // An unterminated fence is the one case the two callers disagree about.
+  if (fence && !unmatchedFenceHides) {
+    for (let index = fenceStart; index < lines.length; index += 1) hidden[index] = false;
+  }
+  return text.filter((_, index) => !hidden[index]).join('\n');
+}
+
+function verificationSection(body, options) {
+  return sectionBody(visibleBody(body, options), 'How I verified') || '';
+}
+
+// Scans the section it is handed. The caller decides which reading of an
+// unterminated fence applies, because the hatch and the evidence answer that
+// question in opposite directions.
 function hasValidProofNa(text) {
-  const visible = String(text || '').replace(/<!--[\s\S]*?-->/g, '');
-  const lines = visible.split('\n');
-  for (const line of lines) {
+  for (const line of String(text || '').split('\n')) {
     const match = PROOF_NA_LINE.exec(line);
     if (match && match[1].trim().length >= 20) return true;
   }
@@ -551,10 +666,10 @@ function hasValidProofNa(text) {
 const ACTIONS_RUN_URL =
   /https:\/\/github\.com\/[^\s\/]+\/[^\s\/]+\/actions\/runs\/\d+(?=[\/?#]|[.,;:!*_"'\x60\)\]\}<>]*(?:\s|$))/;
 
-function hasExternalProofEvidence(verifiedSection) {
+function hasExternalProofEvidence(verifiedSection, hatchSection) {
   if (countUserAttachments(verifiedSection) > 0) return true;
   if (ACTIONS_RUN_URL.test(verifiedSection)) return true;
-  if (hasValidProofNa(verifiedSection)) return true;
+  if (hasValidProofNa(hatchSection)) return true;
   return false;
 }
 
@@ -655,9 +770,14 @@ export function checkProof(body, files, config = DEFAULT_CONFIG) {
   // cannot tell a real one from "n/a". Both live under ## How I verified per
   // the docs, so an attachment or hatch line pasted under ## What or ## Why
   // does not count: the evidence belongs where the reviewer is told to look.
-  const verifiedSection = sectionBody(body, 'How I verified') || '';
+  // The two readings differ only for an UNTERMINATED fence. Evidence fails
+  // OPEN, so a stray ``` above a screenshot does not swallow it and fail a pull
+  // request that did nothing wrong. The hatch fails CLOSED, so a `Proof: n/a`
+  // inside a fence that never closes grants no waiver.
+  const verifiedSection = verificationSection(body, { unmatchedFenceHides: false });
+  const hatchSection = verificationSection(body, { unmatchedFenceHides: true });
   let uiProofFailed = false;
-  if (hasUiDiff(files || [], config) && !hasValidProofNa(verifiedSection)) {
+  if (hasUiDiff(files || [], config) && !hasValidProofNa(hatchSection)) {
     const count = countUserAttachments(verifiedSection);
     if (count === 0) {
       uiProofFailed = true;
@@ -692,7 +812,7 @@ export function checkProof(body, files, config = DEFAULT_CONFIG) {
   // the whole fleet red on day one and get the standard switched off. A repo
   // ratchets this to a failure with `requireAttributableProof` once its tests
   // run in CI and a run link is something its own agents can always produce.
-  if (!uiProofFailed && hasCommandAndResult(verifiedSection) && !hasExternalProofEvidence(verifiedSection)) {
+  if (!uiProofFailed && hasCommandAndResult(verifiedSection) && !hasExternalProofEvidence(verifiedSection, hatchSection)) {
     const finding = fail(
       'attributable proof',
       'a command and result claimed in text, nothing outside the body to check it against',
