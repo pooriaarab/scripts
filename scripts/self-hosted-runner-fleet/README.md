@@ -160,3 +160,44 @@ Also: these tools check that the commit being synced is on the branch they adver
 unpushed local branch fails with an unhelpful message and is not a host problem. And when
 every step of the tool passes by hand but the tool still fails, the bug is upstream — file
 it with that evidence rather than rebuilding the machine around it.
+
+## Make a busy fleet fast
+
+Run `ci-cache-dropin.sh` once per host. It creates `/opt/ci-cache` and points every
+runner service at it with a systemd drop-in. The caches have to live outside the job
+workspace, because `actions/checkout` cleans the workspace on every run. Each service
+keeps its own `HOME`; only the content-addressed caches are shared.
+
+Then fix the workflows:
+
+- **Delete `actions/cache` steps from self-hosted jobs.** They round-trip the cache to
+  the forge and back, which is slower than reading the local directory, and they consume
+  the repository's 10 GB cache quota.
+- **Collapse a repo's check jobs into one.** Each job pays checkout and dependency
+  install again. One repo paid install eight times per pull request; on a shared host
+  that cost more than the checks. Job names are the required status checks, so update
+  branch protection in the same change.
+- **Cap in-job parallelism.** A 20-thread host running five concurrent jobs with
+  uncapped workers reached load average 30. Pull requests queued for about 30 minutes,
+  unrelated SSH sessions stopped answering, and file-sync subprocesses were killed. Set
+  the task runner's `--concurrency` and the test runner's worker count.
+- **One runner service per repo serializes that repo.** Check `uptime` before adding
+  services: on a CPU-bound host, more concurrency is not more throughput.
+- **Retire a service in the right order.** Delete the runner registration through the
+  API first, then stop and remove the systemd unit. The other order leaves a
+  registration the API refuses to delete while it still looks busy.
+- **Send fixed-port `services:` jobs to ephemeral per-job cloud runners.** Three test
+  shards that each bind the same database port cannot share one host.
+
+Two host faults worth recognising, because both look like a per-repo problem:
+
+- `wsl --shutdown` does not bring the runner services back. After a restart, start them
+  explicitly.
+- If every runner reads "offline, busy=false" at once while the services are active and
+  the forge API is reachable, check IPv6. A host that resolves the Actions broker to an
+  AAAA record but has no IPv6 default route leaves every listener in backoff throwing
+  `ObjectDisposedException` on the TLS stream. Prefer IPv4 by appending
+  `precedence ::ffff:0:0/96  100` to `/etc/gai.conf`, then restart the services.
+
+The full job-placement and cost playbook, including per-minute prices across runner
+options, is the `high-volume-ci-optimization` skill in the skills repository.
