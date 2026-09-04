@@ -351,6 +351,16 @@ for cline in "${CAND_LINES[@]}"; do
   esac
   target="$REPO/$mfile"
   if [ ! -f "$target" ]; then echo "mutation-run: stale mutation, file gone: $mfile" >&2; continue; fi
+  # The lexical check above cannot see a symlink. A path inside the repo whose
+  # target resolves outside it would be followed by `cp` and written through by
+  # the mutation, overwriting a file this tool has no business touching -- with
+  # replacement text taken from the diff, which on an external pull request is
+  # not ours to trust. Resolve both sides and compare.
+  if ! target=$(python3 -c 'import os,sys
+r, t = os.path.realpath(sys.argv[1]), os.path.realpath(sys.argv[2])
+sys.exit(1) if not (t == r or t.startswith(r + os.sep)) else print(t)' "$REPO" "$target"); then
+    echo "mutation-run: rejecting mutation that resolves outside repo: $mfile" >&2; continue
+  fi
   if ! cp -f "$target" "$TMPD/bak"; then
     echo "mutation-run: cannot back up $mfile — skipping mutation" >&2
     continue
