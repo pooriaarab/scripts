@@ -24,7 +24,15 @@ cd "$REPO"
 command -v git >/dev/null || { echo "error: git not found" >&2; exit 1; }
 git rev-parse --show-toplevel >/dev/null 2>&1 || { echo "error: not a git repo: $REPO" >&2; exit 1; }
 
-MAIN_TOP="$(git rev-parse --show-toplevel)"
+# Capture the worktree list once: reused below for MAIN_TOP and the
+# enumeration loop, and lets us fail loudly if the command itself fails
+# (a `while ... < <(cmd)` would otherwise silently see zero lines).
+WT_PORCELAIN="$(git worktree list --porcelain)" || { echo "error: git worktree list failed" >&2; exit 1; }
+# The main worktree is always the first entry, regardless of which
+# worktree $REPO happens to point at (git rev-parse --show-toplevel would
+# instead report whichever worktree we're standing in).
+MAIN_TOP="${WT_PORCELAIN%%$'\n'*}"
+MAIN_TOP="${MAIN_TOP#worktree }"
 # Scratch files that alone do not block removal.
 SCRATCH_RE='^(WORKER_BRIEF\.md|CONTINUE\.md|BRIEF\.md)$'
 
@@ -34,6 +42,11 @@ needs_review=0
 removed_list=()
 skipped_list=()
 review_list=()
+
+# Refresh the remote tracking ref once up front; ignore fetch failures
+# (offline). Doing this per-worktree below would be an N-fetch penalty
+# for data that doesn't change between worktrees.
+git fetch origin main --quiet 2>/dev/null || true
 
 # --- Enumerate linked worktrees via porcelain output ---
 # Blocks look like: "worktree <path>", "branch refs/heads/<name>", ...
@@ -77,8 +90,6 @@ process_worktree() {
 
   # --- Merged check: branch merged into origin/main (or local main)? ---
   local merged=0
-  # Refresh remote tracking ref quietly; ignore fetch failures (offline).
-  git fetch origin main --quiet 2>/dev/null || true
   # Prefer origin/main; fall back to local main/master when no remote exists.
   local intobranch="origin/main"
   if ! git rev-parse --verify --quiet "$intobranch" >/dev/null; then
@@ -112,18 +123,22 @@ process_worktree() {
     needs_review=$((needs_review + 1))
     return 0
   fi
+  local scratch_paths=()
   if [ -n "$status" ]; then
-    # Any changed path outside the scratch set counts as real.
+    # Any changed path outside the scratch set counts as real. Match the
+    # full repo-relative path (not basename) so a real file that merely
+    # shares a name with a scratch file, e.g. docs/BRIEF.md, isn't
+    # mistaken for the harmless root-level scratch note.
     while IFS= read -r line; do
       [ -n "$line" ] || continue
       # Porcelain v1: XY + space + path (handle renames "old -> new").
       local f="${line:3}"
       f="${f##* -> }"
-      f="$(basename "$f")"
       if ! printf '%s' "$f" | grep -Eq "$SCRATCH_RE"; then
         real_dirty=1
         break
       fi
+      scratch_paths+=("$f")
     done <<< "$status"
   fi
   if [ "$real_dirty" -eq 1 ]; then
@@ -136,6 +151,13 @@ process_worktree() {
 
   # --- Safe to remove (or dry-run report) ---
   if [ "$APPLY" -eq 1 ]; then
+    # Clear the verified scratch-only files first: `git worktree remove`
+    # refuses any dirty worktree, scratch files included, and we deliberately
+    # don't pass --force, since --force also bypasses `git worktree lock` —
+    # a locked worktree must still block removal.
+    for f in ${scratch_paths[@]+"${scratch_paths[@]}"}; do
+      git -C "$wt" checkout -- "$f" 2>/dev/null || rm -f -- "$wt/$f"
+    done
     # Never rm -rf as a fallback: git owns removal or nothing happens.
     if git worktree remove "$wt"; then
       removed_list+=("$wt ($short)")
@@ -156,7 +178,7 @@ while IFS= read -r line; do
     "branch "*)   current_branch="${line#branch }" ;;
     "detached")   current_branch="(detached)" ;;
   esac
-done < <(git worktree list --porcelain)
+done <<< "$WT_PORCELAIN"
 process_worktree # flush last entry
 
 # --- Summary ---
