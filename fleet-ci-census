@@ -1,0 +1,301 @@
+#!/usr/bin/env bash
+# Report how long CI takes, per repo and per workflow, across the fleet.
+#
+# Wall time, not billable minutes: a regex check sitting 35 minutes in the
+# runner queue is the number that says where to spend effort. Billable
+# minutes need one /timing request per run, so they stay behind --timing.
+#
+# GitHub's Actions list is newest-first and stops at the page cap. A repo
+# whose fetched count equals that cap is a floor, never a total — printing
+# 300 as if it were complete understates the busiest repos in the fleet.
+set -euo pipefail
+
+usage() {
+  cat <<'USAGE'
+Usage: fleet-ci-census [owner/repo ...] [--owner NAME] [--limit N] [--days N] [--pages N] [--markdown] [--timing]
+
+  owner/repo     repos to census. When none, the --limit newest by pushedAt
+                 under --owner.
+  --owner NAME   owner used for discovery (default: pooriaarab)
+  --limit N      how many newest repos to discover (default: 26, max 100)
+  --days N       created-since window in days (default: 14)
+  --pages N      Actions API pages per repo, 100 runs each (default: 3)
+  --markdown     ranked markdown table (JSON is the default)
+  --timing       per-run billable minutes; one extra API request per run
+  --help         show this help
+
+Groups by workflow: run count, p50, p95, total minutes, failure rate,
+cancellation rate. Sorted by total minutes. A repo whose fetched run
+count equals the page cap is a floor, not a total, and is marked so.
+USAGE
+}
+
+OWNER="pooriaarab"
+LIMIT=26
+DAYS=14
+PAGES=3
+MARKDOWN=0
+TIMING=0
+REPOS=()
+
+positive_int() {
+  local name="$1" val="$2"
+  [[ "$val" =~ ^[0-9]+$ ]] || { echo "error: $name needs a positive integer" >&2; exit 2; }
+  val=$((10#$val))
+  (( val > 0 )) || { echo "error: $name needs a positive integer" >&2; exit 2; }
+  printf '%s' "$val"
+}
+
+while (( $# )); do
+  case "$1" in
+    --owner) OWNER="${2:-}"; [[ -n "$OWNER" ]] || { echo "error: --owner needs a value" >&2; exit 2; }; shift 2 ;;
+    --limit) LIMIT=$(positive_int --limit "${2:-}"); shift 2 ;;
+    --days) DAYS=$(positive_int --days "${2:-}"); shift 2 ;;
+    --pages) PAGES=$(positive_int --pages "${2:-}"); shift 2 ;;
+    --markdown) MARKDOWN=1; shift ;;
+    --timing) TIMING=1; shift ;;
+    --help|-h) usage; exit 0 ;;
+    --) shift; break ;;
+    -*) echo "error: unknown flag $1" >&2; usage >&2; exit 2 ;;
+    *) REPOS+=("$1"); shift ;;
+  esac
+done
+while (( $# )); do REPOS+=("$1"); shift; done
+
+(( LIMIT <= 100 )) || { echo "error: --limit max is 100 (GitHub API page size)" >&2; exit 2; }
+
+for r in "${REPOS[@]+"${REPOS[@]}"}"; do
+  if ! [[ "$r" =~ ^[A-Za-z0-9_.\-]+/[A-Za-z0-9_.\-]+$ ]]; then
+    echo "error: owner/repo must match [A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+" >&2
+    exit 2
+  fi
+done
+
+if SINCE=$(date -u -d "$DAYS days ago" +%Y-%m-%d 2>/dev/null); then
+  :
+elif SINCE=$(date -u -v-${DAYS}d +%Y-%m-%d 2>/dev/null); then
+  :
+else
+  SINCE=$(DAYS="$DAYS" python3 -c 'import datetime,os; print((datetime.datetime.now(datetime.timezone.utc)-datetime.timedelta(days=int(os.environ["DAYS"]))).strftime("%Y-%m-%d"))')
+fi
+
+command -v gh >/dev/null 2>&1 || { echo "error: gh CLI not found" >&2; exit 3; }
+command -v python3 >/dev/null 2>&1 || { echo "error: python3 not found" >&2; exit 3; }
+if (( TIMING )); then echo "warning: --timing costs one API request per run" >&2; fi
+
+# A cancelled job that never finished can keep updating for hours. 6h is past any
+# runner-queue tail the census is meant to see.
+MAX_DURATION_S=$((6 * 3600))
+PAGE_CAP=$((PAGES * 100))
+REPOS_STR="${REPOS[*]+"${REPOS[*]}"}"
+export OWNER LIMIT DAYS SINCE PAGES PAGE_CAP MAX_DURATION_S MARKDOWN TIMING REPOS_STR
+
+python3 - <<'PY'
+import json, os, subprocess, sys
+from collections import defaultdict
+from datetime import datetime
+
+OWNER = os.environ["OWNER"]
+LIMIT = int(os.environ["LIMIT"])
+DAYS = int(os.environ["DAYS"])
+SINCE = os.environ["SINCE"]
+PAGES = int(os.environ["PAGES"])
+PAGE_CAP = int(os.environ["PAGE_CAP"])
+MAX_DURATION_S = int(os.environ["MAX_DURATION_S"])
+MARKDOWN = os.environ["MARKDOWN"] == "1"
+TIMING = os.environ["TIMING"] == "1"
+REPOS = os.environ.get("REPOS_STR", "").split()
+
+
+def die(msg):
+    sys.stderr.write(msg + "\n")
+    sys.exit(1)
+
+
+def gh_api(path):
+    try:
+        return json.loads(subprocess.check_output(["gh", "api", path], text=True))
+    except subprocess.CalledProcessError as e:
+        die(f"error: gh api {path} failed (exit {e.returncode})")
+    except json.JSONDecodeError as e:
+        die(f"error: gh api {path} returned invalid JSON: {e}")
+
+
+def parse_ts(s):
+    if not s:
+        return None
+    try:
+        return datetime.fromisoformat(s[:-1] + "+00:00" if s.endswith("Z") else s)
+    except ValueError:
+        return None
+
+
+def percentile(vals, p):
+    if not vals:
+        return 0
+    ordered = sorted(vals)
+    return ordered[min(len(ordered) - 1, int(len(ordered) * p))]
+
+
+def billable_ms(payload):
+    total = 0
+    for v in (payload.get("billable") or {}).values():
+        if isinstance(v, dict):
+            total += int(v.get("total_ms") or 0)
+    return total
+
+
+def discover_repos():
+    found = []
+    page = 1
+    while len(found) < LIMIT:
+        data = gh_api(
+            f"users/{OWNER}/repos?type=owner&sort=pushed&direction=desc&per_page=100&page={page}"
+        )
+        if not isinstance(data, list):
+            die(f"error: repo list for {OWNER} was not an array")
+        for r in data:
+            if not isinstance(r, dict) or r.get("archived"):
+                continue
+            full = r.get("full_name") or ""
+            if "/" not in full:
+                continue
+            found.append(full)
+            if len(found) >= LIMIT:
+                break
+        if len(data) < 100:
+            break
+        page += 1
+    return found
+
+
+def fetch_runs(repo):
+    runs = []
+    for page in range(1, PAGES + 1):
+        data = gh_api(
+            f"repos/{repo}/actions/runs?per_page=100&page={page}&created=>={SINCE}"
+        )
+        if not isinstance(data, dict) or "workflow_runs" not in data:
+            die(f"error: GitHub response for {repo} page {page} has no workflow_runs")
+        batch = data["workflow_runs"] or []
+        if not isinstance(batch, list):
+            die(f"error: workflow_runs for {repo} page {page} was not an array")
+        runs.extend(batch)
+        if len(batch) < 100:
+            break
+    return runs
+
+
+def aggregate(repo, runs):
+    # workflow_id not name: two files can share a display name.
+    by_wf = defaultdict(lambda: {"name": None, "durs": [], "ids": [], "fail": 0, "cancelled": 0})
+    for r in runs:
+        if not isinstance(r, dict):
+            continue
+        if r.get("status") not in (None, "completed"):
+            continue
+        start, end = parse_ts(r.get("run_started_at")), parse_ts(r.get("updated_at"))
+        if start is None or end is None:
+            continue
+        secs = (end - start).total_seconds()
+        if secs < 0 or secs > MAX_DURATION_S:
+            continue
+        name = r.get("name") or "(unnamed)"
+        b = by_wf[r.get("workflow_id", name)]
+        b["name"] = name
+        b["durs"].append(secs)
+        if r.get("id") is not None:
+            b["ids"].append(r["id"])
+        if r.get("conclusion") == "failure":
+            b["fail"] += 1
+        elif r.get("conclusion") == "cancelled":
+            b["cancelled"] += 1
+
+    timing_ms = {}
+    if TIMING:
+        for b in by_wf.values():
+            for rid in b["ids"]:
+                payload = gh_api(f"repos/{repo}/actions/runs/{rid}/timing")
+                if not isinstance(payload, dict):
+                    die(f"error: timing for {repo} run {rid} was not an object")
+                timing_ms[rid] = billable_ms(payload)
+
+    workflows = []
+    for b in by_wf.values():
+        n = len(b["durs"])
+        row = {
+            "name": b["name"],
+            "runs": n,
+            "p50_s": int(round(percentile(b["durs"], 0.5))),
+            "p95_s": int(round(percentile(b["durs"], 0.95))),
+            "total_min": int(round(sum(b["durs"]) / 60)),
+            "fail_pct": int(round((b["fail"] / n) * 100)) if n else 0,
+            "cancelled_pct": int(round((b["cancelled"] / n) * 100)) if n else 0,
+        }
+        if TIMING:
+            row["billable_min"] = int(
+                round(sum(timing_ms.get(rid, 0) for rid in b["ids"]) / 60000)
+            )
+        workflows.append(row)
+    workflows.sort(key=lambda w: (-w["total_min"], w["name"]))
+    entry = {
+        "repo": repo,
+        "runs": len(runs),
+        "runs_are_floor": len(runs) == PAGE_CAP,
+        "total_min": sum(w["total_min"] for w in workflows),
+        "workflows": workflows,
+    }
+    if TIMING:
+        entry["billable_min"] = sum(w["billable_min"] for w in workflows)
+    return entry
+
+
+def md_cell(v):
+    s = str(v).replace("|", "\\|")
+    return " ".join(s.splitlines())
+
+
+def render_markdown(report):
+    cols = ["repo", "workflow", "runs", "p50 s", "p95 s", "total min", "fail %", "cancel %"]
+    if report["timing"]:
+        cols.append("billable min")
+    lines = [
+# Fleet CI census
+        f"Window: {report['days']} days from {report['since']}. "
+        f"Page cap: {report['page_cap']} runs/repo.",
+        "",
+        "Repos marked (floor) hit the page cap; totals understate the window.",
+        "",
+        "| " + " | ".join(cols) + " |",
+        "|" + "|".join(["---"] * len(cols)) + "|",
+    ]
+    rows = []
+    for entry in report["repos"]:
+        label = f"{entry['repo']} (floor)" if entry["runs_are_floor"] else entry["repo"]
+        for w in entry["workflows"]:
+            row = [label, w["name"], w["runs"], w["p50_s"], w["p95_s"],
+                   w["total_min"], w["fail_pct"], w["cancelled_pct"]]
+            if report["timing"]:
+                row.append(w["billable_min"])
+            rows.append((w["total_min"], label, w["name"], row))
+    rows.sort(key=lambda t: (-t[0], t[1], t[2]))
+    for _, _, _, row in rows:
+        lines.append("| " + " | ".join(md_cell(c) for c in row) + " |")
+    return "\n".join(lines) + "\n"
+
+
+report = {
+    "days": DAYS,
+    "since": SINCE,
+    "page_cap": PAGE_CAP,
+    "max_duration_s": MAX_DURATION_S,
+    "timing": TIMING,
+    "repos": [aggregate(repo, fetch_runs(repo)) for repo in (REPOS or discover_repos())],
+}
+report["repos"].sort(key=lambda e: (-e["total_min"], e["repo"]))
+if MARKDOWN:
+    sys.stdout.write(render_markdown(report))
+else:
+    json.dump(report, sys.stdout, indent=2)
+    sys.stdout.write("\n")
+PY

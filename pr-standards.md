@@ -66,6 +66,7 @@ Four things, all required:
     Manually walked steps 1-4 of onboarding in staging.
 
     Assisted-by: claude-personal:claude-opus-5
+    Assisted-by: pi:glm-5
 
 - **Exactly one** closing reference, matching the branch issue. Two closing
   references means two concerns, which means two PRs.
@@ -92,6 +93,15 @@ Four things, all required:
   reason: so you can tell, later, which agent produced which class of defect.
   Convention puts it last. The check accepts it anywhere in the body rather than
   pretending to enforce a position it does not.
+
+  One trailer per line. Repeat the line for each contributor. Most work here has
+  two or more contributors, so two lines is the normal shape:
+
+      Assisted-by: muse:meta-code
+      Assisted-by: claude-personal-1:claude-opus-5
+
+  A comma-separated list on one line fails the check. The checker names the line
+  it finds, so the failure is not a false "missing".
 
 #### Proof of work
 
@@ -132,6 +142,18 @@ The checker enforces only what it can cheaply and mechanically:
 - `requireProof: false` turns off both proof checks for a repo with no
   user-facing surface. That is a config decision: it lives in the repo, it shows
   up in a diff, and it is reviewed like any other change.
+- **Proof has to be attributable, not merely present.** `bun test -> 214
+  passed` reads the same whether or not it ran, and nothing mechanical can tell
+  the two apart from text alone. What the checker can tell is whether the claim
+  points to something it did not write itself: a linked Actions run, a
+  user-attachments URL, or a `Proof: n/a` reason. None of those present is a
+  warning, not a failure — most repos in the fleet do not yet run their own
+  tests in CI, and failing every PR whose proof lives only in prose would turn
+  the whole fleet red on day one. Set `requireAttributableProof: true` once a
+  repo's own tests run in CI, so this becomes a failure instead of a warning.
+  Silent when the UI attachment check above already failed on the same diff —
+  that failure already names the missing capture. `requireProof: false` turns
+  this off too.
 
 Escape hatch, when proof truly does not apply:
 
@@ -207,14 +229,74 @@ Not counted, an agent should never be penalised for a lockfile it did not write:
 
 **500 is a design constraint, not a nuisance.** It is roughly one reviewable
 sitting. An agent that must stay under it decomposes the work before it writes,
-which is the behaviour we actually want. If a change genuinely cannot be split,
-that is a fact worth stating out loud, so the only way past the cap is the
-`oversized-approved` label, applied by the repo owner. An agent cannot clear its
-own PR.
+which is the behaviour we actually want.
+
+**The cap has no escape.** There was one — an owner-applied `oversized-approved`
+label — and it is gone. Every escape from a design constraint becomes the path:
+an agent told it may ask for a label asks for the label instead of decomposing
+the work, which is the one thing the cap exists to force. A change that seems
+unsplittable almost always splits once you accept that it has to.
+
+One escape remains, and it is deliberately awkward: a person merges past a red
+check. That takes an act by a human on a named pull request. It cannot be
+requested in a body, and it leaves a record.
 
 **Atomic means one concern.** The mechanical proxies above catch the obvious
 cases. Whether a PR really does one thing is a judgement, and that judgement
 belongs to the review council, see the scope lens in `vibecodereview`.
+
+## What makes an issue dispatchable
+
+The standard says: no issue, no branch. That makes the issue the unit of work,
+which makes its text the thing that decides whether anyone else can do it.
+
+Measured across this fleet's 145 open issues, **10 were implementable by a
+delegate without guessing.** Not because the issues are bad — they are good
+notes to someone who already knows the codebase. `content-rabbit#1238` reads
+"Add `reactToComment` + declare like capability": clear to its author,
+underdetermined for anyone else. Which file? What signature? Which sibling
+already does this correctly?
+
+A delegate that has to guess will guess. Reviewing a guess costs more than
+writing the spec would have, so **the spec is the bottleneck, not the
+implementation.**
+
+### Four things a delegate needs
+
+| | Missing on |
+|---|---|
+| **A file or directory.** Not a concept: `apps/website/src/services/bluesky.ts`, not "the Bluesky service". | 40% |
+| **A thing to copy.** Name the sibling that already does this right. This is the strongest instruction available to a weak model, and the one most often absent. | 92% |
+| **A testable finish line.** "Under 15 seconds", "exit 1 on a malformed body". Never "faster", never "handles errors". | 84% |
+| **A verification command**, by name, that a reader can run. | 77% |
+
+### Two more when a human has to choose
+
+The four above let someone *check* the work. They do not let someone *decide*
+it. When the issue asks for a judgement rather than a correction, it needs
+something to judge.
+
+- **A flowchart**, when the change is a decision tree: a routing rule, a
+  failover chain, a gate with more than two outcomes. Prose describing a branch
+  is where a reviewer stops reading and starts assuming, and the assumption is
+  what ships.
+- **Something to look at**, when the change is visible: a screenshot, an HTML
+  prototype, or a Worker Preview URL. Nobody can judge a layout from a
+  paragraph. Asking them to is how a design decision gets made by whoever wrote
+  the paragraph.
+
+A rough prototype from a cheap model beats a careful description, because it can
+be rejected in five seconds. That is the point of a prototype: it is cheap to
+throw away, and prose is not — prose gets argued with.
+
+### Score before dispatching
+
+    ./spec-audit                      # every open issue in the fleet
+    ./spec-audit --repo content-rabbit
+    ./spec-audit --ready              # only the dispatchable ones
+
+It prints what each issue is missing. Run it before a dispatch round, so the
+gap shows up as a missing line in a spec rather than as a bad diff.
 
 ## Configuration
 
@@ -245,9 +327,14 @@ repo chose:
 {
   "prefix": "cr",
   "maxLines": 900,
+  "maxBaseCommitsBehind": 20,
   "allowChoreEscape": true
 }
 ```
+
+`maxBaseCommitsBehind` defaults to 10. Above that limit, the checker names the
+base commits that arrived after the branch point. It warns for independent
+files and fails when the base and pull request change the same file.
 
 The full set of keys and their defaults is `DEFAULT_CONFIG` in `pr-standards.mjs`.
 
@@ -375,6 +462,22 @@ Write "Explicitly not this" last, and write it from requests you have already
 turned down. Every other section tells a reviewer what to accept. Only that one
 tells it what to reject, and a vision that rejects nothing changes no review.
 
+The council must actually read it. Every code repo's `vibecodereview.yml` skips
+markdown, for a good reason — a README typo does not need a five-model council —
+and that skip covered `VISION.md` too. So the one file the council consults to
+judge every other pull request was the one file it never reviewed, and a docs-only
+vision could never be approved. Re-include it with an ordered `paths` filter — `!` exclusions work with `paths`
+and not with `paths-ignore`, so the negated `paths-ignore` form looks right and
+still skips the file:
+
+```yaml
+paths:
+  - "**"
+  - "!**.md"
+  - "!docs/**"
+  - "VISION.md"
+```
+
 Two failures to avoid:
 
 - **A template left as prompts.** The council judges against whatever text is
@@ -385,6 +488,55 @@ Two failures to avoid:
   whose bet has not moved in a year is either finished or abandoned, and the
   vision should say which.
 
+## Post-merge verify
+
+Merged is not live. CI proves the change is good on a runner. This job proves
+the change reached production. It runs on every `push` and on
+`workflow_dispatch`, but the job itself skips unless the push landed on the
+repo's actual default branch — not every repo in the fleet defaults to `main`.
+It uses the `ubicloud-standard-2` runner and one concurrency group per repo.
+
+Add `postMergeVerify` to `.github/pr-standards.json` to enable it:
+
+```json
+{
+  "postMergeVerify": {
+    "url": "https://example.com",
+    "shaPath": "/api/version",
+    "shaJsonKey": "sha",
+    "timeoutSeconds": 900
+  }
+}
+```
+
+- `url` — the live URL. The job requests it and requires a 2xx.
+- `shaPath` — path appended to `url` to poll for the live SHA. When absent,
+  the job skips the poll step.
+- `shaJsonKey` — JSON key that holds the SHA in the version response. Default
+  is `sha`.
+- `timeoutSeconds` — how long to poll before the job fails. Default is `900`,
+  capped at `1000` regardless of the configured value so the check always
+  fails through its own logic before the job's 20-minute timeout cancels it
+  out from under the reporting step.
+
+When `postMergeVerify` is absent, every step is skipped and the job passes. A
+repo that does not deploy stays green. Malformed JSON in `pr-standards.json`
+is not treated as absent — the job fails so a broken config is never silently
+green.
+
+When the job fails, it opens an issue titled `Deploy did not go live: <short sha>`
+with the failing step, the expected SHA, what the endpoint returned, and a link
+to the run. When an open issue with that title prefix already exists, the job
+comments on that issue instead of opening a new one.
+
+Install the workflow with `pr-standards-rollout --with-post-merge-verify`. The
+flag is opt-in because most repos in the fleet do not deploy.
+
+`pr-standards-templates/post-merge-verify.test.sh` runs the check the workflow
+embeds against a local server. It pins the two cases that decide whether the job
+is worth having: a repo with no config stays green, and a SHA that never appears
+goes red.
+
 ## Usage
 
 ```bash
@@ -393,6 +545,7 @@ pr-standards branch cr-142-fix-onboard   # validate a specific name
 pr-standards precheck --branch X --title Y   # for the agent hook; no network
 pr-standards pr --repo pooriaarab/content-rabbit --number 88
 pr-standards pr --repo pooriaarab/content-rabbit --number 88 --json   # machine-readable
+pr-standards drift                       # check the managed AGENTS.md block and PR template for drift
 ```
 
 Exit 0 clean, exit 1 on any failure, exit 2 on a configuration problem.

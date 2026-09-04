@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# Send 17*23 through every route and check for 391.
+#
+# Arithmetic, not "reply OK". Every route here has a failure mode where it
+# answers pleasantly and changes nothing, so a reply proves the process started
+# and nothing else. A wrong arithmetic answer is a route that cannot be trusted
+# with a file.
+#
+# Three outcomes, and the middle one is the point:
+#   ok        returned 391
+#   quota     authenticated, out of budget — retryable, not a broken invocation
+#   BROKEN    ran and did not return 391
+set -uo pipefail
+HERE="$(cd "$(dirname "$0")" && pwd)"
+WORK="$(mktemp -d)"
+trap 'rm -rf "$WORK"' EXIT
+
+printf '%-10s %-8s %s\n' ROUTE STATE DETAIL
+printf '%.0s-' {1..64}; echo
+
+broken=0
+for route in gemini cursor devin pi muse; do
+  launcher="$HERE/w-$route"
+  [ -x "$launcher" ] || { printf '%-10s %-8s %s\n' "$route" MISSING "no $launcher"; broken=$((broken+1)); continue; }
+  box="$WORK/$route"; mkdir -p "$box"; ( cd "$box" && git init -q )
+  out=$("$launcher" "$box" "reply with only the number: 17*23" 2>&1); status=$?
+  last_line=$(printf '%s' "$out" | sed '/^[[:space:]]*$/d' | tail -n1 | tr -d '[:space:]')
+  if [ "$last_line" = "391" ] && [ "$status" -eq 0 ]; then
+    printf '%-10s %-8s %s\n' "$route" ok "returned 391"
+  elif printf '%s' "$out" | grep -qiE 'resource_exhausted|too many requests|(quota|rate.?limit).{0,30}(exceeded|exhausted)|(exceeded|exhausted).{0,30}(quota|rate.?limit)|insufficient.?(quota|balance|credits|funds)'; then
+    printf '%-10s %-8s %s\n' "$route" quota "authenticated, out of budget (retryable)"
+  else
+    printf '%-10s %-8s %s\n' "$route" BROKEN "exit=$status: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-70)"
+    broken=$((broken+1))
+  fi
+done
+
+echo
+if [ "$broken" -gt 0 ]; then
+  echo "$broken route(s) broken. Do not fan out until they return 391 or read quota." >&2
+  exit 1
+fi
+echo "every route usable"

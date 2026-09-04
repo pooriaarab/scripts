@@ -254,10 +254,22 @@ def resolve_collisions(prefixes: dict[str, str], fixed: set[str] = frozenset()) 
 def main():
     repos = gh_list()
 
-    # Filter: non-archived, non-fork, diskUsage >= 10 (≈ 10KB min)
+    # Size is a poor proxy for whether a repo is real. A vibe* scaffold at
+    # 8-9KB already has AGENTS.md, .agents/brand.md, .agents/design.md and
+    # .github/workflows: it is a live repo with no product code yet. The old
+    # floor (diskUsage >= 10, about 10KB) had no recorded reason. It left
+    # those 41 scaffolds out of the registry, so rollout could not see them,
+    # so the issue rollout that needs a prefix skipped them too. Each layer
+    # is defensible alone; together the exclusion is permanent.
+    #
+    # gh_list() already fetches diskUsage, isArchived, isFork. It does not
+    # fetch a commit count or isEmpty, and a new API field is not needed:
+    # GitHub reports diskUsage 0 for a repo with no git objects (never
+    # pushed). Anything above 0 has at least one commit and must register.
+    # Do not put the 10KB number back.
     eligible = [
         r for r in repos
-        if not r["isArchived"] and not r["isFork"] and r["diskUsage"] >= 10
+        if not r["isArchived"] and not r["isFork"] and r["diskUsage"] > 0
     ]
 
     # A prefix is permanent. Once a repo has one, branch names, PR titles and

@@ -13,16 +13,19 @@ title:   [__PREFIX_UPPER__-<issue>] <Subject>   [__PREFIX_UPPER__-142] Fix onboa
 body:    Closes #142
          ## What / ## Why / ## How I verified
          Assisted-by: <agent>:<model>
+         Assisted-by: <agent>:<model>
 ```
+
+One `Assisted-by: <agent>:<model>` line per contributor. Repeat the line for
+each contributor. A comma-separated list on one line fails the check.
 
 Subject line: imperative mood, 10-50 characters, no trailing period, no emoji.
 Write "Fix the drop-off", not "Fixed the drop-off".
 
 Hard caps, failed by the `pr-standards` CI check: 500 counted lines, 40 counted
 files, exactly one `Closes #`. Lockfiles, build output, snapshots, generated
-code and migrations are not counted. If a change genuinely cannot be split, say
-why in the body and ask for the `oversized-approved` label. Do not apply that
-label yourself.
+code and migrations are not counted. There is no label that clears the cap and
+no one to ask for one. Split the change.
 
 Settings for this repo are in `.github/pr-standards.json`. The standard is at
 https://github.com/pooriaarab/scripts/blob/main/pr-standards.md

@@ -1,0 +1,11 @@
+#!/usr/bin/env node
+// The launcher keeps direct execution compatible with Node 20 while the validator stays ESM.
+import('./issue-standards.mjs')
+  .then(({ main }) => main(process.argv.slice(2)))
+  .then((status) => {
+    process.exitCode = status;
+  })
+  .catch((error) => {
+    process.stderr.write(`${error.stack || error}\n`);
+    process.exitCode = 1;
+  });
