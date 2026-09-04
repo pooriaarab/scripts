@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { execFile, execFileSync, spawnSync } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -6,6 +7,9 @@ import { fileURLToPath } from 'node:url';
 
 const execFileAsync = promisify(execFile);
 const PREFIX_REGISTRY_PATH = fileURLToPath(new URL('./repo-prefixes.json', import.meta.url));
+const TEMPLATES_DIR = fileURLToPath(new URL('./pr-standards-templates/', import.meta.url));
+const AGENTS_BLOCK_START = '<!-- pr-standards:start -->';
+const AGENTS_BLOCK_END = '<!-- pr-standards:end -->';
 
 // Banned AI attribution names in Co-authored-by trailers. These are matched as
 // whole words in the author name field so "Pia" does not match pi and "Gupta"
@@ -60,13 +64,15 @@ export const DEFAULT_CONFIG = {
   maxFiles: 40,
   maxTopLevelDirs: 3,
   minBodyChars: 120,
-  overrideLabel: 'oversized-approved',
-  // Beyond the repo owner, who may clear the size caps. Empty means owner only.
-  overrideActors: [],
+  maxBaseCommitsBehind: 10,
   bannedCommitTrailers: DEFAULT_BANNED_COMMIT_TRAILERS,
   exemptBranches: ['main', 'release', 'refactor', 'gh-pages'],
   excludeGlobs: DEFAULT_EXCLUDE_GLOBS,
   requireProof: true,
+  // Warn first, then ratchet. A fleet where no repo runs its tests in CI would
+  // go red everywhere on the day this became a failure, and a standard that
+  // does that on its first day gets switched off.
+  requireAttributableProof: false,
   uiGlobs: [
     '**/*.tsx', '**/*.jsx', '**/*.vue', '**/*.svelte', '**/*.css', '**/*.scss',
     '**/*.html', '**/components/**', '**/app/**/page.*', '**/pages/**',
@@ -379,156 +385,115 @@ function sentenceCount(text) {
 // a lazy body rather than a drifted regex.
 const PROOF_NA_LINE = /^\s*Proof:\s*n\/a\s*[—–-]\s*(\S.*)\s*$/i;
 
-function hasCommandAndResult(text) {
+// Names, not shape. Two pull requests already failed because a runner they
+// actually used was missing (`python3` in #145, `bunx` in #135), and #113 is
+// the third. Shape — "a line that looks like argv" — would stop that treadmill,
+// but an existing test requires `bunxx frobnicate -> 3 passed` to fail: that
+// string is the word-boundary check that `bun` not match inside a longer token.
+// A shape check has no allowlist, so it cannot tell `bunxx` from `bash`, and
+// any lowercase first word plus a success word would then count as evidence.
+// The next missing name is cheaper than emptying the rule. Add the runner
+// the evidence actually used.
+//
+// The word boundary goes AFTER the command name, not before it. Without it
+// `bun` matched inside `Bundle`, so "Bundle was verified" satisfied both the
+// command and the result check while naming no command at all.
+// Order in the alternation does NOT matter, despite what an earlier comment
+// here claimed: a failed `\b` makes the engine backtrack and try the other
+// branches, so `bun|bunx` matches "bunx" exactly as `bunx|bun` does. What
+// fixed the `bunx` failure was adding the name, not moving it. The longer
+// names are still written first, because that reads as intent.
+//
+// `python3` and `python` are here because the checker itself shells to
+// `python3` and three of its test suites are `python3` scripts, yet the list
+// named neither: a pull request whose evidence was a real `python3` run
+// failed the rule, and the author met the regex by prefixing a pointless
+// `node -e` to the command that had already run.
+//
+// `bash` and `sh` are here because a repo whose suite is a shell script
+// cannot state that evidence at all — live as PR #205, whose body recorded
+// `bash worker-run.test.sh` and failed this check. `docker`, `curl`, and
+// `terraform` are the other runners in that same table that the list skipped.
+const PROOF_COMMAND_RE = /^(?:[$>`]\s*|\*\s*)?(?:bunx|bun|npm|pnpm|yarn|node|deno|cargo|go|pytest|python3|python|make|git|gh|npx|bash|sh|docker|curl|terraform|\.\/)\b[^\n]*/i;
+
+// Real tools do not all print "passed". oxlint prints "Found 0 warnings",
+// tsc prints "0 errors", docker prints "Successfully built", terraform
+// prints "No changes.", and this repo's install-pr-hooks prints
+// "installed=1 failed=0". Those are passing results. Counting any number of
+// warnings or errors as success would let a red run through, so the counts
+// that mean clean are zero, not `\d+`. "Successfully" needs the adverb
+// form so the word boundary sits after the `y`, not inside the word.
+const PROOF_RESULT_RE = /(?:->|\b(?:pass(?:ed)?|success(?:ful(?:ly)?)?|clean|green|ok|verified|complete|no issues|no changes|exit(?:ed)?\s+0)\b|\d+\s+(?:tests?|checks?)\s+(?:pass|passed|successful)|\b0\s+(?:warnings?|errors?)\b|\bfailed\s*=\s*0\b)/i;
+
+// oxlint's actual output is "Found N warnings and M errors", both counts in
+// one line. `\b0\s+(?:warnings?|errors?)\b` alone would let a nonzero
+// warning count through on the back of a clean "0 errors" in the same
+// string — "Found 7 warnings and 0 errors" is not a passing result even
+// though it contains a zero count. A nonzero warnings/errors count anywhere
+// in the text means the run was not clean, full stop.
+//
+// Same masking, different word: "12 passed, 2 failed" matches `pass(?:ed)?`
+// and reads as a passing result, with the "2 failed" right next to it doing
+// nothing to stop it. `failed=2` is the same failure wearing install-pr-hooks'
+// key=value spelling. Either spelling of a nonzero failure count means the
+// run was not clean, same as a nonzero warning or error count.
+// The count must not be the value half of a key=value pair. `installed=1
+// failed=0` is a clean run of install-pr-hooks, and reading "1 failed" across
+// the `=` boundary vetoed it: the 1 counts installs, the failures are 0. The
+// lookbehind requires the digits to start a token, so "2 failed" in "12
+// passed, 2 failed" still vetoes and `key=1 failed=0` does not.
+//
+// A count is not always adjacent to the word it counts. go test prints
+// "1 test failed", not "1 failed" -- the noun sits between the digit and
+// the word this rule looks for, so the count and "failed" need an optional
+// noun between them. And a count is not always written without a leading
+// zero: "02 failed" still means two failures. `0*` before the required
+// nonzero digit absorbs the leading zero without letting an all-zero count
+// like "00" or "0" through, since `[1-9]` still demands one nonzero digit.
+const PROOF_NONZERO_RE = /(?<![=\d])0*[1-9]\d*\s+(?:(?:tests?|checks?|cases?)\s+)?(?:warnings?|errors?|failed)\b|\bfailed\s*=\s*0*[1-9]\d*\b/i;
+
+function proofCommand(text) {
   const lines = String(text).split('\n').map((line) => line.trim()).filter(Boolean);
-  // The word boundary goes AFTER the command name, not before it. Without it
-  // `bun` matched inside `Bundle`, so "Bundle was verified" satisfied both the
-  // command and the result check while naming no command at all.
-  // `bunx` must come BEFORE `bun` in the alternation. Regex alternation is
-  // first-match, so `bun` wins on the string "bunx" and then `\b` fails against
-  // the following `x` -- which rejected every pull request whose only evidence
-  // was a `bunx` command, in repos where `bunx` is the default runner.
-  const command = lines.some((line) => /^(?:[$>`]\s*|\*\s*)?(?:bunx|bun|npm|pnpm|yarn|node|deno|cargo|go|pytest|make|git|gh|npx|\.\/)\b[^\n]*/i.test(line));
-  const result = /(?:->|\b(?:pass(?:ed)?|success(?:ful)?|clean|green|ok|verified|complete|no issues|exit(?:ed)?\s+0)\b|\d+\s+(?:tests?|checks?)\s+(?:pass|passed|successful))/i.test(text);
-  return command && result;
+  return lines.some((line) => PROOF_COMMAND_RE.test(line));
+}
+
+function proofResult(text) {
+  if (PROOF_NONZERO_RE.test(text)) return false;
+  return PROOF_RESULT_RE.test(text);
+}
+
+function hasCommandAndResult(text) {
+  return proofCommand(text) && proofResult(text);
 }
 
 // Proof helpers — an agent can type "tested locally" for free; a screenshot
 // or a real command output costs work, so proof is the part worth checking.
 // A user-attachments URL is the only proof that does not bloat the repo.
 //
-// A comment is not visible text, and neither is a fenced code block. A body
-// that documents this checker quotes its own escape hatch, and a quoted rule
-// must not satisfy the rule it quotes.
-function isQuoted(line) {
-  return /^(?:\s{0,3}>\s?)+/.test(line);
-}
-
-function fenceOpener(line) {
-  const match = /^( {0,3})((?:[-*+]|\d{1,9}[.)])[ \t]+)?(`{3,}|~{3,})(.*)$/.exec(line);
-  if (!match) return null;
-  // A backtick fence cannot carry a backtick in its info string -- GitHub
-  // reads that line as plain text, never a fence opener, to stay unambiguous
-  // with an inline code span.
-  if (match[3][0] === '`' && match[4].includes('`')) return null;
-  return {
-    char: match[3][0],
-    len: match[3].length,
-    indent: match[1].length + (match[2] || '').length,
-    hasMarker: Boolean(match[2]),
-  };
-}
-
-function fenceCloser(fence) {
-  // The closing fence's indentation tolerance is always <=3, except inside a
-  // list item, where it is relative to the item's own content column rather
-  // than the document root.
-  const cap = fence.hasMarker ? fence.indent + 3 : 3;
-  return new RegExp(`^ {0,${cap}}[${fence.char}]{${fence.len},}[ \t]*$`);
-}
-
-function hasCloser(lines, openIndex, fence, quoted) {
-  const closer = fenceCloser(fence);
-  for (let index = openIndex + 1; index < lines.length; index += 1) {
-    const line = lines[index];
-    if (quoted && !isQuoted(line)) return false;
-    // Only strip a blockquote prefix when the fence itself lives inside one.
-    // A fence opened outside any blockquote is not closed by a line that
-    // happens to start with `>` -- GitHub parses that line as quoted text
-    // sitting inert inside the still-open fence, not as a container the
-    // fence's closer could be found within.
-    const candidate = quoted ? line.replace(/^(?:\s{0,3}>\s?)+/, '') : line;
-    if (closer.test(candidate)) return true;
-  }
-  return false;
-}
-
-function visibleBody(body, { unmatchedFenceHides }) {
-  const lines = String(body || '').replace(/\r\n/g, '\n').split('\n');
-  const visible = [];
-  let fence = null;
-  let inComment = false;
-  const unquoted = (line) => line.replace(/^(?:\s{0,3}>\s?)+/, '');
-
-  for (let [index, line] of lines.entries()) {
-    if (inComment) {
-      const close = line.indexOf('-->');
-      if (close === -1) continue;
-      line = line.slice(close + 3);
-      inComment = false;
-    }
-
-    if (fence) {
-      if (fence.quoted && !isQuoted(line)) {
-        fence = null;
-      } else {
-        // Same reasoning as hasCloser: an unquoted fence is only closed by
-        // an unquoted closer, so a `>`-prefixed line must not be unquoted
-        // before the test unless the fence itself opened inside a quote.
-        const candidate = fence.quoted ? unquoted(line) : line;
-        if (fenceCloser(fence).test(candidate)) fence = null;
-        continue;
-      }
-    }
-
-    let cursor = 0;
-    while (true) {
-      const openIndex = line.indexOf('<!--', cursor);
-      if (openIndex === -1) break;
-      // Backslashes escape in pairs -- `\\<!--` is one literal backslash
-      // followed by a live marker, so only an odd run escapes it.
-      let backslashes = 0;
-      while (line[openIndex - 1 - backslashes] === '\\') backslashes += 1;
-      if (backslashes % 2 === 1) {
-        cursor = openIndex + 4;
-        continue;
-      }
-      const closeIndex = line.indexOf('-->', openIndex + 4);
-      if (closeIndex === -1) {
-        const prefix = line.slice(0, openIndex).replace(/^(?:\s{0,3}>\s?)+/, '');
-        if (prefix.trim() !== '') {
-          let closesInParagraph = false;
-          for (let ahead = index + 1; ahead < lines.length; ahead += 1) {
-            if (lines[ahead].trim() === '') break;
-            if (lines[ahead].includes('-->')) {
-              closesInParagraph = true;
-              break;
-            }
-          }
-          if (!closesInParagraph) break;
-        }
-        line = line.slice(0, openIndex);
-        inComment = true;
-        break;
-      }
-      line = line.slice(0, openIndex) + line.slice(closeIndex + 3);
-      cursor = openIndex;
-    }
-
-    const open = fenceOpener(unquoted(line));
-    if (open && (unmatchedFenceHides || hasCloser(lines, index, open, isQuoted(line)))) {
-      fence = { ...open, quoted: isQuoted(line) };
-      continue;
-    }
-    visible.push(line);
-  }
-  return visible.join('\n');
-}
-
-function verificationSection(body, { unmatchedFenceHides }) {
-  return sectionBody(visibleBody(body, { unmatchedFenceHides }), 'How I verified') || '';
-}
-
+// Fenced code remains outside this check's scope. Inline code is allowed to
+// carry a real URL, so its backticks must not become part of the asset id.
 function countUserAttachments(body) {
-  const visible = verificationSection(body, { unmatchedFenceHides: false });
-  const matches = visible.match(/https:\/\/github\.com\/user-attachments\/assets\/[^\s"'\)\]]+/g);
+  const visible = String(body || '').replace(/<!--[\s\S]*?-->/g, '');
+  // No indentation filter here, deliberately. Four leading spaces mark an
+  // indented code block only OUTSIDE a list; inside one they are continuation
+  // content that renders normally, and a line-start test cannot tell the two
+  // apart. Filtering on indentation alone rejected an attachment written under
+  // a bullet -- an ordinary way to caption before and after -- which is a false
+  // failure on honest work. Answering it needs real block containment, which is
+  // the body reader's job (#143), not a second implementation here. Until then
+  // an inert URL counts, and that is the safe direction to be wrong.
+  const text = visible;
+  // Backticks are Markdown syntax, not URL characters. Angle brackets mark
+  // the before/after placeholders in this convention's own docs; counting
+  // them would let copied examples through as real assets.
+  const matches = text.match(/https:\/\/github\.com\/user-attachments\/assets\/[^\s"'\x60\)\]<>]+/g);
   if (!matches) return 0;
   // Distinct assets, not link count. The threshold asks for before AND after,
   // so the same image pasted twice is one image and must not clear it -- and a
   // query string or fragment on the same asset is still that asset. The match
-  // itself excludes `)`, `]`, quotes and whitespace, but not sentence
-  // punctuation, so a bare URL followed by a period or comma in prose keeps
-  // that character; strip it too or the same asset pasted once inside
+  // itself excludes Markdown delimiters, quotes and whitespace, but not
+  // sentence punctuation, so a bare URL followed by a period or comma in prose
+  // keeps that character; strip it too or the same asset pasted once inside
   // markdown and once in prose counts as two.
   return new Set(matches.map((url) => url.split(/[?#]/)[0].replace(/[.,;:!?]+$/, ''))).size;
 }
@@ -539,6 +504,50 @@ function hasValidProofNa(body) {
     const match = PROOF_NA_LINE.exec(line);
     if (match && match[1].trim().length >= 20) return true;
   }
+  return false;
+}
+
+// A command and its result cost nothing to type whether or not the command
+// ran -- `bun test -> 214 passed` reads identically either way, and nothing
+// mechanical can tell the two apart from text alone. What CAN be checked is
+// whether the claim points to something outside the body: a run GitHub itself
+// executed, or an attachment that took a real screen capture to produce. The
+// documented `Proof: n/a` hatch counts too, because it already carries its own
+// burden (a stated reason, judged by the review council) that a bare command
+// claim does not.
+// #210 tried to name, inside one regex, every character that can legitimately
+// follow a run ID in prose or Markdown -- and grew a new clause every time the
+// review council found one more real shape (a parenthetical closing on a
+// period, Markdown bold) that the previous clause rejected, or one more fake
+// shape (`_`, `-`, a glued `.`) that it accepted. Four rounds of that and the
+// lookahead was still a deny-list wearing an allow-list's name: it enumerated
+// followers instead of checking structure.
+//
+// A later attempt split the match from the validation: grab a broad
+// URL-shaped candidate first, decide if it's real after. That reintroduced
+// the same bug in a new spot -- the candidate regex still had to exclude
+// delimiter characters (`)`, `]`, quotes, a backtick) so Markdown wrappers
+// didn't get swallowed into the match, which meant a fake glued onto the
+// digits with one of THOSE characters (`123)not-a-run`) got truncated to a
+// clean-looking `.../123` before validation ever saw the `)not-a-run` tail.
+//
+// The fix is one regex, one lookahead, checking the real source text instead
+// of a pre-truncated copy of it: what follows the digits is either an
+// immediate URL continuation (`/`, `?`, `#`), or a run of ordinary
+// closing/punctuation characters that actually reaches whitespace or the end
+// of the string. Structural, not enumerable, and there is no separate
+// "grab now, worry about the edges later" step for stray characters to hide
+// behind. (`_` is in that closing set alongside `*` so a run URL wrapped in
+// Markdown underscore-emphasis, `_..._`, reads the same as `**bold**` does.
+// `}` closes the set the same way `)` and `]` already do, for a URL wrapped
+// in a curly brace instead of a paren or bracket.)
+const ACTIONS_RUN_URL =
+  /https:\/\/github\.com\/[^\s\/]+\/[^\s\/]+\/actions\/runs\/\d+(?=[\/?#]|[.,;:!*_"'\x60\)\]\}<>]*(?:\s|$))/;
+
+function hasExternalProofEvidence(verifiedSection) {
+  if (countUserAttachments(verifiedSection) > 0) return true;
+  if (ACTIONS_RUN_URL.test(verifiedSection)) return true;
+  if (hasValidProofNa(verifiedSection)) return true;
   return false;
 }
 
@@ -565,28 +574,43 @@ export function hasUiDiff(files, config = DEFAULT_CONFIG) {
 }
 
 const PROOF_MEDIA_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'mp4', 'mov', 'webm']);
-const PROOF_MEDIA_GLOBS = [
+// Keep directory signals separate from filename signals. Mixing them makes a
+// future exemption easy to apply to the wrong kind of path rule.
+const PROOF_MEDIA_DIR_GLOBS = [
   'screenshot*/**',
   '**/screenshots/**',
   'proof*/**',
+];
+const PROOF_MEDIA_NAME_GLOBS = [
   '**/*before*',
   '**/*after*',
   '**/*demo-recording*',
 ];
+const PROOF_MEDIA_ASSET_DIR_GLOBS = ['public/**', '**/assets/**'];
 
 function isProofMediaPath(filename) {
   const normalized = String(filename).replaceAll('\\', '/').replace(/^\.\//, '');
   if (!normalized.includes('/')) return true;
-  return PROOF_MEDIA_GLOBS.some((pattern) => matchesGlob(normalized, pattern));
+  // The asset-root exemption wins over every other signal, including a
+  // proof-named directory. `public/screenshots/` is a completely ordinary
+  // product pattern -- a docs site or a landing page serving a screenshot
+  // gallery -- and flagging it rejects honest work, which is the one direction
+  // this check must not be wrong in. Someone committing pull request media
+  // puts it at the repo root or in `proof/`, not under a served asset root.
+  if (PROOF_MEDIA_ASSET_DIR_GLOBS.some((pattern) => matchesGlob(normalized, pattern))) return false;
+  if (PROOF_MEDIA_DIR_GLOBS.some((pattern) => matchesGlob(normalized, pattern))) return true;
+  return PROOF_MEDIA_NAME_GLOBS.some((pattern) => matchesGlob(normalized, pattern));
 }
 
 export function isCommittedProofMedia(file) {
   const filename = String(file.filename || '');
   if (!filename) return false;
-  // Only files ADDED by the diff are proof media committed by mistake. A
-  // modified or renamed media file could be a real product asset. When the
-  // caller does not provide a status (unit tests without GitHub payloads),
-  // treat it as added so the glob and extension rules remain testable.
+  // Only files ADDED by the diff are proof media committed by mistake. Treating
+  // modified or renamed files as added rejects honest product-asset changes.
+  // Treating a missing status as non-added lets committed media through when a
+  // caller lacks a GitHub payload.
+  // When no status is supplied, treat the file as added so unit tests can still
+  // exercise the glob and extension rules without a GitHub payload.
   if (Object.prototype.hasOwnProperty.call(file, 'status') && file.status !== 'added') return false;
   const lower = filename.toLowerCase();
   const dot = lower.lastIndexOf('.');
@@ -624,9 +648,12 @@ export function checkProof(body, files, config = DEFAULT_CONFIG) {
   // cannot tell a real one from "n/a". Both live under ## How I verified per
   // the docs, so an attachment or hatch line pasted under ## What or ## Why
   // does not count: the evidence belongs where the reviewer is told to look.
-  if (hasUiDiff(files || [], config) && !hasValidProofNa(body)) {
-    const count = countUserAttachments(body);
+  const verifiedSection = sectionBody(body, 'How I verified') || '';
+  let uiProofFailed = false;
+  if (hasUiDiff(files || [], config) && !hasValidProofNa(verifiedSection)) {
+    const count = countUserAttachments(verifiedSection);
     if (count === 0) {
+      uiProofFailed = true;
       failures.push(fail(
         'proof of a visible change',
         'no user-attachments URL in the body',
@@ -641,6 +668,32 @@ export function checkProof(body, files, config = DEFAULT_CONFIG) {
         'One image shows the result, not the change. Add the other side.',
       ));
     }
+  }
+
+  // Evidence has to be attributable, not merely present. A command claim like
+  // `bun test -> 214 passed` costs an agent nothing to write, and it reads
+  // identically whether or not it ran. What can be checked is whether the claim
+  // points to something outside the body: a run GitHub itself executed, or an
+  // attachment that took a real capture to produce.
+  //
+  // Silent when the visible-change check above already failed: that failure
+  // already names the same gap for a UI diff, and two findings for one missing
+  // capture reads as two gaps rather than one.
+  //
+  // Warn by default (#85). Most repos in the fleet do not yet run their own
+  // tests in CI, so failing every PR whose proof lives only in prose would turn
+  // the whole fleet red on day one and get the standard switched off. A repo
+  // ratchets this to a failure with `requireAttributableProof` once its tests
+  // run in CI and a run link is something its own agents can always produce.
+  if (!uiProofFailed && hasCommandAndResult(verifiedSection) && !hasExternalProofEvidence(verifiedSection)) {
+    const finding = fail(
+      'attributable proof',
+      'a command and result claimed in text, nothing outside the body to check it against',
+      'a linked Actions run, an attachment, or `Proof: n/a — <reason>`',
+      'A line like `bun test -> 214 passed` reads the same whether or not it ran. Link the Actions run that produced it, attach a screenshot, or state a `Proof: n/a` reason.',
+    );
+    if (config.requireAttributableProof) failures.push(finding);
+    else warnings.push(finding);
   }
   return { failures, warnings };
 }
@@ -722,21 +775,60 @@ export function validateBody(body, issueNumber, config = DEFAULT_CONFIG) {
         const hatch = PROOF_NA_LINE.exec(line);
         return hatch ? hatch[1] : line;
       }).join('\n');
-  if (!verified || /\b(?:N\/A|TODO|tested locally)\b/i.test(claimed) || !hasCommandAndResult(verified)) {
+  const command = Boolean(verified) && proofCommand(verified);
+  const result = Boolean(verified) && proofResult(verified);
+  const refused = claimed !== null && /\b(?:N\/A|TODO|tested locally)\b/i.test(claimed);
+  if (!verified || refused || !command || !result) {
+    // Name the half that fell short. Both halves used to produce the same
+    // message, so a bunx rejection was read as the command half failing when
+    // the result half was the one that missed (`Found 0 warnings`), and #125
+    // was filed against the wrong cause.
+    let expected = 'a command and its result, such as: bun test -> 214 passed';
+    let fix = 'Run a check and record the command and result under ## How I verified.';
+    if (verified && !refused && command && !result) {
+      expected = 'a result from that command, such as: 13 passed or Found 0 warnings';
+      fix = 'Record what the command printed. A command with no result is not evidence.';
+    } else if (verified && !refused && !command && result) {
+      expected = 'a command that produced that result, such as: bash tests/x.sh';
+      fix = 'Name the command you ran. A result with no command is not evidence.';
+    }
     failures.push(fail(
       '## How I verified',
       verified || 'missing',
-      'a command and its result, such as: bun test -> 214 passed',
-      'Run a check and record the command and result under ## How I verified.',
+      expected,
+      fix,
     ));
   }
-  if (!/^Assisted-by:\s*[^\s:]+:[^\s]+\s*$/im.test(visibleSource)) {
-    failures.push(fail(
-      'Assisted-by line',
-      'missing',
-      'Assisted-by: <agent>:<model>',
-      'Add Assisted-by: <agent>:<model> in the body.',
-    ));
+  {
+    // The accepted form matches one trailer per line, so a comma-separated
+    // list fails. Most work in this fleet has two or more contributors, so
+    // that list is the common way this check fails, and the line is right
+    // there in the body when it does. A "missing" message denies what the
+    // reviewer can see, so the failure must name the line it found.
+    //
+    // Every candidate line must be checked, not just the first: testing the
+    // whole body against the accepted-form pattern only proves that SOME line
+    // matches, so a valid first trailer followed by a malformed second one
+    // passed silently. Commas are excluded from both fields too: `[^\s]+`
+    // alone accepts a comma-separated list that has no space after the
+    // comma, contradicting the documented rule that the list fails.
+    const assistedByLines = visibleSource.split('\n').filter((line) => /^\s*assisted-by:/i.test(line));
+    const badLine = assistedByLines.find((line) => !/^Assisted-by:\s*[^\s:,]+:[^\s,]+\s*$/i.test(line));
+    if (assistedByLines.length === 0) {
+      failures.push(fail(
+        'Assisted-by line',
+        'missing',
+        'Assisted-by: <agent>:<model>',
+        'Add Assisted-by: <agent>:<model> in the body.',
+      ));
+    } else if (badLine) {
+      failures.push(fail(
+        'Assisted-by line',
+        `not in the accepted form: ${badLine.trim()}`,
+        'one Assisted-by: <agent>:<model> line per contributor',
+        'Write one Assisted-by: <agent>:<model> line per contributor.',
+      ));
+    }
   }
 
   return { ok: failures.length === 0, failures };
@@ -837,27 +929,31 @@ export function summarizeFiles(files, config = DEFAULT_CONFIG) {
   };
 }
 
-export function checkSize(summary, config = DEFAULT_CONFIG, labels = []) {
+// The cap has no label escape. Every escape from a design constraint becomes
+// the path: an agent told it may ask for a label asks for the label, rather
+// than decomposing the work, which is the one thing the cap exists to force.
+//
+// The remaining escape is the right one and lives outside this checker: a
+// person merges past a red check. That takes a deliberate act by a human on a
+// named pull request. It cannot be requested in a body, and it leaves a record.
+export function checkSize(summary, config) {
+  config ??= DEFAULT_CONFIG;
   const failures = [];
   const warnings = [];
-  // `labels` is what the CALLER decided counts. runPr passes the label through
-  // only when the repo owner applied it, because an override anyone can add is
-  // not an override. See resolveOverrideLabels.
-  const overridden = labels.includes(config.overrideLabel);
-  if (!overridden && summary.countedLines > config.maxLines) {
+  if (summary.countedLines > config.maxLines) {
     failures.push(fail(
       'PR size',
       `${summary.countedLines.toLocaleString()} counted lines`,
       `${config.maxLines.toLocaleString()} counted lines or fewer`,
-      `Split the change, or ask the repo owner to add the ${config.overrideLabel} label.`,
+      'Split the change. There is no label that clears this.',
     ));
   }
-  if (!overridden && summary.countedFiles > config.maxFiles) {
+  if (summary.countedFiles > config.maxFiles) {
     failures.push(fail(
       'changed files',
       `${summary.countedFiles} counted files`,
       `${config.maxFiles} counted files or fewer`,
-      `Split the change, or ask the repo owner to add the ${config.overrideLabel} label.`,
+      'Split the change. There is no label that clears this.',
     ));
   }
   if (summary.topLevelDirs.length > config.maxTopLevelDirs) {
@@ -868,7 +964,7 @@ export function checkSize(summary, config = DEFAULT_CONFIG, labels = []) {
       'Split unrelated directories into separate pull requests.',
     ));
   }
-  return { failures, warnings, overridden };
+  return { failures, warnings };
 }
 
 function repoRoot() {
@@ -883,15 +979,14 @@ export function validateConfig(config) {
   if (!isValidPrefix(config.prefix)) throw new ConfigurationError('prefix must be 2-4 lowercase letters');
   if (typeof config.requireIssue !== 'boolean') throw new ConfigurationError('requireIssue must be true or false');
   if (typeof config.allowChoreEscape !== 'boolean') throw new ConfigurationError('allowChoreEscape must be true or false');
-  for (const field of ['maxLines', 'maxFiles', 'maxTopLevelDirs', 'minBodyChars']) {
+  for (const field of ['maxLines', 'maxFiles', 'maxTopLevelDirs', 'minBodyChars', 'maxBaseCommitsBehind']) {
     if (!Number.isInteger(config[field]) || config[field] < 0) throw new ConfigurationError(`${field} must be a non-negative integer`);
   }
-  if (typeof config.overrideLabel !== 'string' || !config.overrideLabel) throw new ConfigurationError('overrideLabel must be a non-empty string');
-  if (!Array.isArray(config.overrideActors) || !config.overrideActors.every((value) => typeof value === 'string')) throw new ConfigurationError('overrideActors must be an array of strings');
   if (!Array.isArray(config.bannedCommitTrailers) || !config.bannedCommitTrailers.every((value) => typeof value === 'string' && value.length > 0 && value === value.trim())) throw new ConfigurationError('bannedCommitTrailers must be an array of non-empty strings with no leading or trailing whitespace');
   if (!Array.isArray(config.exemptBranches) || !config.exemptBranches.every((value) => typeof value === 'string')) throw new ConfigurationError('exemptBranches must be an array of strings');
   if (!Array.isArray(config.excludeGlobs) || !config.excludeGlobs.every((value) => typeof value === 'string')) throw new ConfigurationError('excludeGlobs must be an array of strings');
   if (typeof config.requireProof !== 'boolean') throw new ConfigurationError('requireProof must be true or false');
+  if (typeof config.requireAttributableProof !== 'boolean') throw new ConfigurationError('requireAttributableProof must be true or false');
   if (!Array.isArray(config.uiGlobs) || !config.uiGlobs.every((value) => typeof value === 'string')) throw new ConfigurationError('uiGlobs must be an array of strings');
   if (!Array.isArray(config.uiExcludeGlobs) || !config.uiExcludeGlobs.every((value) => typeof value === 'string')) throw new ConfigurationError('uiExcludeGlobs must be an array of strings');
   return config;
@@ -1107,6 +1202,86 @@ async function fetchPullFiles(repo, number) {
   }
 }
 
+function changedNames(files) {
+  return new Set(files.flatMap((file) => [file.filename, file.previous_filename]).filter(Boolean));
+}
+
+function commitNames(commits) {
+  return commits.map((commit) => {
+    const subject = String(commit.commit?.message || '(no commit message)').split('\n')[0];
+    return `${String(commit.sha || '').slice(0, 7)} ${subject}`;
+  });
+}
+
+// A stale branch with no shared files is useful review context, but rebasing it
+// on every busy repository adds work without reducing resurrection risk. When
+// a stale branch and the base both touch a file, however, a squash merge can
+// restore deleted code without a conflict. That case fails deliberately.
+export function checkBaseBranchAge(compare, baseChanges, pullFiles, config = DEFAULT_CONFIG) {
+  const behind = compare?.behind_by;
+  if (!Number.isInteger(behind) || behind < 0) {
+    throw new ApiError('GitHub returned an invalid branch comparison');
+  }
+  if (behind <= config.maxBaseCommitsBehind) return { failures: [], warnings: [] };
+
+  const mergeBase = compare.merge_base_commit?.sha;
+  if (typeof mergeBase !== 'string' || !mergeBase) {
+    throw new ApiError('GitHub returned no merge base for the branch comparison');
+  }
+  if (!Array.isArray(baseChanges?.commits) || !Array.isArray(baseChanges?.files)) {
+    throw new ApiError('GitHub returned an invalid base branch comparison');
+  }
+  const commits = commitNames(baseChanges.commits);
+  const names = commits.length ? commits.join('; ') : '(GitHub returned no commit names)';
+  const baseFiles = changedNames(baseChanges.files);
+  const overlaps = [...changedNames(pullFiles)].filter((name) => baseFiles.has(name));
+  const got = `${behind} commits behind since ${mergeBase.slice(0, 7)}: ${names}`;
+
+  if (overlaps.length) {
+    return {
+      failures: [fail(
+        'branch point overlaps base changes',
+        `${got}; overlapping files: ${overlaps.join(', ')}`,
+        'a branch rebased onto the base branch before merge',
+        'Rebase this branch, then review the overlapping changes again.',
+      )],
+      warnings: [],
+    };
+  }
+  return {
+    failures: [],
+    warnings: [fail(
+      'branch point is behind base',
+      got,
+      `${config.maxBaseCommitsBehind} base commits behind or fewer`,
+      'Rebase before merge if the listed base changes affect this work.',
+    )],
+  };
+}
+
+async function checkRemoteBaseBranchAge(repo, pull, pullFiles, config) {
+  const base = pull.base?.ref;
+  // The head ref name only resolves inside the base repo's own branches. A
+  // fork PR's branch lives in the fork, so comparing by name here either
+  // 404s or, worse, silently matches an unrelated same-named branch in the
+  // base repo. The head SHA is unambiguous and GitHub mirrors it into the
+  // base repo's object database via the pull request's refs.
+  const headSha = pull.head?.sha;
+  if (!base || !headSha) throw new ApiError('GitHub returned a pull request without base or head refs');
+  const compare = await apiRequest(`compare/${encodeURIComponent(base)}...${encodeURIComponent(headSha)}`, repo);
+  const behind = compare?.behind_by;
+  if (!Number.isInteger(behind) || behind < 0) {
+    throw new ApiError('GitHub returned an invalid branch comparison');
+  }
+  if (behind <= config.maxBaseCommitsBehind) {
+    return { failures: [], warnings: [] };
+  }
+  const mergeBase = compare?.merge_base_commit?.sha;
+  if (typeof mergeBase !== 'string' || !mergeBase) throw new ApiError('GitHub returned no merge base for the branch comparison');
+  const baseChanges = await apiRequest(`compare/${encodeURIComponent(mergeBase)}...${encodeURIComponent(base)}`, repo);
+  return checkBaseBranchAge(compare, baseChanges, pullFiles, config);
+}
+
 function currentBranch() {
   try {
     return execFileSync('git', ['branch', '--show-current'], { encoding: 'utf8' }).trim();
@@ -1150,14 +1325,18 @@ function formatNumber(value) {
 }
 
 function humanFailure(item, prefix = '      ') {
-  return `${prefix}got:      ${item.got}\n${prefix}expected: ${item.expected}\n${prefix}fix:      ${item.fix}`;
+  const diff = item.diff ? `\n${prefix}diff:\n${item.diff}` : '';
+  return `${prefix}got:      ${item.got}\n${prefix}expected: ${item.expected}\n${prefix}fix:      ${item.fix}${diff}`;
 }
 
 function outputHuman(result) {
   const prefixLine = result.provenance
     ? `Using prefix: ${result.prefix} (${result.provenance})`
     : `Using prefix: ${result.prefix}`;
-  const lines = [prefixLine];
+  const lines = result.prefix ? [prefixLine] : [];
+  if (result.mode === 'drift' && result.adopted === false) {
+    lines.push('SKIP  repo has not adopted pr-standards (no .github/pr-standards.json)');
+  }
   for (const pass of result.passes || []) lines.push(`PASS  ${pass}`);
   for (const item of result.failures || []) lines.push(`FAIL  ${item.check}\n${humanFailure(item)}`);
   for (const item of result.warnings || []) lines.push(`WARN  ${item.check}\n${humanFailure(item)}`);
@@ -1167,6 +1346,7 @@ function outputHuman(result) {
       : ` (${formatNumber(result.size.rawLines)} raw)`;
     lines.push(`SIZE  ${formatNumber(result.size.countedLines)} counted lines${excluded}; ${result.size.countedFiles} counted files`);
   }
+  if (lines.length === 0) return;
   process.stdout.write(`${lines.join('\n')}\n`);
 }
 
@@ -1188,11 +1368,11 @@ function parseArgs(argv) {
   if (filtered.includes('--help') || filtered.includes('-h')) return { help: true };
   if (filtered.includes('--selfcheck')) return { selfcheck: true };
   const mode = filtered.shift();
-  if (!mode || !['branch', 'precheck', 'pr'].includes(mode)) throw new ConfigurationError('usage: pr-standards branch [name], precheck --branch X, or pr --repo owner/name --number N');
+  if (!mode || !['branch', 'precheck', 'pr', 'drift'].includes(mode)) throw new ConfigurationError('usage: pr-standards branch [name], precheck --branch X, pr --repo owner/name --number N, or drift');
   const options = { mode, json, positional: [] };
   for (let index = 0; index < filtered.length; index += 1) {
     const arg = filtered[index];
-    if (arg === '--branch' || arg === '--title' || arg === '--repo' || arg === '--number') {
+    if (arg === '--branch' || arg === '--title' || arg === '--repo' || arg === '--number' || arg === '--prefix') {
       const value = filtered[index + 1];
       if (!value || value.startsWith('--')) throw new ConfigurationError(`${arg} requires a value`);
       options[arg.slice(2)] = value;
@@ -1209,8 +1389,9 @@ function parseArgs(argv) {
 function usage() {
   return `Usage:
   pr-standards branch [name]
-  pr-standards precheck --branch X [--title Y]
+  pr-standards precheck --branch X [--title Y] [--prefix P]
   pr-standards pr --repo owner/name --number N
+  pr-standards drift
   pr-standards --selfcheck
 
 Add --json to any command for machine-readable output.`;
@@ -1228,7 +1409,7 @@ async function runBranch(options) {
     : prefixSource === 'registry'
       ? 'from repo-prefixes.json'
       : `derived from ${named.source}`;
-  if (options.branch || options.title || options.repo || options.number) throw new ConfigurationError('branch accepts only one optional branch name');
+  if (options.branch || options.title || options.repo || options.number || options.prefix) throw new ConfigurationError('branch accepts only one optional branch name');
   const branch = options.positional[0] || currentBranch();
   if (options.positional.length > 1) throw new ConfigurationError('branch accepts one optional name');
   const branchResult = validateBranchName(branch, config);
@@ -1255,14 +1436,28 @@ async function runPrecheck(options) {
       ? 'from repo-prefixes.json'
       : `derived from ${named.source}`;
   if (!options.branch) throw new ConfigurationError('precheck requires --branch');
-  if (options.positional.length > 0 || options.repo || options.number) throw new ConfigurationError('precheck accepts --branch and optional --title only');
-  const branchResult = validateBranchName(options.branch, config);
+  if (options.positional.length > 0 || options.repo || options.number) throw new ConfigurationError('precheck accepts --branch, --prefix and optional --title only');
+  // A caller may be judging a branch for a DIFFERENT repo than the one it is
+  // standing in. The PreToolUse guard is exactly that case: it runs in the
+  // session's working directory while `gh pr create --repo X` targets X. Without
+  // this, the branch is checked against the wrong prefix and a conforming
+  // cross-repo PR is refused.
+  let effective = config;
+  let effectiveProvenance = provenance;
+  if (options.prefix) {
+    if (!isValidPrefix(options.prefix)) {
+      throw new ConfigurationError(`--prefix must be 2-4 lowercase letters, got: ${options.prefix}`);
+    }
+    effective = { ...config, prefix: options.prefix };
+    effectiveProvenance = 'from --prefix';
+  }
+  const branchResult = validateBranchName(options.branch, effective);
   const failures = [...branchResult.failures];
   const passes = branchResult.ok ? [`branch name: ${options.branch}`] : [];
   if (options.title) {
     if (!branchResult.exempt) {
       if (branchResult.issueNumber !== null || branchResult.choreEscape) {
-        const titleResult = validateTitle(options.title, config.prefix, branchResult.issueNumber);
+        const titleResult = validateTitle(options.title, effective.prefix, branchResult.issueNumber);
         failures.push(...titleResult.failures);
         if (titleResult.ok) passes.push('PR title');
       } else {
@@ -1270,72 +1465,151 @@ async function runPrecheck(options) {
       }
     }
   }
-  return finish({ mode: 'precheck', prefix: config.prefix, provenance, failures, warnings: [], passes }, options.json);
+  return finish({ mode: 'precheck', prefix: effective.prefix, provenance: effectiveProvenance, failures, warnings: [], passes }, options.json);
 }
 
-// The size override is the one deliberate escape hatch, and the standard says
-// the repo owner applies it. Nothing enforced that: any collaborator or token
-// with label-write could add the label and clear the cap, which is exactly the
-// actor the rule exists to stop. So find who applied it and honour it only from
-// the owner. If the events cannot be read, drop the override rather than trust
-// it: failing closed on an escape hatch is the safe direction.
-async function resolveOverrideLabels(repo, number, labels, config, warnings) {
-  if (!labels.includes(config.overrideLabel)) return labels;
-  const owner = repo.split('/')[0];
-  const allowed = new Set([owner, ...(config.overrideActors || [])].map((name) => name.toLowerCase()));
-  let applier = null;
+function readTemplate(filename) {
+  const templatePath = path.join(TEMPLATES_DIR, filename);
   try {
-    // Paginate. This endpoint defaults to 30 items, and label changes, reopens
-    // and `referenced` events from every commit that mentions the issue all
-    // land here, so on a real PR the labelling event is often not on page one.
-    // Missing it stripped a legitimate override and failed a PR that should
-    // have passed.
-    for (let page = 1; ; page += 1) {
-      const events = await apiRequest(`issues/${number}/events?per_page=100&page=${page}`, repo);
-      if (!Array.isArray(events)) break;
-      for (const event of events) {
-        if (event.event === 'labeled' && event.label?.name === config.overrideLabel) {
-          applier = event.actor?.login || null;
-        } else if (event.event === 'unlabeled' && event.label?.name === config.overrideLabel) {
-          // `labels` is a snapshot taken before this call. If the label was removed
-          // between that snapshot and this events read, the last `labeled` event is
-          // stale -- clear it so the removal wins and the override is not honoured
-          // on a label that no longer applies.
-          applier = null;
-        }
-      }
-      if (events.length < 100) break;
-    }
-  } catch {
-    warnings.push(fail(
-      `${config.overrideLabel} ignored`,
-      'the label events could not be read',
-      'a readable audit trail for the override',
-      'The size caps were applied. Re-run when the API is reachable.',
+    return fs.readFileSync(templatePath, 'utf8');
+  } catch (error) {
+    throw new ConfigurationError(`cannot read pr-standards-templates/${filename}: ${error.message}`);
+  }
+}
+
+function substituteTemplate(template, prefix) {
+  return template
+    .replaceAll('__PREFIX_UPPER__', prefix.toUpperCase())
+    .replaceAll('__PREFIX__', prefix);
+}
+
+const MALFORMED_BLOCK = Symbol('malformed-managed-block');
+
+// Extracting the first start/end pair and ignoring the rest would let a
+// correct block followed by a leftover stale one (a hand edit, or a rollout
+// repair appended after markers it wouldn't touch, see pr-standards-rollout)
+// PASS while the stale duplicate goes unreported. Require exactly one pair.
+// Count every marker before looking at any of them. Two rounds of review found
+// a new ordering the previous check missed -- a duplicate start, then a trailing
+// duplicate end, then a stray end BEFORE the real start -- because each fix
+// asked "is there another marker after this one", which can only see forward.
+// The guarantee wanted is a property of the whole file: exactly one start and
+// exactly one end, in that order. Stating it that way has no next case.
+function markerOffsets(content, marker) {
+  const offsets = [];
+  for (let at = content.indexOf(marker); at !== -1; at = content.indexOf(marker, at + marker.length)) {
+    offsets.push(at);
+  }
+  return offsets;
+}
+
+function managedBlock(content) {
+  const starts = markerOffsets(content, AGENTS_BLOCK_START);
+  const ends = markerOffsets(content, AGENTS_BLOCK_END);
+  // No markers at all is a file that never had the block, which is missing
+  // rather than malformed -- the rollout has simply not run here.
+  if (starts.length === 0 && ends.length === 0) return null;
+  if (starts.length !== 1 || ends.length !== 1) return MALFORMED_BLOCK;
+  // An end before its start is malformed, not missing: the markers are present
+  // and wrong, which is a different thing to answer than absent.
+  if (ends[0] < starts[0] + AGENTS_BLOCK_START.length) return MALFORMED_BLOCK;
+  return content.slice(starts[0] + AGENTS_BLOCK_START.length, ends[0]);
+}
+
+function unifiedDiff(expected, actual, expectedLabel, actualLabel) {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'pr-standards-drift-'));
+  const expectedPath = path.join(directory, 'expected');
+  const actualPath = path.join(directory, 'actual');
+  try {
+    fs.writeFileSync(expectedPath, expected);
+    fs.writeFileSync(actualPath, actual);
+    const result = spawnSync('diff', [
+      '-u', '--label', expectedLabel, '--label', actualLabel, expectedPath, actualPath,
+    ], { encoding: 'utf8' });
+    if (result.status === 1) return result.stdout.trimEnd();
+    if (result.status === 0) return '';
+    throw new ConfigurationError(`cannot create diff: ${result.error?.message || result.stderr.trim()}`);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+function staleFailure(check, expected, actual, expectedLabel, actualLabel) {
+  return {
+    ...fail(
+      check,
+      'stale',
+      `match ${expectedLabel}`,
+      `Replace it with ${expectedLabel}.`,
+    ),
+    diff: unifiedDiff(expected, actual, expectedLabel, actualLabel),
+  };
+}
+
+async function runDrift(options) {
+  if (options.positional.length > 0 || options.branch || options.title || options.repo || options.number) {
+    throw new ConfigurationError('drift accepts no options');
+  }
+  const root = repoRoot();
+  const configPath = path.join(root, '.github', 'pr-standards.json');
+  // A repository without the config has not adopted this standard. Do not make
+  // its unrelated AGENTS.md or pull request template look like drift.
+  if (!fs.existsSync(configPath)) {
+    return finish({ mode: 'drift', adopted: false, failures: [], warnings: [], passes: [] }, options.json);
+  }
+  const { config } = loadConfig(root);
+  const failures = [];
+  const passes = [];
+  const expectedAgents = managedBlock(substituteTemplate(readTemplate('agents-block.md'), config.prefix));
+  if (expectedAgents === null || expectedAgents === MALFORMED_BLOCK) {
+    throw new ConfigurationError('pr-standards-templates/agents-block.md has no managed block');
+  }
+  const agentsPath = path.join(root, 'AGENTS.md');
+  const installedAgents = fs.existsSync(agentsPath) ? managedBlock(fs.readFileSync(agentsPath, 'utf8')) : null;
+  if (installedAgents === null) {
+    failures.push(fail(
+      'managed AGENTS.md block',
+      'missing',
+      'a managed block between pr-standards markers',
+      'Run pr-standards-rollout to install the managed block.',
     ));
-    return labels.filter((name) => name !== config.overrideLabel);
+  } else if (installedAgents === MALFORMED_BLOCK) {
+    failures.push(fail(
+      'managed AGENTS.md block',
+      'malformed',
+      'exactly one pr-standards:start/end marker pair',
+      'Remove the duplicate markers, then run pr-standards-rollout to reinstall the managed block.',
+    ));
+  } else if (installedAgents !== expectedAgents) {
+    failures.push(staleFailure(
+      'managed AGENTS.md block', expectedAgents, installedAgents,
+      'pr-standards-templates/agents-block.md', 'AGENTS.md managed block',
+    ));
+  } else {
+    passes.push('managed AGENTS.md block');
   }
-  if (applier && allowed.has(applier.toLowerCase())) return labels;
-  // On an organization-owned repo the first path segment is the org slug, not
-  // anyone's login, so the name comparison above can never match and the
-  // documented escape hatch would be dead for every org repo. Ask GitHub who
-  // actually administers the repo instead. Only reached when a label is present
-  // and the cheap check already failed, so it costs one request in a rare case.
-  if (applier) {
-    try {
-      const permission = await apiRequest(`collaborators/${encodeURIComponent(applier)}/permission`, repo);
-      if (permission?.permission === 'admin') return labels;
-    } catch {
-      // Fall through to the refusal below. An escape hatch fails closed.
+
+  const templatePath = path.join(root, '.github', 'pull_request_template.md');
+  const expectedTemplate = substituteTemplate(readTemplate('pull_request_template.md'), config.prefix);
+  if (!fs.existsSync(templatePath)) {
+    failures.push(fail(
+      'pull request template',
+      'missing',
+      'match pr-standards-templates/pull_request_template.md',
+      'Run pr-standards-rollout to install the pull request template.',
+    ));
+  } else {
+    const installedTemplate = fs.readFileSync(templatePath, 'utf8');
+    if (installedTemplate !== expectedTemplate) {
+      failures.push(staleFailure(
+        'pull request template', expectedTemplate, installedTemplate,
+        'pr-standards-templates/pull_request_template.md', '.github/pull_request_template.md',
+      ));
+    } else {
+      passes.push('pull request template');
     }
   }
-  warnings.push(fail(
-    `${config.overrideLabel} ignored`,
-    applier ? `applied by ${applier}` : 'no labelling event found',
-    `applied by ${owner} or a repo admin`,
-    `Only ${owner} or a repo admin can clear the size caps. An agent cannot clear its own PR. On an organization repo, list the people who may in overrideActors.`,
-  ));
-  return labels.filter((name) => name !== config.overrideLabel);
+  return finish({ mode: 'drift', adopted: true, prefix: config.prefix, failures, warnings: [], passes }, options.json);
 }
 
 async function fetchRemoteConfig(repo, repoName, ref) {
@@ -1384,7 +1658,7 @@ async function fetchRemoteConfig(repo, repoName, ref) {
 }
 
 async function runPr(options) {
-  if (options.positional.length > 0 || options.branch || options.title) throw new ConfigurationError('pr accepts --repo and --number only');
+  if (options.positional.length > 0 || options.branch || options.title || options.prefix) throw new ConfigurationError('pr accepts --repo and --number only');
   if (!options.repo || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(options.repo)) throw new ConfigurationError('pr requires --repo owner/name');
   if (!options.number || !/^[0-9]+$/.test(options.number) || Number(options.number) < 1) throw new ConfigurationError('pr requires a positive --number');
   const repoName = options.repo.split('/').pop();
@@ -1482,16 +1756,12 @@ async function runPr(options) {
     warnings.push(...proofResult.warnings);
     if (proofResult.failures.length === 0) passes.push('proof of work');
   }
-  // Size keeps whatever shape main has. #114 removed the override label and
-  // #119 put it back while changing Box scripts, so the size escape is live
-  // again against a decision nobody revisited -- tracked separately. A proof
-  // pull request is the wrong place to take a side on it.
-  const rawLabels = (pull.labels || []).map((label) => typeof label === 'string' ? label : label.name).filter(Boolean);
-  const labels = await resolveOverrideLabels(options.repo, number, rawLabels, config, warnings);
-  const sizeResult = checkSize(summary, config, labels);
+  const sizeResult = checkSize(summary, config);
   failures.push(...sizeResult.failures);
   warnings.push(...sizeResult.warnings);
-  if (sizeResult.overridden) passes.push(`size caps overridden by ${config.overrideLabel}`);
+  const baseAgeResult = await checkRemoteBaseBranchAge(options.repo, pull, files, config);
+  failures.push(...baseAgeResult.failures);
+  warnings.push(...baseAgeResult.warnings);
 
   return finish({
     mode: 'pr',
@@ -1505,7 +1775,6 @@ async function runPr(options) {
     warnings,
     passes,
     size: summary,
-    overrideLabel: config.overrideLabel,
   }, options.json);
 }
 
@@ -1524,6 +1793,7 @@ export async function main(argv = process.argv.slice(2)) {
     }
     if (options.mode === 'branch') return await runBranch(options);
     if (options.mode === 'precheck') return await runPrecheck(options);
+    if (options.mode === 'drift') return await runDrift(options);
     return await runPr(options);
   } catch (error) {
     const result = {

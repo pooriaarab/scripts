@@ -1,71 +1,154 @@
 # canva-app — build, run, and submit a Canva app
 
-A Canva app is a React app on the **Canva Apps SDK** running in a sandboxed iframe
-inside the Canva editor. Unlike Make/Zapier there is no push CLI for submission — you
-upload a built bundle in the Developer Portal. This is the playbook: the command
-sequence from `integrations/<app>/` to submitted-for-review, plus the traps that each
-cost a round-trip. The concept-level skill is `canva-app` in `pooriaarab/skills`.
+A Canva app is a React app on the **Canva Apps SDK** running in an iframe inside the Canva
+editor. There is no push CLI for submission — you upload a built bundle in the Developer
+Portal and fill the listing there. This is the playbook: the command sequence from
+`integrations/<app>/` to submitted-for-review, plus the traps that each cost a round-trip.
+The concept-level skill is `canva-app` in `pooriaarab/skills`.
 
 ## Flow
 
 ```bash
 export PATH="/opt/homebrew/opt/node@20/bin:$PATH"   # see the Node note below
-cd integrations/<app>            # canva app source (src/, config, assets/)
+cd integrations/<app>
 npm install
-npx @canva/cli apps link         # writes CANVA_APP_ID into .env from the portal
-npx @canva/app-scripts dev       # dev server
-npx @canva/cli apps preview      # opens the running app in a new Canva design
-# ... develop against @canva/app-ui-kit + @canva/design + @canva/intents ...
-npx tsc --noEmit                 # the bundler does NOT typecheck -- run this yourself
-npx @canva/app-scripts build     # -> dist/app.js, the bundle you upload
+npx @canva/cli apps link            # writes CANVA_APP_ID into .env from the portal
+npx @canva/app-scripts dev          # dev server
+npx @canva/cli apps preview         # opens the running app in a new Canva design
+
+# before every submit, in this order:
+npx tsc --noEmit                    # the bundler does NOT typecheck -- run it yourself
+npx eslint src                      # Canva's own rules; see the plugin setup below
+npx @canva/app-scripts build        # -> dist/app.js  (cleans dist/ first!)
+npx @canva/app-scripts extract-translations   # -> dist/messages_en.json  (AFTER build)
+npx @canva/cli@latest apps doctor   # pre-submission check
 ```
+
+**Order matters on the last two.** `build` cleans `dist/`, so generating the translation
+file first silently deletes it. If the upload page says the JSON is missing, this is why.
 
 **`@canva/cli` has no `build` and no `start`.** Its whole surface is
 `create/list/link/preview/doctor/migrate/config`; both build and dev live in
 `@canva/app-scripts`. A `package.json` with `"build": "@canva/cli apps build"` looks
 plausible, fails, and — because the build never runs — hides every type error in the app.
 
-**Node:** `@canva/app-scripts` declares `node>=22` but builds fine on 20, and the other
+**Node:** `@canva/app-scripts` declares `node>=22` but builds fine on 20, and the sibling
 marketplace CLIs (`vsce`, `ovsx`, Coda `packs`) segfault on 22+. Pin 20 for all of them and
 ignore the EBADENGINE warning.
 
-Then in `developer.canva.com` (portal-review, free — no publish CLI; `@canva/cli` is preview only):
-1. Create the app → `npx @canva/cli apps link` (or set `CANVA_APP_ID` in `.env`). The App ID
-   lives in the environment, not in source.
-2. Configuration → allow-list every external origin the app fetches (incl. `localhost` for dev) — **un-allow-listed origins fail silently**.
-3. Declare capabilities (design read, asset upload) — match them to the SDK calls exactly.
-4. Upload the built bundle; fill the listing. Assets: **512×512** PNG icon (1:1, full-bleed, no
-   transparency/rounded corners), a **2400×1800** (4:3) featured image (up to 2 in a carousel),
-   app support + privacy-policy URLs, and a **test-account login** if the app authenticates.
-5. **Submit for review** (marketplace) — or keep it private/team for internal use. Cap: 5
-   submissions per app per day.
+## Set up Canva's lint before you need it
+
+`apps doctor` runs your `lint` and `format:check` scripts and **skips them silently if they
+are not defined**, so an unconfigured project passes doctor while failing review.
+
+```bash
+npm i -D @canva/app-eslint-plugin "eslint@^9.23.0" prettier
+```
+
+`eslint` must be `^9` — the plugin peers on `^9.23` and will not resolve against 10.
+
+```js
+// eslint.config.mjs
+import canva from "@canva/app-eslint-plugin";
+
+export default [
+  ...canva.configs.apps,
+  {
+    rules: {
+      // Canva's shared config assumes the starter kit's Jest setup. Without a jest
+      // install this rule cannot read a version and fails to LOAD, taking the whole
+      // run with it. The other jest/* rules just never match a file.
+      "jest/no-deprecated-functions": "off",
+    },
+  },
+];
+```
+
+```json
+"scripts": {
+  "lint": "eslint src",
+  "format:check": "prettier --check src",
+  "format": "prettier --write src"
+}
+```
+
+Two rules map onto rejection reasons: `formatjs/no-literal-string-in-jsx` (strings missing
+from the translation file) and `react/forbid-elements` (raw `<img>` / `<input>`; use
+`ImageCard`, `DateInput mode="datetime"`, `Avatar photo`).
+
+## Listing assets
+
+`make-listing-assets.mjs` (next to this README) renders both portal rasters from SVG
+sources and strips the alpha channel:
+
+```bash
+node make-listing-assets.mjs ./listing "#7857ed"
+# -> listing/icon-512.png            512x512,   RGB
+# -> listing/featured-2400x1800.png  2400x1800, RGB
+```
+
+Alpha-stripping needs a real rasteriser. `sips` renders SVG to PNG but always keeps an
+alpha channel, and a JPEG round-trip adds visible artifacts to flat brand colour — hence
+sharp's `.flatten({ background })`. Render the icon from a **square, unclipped** source:
+the rounded-corner variant most brand kits ship as the app/PWA icon is exactly what Canva
+rejects.
+
+The featured image guideline asks for the app's **features, outputs or UI**. A wordmark on
+a brand field meets the dimensions and misses the requirement; a faithful mock of the app's
+own panel does not.
+
+## Portal sequence (developer.canva.com)
+
+1. **Code upload** — "JavaScript bundle", upload `dist/app.js` (5 MB cap), then upload
+   `dist/messages_en.json` under Translations.
+2. **Scopes** — leave every scope off unless you call it. `requestExport`,
+   `requestOpenExternalUrl` and `prepareDesignEditor` are user-mediated and need none.
+3. **Authentication** — empty, unless you genuinely use third-party OAuth.
+4. **Compatibility** — `Public`; Desktop-only is the lower-risk first submission (mobile is
+   reviewed against separate guidelines).
+5. **App listing details → Text** — name ≤18 chars, short description ≤50, description ≤200.
+6. **→ Media** — icon + featured image from `listing/`.
+7. **→ Links** — site, terms, privacy, support. `curl` all four first.
+8. **Testing instructions** — overview, steps, and a **sandbox** credential.
+9. **App status → Submit.** Cap: 5 submissions per day.
 
 ## Traps (each = one round-trip)
 
-- **Iframe blocks un-allow-listed fetch** — the #1 "my API hangs" cause. Allow-list the origin in the portal.
-- **Design export is async and user-facing** — `requestExport(...)` from `@canva/design` opens Canva's own export UI and resolves to `{ status, exportBlobs }`; handle the `"aborted"` status (user cancelled) and fetch each blob's `url` for its bytes. No synchronous getter.
-- **App ID is portal-owned** — a placeholder ID previews fine but fails on submit.
-- **The bundler does not typecheck.** `app-scripts build` succeeds over broken types, so a
-  wrong build script means `tsc` has never run on the app. Run it before every submit.
-- **Icon must be exactly 512×512** with **no alpha channel**; a fresh reviewer must be able
-  to authenticate from a clean state (self-service auth in-app).
-- **Stripping alpha needs a real rasteriser.** `sips` renders SVG to PNG but always keeps an
-  alpha channel, and a JPEG round-trip adds visible artifacts to flat brand colour. Use
-  sharp's `.flatten({ background })`:
-  ```bash
-  node -e 'require("sharp")("icon.svg",{density:600}).resize(512,512,{fit:"fill"})
-    .flatten({background:"#7857ed"}).png().toFile("icon-512.png")'
-  ```
-  Render the icon from a **square, unclipped** source. The rounded-corner variant most brand
-  kits ship as the app/PWA icon is exactly what Canva rejects.
+- **Translations block submission and an empty file is rejected.** Every user-facing string
+  must go through react-intl (`FormattedMessage` in JSX; `intl.formatMessage` for `Button`
+  children, `placeholder`, `label`, `alt`, and error-state strings, which the kit types as
+  `string`). `extract-translations` printing `0 messages` means the app only *looks*
+  internationalised — scaffolds ship `@canva/app-i18n-kit` and `AppI18nProvider` unused.
+- **The portal's forms save on blur, not on input.** Fill a field, move focus off it, wait
+  for "All changes saved". Filling the last field in a form and navigating away reverts it
+  to the placeholder, which then reads as "Provide a Description" on App status even though
+  you typed one. Re-read every form after filling it.
+- **File inputs clear after a successful read.** `input.files.length` goes back to 0 when
+  the upload *worked*, so assert on the filename and "Saved" label instead. Reading 0 as
+  failure sends you debugging a working upload.
+- **There is no allow-listed-fetch-domains field** in the current portal, despite older
+  guidance calling it the #1 trap. Security is read-only identifiers (App ID, app origin —
+  the latter is what your backend's CORS policy needs). Debug a failing request as runtime
+  CSP, not a missing portal toggle.
+- **`requestExport` is user-facing and async.** It opens Canva's export dialog and resolves
+  to `{ status, exportBlobs }`. Handle the non-`"completed"` status (the user cancelled) and
+  fetch each blob's `url`. A multi-page design returns several. `createRenditions` is the
+  *Adobe Express* API, not this one.
+- **The final three gates need the account owner**: legal entity details plus identity
+  documents, a compliance attestation checkbox, and a public walkthrough video link that
+  plays without sign-in. Plan them as a handoff.
+- **`apps config pull` needs `canva login`** (interactive browser), so `canva-app.json`
+  cannot be fetched unattended.
 - **oxlint's autofix can outrun your `lib`.** If the repo lints on commit, its `prefer-*`
   autofixes may rewrite `.sort()` to `.toSorted()`; on `lib: ES2022` that does not compile,
   so the file can never be committed. Raise `lib` to ES2023 rather than fighting the fixer.
 
 ## Files
 
-`example.ts` (next to this README) — the smallest real wiring: export the current design,
-upload the rendition, create the downstream action. Copy it as a starting point.
+- `example.ts` — the smallest real wiring: export the open design, upload the rendition,
+  create the downstream action.
+- `make-listing-assets.mjs` — renders and flattens the icon + featured image.
+- `eslint.config.mjs.example` — the working Canva lint config, jest rule disabled.
 
 ## Pre-submission gate: run Canva's own doctor
 

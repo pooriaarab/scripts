@@ -64,6 +64,33 @@ Or opt a Box out of reaping entirely:
 touch /home/user/.box-reap-keep
 ```
 
+## The four layers, and what each one knows
+
+Box cost control is four layers. Each knows strictly less than the one before.
+
+| # | Layer | Mechanism | What it knows | How it acts |
+|---|---|---|---|---|
+| 1 | Creation | `box-guard` | whether a Box has a deadline (`archiveAfter`) | gives an unbounded Box a TTL in place with `box extend --ttl`; see "The unbounded Box, and why the guard is not a rule" |
+| 2 | Session | `box-session`, wired to the Claude Code SessionStart/SessionEnd hooks | which repo claimed which Box (`~/.local/state/box-work/<repo>.id`) | warms one Box per repo; the last session out stops it and keeps the id so the next session resumes instead of creating; see "Stop keeps the id, so the next session resumes" |
+| 3 | Laptop | `box-reap` via launchd, every 15 minutes | CPU, load, and the heartbeat file inside the Box, over SSH | the only layer that decides with evidence: it probes each Box and stops it only when the probe says quiet; see "Why \"idle\" is a trap" |
+| 4 | Cloud | `box-sweep-remote` in `.github/workflows/box-sweep.yml`, on a GitHub-hosted runner every 30 minutes | age alone | cannot SSH into a Box, so it decides on age alone; report-only on a schedule, stopping only on a `workflow_dispatch` with `execute: true`; see "The laptop reaper cannot run while the laptop sleeps" |
+
+The layers are ordered by how much they know, and **a layer must never act with more
+confidence than its evidence supports.** The cloud layer's age rule is crude, and it is
+safe only because it defaults to reporting.
+
+What each layer misses, all of it recorded in the sections below:
+
+- **Creation:** a Box created with `--no-auto-stop` has `archiveAfter: null`, and nothing
+  stops it until `box-guard` gives it a deadline.
+- **Session:** a session killed before SessionEnd never runs `box-session end`, so its claim
+  file stays behind and shields the Box until the claim TTL expires.
+- **Laptop:** `box-reap` cannot run while the laptop is asleep, which is when a forgotten
+  Box bills longest.
+- **Probing:** a Box the reaper cannot reach over SSH produces no CPU or heartbeat evidence,
+  so the reaper must not stop it — and on 2026-09-02 two such Boxes reached 51.7h and 65.4h,
+  about $4.20 between them, before the cloud layer's age rule caught them.
+
 ## Why "idle" is a trap
 
 `box list` reports a state of `idle` for almost every Box you will ever look at.
@@ -231,11 +258,32 @@ means guessing a base URL, and a wrong guess makes an enumeration failure look i
 an empty account — the one wrong answer that looks calm. (`api.ascii.dev` does not resolve;
 that was the first attempt, and it "found" zero Boxes.)
 
-**Not yet wired to CI.** There is no verified way to install the `box` CLI on a runner:
-`https://ascii.dev/install.sh` redirects to `https://box.ascii.dev/install.sh`, which
-returns a 404 HTML page, and `https://get.ascii.dev` does not answer. Until an install path
-is confirmed, run it from any machine that already has the CLI. Wiring it to a scheduled
-Ubicloud job is a small change once that is known.
+**Wired to CI**, and it does not need the CLI. Installing `box` on a runner was the wrong
+problem: `box status` reports the API base the CLI itself uses, and the endpoints work with
+curl and an API key.
+
+```
+box status  ->  "config": { "apiUrl": "https://ascii.dev", "channel": "prod" }
+
+GET  https://ascii.dev/api/box/boxes            200, same JSON shape as `box list --json`
+POST https://ascii.dev/api/box/boxes/{id}/stop  stop
+```
+
+Verify a route exists before trusting it. A missing route answers
+`{"error":"Not Found","path":"/..."}`, while a real route with a bad id answers
+`{"error":"not_found"}` — that distinction is how the stop path was confirmed without
+stopping anything.
+
+**The API is not the CLI, and the difference bites.** `GET /api/box/boxes` returns every
+Box the account has ever had, including `stopped` and `archived`; `box list` hides those by
+default (`--filter` defaults to running). The first API run reported **100 Boxes burning
+$3.636/hour**, when five were running and the real figure was $0.180/hour. The report now
+counts only billing states (`idle`, `running`, `pending`, `stopping`, `ready`).
+
+`.github/workflows/box-sweep.yml` runs it every 30 minutes on `ubuntu-latest`,
+report-only, with a `workflow_dispatch` input to actually stop. The first real run found two
+Boxes at **39h and 52h old** — claimed Boxes whose session state kept being refreshed, so
+the laptop reaper never touched them. That is precisely the gap this backstop exists for.
 
 ## The periodic reaper (added 2026-08-28, tightened 2026-08-30)
 
