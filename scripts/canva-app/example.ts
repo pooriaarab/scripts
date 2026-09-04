@@ -17,7 +17,8 @@ async function shareCurrentDesign(apiKey: string, apiBase: string) {
     if (!blobRes.ok) throw new Error(`export blob fetch -> ${blobRes.status}`);
     const blob = await blobRes.blob();
 
-    // External origin MUST be allow-listed in the Developer Portal or this fails silently.
+    // No portal allow-list field exists for this anymore (see README) -- the API's own
+    // CORS/CSP policy must permit the app's origin, or this fails at the fetch/upload.
     const form = new FormData();
     form.append("file", blob, "design.png");
     const media = await postToApi(apiBase, "/media", apiKey, form);
