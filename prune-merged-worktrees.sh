@@ -39,6 +39,13 @@ MAIN_TOP="${MAIN_TOP#worktree }"
 # path merely contains the substring "/worktrees/" (see below).
 COMMON_GITDIR="$(git rev-parse --git-common-dir)"
 COMMON_GITDIR="$(cd "$COMMON_GITDIR" && pwd)"
+# Re-anchor our own cwd to the main worktree, which process_worktree never
+# removes. Without this, if $REPO itself is a linked worktree that turns
+# out to be eligible for removal, `git worktree remove` deletes the
+# directory the shell is sitting in, and every subsequent ambient `git`
+# call (rev-parse, branch --merged, worktree remove for later entries)
+# fails because the shell can no longer resolve its own cwd.
+cd "$MAIN_TOP"
 # Scratch files that alone do not block removal.
 SCRATCH_RE='^(WORKER_BRIEF\.md|CONTINUE\.md|BRIEF\.md)$'
 
@@ -103,10 +110,19 @@ process_worktree() {
 
   # --- Merged check: branch merged into origin/main (or local main)? ---
   local merged=0
-  # Prefer origin/main; fall back to local main/master when no remote exists.
+  # Prefer origin/main; fall back to local main/master when no remote
+  # exists. But if origin *is* configured, the earlier fetch failed, and
+  # origin/main still doesn't resolve, don't silently trust local main: it
+  # could be an arbitrarily stale snapshot from before that remote was
+  # ever fetched — the same "looks merged against stale history" trap
+  # this script already guards against below via FETCH_OK.
   local intobranch="origin/main"
   if ! git rev-parse --verify --quiet "$intobranch" >/dev/null; then
-    if git rev-parse --verify --quiet "refs/heads/main" >/dev/null; then
+    if [ "$FETCH_OK" -eq 0 ] && git remote get-url origin >/dev/null 2>&1; then
+      review_list+=("$wt ($short cannot verify merge: origin is configured but origin/main is unresolvable and the fetch failed; verify manually)")
+      needs_review=$((needs_review + 1))
+      return 0
+    elif git rev-parse --verify --quiet "refs/heads/main" >/dev/null; then
       intobranch="main"
     elif git rev-parse --verify --quiet "refs/heads/master" >/dev/null; then
       intobranch="master"
@@ -155,7 +171,17 @@ process_worktree() {
       [ -n "$line" ] || continue
       # Porcelain v1: XY + space + path (handle renames "old -> new").
       local f="${line:3}"
-      f="${f##* -> }"
+      # A rename is never scratch-only: checking just the destination name
+      # would let e.g. "important.txt -> BRIEF.md" pass as harmless, and
+      # --apply's cleanup below (reset + checkout/rm on the new path alone)
+      # can then delete the only copy of the renamed content. Treat any
+      # rename as a real change regardless of what either side is named.
+      case "$f" in
+        *" -> "*)
+          real_dirty=1
+          break
+          ;;
+      esac
       if ! printf '%s' "$f" | grep -Eq "$SCRATCH_RE"; then
         real_dirty=1
         break
