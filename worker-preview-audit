@@ -19,6 +19,13 @@ BINDINGS = {
     "services": ("service",), "send_email": ("destination_address", "allowed_destination_addresses"),
 }
 MARKER = re.compile(r"(?:PREVIEW|E2E|TEST)_(?:USER|EMAIL|PASSWORD|TOKEN|SECRET|AUTH)[A-Z0-9_]*")
+CONTROLLER = {"schema": 1, "mode": "external", "build_workflow": "Worker Preview Build",
+              "artifact": "worker-preview-bundle", "status_context": "worker-preview/live"}
+SENSITIVE_ENV = re.compile(
+    r"(?mi)(?:^[ \t]+|[{,][ \t]*)['\"]?[A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|CREDENTIAL|API_KEY|PRIVATE_KEY|CLIENT_ID|ACCOUNT_ID|USER|EMAIL)[A-Z0-9_]*['\"]?\s*:")
+SENSITIVE_REFERENCE = re.compile(
+    r"(?i)(?:\bsecrets\b(?=\s*[.\[\])}:,])|github(?:\.token\b|\s*\[\s*['\"]token)|(?:vars|env)(?:\.|\s*\[\s*['\"])[A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|CREDENTIAL|API_KEY|PRIVATE_KEY|CLIENT_ID|ACCOUNT_ID|USER|EMAIL))")
+PREVIEW_COMMAND = re.compile(r"\bwrangler(?:@[^\s\\]+)?\s+preview\b", re.I)
 def normalize(value):
     if len(value) > 63 or not re.fullmatch(r"[a-z]{2,4}-[1-9][0-9]*-[a-z0-9]+(?:-[a-z0-9]+)*", value):
         raise ValueError("name must be an unchanged PR-standard branch of at most 63 characters")
@@ -80,6 +87,61 @@ def command(*args, cwd=None):
     except OSError as error:
         return subprocess.CompletedProcess(args, 127, "", str(error))
 
+def workflow_events(text):
+    match = re.search(r'''(?m)^(?:on|"on"|'on')\s*:[ \t]*(.*)$''', text)
+    if not match: return set()
+    value = match.group(1).split("#", 1)[0].strip()
+    if value:
+        events = re.findall(r"[A-Za-z_][A-Za-z0-9_-]*", value)
+        return set(events) if events else {"<unparsed>"}
+    tail = text[match.end():]
+    end = re.search(r"(?m)^\S", tail)
+    block = tail[:end.start()] if end else tail
+    keys = []
+    for line in block.splitlines():
+        key = re.match(r'''^(\s+)(?:"([^"]+)"|'([^']+)'|([A-Za-z_][A-Za-z0-9_-]*))\s*:''', line)
+        if key: keys.append((len(key.group(1)), next(item for item in key.groups()[1:] if item)))
+    if not keys: return {"<unparsed>"}
+    indent = min(item[0] for item in keys)
+    return {event for level, event in keys if level == indent}
+
+def workflow_name(text):
+    match = re.search(r"(?m)^name:\s*([^#\n]+?)\s*$", text)
+    return match.group(1).strip("'\"") if match else ""
+
+def top_block(text, key):
+    escaped = re.escape(key)
+    match = re.search(rf'''(?m)^(?:{escaped}|"{escaped}"|'{escaped}')\s*:[ \t]*(.*)$''', text)
+    if not match: return ""
+    if match.group(1): return match.group(1).strip()
+    end = re.search(r"(?m)^\S", text[match.end():])
+    return (text[match.end():match.end() + end.start()] if end else text[match.end():]).strip()
+
+def action_steps(text, action):
+    lines = text.splitlines()
+    steps = []
+    for index, line in enumerate(lines):
+        if not re.search(rf'''(?i)^\s*(?:-\s*)?(?:uses|"uses"|'uses')\s*:\s*["']?{re.escape(action)}@''', line): continue
+        indent = len(line) - len(line.lstrip())
+        start = next((item for item in range(index, -1, -1)
+                      if (match := re.match(r"^(\s*)-\s", lines[item])) and
+                      len(match.group(1)) <= indent), index)
+        step_indent = len(lines[start]) - len(lines[start].lstrip())
+        end = next((item for item in range(index + 1, len(lines))
+                    if re.match(rf"^\s{{{step_indent}}}-\s", lines[item])), len(lines))
+        steps.append("\n".join(lines[start:end]))
+    return steps
+
+def action_option(step, name):
+    match = re.search(r"(?m)^(\s*)with:\s*$", step)
+    if not match: return None
+    indent = len(match.group(1))
+    for line in step[match.end():].splitlines():
+        if line.strip() and len(line) - len(line.lstrip()) <= indent: break
+        option = re.match(rf"^\s{{{indent + 2},}}{re.escape(name)}:\s*([^#]+?)\s*$", line)
+        if option: return option.group(1).strip("'\"")
+    return None
+
 def passes_credential(block, name, source):
     value = r'["\x27]?\$\{\{\s*' + source + r'\s*\}\}["\x27]?'
     return re.search(rf"(?m)^[ \t]+{name}:\s*{value}\s*$", block) or re.search(rf"(?m){name}={value}(?:\s+\S+=\S+)*\s+wrangler[^\n]* preview", block) or re.search(rf"(?m)export\s+{name}={value}[^\n]*wrangler[^\n]* preview", block)
@@ -100,6 +162,11 @@ def tracked_files(root):
     if result.returncode == 0:
         return [root / name for name in result.stdout.split("\0") if name and (root / name).is_file() and not (root / name).is_symlink()]
     return [path for path in root.rglob("*") if path.is_file() and ".git" not in path.parts]
+
+def is_tracked(root, path):
+    inside = command("git", "rev-parse", "--is-inside-work-tree", cwd=root)
+    if inside.returncode: return True
+    return command("git", "ls-files", "--error-unmatch", "--", str(path.relative_to(root)), cwd=root).returncode == 0
 
 def resource_map(items, fields):
     return {str(item.get("binding") or item.get("name")): "|".join(str(item.get(field, "")) for field in fields)
@@ -174,10 +241,74 @@ def audit(root, repo):
     files = tracked_files(root)
     configs = sorted(path for path in files if re.fullmatch(r"wrangler(?:[._-][^.]+)*\.(?:toml|jsonc?|ya?ml)", path.name))
     workflows = [path for path in files if ".github/workflows" in path.as_posix()]
-    preview_workflows = [str(path.relative_to(root)) for path in workflows if re.search(r"wrangler[^\n]* preview", "\n".join(line for line in path.read_text(errors="ignore").splitlines() if not line.strip().startswith("#")))]
-    workflow_text = "\n".join("\n".join(line for line in (root / path).read_text(errors="ignore").splitlines() if not line.strip().startswith("#")) for path in preview_workflows)
+    records = [(str(path.relative_to(root)), "\n".join(
+        line for line in path.read_text(errors="ignore").splitlines()
+        if not line.strip().startswith("#"))) for path in workflows]
+    preview_records = [(path, text) for path, text in records if PREVIEW_COMMAND.search(text)]
+    preview_workflows = [path for path, _ in preview_records]
+    workflow_text = "\n".join(text for _, text in preview_records)
     preview_envs = set(re.findall(r"--env[ =]+[\"']?([A-Za-z0-9_-]+)", workflow_text))
     blockers, bindings, domains, preview_scopes, configured_envs = [], [], [], [], set()
+    controller_path = next((path for path in files if path.relative_to(root).as_posix() ==
+                            ".github/worker-preview-controller.json"), None)
+    controller = None
+    if controller_path:
+        try: controller = json.loads(controller_path.read_text())
+        except (OSError, json.JSONDecodeError): pass
+        if controller != CONTROLLER:
+            blockers.append("external controller contract must match the required schema")
+        if not is_tracked(root, controller_path):
+            blockers.append("external controller contract must be tracked")
+    producers = [(path, text) for path, text in records if workflow_name(text) == "Worker Preview Build"]
+    external_mode = controller == CONTROLLER and is_tracked(root, controller_path) and len(producers) == 1
+    if controller == CONTROLLER and len(producers) != 1:
+        blockers.append("external controller needs exactly one Worker Preview Build workflow")
+    if producers and controller is None:
+        blockers.append("Worker Preview Build needs .github/worker-preview-controller.json")
+    for path, text in records:
+        events = workflow_events(text)
+        credentials = SENSITIVE_REFERENCE.search(text) or SENSITIVE_ENV.search(text)
+        if "pull_request" in events:
+            if credentials:
+                blockers.append(f"{path}: pull_request workflow exposes source-repository credentials")
+            permissions = top_block(text, "permissions")
+            if (not permissions or re.search(r"(?i)\bwrite(?:-all)?\b", permissions)
+                    or re.search(r'''(?mi)^[ \t]+(?:permissions|"permissions"|'permissions')\s*:''', text)):
+                blockers.append(f"{path}: pull_request workflow permissions must be explicitly read-only")
+            if any(action_option(step, "persist-credentials") != "false"
+                   for step in action_steps(text, "actions/checkout")):
+                blockers.append(f"{path}: pull_request checkout must set persist-credentials: false")
+        if events & {"workflow_run", "pull_request_target"} and "preview" in (path + workflow_name(text)).lower() and credentials:
+            blockers.append("source-hosted trusted deployer needs a verified branch-restricted environment")
+    for path, text in producers:
+        if workflow_events(text) != {"pull_request"}:
+            blockers.append("Worker Preview Build must use only the pull_request event")
+        permissions_text = top_block(text, "permissions")
+        permissions = [line.strip() for line in permissions_text.splitlines() if line.strip()]
+        inline_permissions = re.fullmatch(r"\{\s*contents:\s*read\s*\}", permissions_text)
+        if not (permissions == ["contents: read"] or inline_permissions) or re.search(
+                r'''(?mi)^[ \t]+(?:permissions|"permissions"|'permissions')\s*:''', text):
+            blockers.append("Worker Preview Build permissions must be contents: read")
+        checkouts = action_steps(text, "actions/checkout")
+        if len(checkouts) != 1 or action_option(checkouts[0], "persist-credentials") != "false":
+            blockers.append("Worker Preview Build checkout must set persist-credentials: false")
+        if len(checkouts) != 1 or action_option(checkouts[0], "ref") != "${{ github.event.pull_request.head.sha }}":
+            blockers.append("Worker Preview Build checkout must use the exact pull_request head SHA")
+        uploads = action_steps(text, "actions/upload-artifact")
+        if len(uploads) != 1 or action_option(uploads[0], "name") != "worker-preview-bundle":
+            blockers.append("Worker Preview Build must upload fixed artifact worker-preview-bundle")
+        if SENSITIVE_REFERENCE.search(text) or SENSITIVE_ENV.search(text):
+            blockers.append("Worker Preview Build contains secrets or sensitive environment values")
+        if PREVIEW_COMMAND.search(text):
+            blockers.append("Worker Preview Build must not deploy or delete a Preview")
+    for path, text in preview_records:
+        events = workflow_events(text)
+        if "pull_request" in events:
+            blockers.append("pull_request workflow deploys PR-controlled code with Preview credentials")
+        elif events & {"workflow_run", "pull_request_target"}:
+            blockers.append("source-hosted trusted deployer needs a verified branch-restricted environment")
+    if external_mode and preview_workflows:
+        blockers.append("external controller mode must not deploy from the source repository")
     if len(preview_workflows) > 1: blockers.append("multiple Worker Preview workflows need manual review")
     if len(configs) > 1 and preview_envs:
         blockers.append("multiple Wrangler configs with Preview environments need manual mapping")
@@ -222,8 +353,8 @@ def audit(root, repo):
         version = next((package_versions[parent] for parent in [config.parent, *config.parents]
                         if parent in package_versions), None)
         if version != "4.127.1": blockers.append(f"{config.relative_to(root)}: Wrangler 4.127.1 is not pinned exactly")
-    if not preview_workflows: blockers.append("no Worker Preview workflow")
-    else:
+    if not preview_workflows and not external_mode: blockers.append("no Worker Preview workflow")
+    elif preview_workflows:
         blocks = re.findall(r"(?ms)^  [A-Za-z0-9_-]+:\s*\n(.*?)(?=^  [A-Za-z0-9_-]+:\s*\n|\Z)", workflow_text)
         deploys = [block for block in blocks if re.search(r"wrangler[^\n]* preview(?! delete)", block)]
         cleanups = [block for block in blocks if re.search(r"wrangler[^\n]* preview delete", block)]
@@ -261,9 +392,11 @@ def audit(root, repo):
         concurrency_body = concurrency.group(1) if concurrency else ""
         if "cancel-in-progress: false" not in concurrency_body or not re.search(r"(?m)^\s*group:\s*\S", concurrency_body):
             blockers.append("Preview lifecycle jobs are not serialized")
-    secrets, variables = github_names(repo, "secrets"), github_names(repo, "variables")
-    if repo and (secrets is None or variables is None): blockers.append("GitHub credential metadata could not be verified")
-    if secrets is not None and "CLOUDFLARE_API_TOKEN" not in secrets: blockers.append("GitHub secret CLOUDFLARE_API_TOKEN is missing")
+    secrets = variables = None
+    if not external_mode:
+        secrets, variables = github_names(repo, "secrets"), github_names(repo, "variables")
+    if repo and not external_mode and (secrets is None or variables is None): blockers.append("GitHub credential metadata could not be verified")
+    if not external_mode and secrets is not None and "CLOUDFLARE_API_TOKEN" not in secrets: blockers.append("GitHub secret CLOUDFLARE_API_TOKEN is missing")
     account_variable = variables is not None and "CLOUDFLARE_ACCOUNT_ID" in variables
     account_secret = secrets is not None and "CLOUDFLARE_ACCOUNT_ID" in secrets
     if variables is not None and secrets is not None and not (account_variable or account_secret):
@@ -280,7 +413,7 @@ def audit(root, repo):
         if found: markers.update(found); marker_files.append(str(path.relative_to(root)))
         if in_worker and path.suffix in {".ts", ".tsx", ".js", ".jsx", ".py", ".go", ".rs", ".json", ".jsonc", ".toml", ".yml", ".yaml"}:
             if "docs" not in path.parts and re.search(r"better-auth|next-auth|firebase/auth|@clerk|auth0|supabase\.auth|request\.headers\.get\([\"']authorization", text, re.I): auth_used = True
-    if auth_used:
+    if auth_used and not external_mode:
         identity = any(re.search(r"_(?:USER|EMAIL)(?:_|$)", marker) for marker in markers)
         credential = any(re.search(r"_(?:PASSWORD|TOKEN|SECRET)(?:_|$)", marker) for marker in markers)
         if not identity or not credential:
@@ -292,7 +425,12 @@ def audit(root, repo):
             if missing_markers: blockers.append("test-user GitHub values are missing: " + ", ".join(sorted(missing_markers)))
     return {"repo": repo or "local-only", "wrangler_configs": [str(p.relative_to(root)) for p in configs],
             "wrangler_versions": packages, "preview_scopes": preview_scopes, "custom_domains": domains,
-            "resource_bindings": bindings, "workflows": preview_workflows,
+            "resource_bindings": bindings, "workflows": sorted(set(preview_workflows + [path for path, _ in producers])),
+            "deployment_boundary": "external controller" if external_mode else "unverified source workflow",
+            "controller_requirements": (["consume worker-preview-bundle", "publish worker-preview/live",
+                                         "deploy and delete from a credential-isolated repository",
+                                         "verify Preview bindings, URL, indexing, and authentication"] if external_mode else
+                                        ["use the exact external controller contract or verify a branch-restricted trusted deployer"]),
             "live_previews": "not queryable: Wrangler 4.127.1 has no list command",
             "credential_scope": "presence only: GitHub does not reveal token scopes",
             "github_secret": "present" if secrets and "CLOUDFLARE_API_TOKEN" in secrets else "missing" if secrets is not None else "unknown",

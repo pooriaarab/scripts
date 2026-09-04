@@ -10,6 +10,7 @@ import {
   ConfigurationError,
   DEFAULT_CONFIG,
   checkProof,
+  checkBaseBranchAge,
   checkSize,
   countClosingReferences,
   validateCommits,
@@ -224,6 +225,54 @@ test('requires one matching closing reference and the required body sections', (
   assert.equal(validateBody('<!-- template -->', 142, config).ok, false);
 });
 
+test('one Assisted-by trailer per line, and the failure names the line it found', () => {
+  // Two pull requests failed this check in one day with "got: missing" while
+  // their bodies carried `Assisted-by: muse:meta-code,
+  // claude-personal-1:claude-opus-5`. Most work here has two or more
+  // contributors, so the comma list is the common failure, and a message that
+  // denies the line sends the author hunting for a line they already wrote.
+  const bodyWithTrailer = (trailer) =>
+    validBody.replace('Assisted-by: claude-personal:claude-opus-5', trailer);
+  const assistedBy = (r) => r.failures.find((f) => f.check === 'Assisted-by line');
+
+  // Two trailers on two lines is the accepted shape.
+  assert.equal(validateBody(
+    bodyWithTrailer('Assisted-by: muse:meta-code\nAssisted-by: claude-personal-1:claude-opus-5'), 142, config,
+  ).ok, true);
+
+  // The comma list still fails: the fix is a second line, not a looser match.
+  const commaList = validateBody(
+    bodyWithTrailer('Assisted-by: muse:meta-code, claude-personal-1:claude-opus-5'), 142, config,
+  );
+  assert.equal(commaList.ok, false);
+  assert.equal(
+    assistedBy(commaList).got.includes('Assisted-by: muse:meta-code, claude-personal-1:claude-opus-5'),
+    true,
+    'the failure reports the line it found, not "missing"',
+  );
+  assert.notEqual(assistedBy(commaList).got, 'missing');
+
+  // A body with no trailer at all is the one case "missing" still describes.
+  const absent = validateBody(validBody.replace('Assisted-by: claude-personal:claude-opus-5', ''), 142, config);
+  assert.equal(assistedBy(absent).got, 'missing');
+
+  // A valid first line must not shield a malformed second line: checking
+  // only "does some line match" instead of "does every line match" would
+  // let this pass.
+  const mixedLines = validateBody(
+    bodyWithTrailer('Assisted-by: muse:meta-code\nAssisted-by: muse:meta-code, claude:opus'), 142, config,
+  );
+  assert.equal(mixedLines.ok, false);
+  assert.notEqual(assistedBy(mixedLines).got, undefined);
+
+  // A comma list with no space after the comma has no whitespace for
+  // `[^\s]+` to stop at, so the fields must also reject commas directly.
+  const commaListNoSpace = validateBody(
+    bodyWithTrailer('Assisted-by: muse:meta-code,claude-personal-1:claude-opus-5'), 142, config,
+  );
+  assert.equal(commaListNoSpace.ok, false);
+});
+
 test('matches the supported exclusion glob forms', () => {
   assert.equal(matchesGlob('app.lock', '**/*.lock'), true);
   assert.equal(matchesGlob('packages/app.lock', '**/*.lock'), true);
@@ -268,6 +317,35 @@ test('enforces size failures without a label escape', () => {
 
   assert.equal(result.failures.length, 2);
   assert.equal(result.warnings.length, 1);
+});
+
+test('reports stale branch points at the configured threshold', () => {
+  const compare = { behind_by: 11, merge_base_commit: { sha: '1234567890' } };
+  const baseChanges = {
+    commits: [{ sha: 'abcdef123', commit: { message: 'Remove the escape hatch\n\nDetails' } }],
+    files: [{ filename: 'pr-standards.mjs' }],
+  };
+
+  assert.deepEqual(checkBaseBranchAge({ ...compare, behind_by: 0 }, baseChanges, [], config), {
+    failures: [], warnings: [],
+  }, 'an up-to-date branch is silent');
+
+  const stale = checkBaseBranchAge(compare, baseChanges, [{ filename: 'README.md' }], config);
+  assert.equal(stale.failures.length, 0);
+  assert.equal(stale.warnings.length, 1);
+  assert.match(stale.warnings[0].got, /abcdef1 Remove the escape hatch/);
+
+  const overlap = checkBaseBranchAge(compare, baseChanges, [{ filename: 'pr-standards.mjs' }], config);
+  assert.equal(overlap.failures.length, 1, 'overlap must fail, not warn');
+  assert.match(overlap.failures[0].got, /pr-standards\.mjs/);
+
+  const raised = checkBaseBranchAge(compare, baseChanges, [], { ...config, maxBaseCommitsBehind: 11 });
+  assert.deepEqual(raised, { failures: [], warnings: [] }, 'the threshold is configurable');
+  assert.throws(
+    () => validateConfig({ ...config, maxBaseCommitsBehind: -1 }),
+    ConfigurationError,
+    'the configured threshold must be a non-negative integer',
+  );
 });
 
 test('prevents size-cap escape resurrection', () => {
@@ -466,8 +544,11 @@ test('issues/{n} returning an object with a pull_request field fails', async () 
     if (url.includes('pulls/12/files')) {
       return { ok: true, json: async () => ([]) };
     }
+    if (url.includes('/compare/')) {
+      return { ok: true, json: async () => ({ behind_by: 0, merge_base_commit: { sha: '1234567' } }) };
+    }
     if (url.includes('pulls/12')) {
-      return { ok: true, json: async () => ({ head: { ref: 'cr-12-test' }, title: '[CR-12] Test PR', body: validBody.replace('142', '12').replace('142', '12').replace('142', '12') }) };
+      return { ok: true, json: async () => ({ head: { ref: 'cr-12-test', sha: 'deadbee' }, base: { ref: 'main' }, title: '[CR-12] Test PR', body: validBody.replace('142', '12').replace('142', '12').replace('142', '12') }) };
     }
     if (url.includes('issues/12')) {
       return { ok: true, json: async () => ({ state: 'open', pull_request: {} }) };
@@ -514,8 +595,11 @@ test('an exempt branch skips proof of work along with title and body', async () 
       // to write.
       return { ok: true, json: async () => ([{ filename: 'src/components/Button.tsx', status: 'modified' }]) };
     }
+    if (url.includes('/compare/')) {
+      return { ok: true, json: async () => ({ behind_by: 0, merge_base_commit: { sha: '1234567' } }) };
+    }
     if (url.includes('pulls/13')) {
-      return { ok: true, json: async () => ({ head: { ref: 'refactor' }, title: 'Move things around', body: 'no structured body at all' }) };
+      return { ok: true, json: async () => ({ head: { ref: 'refactor', sha: 'deadbee' }, base: { ref: 'main' }, title: 'Move things around', body: 'no structured body at all' }) };
     }
     throw new Error(`Unexpected fetch URL: ${url}`);
   };
@@ -555,8 +639,11 @@ test('config resolution prefers the target repo over the local checkout', async 
     if (url.includes('pulls/12/files')) {
       return { ok: true, json: async () => ([]) };
     }
+    if (url.includes('/compare/')) {
+      return { ok: true, json: async () => ({ behind_by: 0, merge_base_commit: { sha: '1234567' } }) };
+    }
     if (url.includes('pulls/12')) {
-      return { ok: true, json: async () => ({ head: { ref: 'rmt-12-test' }, title: '[RMT-12] Test PR that works', body: validBody.replace('142', '12').replace('142', '12').replace('142', '12') }) };
+      return { ok: true, json: async () => ({ head: { ref: 'rmt-12-test', sha: 'deadbee' }, base: { ref: 'main' }, title: '[RMT-12] Test PR that works', body: validBody.replace('142', '12').replace('142', '12').replace('142', '12') }) };
     }
     if (url.includes('issues/12')) {
       return { ok: true, json: async () => ({ state: 'open' }) };
@@ -569,7 +656,225 @@ test('config resolution prefers the target repo over the local checkout', async 
     assert.equal(exitCode, 0);
     const result = JSON.parse(output);
     assert.equal(result.prefix, 'rmt');
-    assert.equal(result.provenance, 'from test/repo .github/pr-standards.json');
+    assert.equal(result.provenance, 'from test/repo .github/pr-standards.json @ main');
+  } finally {
+    process.stdout.write = originalWrite;
+    process.env.PATH = originalPath;
+    process.env.GITHUB_TOKEN = originalToken;
+    globalThis.fetch = originalFetch;
+    delete process.env.GITHUB_REPOSITORY;
+  }
+});
+
+test('compares a fork PR by head sha, not by a head branch name the base repo may not have', async () => {
+  const originalWrite = process.stdout.write;
+  const originalPath = process.env.PATH;
+  const originalToken = process.env.GITHUB_TOKEN;
+  const originalFetch = globalThis.fetch;
+  let output = '';
+  process.stdout.write = (chunk) => { output += chunk; return true; };
+  process.env.PATH = '';
+  process.env.GITHUB_TOKEN = 'test-token';
+  process.env.GITHUB_REPOSITORY = 'other/repo';
+
+  globalThis.fetch = async (url) => {
+    if (url.includes('contents/.github/pr-standards.json')) {
+      return { ok: true, json: async () => ({ content: Buffer.from(JSON.stringify({ prefix: 'cr' })).toString('base64'), encoding: 'base64' }) };
+    }
+    if (url.includes('pulls/12/commits')) {
+      return { ok: true, json: async () => ([{ sha: 'abc1234', commit: { message: 'Fix the thing' } }]) };
+    }
+    if (url.includes('pulls/12/files')) {
+      return { ok: true, json: async () => ([]) };
+    }
+    // A fork PR's head sha does not exist as a branch name in the base repo.
+    // Only a compare keyed on the sha can succeed here; one keyed on the
+    // ref would 404 or match an unrelated same-named branch in the base repo.
+    if (url.includes('/compare/main...forksha123')) {
+      return { ok: true, json: async () => ({ behind_by: 0, merge_base_commit: { sha: '1234567' } }) };
+    }
+    if (url.includes('pulls/12')) {
+      return { ok: true, json: async () => ({ head: { ref: 'cr-12-test', sha: 'forksha123' }, base: { ref: 'main' }, title: '[CR-12] Compare a fork by its head sha', body: validBody.replace('142', '12').replace('142', '12').replace('142', '12') }) };
+    }
+    if (url.includes('issues/12')) {
+      return { ok: true, json: async () => ({ state: 'open' }) };
+    }
+    throw new Error(`Unexpected fetch URL: ${url}`);
+  };
+
+  try {
+    const exitCode = await main(['pr', '--repo', 'test/repo', '--number', '12', '--json']);
+    assert.equal(exitCode, 0);
+  } finally {
+    process.stdout.write = originalWrite;
+    process.env.PATH = originalPath;
+    process.env.GITHUB_TOKEN = originalToken;
+    globalThis.fetch = originalFetch;
+    delete process.env.GITHUB_REPOSITORY;
+  }
+});
+
+test('a malformed behind_by does not silently skip the branch-age check', async () => {
+  const originalWrite = process.stdout.write;
+  const originalPath = process.env.PATH;
+  const originalToken = process.env.GITHUB_TOKEN;
+  const originalFetch = globalThis.fetch;
+  let output = '';
+  process.stdout.write = (chunk) => { output += chunk; return true; };
+  process.env.PATH = '';
+  process.env.GITHUB_TOKEN = 'test-token';
+  process.env.GITHUB_REPOSITORY = 'other/repo';
+
+  globalThis.fetch = async (url) => {
+    if (url.includes('contents/.github/pr-standards.json')) {
+      return { ok: true, json: async () => ({ content: Buffer.from(JSON.stringify({ prefix: 'cr' })).toString('base64'), encoding: 'base64' }) };
+    }
+    if (url.includes('pulls/12/commits')) {
+      return { ok: true, json: async () => ([{ sha: 'abc1234', commit: { message: 'Fix the thing' } }]) };
+    }
+    if (url.includes('pulls/12/files')) {
+      return { ok: true, json: async () => ([]) };
+    }
+    // -1 is not a value GitHub should ever send, but a naive `behind_by <=
+    // threshold` early return would treat it as "up to date" and skip the
+    // check entirely instead of surfacing the bad data.
+    if (url.includes('/compare/main...deadbee')) {
+      return { ok: true, json: async () => ({ behind_by: -1, merge_base_commit: { sha: '1234567' } }) };
+    }
+    // Reached only if the malformed behind_by above is mistakenly treated
+    // as "in range" and never re-validated.
+    if (url.includes('/compare/1234567...main')) {
+      return { ok: true, json: async () => ({ commits: [], files: [] }) };
+    }
+    if (url.includes('pulls/12')) {
+      return { ok: true, json: async () => ({ head: { ref: 'cr-12-test', sha: 'deadbee' }, base: { ref: 'main' }, title: '[CR-12] Test PR', body: validBody.replace('142', '12').replace('142', '12').replace('142', '12') }) };
+    }
+    if (url.includes('issues/12')) {
+      return { ok: true, json: async () => ({ state: 'open' }) };
+    }
+    throw new Error(`Unexpected fetch URL: ${url}`);
+  };
+
+  try {
+    const exitCode = await main(['pr', '--repo', 'test/repo', '--number', '12', '--json']);
+    assert.equal(exitCode, 1);
+    const result = JSON.parse(output);
+    assert.equal(result.failures.some((f) => /invalid branch comparison/.test(f.got)), true);
+  } finally {
+    process.stdout.write = originalWrite;
+    process.env.PATH = originalPath;
+    process.env.GITHUB_TOKEN = originalToken;
+    globalThis.fetch = originalFetch;
+    delete process.env.GITHUB_REPOSITORY;
+  }
+});
+
+test('a stale branch point reaches the base comparison and fails on overlap end to end', async () => {
+  const originalWrite = process.stdout.write;
+  const originalPath = process.env.PATH;
+  const originalToken = process.env.GITHUB_TOKEN;
+  const originalFetch = globalThis.fetch;
+  let output = '';
+  process.stdout.write = (chunk) => { output += chunk; return true; };
+  process.env.PATH = '';
+  process.env.GITHUB_TOKEN = 'test-token';
+  process.env.GITHUB_REPOSITORY = 'other/repo';
+
+  globalThis.fetch = async (url) => {
+    if (url.includes('contents/.github/pr-standards.json')) {
+      return { ok: true, json: async () => ({ content: Buffer.from(JSON.stringify({ prefix: 'cr' })).toString('base64'), encoding: 'base64' }) };
+    }
+    if (url.includes('pulls/12/commits')) {
+      return { ok: true, json: async () => ([{ sha: 'abc1234', commit: { message: 'Fix the thing' } }]) };
+    }
+    if (url.includes('pulls/12/files')) {
+      return { ok: true, json: async () => ([{ filename: 'pr-standards.mjs' }]) };
+    }
+    // The first compare reports the branch is behind by more than the
+    // default threshold, which must trigger the second compare below
+    // rather than stopping at this pure-unit-tested decision.
+    if (url.includes('/compare/main...deadbee')) {
+      return { ok: true, json: async () => ({ behind_by: 11, merge_base_commit: { sha: '1234567' } }) };
+    }
+    if (url.includes('/compare/1234567...main')) {
+      return {
+        ok: true,
+        json: async () => ({
+          commits: [{ sha: 'abcdef1', commit: { message: 'Remove the escape hatch' } }],
+          files: [{ filename: 'pr-standards.mjs' }],
+        }),
+      };
+    }
+    if (url.includes('pulls/12')) {
+      return { ok: true, json: async () => ({ head: { ref: 'cr-12-test', sha: 'deadbee' }, base: { ref: 'main' }, title: '[CR-12] Test PR', body: validBody.replace('142', '12').replace('142', '12').replace('142', '12') }) };
+    }
+    if (url.includes('issues/12')) {
+      return { ok: true, json: async () => ({ state: 'open' }) };
+    }
+    throw new Error(`Unexpected fetch URL: ${url}`);
+  };
+
+  try {
+    const exitCode = await main(['pr', '--repo', 'test/repo', '--number', '12', '--json']);
+    assert.equal(exitCode, 1);
+    const result = JSON.parse(output);
+    assert.equal(result.failures.some((f) => f.check === 'branch point overlaps base changes'), true);
+  } finally {
+    process.stdout.write = originalWrite;
+    process.env.PATH = originalPath;
+    process.env.GITHUB_TOKEN = originalToken;
+    globalThis.fetch = originalFetch;
+    delete process.env.GITHUB_REPOSITORY;
+  }
+});
+
+test('a stale branch point with no overlapping files warns rather than fails end to end', async () => {
+  const originalWrite = process.stdout.write;
+  const originalPath = process.env.PATH;
+  const originalToken = process.env.GITHUB_TOKEN;
+  const originalFetch = globalThis.fetch;
+  let output = '';
+  process.stdout.write = (chunk) => { output += chunk; return true; };
+  process.env.PATH = '';
+  process.env.GITHUB_TOKEN = 'test-token';
+  process.env.GITHUB_REPOSITORY = 'other/repo';
+
+  globalThis.fetch = async (url) => {
+    if (url.includes('contents/.github/pr-standards.json')) {
+      return { ok: true, json: async () => ({ content: Buffer.from(JSON.stringify({ prefix: 'cr' })).toString('base64'), encoding: 'base64' }) };
+    }
+    if (url.includes('pulls/12/commits')) {
+      return { ok: true, json: async () => ([{ sha: 'abc1234', commit: { message: 'Fix the thing' } }]) };
+    }
+    if (url.includes('pulls/12/files')) {
+      return { ok: true, json: async () => ([{ filename: 'README.md' }]) };
+    }
+    if (url.includes('/compare/main...deadbee')) {
+      return { ok: true, json: async () => ({ behind_by: 11, merge_base_commit: { sha: '1234567' } }) };
+    }
+    if (url.includes('/compare/1234567...main')) {
+      return {
+        ok: true,
+        json: async () => ({
+          commits: [{ sha: 'abcdef1', commit: { message: 'Remove the escape hatch' } }],
+          files: [{ filename: 'pr-standards.mjs' }],
+        }),
+      };
+    }
+    if (url.includes('pulls/12')) {
+      return { ok: true, json: async () => ({ head: { ref: 'cr-12-test', sha: 'deadbee' }, base: { ref: 'main' }, title: '[CR-12] Warn on a stale branch point', body: validBody.replace('142', '12').replace('142', '12').replace('142', '12') }) };
+    }
+    if (url.includes('issues/12')) {
+      return { ok: true, json: async () => ({ state: 'open' }) };
+    }
+    throw new Error(`Unexpected fetch URL: ${url}`);
+  };
+
+  try {
+    const exitCode = await main(['pr', '--repo', 'test/repo', '--number', '12', '--json']);
+    assert.equal(exitCode, 0);
+    const result = JSON.parse(output);
+    assert.equal(result.warnings.some((w) => w.check === 'branch point is behind base'), true);
   } finally {
     process.stdout.write = originalWrite;
     process.env.PATH = originalPath;
@@ -847,6 +1152,138 @@ test('proof: a visible change needs before and after attachments', () => {
   assert.equal(hasUiDiff([{ filename: 'src/server/api.ts' }], config), false);
 });
 
+test('proof: a bare command claim warns that it lives only in the body', () => {
+  const nonUiFiles = [{ filename: 'src/server/api.ts', status: 'modified' }];
+  const warned = (r) => r.warnings.some((w) => w.check === 'attributable proof');
+
+  // validBody's "How I verified" is `bun test -> 214 passed` and nothing else --
+  // exactly the claim that costs nothing to type whether or not it ran.
+  assert.equal(warned(checkProof(validBody, nonUiFiles, config)), true);
+
+  // A linked Actions run is something GitHub itself produced.
+  const withRun = `${validBody}\nhttps://github.com/pooriaarab/scripts/actions/runs/123456789`;
+  assert.equal(warned(checkProof(withRun, nonUiFiles, config)), false);
+
+  // An attachment settles it too, even off the UI path.
+  const withAttachment = `${validBody}\n![log](https://github.com/user-attachments/assets/abc)`;
+  assert.equal(warned(checkProof(withAttachment, nonUiFiles, config)), false);
+
+  // The documented hatch already carries its own burden -- a stated reason --
+  // so it settles this warning the same way it settles the UI one.
+  const withHatch = `${validBody}\nProof: n/a — a CLI check with no visible surface at all.`;
+  assert.equal(warned(checkProof(withHatch, nonUiFiles, config)), false);
+
+  // Never fails. Most repos in the fleet do not run their own tests in CI yet,
+  // so this stays a nudge, not a gate (#85).
+  assert.equal(checkProof(validBody, nonUiFiles, config).failures.length, 0);
+
+  // requireProof: false turns this off along with the UI checks -- a repo that
+  // opted out of proof entirely has no reason to be warned about how it phrased it.
+  assert.equal(warned(checkProof(validBody, nonUiFiles, { ...config, requireProof: false })), false);
+
+  // A run ID immediately followed by more word characters is not a GitHub
+  // Actions URL GitHub would ever produce -- it is a numeric prefix wearing a
+  // real link's clothes. Without a boundary check after \d+, the digits alone
+  // satisfied the pattern and the trailing text rode along for free.
+  const withFakeRun = `${validBody}\nhttps://github.com/pooriaarab/scripts/actions/runs/123not-a-run`;
+  assert.equal(warned(checkProof(withFakeRun, nonUiFiles, config)), true);
+
+  // `_` and `-` are neither letters nor digits, so the first boundary fix
+  // (excluding only [a-zA-Z0-9]) missed both of these (#210). The fix moved to
+  // naming what CAN follow a real run ID instead of denying one more character
+  // at a time, which closes every shape of this bypass at once.
+  const withUnderscoreRun = `${validBody}\nhttps://github.com/pooriaarab/scripts/actions/runs/123_not-a-run`;
+  assert.equal(warned(checkProof(withUnderscoreRun, nonUiFiles, config)), true);
+  const withHyphenRun = `${validBody}\nhttps://github.com/pooriaarab/scripts/actions/runs/123-not-a-run`;
+  assert.equal(warned(checkProof(withHyphenRun, nonUiFiles, config)), true);
+
+  // Sentence punctuation only ends the run ID when it actually ends the
+  // clause. Gluing a dot, comma, semicolon, colon, or bang directly onto more
+  // text is the same disguised-suffix bypass wearing different punctuation --
+  // treating the punctuation as a boundary on its own (without checking what
+  // follows it) let all of these through.
+  const withGluedPunctuation = [
+    'https://github.com/pooriaarab/scripts/actions/runs/123.not-a-run',
+    'https://github.com/pooriaarab/scripts/actions/runs/123,not-a-run',
+    'https://github.com/pooriaarab/scripts/actions/runs/123;not-a-run',
+    'https://github.com/pooriaarab/scripts/actions/runs/123:not-a-run',
+    'https://github.com/pooriaarab/scripts/actions/runs/123!not-a-run',
+  ];
+  for (const shape of withGluedPunctuation) {
+    assert.equal(warned(checkProof(`${validBody}\n${shape}`, nonUiFiles, config)), true, shape);
+  }
+
+  // A lone `*` glued directly onto the digits is the same disguised-suffix
+  // bypass wearing a Markdown emphasis character instead of a dot or comma:
+  // it must actually reach whitespace/end-of-string to count as a boundary,
+  // not just appear once.
+  const withGluedAsterisk = `${validBody}\nhttps://github.com/pooriaarab/scripts/actions/runs/123*not-a-run`;
+  assert.equal(warned(checkProof(withGluedAsterisk, nonUiFiles, config)), true);
+
+  // A fake glued on with one of the delimiter characters the boundary check
+  // otherwise treats as an ordinary closing character (`)`, `]`, a quote, a
+  // backtick) is the same disguised-suffix bypass again: that character must
+  // still actually reach whitespace/end-of-string to count as a real close,
+  // not just appear once with more text riding along after it.
+  const withGluedDelimiter = [
+    'https://github.com/pooriaarab/scripts/actions/runs/123)not-a-run',
+    'https://github.com/pooriaarab/scripts/actions/runs/123]not-a-run',
+    'https://github.com/pooriaarab/scripts/actions/runs/123}not-a-run',
+    'https://github.com/pooriaarab/scripts/actions/runs/123"not-a-run',
+  ];
+  for (const shape of withGluedDelimiter) {
+    assert.equal(warned(checkProof(`${validBody}\n${shape}`, nonUiFiles, config)), true, shape);
+  }
+
+  // A real run URL still clears the warning in every shape GitHub actually
+  // produces: nested under a job, with a query string, with a fragment,
+  // inside a markdown link, wrapped in Markdown bold, and followed by
+  // ordinary sentence punctuation that actually ends the clause (whitespace
+  // or end-of-string after it).
+  const realShapes = [
+    'https://github.com/pooriaarab/scripts/actions/runs/123456789/job/987654321',
+    'https://github.com/pooriaarab/scripts/actions/runs/123456789?check_suite_focus=true',
+    'https://github.com/pooriaarab/scripts/actions/runs/123456789#summary',
+    '[log](https://github.com/pooriaarab/scripts/actions/runs/123456789)',
+    'See https://github.com/pooriaarab/scripts/actions/runs/123456789.',
+    'See https://github.com/pooriaarab/scripts/actions/runs/123456789, it passed.',
+    // A parenthetical remark that ends in a full sentence closes with the
+    // period *inside* the parenthesis, not after it -- the punctuation and
+    // the closing delimiter both sit between the run ID and the line's end.
+    '(https://github.com/pooriaarab/scripts/actions/runs/123456789.)',
+    '[log](https://github.com/pooriaarab/scripts/actions/runs/123456789.)',
+    // Markdown bold closes flush against the digits with no separator --
+    // the emphasis markers themselves are the boundary here. Underscore
+    // emphasis (italics) does the same thing with a different character.
+    '**https://github.com/pooriaarab/scripts/actions/runs/123456789**',
+    'See **https://github.com/pooriaarab/scripts/actions/runs/123456789** it passed.',
+    '_https://github.com/pooriaarab/scripts/actions/runs/123456789_',
+    // A curly brace closes the same way a paren or bracket does.
+    '{https://github.com/pooriaarab/scripts/actions/runs/123456789}',
+  ];
+  for (const shape of realShapes) {
+    assert.equal(warned(checkProof(`${validBody}\n${shape}`, nonUiFiles, config)), false, shape);
+  }
+
+  // requireAttributableProof ratchets the same finding to a failure, for a repo
+  // whose own tests run in CI and can always produce a run link.
+  const strict = { ...config, requireAttributableProof: true };
+  const strictResult = checkProof(validBody, nonUiFiles, strict);
+  assert.equal(strictResult.failures.some((f) => f.check === 'attributable proof'), true);
+  assert.equal(warned(strictResult), false);
+  assert.equal(warned(checkProof(withRun, nonUiFiles, strict)), false);
+  assert.equal(checkProof(withRun, nonUiFiles, strict).failures.length, 0);
+
+  // Silent on a UI diff whose visible-change check already failed: that failure
+  // already names the missing capture, and two findings for one gap reads as
+  // two gaps.
+  const uiFiles = [{ filename: 'src/components/Button.tsx', status: 'modified' }];
+  const uiResult = checkProof(validBody, uiFiles, config);
+  assert.equal(uiResult.failures.some((f) => f.check === 'proof of a visible change'), true);
+  assert.equal(warned(uiResult), false);
+  assert.equal(checkProof(validBody, uiFiles, strict).failures.some((f) => f.check === 'attributable proof'), false);
+});
+
 test('proof: a rename out of the UI globs still counts as a UI diff', () => {
   // GitHub reports a rename as one file object with both names. Checking only
   // the new name lets a rename that moves a UI file to a non-matching name
@@ -879,16 +1316,32 @@ test('proof: media belongs in user-attachments, not in the commit', () => {
 
   // Everything else is a product asset. A repo full of real images must not
   // start failing because one of them is a png.
-  for (const filename of ['public/logo.png', 'public/assets/bg.jpg', 'src/assets/icon.png', 'assets/image.png', 'src/app/logo.png']) {
+  for (const filename of [
+    'public/logo.png', 'public/assets/bg.jpg', 'src/assets/icon.png', 'assets/image.png', 'src/app/logo.png',
+    'public/before.png', 'src/assets/after-signup.png',
+  ]) {
     const file = { filename, status: 'added' };
+    // Flagging an asset directory rejects honest product work. This is the
+    // only fix whose current failure direction is a false failure.
     assert.equal(isCommittedProofMedia(file), false, `should not flag ${filename}`);
     const r = checkProof(validBody, [file], config);
-    assert.equal(r.failures.length + r.warnings.length, 0);
+    assert.equal(r.failures.length, 0);
+    // validBody's own "How I verified" is a bare command claim with nothing
+    // external backing it, so the body-only-proof warning is expected here;
+    // what this test cares about is that the asset triggers nothing else.
+    assert.equal(r.warnings.every((w) => w.check === 'attributable proof'), true);
   }
+  // A proof-named directory UNDER an asset root stays exempt. The precedence is
+  // asserted on its own below; the short version is that a screenshot gallery
+  // served from public/ is ordinary product work.
+  assert.equal(isCommittedProofMedia({ filename: 'public/screenshots/home.png', status: 'added' }), false);
 
   // Only an added file is suspicious: editing a media file already in the repo
-  // is maintenance of a real asset.
+  // is maintenance of a real asset. Treating it as proof media rejects honest
+  // work, which is the failure direction fixed here.
   assert.equal(isCommittedProofMedia({ filename: 'screenshots/home.png', status: 'modified' }), false);
+  assert.equal(isCommittedProofMedia({ filename: 'screenshots/home.png', status: 'renamed' }), false);
+  assert.equal(isCommittedProofMedia({ filename: 'src/before.png' }), true);
   assert.equal(isCommittedProofMedia({ filename: 'screenshots/readme.txt', status: 'added' }), false);
 });
 
@@ -908,6 +1361,16 @@ test('proof: only requireProof clears the checks, and no label can', () => {
   // A label named like the old escape hatch changes nothing, because nothing
   // reads labels any more.
   assert.equal(DEFAULT_CONFIG.proofOverrideLabel, undefined);
+});
+
+test('proof media path rules stay separated by kind', () => {
+  const source = readFileSync(new URL('./pr-standards.mjs', import.meta.url), 'utf8');
+
+  // Mixing directory and filename rules makes a future exemption easy to
+  // misapply. That can reject honest work or let weak evidence through.
+  assert.match(source, /const PROOF_MEDIA_DIR_GLOBS = \[/);
+  assert.match(source, /const PROOF_MEDIA_NAME_GLOBS = \[/);
+  assert.doesNotMatch(source, /const PROOF_MEDIA_GLOBS = \[/);
 });
 
 test('the documented proof hatch is not a refusal to answer', () => {
@@ -949,6 +1412,34 @@ test('proof: the same image pasted twice is one image', () => {
   // a period in a sentence keeps that period as part of the match.
   const bare = (id) => `https://github.com/user-attachments/assets/${id}`;
   assert.equal(warned(checkProof(`${validBody}\nBefore: ${bare('abc')}. After: ${url('abc')}`, uiFiles, config)), true);
+});
+
+test('proof: documented placeholders are not attachments', () => {
+  const uiFiles = [{ filename: 'src/components/Button.tsx', status: 'modified' }];
+  const failed = (r) => r.failures.some((f) => f.check === 'proof of a visible change');
+  const body = validBody
+    + '\n![before](https://github.com/user-attachments/assets/<before>)'
+    + '\n![after](https://github.com/user-attachments/assets/<after>)';
+
+  // Counting angle-bracketed placeholders lets weak, copy-pasted evidence
+  // through. The failure direction is weak evidence accepted.
+  assert.equal(failed(checkProof(body, uiFiles, config)), true);
+});
+
+test('proof: inline-code URLs deduplicate with embedded URLs', () => {
+  const uiFiles = [{ filename: 'src/components/Button.tsx', status: 'modified' }];
+  const url = (id) => 'https://github.com/user-attachments/assets/' + id;
+  const backtick = String.fromCharCode(96);
+  const failed = (r) => r.failures.some((f) => f.check === 'proof of a visible change');
+  const warned = (r) => r.warnings.some((w) => w.check === 'proof of a visible change');
+  const body = validBody
+    + '\n![shot](' + url('abc') + ')'
+    + '\nAlso see ' + backtick + url('abc') + backtick + '.';
+
+  // Treating backticks as URL data turns one asset into two ids and lets weak
+  // evidence through. The failure direction is weak evidence accepted.
+  assert.equal(failed(checkProof(body, uiFiles, config)), false);
+  assert.equal(warned(checkProof(body, uiFiles, config)), true);
 });
 
 test('proof: attachments only count inside How I verified', () => {
@@ -1098,6 +1589,104 @@ test('python3 counts as a command, like pytest already did', () => {
   assert.equal(fails('The pythonic idiom was verified'), true);
 });
 
+test('bash is a command, and real tool output is a result', () => {
+  // The command list named node and python3 and missed the runner a shell-script
+  // suite actually uses. PR #205 recorded `bash worker-run.test.sh` and failed
+  // this check. The result vocabulary missed the strings those tools print when
+  // they succeed. Both halves produced the same message, so the author could
+  // not tell which to fix.
+  const body = (verified) => [
+    '## What', 'One sentence.',
+    '## Why', 'Because of the reason.',
+    '## How I verified', verified,
+    'Assisted-by: agent:model',
+  ].join('\n\n');
+  const fails = (text) => validateBody(body(text), 142, config)
+    .failures.some((f) => f.check === '## How I verified');
+  const finding = (text) => validateBody(body(text), 142, config)
+    .failures.find((f) => f.check === '## How I verified');
+
+  assert.equal(fails('bash tests/x.sh\nResults: 13 passed, 0 failed'), false, 'bash is a command');
+  assert.equal(fails('sh -c ./run.sh\nResults: 13 passed, 0 failed'), false, 'sh is a command');
+  assert.equal(fails('docker build .\nSuccessfully built'), false, 'docker is a command');
+  assert.equal(fails('curl -sSf http://127.0.0.1:8080/health\nok'), false, 'curl is a command');
+  assert.equal(fails('terraform plan\nNo changes.'), false, 'terraform is a command');
+  assert.equal(fails('./script.sh\nFound 0 warnings'), false, './script is a command');
+
+  assert.equal(fails('bunx oxlint@^1\nFound 0 warnings'), false, 'Found 0 warnings is a result');
+
+  // A count that means clean is zero, not any number. Widening the result
+  // vocabulary to `\d+ warnings` would let a red run through while the body
+  // still read as verified -- which is worse than the narrow rule this
+  // replaces, because the failure would be invisible rather than loud.
+  assert.equal(fails('bunx oxlint@^1\nFound 7 warnings'), true, '7 warnings is not a result');
+  assert.equal(fails('npx tsc --noEmit\n3 errors'), true, '3 errors is not a result');
+  // oxlint's real format prints both counts on one line. A nonzero warning
+  // count must not be masked by a clean "0 errors" alongside it.
+  assert.equal(fails('bunx oxlint@^1\nFound 7 warnings and 0 errors'), true, 'a nonzero warning count fails even next to 0 errors');
+  assert.equal(fails('python3 install-pr-hooks --apply\ninstalled=1 failed=2'), true, 'failed=2 is not a result');
+  assert.equal(fails('python3 install-pr-hooks --selfcheck\ninstalled=1 failed=0'), false, 'failed=0 is a result');
+  // The nonzero veto must not read a count across a `key=value` boundary: the
+  // 1 in `installed=1` counts installs, not failures.
+  assert.equal(fails('bunx x\n12 passed, 2 failed'), true, 'a nonzero failed count still vetoes');
+  assert.equal(fails('bunx x\nFound 7 warnings and 0 errors'), true, 'a clean errors count cannot mask warnings');
+  assert.equal(fails('npx tsc --noEmit\n0 errors'), false, '0 errors is a result');
+  assert.equal(fails('pytest -q\n12 passed'), false, 'pytest still counts');
+  assert.equal(fails('cargo test\n14 passed'), false, 'cargo still counts');
+
+  // Widening must not empty the rule. This phrase is the documented refusal.
+  assert.equal(fails('Tested locally.'), true);
+
+  const commandOnly = finding('$ bash x.sh\nit did a thing');
+  assert.ok(commandOnly, 'a command with no result still fails');
+  assert.match(commandOnly.expected, /result/i);
+  assert.doesNotMatch(commandOnly.expected, /a command and its result/i);
+
+  const resultOnly = finding('Results: 13 passed, 0 failed');
+  assert.ok(resultOnly, 'a result with no command still fails');
+  assert.match(resultOnly.expected, /command/i);
+  assert.doesNotMatch(resultOnly.expected, /a command and its result/i);
+});
+
+test('a nonzero failed count is not masked by "passed" in the same result', () => {
+  // "12 passed, 2 failed" matches `pass(?:ed)?` on its own, the same way
+  // "Found 7 warnings and 0 errors" matched a clean "0 errors" until the
+  // prior fix. A nonzero failure count next to a passing word is still a
+  // red run, in either spelling this repo's tools use.
+  const body = (verified) => [
+    '## What', 'One sentence.',
+    '## Why', 'Because of the reason.',
+    '## How I verified', verified,
+    'Assisted-by: agent:model',
+  ].join('\n\n');
+  const fails = (text) => validateBody(body(text), 142, config)
+    .failures.some((f) => f.check === '## How I verified');
+
+  assert.equal(fails('pytest -q\n12 passed, 2 failed'), true, '2 failed is not a result, even beside "passed"');
+  assert.equal(fails('bash tests/x.sh\n13 passed, 0 failed'), false, '0 failed stays a passing result');
+  assert.equal(fails('python3 install-pr-hooks --apply\ninstalled=1 failed=0 failed=2'), true, 'a later failed=2 is not masked by an earlier failed=0');
+});
+
+test('a count is not always spelled with the noun right against it', () => {
+  // go test prints "1 test failed", not "1 failed" -- the noun sits between
+  // the digit and the word the veto looks for. A count is also not always
+  // written without a leading zero. Neither should let a red run through.
+  const body = (verified) => [
+    '## What', 'One sentence.',
+    '## Why', 'Because of the reason.',
+    '## How I verified', verified,
+    'Assisted-by: agent:model',
+  ].join('\n\n');
+  const fails = (text) => validateBody(body(text), 142, config)
+    .failures.some((f) => f.check === '## How I verified');
+
+  assert.equal(fails('go test ./...\n13 passed, 1 test failed'), true, 'a noun between the count and "failed" still vetoes');
+  assert.equal(fails('go test ./...\n11 passed, 2 tests failed'), true, 'the plural noun still vetoes');
+  assert.equal(fails('pytest -q\n13 passed, 02 failed'), true, 'a leading zero does not hide a nonzero count');
+  assert.equal(fails('python3 install-pr-hooks --apply\ninstalled=1 failed=02'), true, 'a leading zero in a key=value count still vetoes');
+  assert.equal(fails('go test ./...\n13 passed, 0 tests failed'), false, 'an all-zero count with a noun stays a passing result');
+});
+
 test('prefix precedence holds on the CI path, not only in loadConfig', async () => {
   // #101 fixed the precedence and covered it through loadConfig, which is the
   // LOCAL path. The path that was broken is this one: runPr -> fetchRemoteConfig.
@@ -1134,8 +1723,9 @@ test('prefix precedence holds on the CI path, not only in loadConfig', async () 
       }
       if (url.includes('/commits')) return { ok: true, json: async () => ([{ sha: 'abc1234', commit: { message: 'Do one thing' } }]) };
       if (url.includes('/files')) return { ok: true, json: async () => ([]) };
+      if (url.includes('/compare/')) return { ok: true, json: async () => ({ behind_by: 0, merge_base_commit: { sha: '1234567' } }) };
       if (url.match(/pulls\/\d+$/)) {
-        return { ok: true, json: async () => ({ head: { ref: branch }, base: { ref: 'main' }, title: 'x', body: 'x', labels: [] }) };
+        return { ok: true, json: async () => ({ head: { ref: branch, sha: 'deadbee' }, base: { ref: 'main' }, title: 'x', body: 'x', labels: [] }) };
       }
       if (url.includes('issues/')) return { ok: true, json: async () => ({ state: 'open' }) };
       throw new Error(`Unexpected fetch URL: ${url}`);
@@ -1166,51 +1756,104 @@ test('prefix precedence holds on the CI path, not only in loadConfig', async () 
   }
 });
 
-test('drift requires exactly one marker pair, in order', () => {
-  // Two review rounds each found a new ordering the previous check missed,
-  // because every fix asked "is there another marker AFTER this one" and that
-  // can only see forward. The stray `end` before the real `start` is the case
-  // that slipped through twice. The rule is a property of the whole file, so
-  // these cases are one table rather than three patches.
-  const START = '<!-- pr-standards:start -->';
-  const END = '<!-- pr-standards:end -->';
-  const cases = [
-    ['a stray end before the real start', (block) => `${END}\n${block}`],
-    ['a stray start before the real start', (block) => `${START}\n${block}`],
-    ['a duplicate pair after the real one', (block) => `${block}\n${block}`],
-    ['a start with no end at all', () => `${START}\ncontent that never closes\n`],
-    ['an end with no start at all', () => `${END}\n`],
-    ['the pair inverted', (block) => `${END}\n${block.split(START)[1].split(END)[0]}\n${START}\n`],
-  ];
+test('a served asset root is never committed proof media', () => {
+  // Precedence, not just membership. A screenshot gallery under public/ is an
+  // ordinary product pattern -- a docs site or a landing page -- so the asset
+  // root has to win over the proof-directory signal. Flagging one rejects
+  // honest work, and that is the direction this check must not be wrong in.
+  // Someone committing pull request media puts it at the repo root or in
+  // proof/, not under a directory the site serves.
+  const added = (filename) => isCommittedProofMedia({ filename, status: 'added' });
 
-  for (const [name, mangle] of cases) {
-    const root = driftFixture();
-    try {
-      const agentsPath = path.join(root, 'AGENTS.md');
-      fs.writeFileSync(agentsPath, mangle(readFileSync(agentsPath, 'utf8')));
-      const result = runDrift(root);
-      const failure = result.json.failures.find((item) => item.check === 'managed AGENTS.md block');
-      assert.equal(result.status, 1, `${name}: ${result.stdout}${result.stderr}`);
-      assert.equal(failure.got, 'malformed', name);
-      // A malformed block gets no diff. Diffing against a block whose extent
-      // cannot be determined would print noise and imply the extent was known.
-      assert.equal(Object.hasOwn(failure, 'diff'), false, name);
-    } finally {
-      fs.rmSync(root, { recursive: true, force: true });
-    }
+  for (const path of [
+    'public/before.png', 'public/screenshots/hero-shot.png',
+    'public/images/screenshots/tour-1.png', 'apps/web/assets/screenshots/x.png',
+    'apps/web/assets/after.png',
+  ]) {
+    assert.equal(added(path), false, `${path} is a product asset`);
   }
 
-  // A file with no markers at all is missing, not malformed. The rollout has
-  // not run there, which is a different thing to answer.
-  const root = driftFixture();
+  // Outside an asset root the signals still fire.
+  for (const path of ['screenshots/home.png', 'proof/before.png', 'before.png', 'docs/after.png']) {
+    assert.equal(added(path), true, `${path} looks like committed proof media`);
+  }
+});
+
+test('proof: an attachment under a bullet is not inert', () => {
+  // Four leading spaces mark an indented code block only OUTSIDE a list.
+  // Inside one they are continuation content that renders normally, so a
+  // line-start indentation test rejected an attachment written under a bullet
+  // -- an ordinary way to caption before and after, and honest work.
+  const uiFiles = [{ filename: 'src/components/Button.tsx', status: 'modified' }];
+  const url = (id) => `![shot](https://github.com/user-attachments/assets/${id})`;
+  const failed = (r) => r.failures.some((f) => f.check === 'proof of a visible change');
+  const warned = (r) => r.warnings.some((w) => w.check === 'proof of a visible change');
+  const body = (...lines) => [
+    '## What', 'x', '## Why', 'y', '## How I verified', 'bun test -> pass',
+    ...lines, 'Assisted-by: agent:model',
+  ].join('\n');
+
+  const underBullet = body('- captured both states:', '', `    ${url('aaa')}`, `    ${url('bbb')}`);
+  assert.equal(failed(checkProof(underBullet, uiFiles, config)), false);
+  assert.equal(warned(checkProof(underBullet, uiFiles, config)), false);
+
+  // An indented URL outside a list is inert on GitHub and still counts here.
+  // Telling the two apart needs real block containment, which belongs to the
+  // body reader; counting it is the fail-open direction and is deliberate.
+  const indented = body(`    ${url('ccc')}`, `    ${url('ddd')}`);
+  assert.equal(failed(checkProof(indented, uiFiles, config)), false);
+});
+
+test('--prefix judges a branch belonging to another repo', () => {
+  // The PreToolUse guard runs in the session's working directory while
+  // `gh pr create --repo X` targets X. Without an explicit prefix the branch is
+  // checked against the wrong repo and a conforming cross-repo PR is refused.
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'prs-crossrepo-'));
   try {
-    const agentsPath = path.join(root, 'AGENTS.md');
-    const stripped = readFileSync(agentsPath, 'utf8').split(START)[0];
-    fs.writeFileSync(agentsPath, stripped);
-    const result = runDrift(root);
-    const failure = result.json.failures.find((item) => item.check === 'managed AGENTS.md block');
-    assert.equal(failure.got, 'missing');
+    const launcher = fileURLToPath(new URL('./pr-standards', import.meta.url));
+    const run = (args, env = {}) => spawnSync(process.execPath, [launcher, ...args], {
+      cwd,
+      encoding: 'utf8',
+      env: { ...process.env, GITHUB_REPOSITORY: 'pooriaarab/content-rabbit', ...env },
+    });
+
+    const crossRepo = run(['precheck', '--branch', 'scr-173-define-the-issue-standard',
+      '--title', '[SCR-173] Define the issue standard', '--prefix', 'scr']);
+    assert.equal(crossRepo.status, 0, crossRepo.stdout + crossRepo.stderr);
+    assert.match(crossRepo.stdout, /Using prefix: scr \(from --prefix\)/);
+
+    // The same branch without the flag is judged against the cwd's repo, which
+    // is the bug this flag exists to fix. Asserted so a regression is visible.
+    const withoutFlag = run(['precheck', '--branch', 'scr-173-define-the-issue-standard']);
+    assert.notEqual(withoutFlag.status, 0, withoutFlag.stdout + withoutFlag.stderr);
   } finally {
-    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test('--prefix narrows the check, it never widens it', () => {
+  // A flag that lets a caller choose the prefix could be used to wave a bad
+  // branch through. It must still refuse a branch that does not match the
+  // prefix it was given, and refuse a prefix that is not a valid prefix.
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'prs-prefixguard-'));
+  try {
+    const launcher = fileURLToPath(new URL('./pr-standards', import.meta.url));
+    const run = (args) => spawnSync(process.execPath, [launcher, ...args], {
+      cwd,
+      encoding: 'utf8',
+      env: { ...process.env, GITHUB_REPOSITORY: 'pooriaarab/content-rabbit' },
+    });
+
+    const mismatch = run(['precheck', '--branch', 'cr-173-x', '--prefix', 'scr']);
+    assert.notEqual(mismatch.status, 0, mismatch.stdout + mismatch.stderr);
+
+    // Exit 2 is the configuration-error code.
+    assert.equal(run(['precheck', '--branch', 'scr-1-x', '--prefix', 'SCRIPTS']).status, 2);
+    assert.equal(run(['precheck', '--branch', 'scr-1-x', '--prefix', 'toolong']).status, 2);
+
+    // The flag belongs to precheck alone; the other modes know their repo.
+    assert.equal(run(['branch', '--prefix', 'scr']).status, 2);
+  } finally {
+    fs.rmSync(cwd, { recursive: true, force: true });
   }
 });

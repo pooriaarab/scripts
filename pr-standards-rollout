@@ -3,7 +3,9 @@
 #
 # Every repo gets .github/pr-standards.json (with its prefix),
 # .github/pull_request_template.md, and .github/workflows/pr-standards.yml.
-# With --with-generated-drift, also .github/workflows/generated-drift.yml.
+# Each --with-* flag adds one more optional workflow:
+#   --with-generated-drift    .github/workflows/generated-drift.yml
+#   --with-post-merge-verify  .github/workflows/post-merge-verify.yml
 #
 # Dry-run is the default.  Use --apply to write anything.
 #
@@ -12,6 +14,7 @@
 #   ./pr-standards-rollout --repo content-rabbit  # dry-run one repo
 #   ./pr-standards-rollout --repo content-rabbit --apply  # PR everything
 #   ./pr-standards-rollout --with-generated-drift  # also deploy the drift check
+#   ./pr-standards-rollout --with-post-merge-verify  # also deploy the live check
 #
 set -u
 SCRIPT_DIR="$(dirname "$0")"
@@ -28,15 +31,31 @@ PREFIXES_FILE="$SCRIPT_DIR/repo-prefixes.json"
 TEMPLATES_DIR="$SCRIPT_DIR/pr-standards-templates"
 OWNER="pooriaarab"
 
-DRY=1; TARGET_REPO=""; WITH_GENERATED_DRIFT=0
+# Adding a path at most once. The flags used to be booleans, so repeating one
+# was harmless; appending to a list is not. A repeated flag looked up and wrote
+# the same file twice, which is a wasted API call and a second no-op commit on
+# the rollout branch.
+want_optional() {
+  local candidate="$1" existing
+  for existing in ${OPTIONAL_FILES[@]+"${OPTIONAL_FILES[@]}"}; do
+    [ "$existing" = "$candidate" ] && return 0
+  done
+  OPTIONAL_FILES+=("$candidate")
+}
+
+DRY=1; TARGET_REPO=""; OPTIONAL_FILES=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --apply) DRY=0; shift ;;
-    --with-generated-drift) WITH_GENERATED_DRIFT=1; shift ;;
+    # Every optional workflow lands in one list. Each flag used to add its own
+    # variable and its own copy of four separate blocks, and the fourth flag
+    # would have added four more.
+    --with-generated-drift) want_optional ".github/workflows/generated-drift.yml"; shift ;;
+    --with-post-merge-verify) want_optional ".github/workflows/post-merge-verify.yml"; shift ;;
     --repo)
       [ $# -ge 2 ] || { echo "ERROR: --repo requires a value"; exit 1; }
       TARGET_REPO="$2"; shift 2 ;;
-    --help|-h) sed -n '2,14p' "$0"; exit 0 ;;
+    --help|-h) sed -n '2,17p' "$0"; exit 0 ;;
     *) echo "unknown flag: $1"; exit 1 ;;
   esac
 done
@@ -69,9 +88,87 @@ PR_CONFIG_TPL=$(read_template pr-standards.json) || exit 1
 PR_TEMPLATE_MD=$(read_template pull_request_template.md) || exit 1
 WORKFLOW_YML=$(read_template pr-standards.yml) || exit 1
 AGENTS_BLOCK_TPL=$(read_template agents-block.md) || exit 1
-if [ "$WITH_GENERATED_DRIFT" -eq 1 ]; then
-  GENERATED_DRIFT_YML=$(read_template generated-drift.yml) || exit 1
-fi
+# An optional template is read only when its flag asked for it. Reading them all
+# would fail the whole run on a template a caller never wanted.
+for OPT in ${OPTIONAL_FILES[@]+"${OPTIONAL_FILES[@]}"}; do
+  case "$OPT" in
+    *generated-drift.yml)   GENERATED_DRIFT_YML=$(read_template generated-drift.yml) || exit 1 ;;
+    *post-merge-verify.yml) POST_MERGE_VERIFY_YML=$(read_template post-merge-verify.yml) || exit 1 ;;
+  esac
+done
+
+# GitHub's secondary rate limit for content-creating requests is about 500
+# per hour. The rate_limit endpoint does not expose it: core stays 5000/5000
+# while these 403s fire. A full apply is roughly 7 writes per repo (issue,
+# branch, four files, PR) across ~107 repos, so 749 back-to-back writes blow
+# past that ceiling. 8 seconds between writes keeps a full-fleet apply under
+# 500 content-creating requests per hour (3600 / 8 = 450).
+WRITE_PACE_SECONDS=8
+
+# Retry a content-creating call. A 403 whose body mentions a rate limit is
+# the secondary limit and is transient. A 404 or a permission error is a
+# genuine failure and must surface immediately so the caller can tally it.
+#
+# The pace applies on every exit, not just success: a permanent failure (or
+# a rate-limited call that exhausts its retries) still counted as one of the
+# content-creating requests GitHub is throttling, and the caller moves on to
+# the next write right after this returns. Skipping the sleep here would let
+# a run of failures fire back-to-back and reproduce the exact burst that
+# trips the secondary limit in the first place.
+GH_WRITE_OUT=""
+gh_write() {
+  local attempt=1
+  local max_attempts=4
+  # Start the backoff at the pacing floor: a retry is still a
+  # content-creating request, so it must never fire sooner than
+  # WRITE_PACE_SECONDS after the attempt before it.
+  local delay="$WRITE_PACE_SECONDS"
+  local err
+  # Buffer stdin once. Some callers pipe a payload in via a heredoc
+  # (`gh_write gh api ... <<< "$PAYLOAD_JSON"`); that heredoc is a
+  # temp file, and the first "$@" attempt below reads it to EOF. A
+  # retry that read the same fd again would see EOF immediately and
+  # send an empty body instead of the payload. Re-feeding a buffered
+  # copy on every attempt keeps retries identical to the first try.
+  #
+  # This whole function runs inside the outer `while read -r repo`
+  # loop, so a call with no heredoc of its own inherits that loop's
+  # fd0 (the REPOS_LIST here-string). `cat` on that fd would drain
+  # the remaining repo list and end the loop early. Callers with no
+  # payload (issue/branch/PR create) must redirect `</dev/null` so
+  # this reads an empty, already-at-EOF fd instead.
+  local stdin_buf=""
+  [ -t 0 ] || stdin_buf=$(cat)
+  GH_WRITE_OUT=""
+  while [ "$attempt" -le "$max_attempts" ]; do
+    if err=$(printf '%s\n' "$stdin_buf" | "$@" 2>&1); then
+      GH_WRITE_OUT="$err"
+      sleep "$WRITE_PACE_SECONDS"
+      return 0
+    fi
+    # Two greps, not one alternation: BSD grep has no \|, and the 403 and
+    # the words "rate limit" can sit on the same line or adjacent lines.
+    if printf '%s\n' "$err" | grep -q 'HTTP 403' \
+        && printf '%s\n' "$err" | grep -qi 'rate limit'; then
+      if [ "$attempt" -ge "$max_attempts" ]; then
+        GH_WRITE_OUT="$err"
+        printf '%s\n' "$err" >&2
+        sleep "$WRITE_PACE_SECONDS"
+        return 1
+      fi
+      sleep "$delay"
+      delay=$((delay * 2))
+      attempt=$((attempt + 1))
+      continue
+    fi
+    GH_WRITE_OUT="$err"
+    printf '%s\n' "$err" >&2
+    sleep "$WRITE_PACE_SECONDS"
+    return 1
+  done
+  sleep "$WRITE_PACE_SECONDS"
+  return 1
+}
 
 # ── List target repos ───────────────────────────────────────────────────
 # Repo names are interpolated into python source below. GitHub will not mint a
@@ -158,8 +255,8 @@ print(prefixes.get('$repo', ''))
   # without this check a single deleted/renamed repo would FAIL forever and
   # `exit 1` at the bottom would never go away. Tell that apart from a real
   # lookup failure (auth, rate-limit) the same way the config/PR lookups do.
-  INFO=$(gh repo view "$OWNER/$repo" --json isFork,isArchived,diskUsage 2>/dev/null) || {
-    VIEW_ERR=$(gh repo view "$OWNER/$repo" --json isFork,isArchived,diskUsage 2>&1 >/dev/null)
+  INFO=$(gh repo view "$OWNER/$repo" --json isFork,isArchived 2>/dev/null) || {
+    VIEW_ERR=$(gh repo view "$OWNER/$repo" --json isFork,isArchived 2>&1 >/dev/null)
     if echo "$VIEW_ERR" | grep -qi 'could not resolve\|not found'; then
       echo "SKIP  $repo  (no longer exists)"
       skipped_c=$(( skipped_c + 1 ))
@@ -169,13 +266,13 @@ print(prefixes.get('$repo', ''))
     fi
     continue
   }
-  # One python3 call emits all three values with booleans lowercased so bash
-  # compares against 'true'/'false' correctly. Three calls carried too many
+  # One python3 call emits both values with booleans lowercased so bash
+  # compares against 'true'/'false' correctly. Two calls carried too many
   # chances for the same class of bug.
-  read -r IS_FORK IS_ARCHIVED DISK <<< "$(echo "$INFO" | python3 -c "
+  read -r IS_FORK IS_ARCHIVED <<< "$(echo "$INFO" | python3 -c "
 import json, sys
 d = json.load(sys.stdin)
-print(str(d['isFork']).lower(), str(d['isArchived']).lower(), d['diskUsage'])
+print(str(d['isFork']).lower(), str(d['isArchived']).lower())
 ")"
 
   if [ "$IS_ARCHIVED" = "true" ]; then
@@ -184,9 +281,9 @@ print(str(d['isFork']).lower(), str(d['isArchived']).lower(), d['diskUsage'])
   if [ "$IS_FORK" = "true" ]; then
     echo "SKIP  $repo  (fork)"; skipped_c=$(( skipped_c + 1 )); continue
   fi
-  if [ "$DISK" -lt 10 ]; then
-    echo "SKIP  $repo  (under 10KB)"; skipped_c=$(( skipped_c + 1 )); continue
-  fi
+  # Eligibility (including the diskUsage==0 never-pushed floor) belongs in
+  # repo-prefixes.json via build-repo-prefixes.py. A second size floor here
+  # can only disagree with the registry and skip repos the generator admitted.
 
   # ── Check if already done ────────────────────────────────────────────
   # A repo is "done" once the config prefix matches, the companion files exist,
@@ -215,8 +312,7 @@ print(p)
           REPAIR_MISSING+="$F "
         }
       done
-      if [ "$WITH_GENERATED_DRIFT" -eq 1 ]; then
-        F=".github/workflows/generated-drift.yml"
+      for F in ${OPTIONAL_FILES[@]+"${OPTIONAL_FILES[@]}"}; do
         F_RESP=$(gh api "repos/$OWNER/$repo/contents/$F" --jq '.sha' 2>&1) || {
           if ! echo "$F_RESP" | grep -q '"Not Found"'; then
             echo "WARN  $repo  (companion lookup failed for $F)" >&2
@@ -225,7 +321,7 @@ print(p)
           fi
           REPAIR_MISSING+="$F "
         }
-      fi
+      done
 
       # AGENTS.md needs its CONTENT checked, not just its existence. A repo with
       # a hand-written AGENTS.md that has no markers, or one carrying a block
@@ -374,8 +470,9 @@ print(json.dumps(cfg, indent=2))
           *.json)               FC="$CONFIG_JSON" ;;
           *_template.md)        FC="$PR_BODY" ;;
           AGENTS.md)            FC="$AGENTS_MD" ;;
-          *generated-drift.yml) FC="$GENERATED_DRIFT_YML" ;;
-          *)                    FC="$WORKFLOW_YML" ;;
+          *generated-drift.yml)   FC="$GENERATED_DRIFT_YML" ;;
+          *post-merge-verify.yml) FC="$POST_MERGE_VERIFY_YML" ;;
+          *)                      FC="$WORKFLOW_YML" ;;
         esac
         # A 404 means the file is new and no sha belongs in the payload. Any
         # other failure means we could not read a file that may well exist, and
@@ -415,10 +512,10 @@ if sha:
     payload['sha'] = sha
 print(json.dumps(payload))
 " <<< "$FC")
-        gh api "repos/$OWNER/$repo/contents/$FP" --method PUT --silent --input - <<< "$PAYLOAD_JSON" 2>/dev/null || {
+        if ! gh_write gh api "repos/$OWNER/$repo/contents/$FP" --method PUT --silent --input - <<< "$PAYLOAD_JSON"; then
           echo "WARN  $repo  (REPAIR: $FP failed)"
           REPAIR_FAIL=1
-        }
+        fi
       done
       if [ "$REPAIR_FAIL" -ne 0 ]; then
         echo "FAIL  $repo  (REPAIR: one or more writes failed)"
@@ -455,7 +552,7 @@ print(json.dumps(payload))
   if [ -n "$ISSUE_NUM" ]; then
     echo "      $repo  (reusing open issue #$ISSUE_NUM from an earlier run)"
   else
-  ISSUE_NUM=$(gh issue create \
+  if gh_write gh issue create \
     --repo "$OWNER/$repo" \
     --title "Adopt the fleet PR standard" \
     --body "Set up branch naming, PR title enforcement, and size checks.
@@ -468,7 +565,11 @@ Branch names: \`$PREFIX-<issue>-<slug>\`
 PR titles: \`[$PREFIX_UPPER-<ISSUE>] description\`
 
 $ISSUE_MARKER
-" 2>/dev/null | grep -oE '[0-9]+$' | head -1)
+" </dev/null; then
+    ISSUE_NUM=$(printf '%s\n' "$GH_WRITE_OUT" | grep -oE '[0-9]+$' | head -1)
+  else
+    ISSUE_NUM=""
+  fi
   fi
   if [ -z "$ISSUE_NUM" ]; then
     echo "FAIL  $repo  (issue create returned no number)"
@@ -488,14 +589,14 @@ $ISSUE_MARKER
   # died before the PR (the issue reuse above means a retry hits this same
   # branch name, and creating a ref that already exists always fails).
   if ! gh api "repos/$OWNER/$repo/git/refs/heads/$BRANCH" &>/dev/null; then
-    gh api "repos/$OWNER/$repo/git/refs" \
+    if ! gh_write gh api "repos/$OWNER/$repo/git/refs" \
       --method POST --silent \
       -f ref="refs/heads/$BRANCH" \
-      -f sha="$SHA" 2>/dev/null || {
+      -f sha="$SHA" </dev/null; then
       echo "FAIL  $repo  (branch)"
       fail_c=$(( fail_c + 1 ))
       continue
-    }
+    fi
   fi
 
   # Step C: write three files via contents API
@@ -511,9 +612,7 @@ $ISSUE_MARKER
 
   WRITE_FAIL=0; WRITE_FAIL_FILE=""
   FILES=(".github/pr-standards.json" ".github/pull_request_template.md" ".github/workflows/pr-standards.yml" "AGENTS.md")
-  if [ "$WITH_GENERATED_DRIFT" -eq 1 ]; then
-    FILES+=(".github/workflows/generated-drift.yml")
-  fi
+  FILES+=(${OPTIONAL_FILES[@]+"${OPTIONAL_FILES[@]}"})
   for item in "${FILES[@]}"; do
     FP="$item"
 
@@ -522,8 +621,9 @@ $ISSUE_MARKER
       *.json)               FC="$CONFIG_JSON" ;;
       *_template.md)        FC="$PR_BODY" ;;
       AGENTS.md)            FC="$AGENTS_MD" ;;
-      *generated-drift.yml) FC="$GENERATED_DRIFT_YML" ;;
-      *)                    FC="$WORKFLOW_YML" ;;
+      *generated-drift.yml)   FC="$GENERATED_DRIFT_YML" ;;
+      *post-merge-verify.yml) FC="$POST_MERGE_VERIFY_YML" ;;
+      *)                      FC="$WORKFLOW_YML" ;;
     esac
 
     EXISTING_SHA=$(gh api "repos/$OWNER/$repo/contents/$FP?ref=$BRANCH" \
@@ -548,13 +648,13 @@ if '$EXISTING_SHA':
 print(json.dumps(payload))
 " <<< "$FC")
 
-    gh api "repos/$OWNER/$repo/contents/$FP" \
+    if ! gh_write gh api "repos/$OWNER/$repo/contents/$FP" \
       --method PUT --silent \
-      --input - <<< "$PAYLOAD_JSON" 2>/dev/null || {
+      --input - <<< "$PAYLOAD_JSON"; then
       echo "WARN  $repo  (failed $FP — may need workflow scope)"
       WRITE_FAIL=1
       WRITE_FAIL_FILE="$FP"
-    }
+    fi
   done
 
   # Step D: abort if any write failed — leave the branch for a re-run
@@ -621,7 +721,7 @@ print(json.dumps(payload))
     continue
   fi
 
-  gh pr create \
+  if gh_write gh pr create \
     --repo "$OWNER/$repo" \
     --base "$DEFAULT_BRANCH" \
     --head "$BRANCH" \
@@ -655,18 +755,17 @@ $PRECHECK_OUT
 The remaining rules -- the body's shape, the size caps, the commit trailers --
 are judged by the same checker when it runs on this PR.
 
-Assisted-by: pooriaarab/scripts:pr-standards-rollout" \
-    2>/dev/null && {
-      echo "DONE  $repo  (#$ISSUE_NUM -> $BRANCH -> PR)"
-      # An assignment, not (( done_c++ )). Post-increment returns the value
-      # before incrementing, so on the first success it returns 0, the group
-      # exits 1, the || branch also runs, and one repo is reported both DONE
-      # and FAIL while fail_c climbs.
-      done_c=$(( done_c + 1 ))
-    } || {
-      echo "FAIL  $repo  (PR)"
-      fail_c=$(( fail_c + 1 ))
-    }
+Assisted-by: pooriaarab/scripts:pr-standards-rollout" </dev/null; then
+    echo "DONE  $repo  (#$ISSUE_NUM -> $BRANCH -> PR)"
+    # An assignment, not (( done_c++ )). Post-increment returns the value
+    # before incrementing, so on the first success it returns 0, the group
+    # exits 1, the || branch also runs, and one repo is reported both DONE
+    # and FAIL while fail_c climbs.
+    done_c=$(( done_c + 1 ))
+  else
+    echo "FAIL  $repo  (PR)"
+    fail_c=$(( fail_c + 1 ))
+  fi
 
 done <<< "$REPOS_LIST"
 

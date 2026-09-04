@@ -2,7 +2,16 @@ name: vibecodereview
 on:
   pull_request:
     types: [opened, synchronize, review_requested]
-    paths-ignore: ["**.md", "docs/**"]
+    # `!` exclusions work with `paths`, not `paths-ignore`, so the negated
+    # form still skipped a pull request that changed only VISION.md.
+    # Ordered: take everything, drop the markdown and docs, then put
+    # VISION.md back. It is what the council reads to judge whether every
+    # OTHER pull request belongs here, so it is the one doc worth a council.
+    paths:
+      - "**"
+      - "!**.md"
+      - "!docs/**"
+      - "VISION.md"
 concurrency:
   group: vibecodereview-${{ github.event.pull_request.number }}
   cancel-in-progress: true
@@ -19,6 +28,8 @@ jobs:
     steps:
       - uses: pooriaarab/vibecodereview@v1
         with:
+          vibetrace_ingest_url: ${{ secrets.VIBETRACE_INGEST_URL }}
+          vibetrace_ingest_token: ${{ secrets.VIBETRACE_INGEST_TOKEN }}
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           claude_code_oauth_token_2: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN_2 }}
           github_token: ${{ github.token }}

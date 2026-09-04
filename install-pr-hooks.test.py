@@ -6,8 +6,13 @@ branch rule. That copy drifted from pr-standards.mjs once already: it accepted
 cr-0-x and cr-007-x, imposed no slug length, and exempted master, which the
 canonical validator does not. These cases pin the two together.
 """
-import pathlib, subprocess, os, tempfile, json, sys
+import pathlib
+import re, subprocess, os, tempfile, json, sys
 HERE = pathlib.Path(__file__).parent
+# The installer writes the PreToolUse guard under $HOME/.local/share. Pin HOME
+# to a throwaway directory so this suite cannot touch the real one, ~/.claude*,
+# or any real settings file.
+os.environ["HOME"] = tempfile.mkdtemp()
 src = (HERE / "install-pr-hooks").read_text()
 k = "read -r -d '' HOOK_BODY <<'HOOK' || true\n"
 body = src[src.index(k)+len(k):]
@@ -453,5 +458,277 @@ def test_global_hooks_path_matching_the_default_in_other_spellings():
 
 if not test_global_hooks_path_matching_the_default_in_other_spellings():
     ALL_OK = False
+
+
+def _guard_harness():
+    """Throwaway HOME plus an empty --root, so the pre-push scan is a no-op."""
+    import subprocess as sp
+    home = tempfile.mkdtemp()
+    root = tempfile.mkdtemp()
+    env = {**os.environ, "HOME": home, "GIT_CONFIG_GLOBAL": "/dev/null"}
+    dest = os.path.join(home, ".local", "share", "pr-standards", "pr-standards-guard.sh")
+    return home, root, env, dest, sp
+
+
+def _guard_run(sp, env, *args):
+    return sp.run([str(HERE / "install-pr-hooks"), *args],
+                  capture_output=True, text=True, env=env)
+
+
+def _expected_sha(sp):
+    return sp.check_output(
+        ["git", "-C", str(HERE), "rev-parse", "HEAD:hooks/pr-standards-guard.sh"],
+        text=True,
+    ).strip()
+
+
+def _strip_stamp(text):
+    body, stamp = [], None
+    for line in text.splitlines(keepends=True):
+        if line.startswith("# pr-standards-guard installed from "):
+            stamp = line
+            continue
+        body.append(line)
+    return "".join(body), stamp
+
+
+def _body_sha(sp, dest):
+    text = pathlib.Path(dest).read_text()
+    body, _ = _strip_stamp(text)
+    return sp.check_output(["git", "hash-object", "--stdin"], input=body.encode()).decode().strip()
+
+
+def test_pretooluse_dry_run_writes_nothing():
+    """No --apply reports the PreToolUse path and writes nothing."""
+    home, root, env, dest, sp = _guard_harness()
+    out = _guard_run(sp, env, "--root", root).stdout
+    wrote = os.path.exists(dest)
+    ok = (not wrote) and ("would write" in out) and (dest in out) and ("settings.json" in out)
+    print(f"  {'OK ' if ok else 'FAIL'} dry-run reports PreToolUse guard, writes nothing")
+    return ok
+
+
+def test_pretooluse_apply_writes_stamped_copy_and_snippet():
+    """--apply writes a copy identical to the source aside from the stamp line."""
+    home, root, env, dest, sp = _guard_harness()
+    out = _guard_run(sp, env, "--apply", "--root", root).stdout
+    src = (HERE / "hooks/pr-standards-guard.sh").read_text()
+    text = pathlib.Path(dest).read_text()
+    body, stamp = _strip_stamp(text)
+    expected = _expected_sha(sp)
+    stamp_ok = (
+        stamp is not None
+        and stamp.startswith(f"# pr-standards-guard installed from {expected} on ")
+    )
+    snippet = "settings.json" in out and dest in out and "does not edit" in out
+    ok = body == src and stamp_ok and snippet and os.access(dest, os.X_OK)
+    print(f"  {'OK ' if ok else 'FAIL'} --apply writes stamped guard and prints snippet")
+    return ok
+
+
+def test_pretooluse_apply_is_idempotent():
+    """A second --apply reports no change and does not rewrite the file."""
+    home, root, env, dest, sp = _guard_harness()
+    _guard_run(sp, env, "--apply", "--root", root)
+    before = pathlib.Path(dest).read_bytes()
+    out = _guard_run(sp, env, "--apply", "--root", root).stdout
+    after = pathlib.Path(dest).read_bytes()
+    ok = after == before and "already installed" in out
+    print(f"  {'OK ' if ok else 'FAIL'} second --apply reports no change")
+    return ok
+
+
+def test_pretooluse_drift_reports_stale_after_hand_edit():
+    """A hand-edited install is stale, and the check names both revisions."""
+    home, root, env, dest, sp = _guard_harness()
+    _guard_run(sp, env, "--apply", "--root", root)
+    pathlib.Path(dest).write_text(pathlib.Path(dest).read_text() + "# hand-edit\n")
+    out = _guard_run(sp, env, "--drift").stdout
+    expected = _expected_sha(sp)
+    installed = _body_sha(sp, dest)
+    ok = (
+        "stale" in out
+        and expected in out
+        and installed in out
+        and expected != installed
+    )
+    print(f"  {'OK ' if ok else 'FAIL'} drift names both revisions when stale")
+    return ok
+
+
+def test_pretooluse_dry_run_distinguishes_edited_from_older():
+    """The dry-run message must not print one revision twice.
+
+    --drift computes a content sha, so it names two different values. The
+    dry-run install path prints the STAMP twice, and a stamp is unchanged by a
+    hand edit -- so it read "stale; installed X expected X", which tells the
+    reader nothing and looks like a broken tool. Two causes, two messages.
+    """
+    home, root, env, dest, sp = _guard_harness()
+    _guard_run(sp, env, "--apply", "--root", root)
+
+    # Cause 1: edited after install. The stamp still matches.
+    pathlib.Path(dest).write_text(pathlib.Path(dest).read_text() + "# hand-edit\n")
+    edited = _guard_run(sp, env, "--root", root).stdout
+    ok = "edited since install" in edited and "expected" not in edited
+
+    # Cause 2: installed from an older revision. The stamp differs.
+    old = "0" * 40
+    pathlib.Path(dest).write_text(
+        re.sub(r"(installed from )[0-9a-f]{40}", r"\g<1>" + old, pathlib.Path(dest).read_text(), count=1)
+    )
+    older = _guard_run(sp, env, "--root", root).stdout
+    ok = ok and "stale" in older and old in older and _expected_sha(sp) in older
+
+    print(f"  {'OK ' if ok else 'FAIL'} dry run tells an edit apart from an older revision")
+    return ok
+
+
+def test_pretooluse_drift_absent_is_not_installed_not_stale():
+    """No installed file is 'not installed', never 'stale'."""
+    home, root, env, dest, sp = _guard_harness()
+    out = _guard_run(sp, env, "--drift").stdout
+    ok = "not installed" in out and "stale" not in out
+    print(f"  {'OK ' if ok else 'FAIL'} absent guard is not installed, not stale")
+    return ok
+
+
+def test_pretooluse_uninstall_removes_and_drift_says_not_installed():
+    """--uninstall --apply removes the guard; drift then says not installed."""
+    home, root, env, dest, sp = _guard_harness()
+    _guard_run(sp, env, "--apply", "--root", root)
+    _guard_run(sp, env, "--uninstall", "--apply", "--root", root)
+    out = _guard_run(sp, env, "--drift").stdout
+    ok = (not os.path.exists(dest)) and ("not installed" in out) and ("stale" not in out)
+    print(f"  {'OK ' if ok else 'FAIL'} uninstall removes guard; drift says not installed")
+    return ok
+
+
+def test_pretooluse_never_writes_settings_or_outside_owned_dir():
+    """The installer never edits settings and never writes outside its owned dir."""
+    home, root, env, dest, sp = _guard_harness()
+    settings = pathlib.Path(home) / ".claude" / "settings.json"
+    settings.parent.mkdir()
+    settings.write_text('{"keep":true}\n')
+    private = pathlib.Path(home) / "agents-private" / "hooks" / "pr-standards-guard.sh"
+    private.parent.mkdir(parents=True)
+    private.write_text("foreign\n")
+    _guard_run(sp, env, "--apply", "--root", root)
+    owned = os.path.join(home, ".local", "share", "pr-standards")
+    extras = []
+    for dirpath, dirnames, filenames in os.walk(home):
+        if dirpath.startswith(owned):
+            continue
+        for name in filenames:
+            extras.append(os.path.join(dirpath, name))
+    ok = (
+        settings.read_text() == '{"keep":true}\n'
+        and private.read_text() == "foreign\n"
+        and os.path.isfile(dest)
+        and set(extras) == {str(settings), str(private)}
+    )
+    print(f"  {'OK ' if ok else 'FAIL'} no settings edit, no write outside owned dir")
+    return ok
+
+
+def test_pre_push_still_installs_alongside_the_guard():
+    """Pre-push install is unchanged: an eligible repo still gets the hook."""
+    import shutil, subprocess as sp
+    home, root, env, dest, _ = _guard_harness()
+    repo = f"{root}/repo"
+    os.makedirs(f"{repo}/.github")
+    sp.run(["git", "-C", repo, "init", "-q"], check=True, env=env)
+    sp.run(["git", "-C", repo, "remote", "add", "origin",
+            "https://github.com/pooriaarab/testrepo.git"], check=True, env=env)
+    pathlib.Path(f"{repo}/.github/pr-standards.json").write_text('{"prefix":"tt"}')
+    out = _guard_run(sp, env, "--apply", "--root", root).stdout
+    hook = f"{repo}/.git/hooks/pre-push"
+    ok = os.path.isfile(hook) and os.path.isfile(dest) and "INSTALL" in out and repo in out
+    shutil.rmtree(home, ignore_errors=True)
+    shutil.rmtree(root, ignore_errors=True)
+    print(f"  {'OK ' if ok else 'FAIL'} pre-push still installs alongside the guard")
+    return ok
+
+
+def test_pretooluse_drift_reports_not_executable():
+    """A missing execute bit is reported distinctly, not as stale with two shas."""
+    home, root, env, dest, sp = _guard_harness()
+    _guard_run(sp, env, "--apply", "--root", root)
+    os.chmod(dest, 0o644)
+    out = _guard_run(sp, env, "--drift")
+    expected = _expected_sha(sp)
+    ok = out.returncode != 0 and "not executable" in out.stdout and expected in out.stdout and "stale" not in out.stdout and "installed" not in out.stdout
+    print(f"  {'OK ' if ok else 'FAIL'} drift reports not executable, not duplicate shas")
+    return ok
+
+
+def test_pretooluse_apply_refuses_symlinked_guard_dir():
+    """A symlinked parent of the guard directory must not redirect the write."""
+    home, root, env, dest, sp = _guard_harness()
+    real_share = os.path.join(home, "real-share")
+    os.makedirs(real_share)
+    os.makedirs(os.path.join(home, ".local"))
+    os.symlink(real_share, os.path.join(home, ".local", "share"))
+    out = _guard_run(sp, env, "--apply", "--root", root)
+    outside = os.path.join(real_share, "pr-standards", "pr-standards-guard.sh")
+    ok = out.returncode != 0 and "resolves outside" in out.stdout and not os.path.exists(outside)
+    print(f"  {'OK ' if ok else 'FAIL'} apply refuses a symlinked guard directory")
+    return ok
+
+
+def test_installer_invoked_through_symlinked_script():
+    home, root, env, dest, sp = _guard_harness()
+    link = os.path.join(home, "install-pr-hooks-link")
+    os.symlink(str(HERE / "install-pr-hooks"), link)
+    out = sp.run([link, "--apply", "--root", root], capture_output=True, text=True, env=env)
+    ok = out.returncode == 0 and os.path.isfile(dest) and "wrote" in out.stdout
+    print(f"  {'OK ' if ok else 'FAIL'} installer works through a symlinked $0")
+    return ok
+
+def test_uninstall_succeeds_when_guard_blob_unresolvable():
+    """Uninstall does not need HEAD:hooks/pr-standards-guard.sh to resolve."""
+    home, root, env, dest, sp = _guard_harness()
+    _guard_run(sp, env, "--apply", "--root", root)
+    copy = os.path.join(home, "install-pr-hooks-copy")
+    pathlib.Path(copy).write_bytes(pathlib.Path(HERE / "install-pr-hooks").read_bytes())
+    os.chmod(copy, 0o755)
+    out = sp.run([copy, "--uninstall", "--apply", "--root", root], capture_output=True, text=True, env=env)
+    ok = out.returncode == 0 and not os.path.exists(dest) and "removed" in out.stdout
+    print(f"  {'OK ' if ok else 'FAIL'} uninstall works when guard source is unresolvable")
+    return ok
+
+
+def test_uninstall_removes_symlinked_guard():
+    """A symlinked GUARD_DST is removed, not followed, on uninstall."""
+    home, root, env, dest, sp = _guard_harness()
+    _guard_run(sp, env, "--apply", "--root", root)
+    other = os.path.join(home, "other-guard")
+    pathlib.Path(other).write_text("foreign\n")
+    os.remove(dest)
+    os.symlink(other, dest)
+    out = _guard_run(sp, env, "--uninstall", "--apply", "--root", root)
+    ok = out.returncode == 0 and not os.path.exists(dest) and not os.path.islink(dest) and os.path.isfile(other)
+    print(f"  {'OK ' if ok else 'FAIL'} uninstall removes a symlinked guard")
+    return ok
+
+
+for _guard_test in (
+    test_pretooluse_dry_run_writes_nothing,
+    test_pretooluse_apply_writes_stamped_copy_and_snippet,
+    test_pretooluse_apply_is_idempotent,
+    test_pretooluse_drift_reports_stale_after_hand_edit,
+    test_pretooluse_dry_run_distinguishes_edited_from_older,
+    test_pretooluse_drift_absent_is_not_installed_not_stale,
+    test_pretooluse_uninstall_removes_and_drift_says_not_installed,
+    test_pretooluse_never_writes_settings_or_outside_owned_dir,
+    test_pre_push_still_installs_alongside_the_guard,
+    test_pretooluse_drift_reports_not_executable,
+    test_pretooluse_apply_refuses_symlinked_guard_dir,
+    test_installer_invoked_through_symlinked_script,
+    test_uninstall_succeeds_when_guard_blob_unresolvable,
+    test_uninstall_removes_symlinked_guard,
+):
+    if not _guard_test():
+        ALL_OK = False
 
 sys.exit(0 if ALL_OK else 1)

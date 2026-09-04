@@ -11,7 +11,13 @@ max_age = float(os.environ.get("MAX_AGE_HOURS", "6"))
 as_json = os.environ.get("JSON") == "1"
 now = datetime.datetime.now(datetime.timezone.utc)
 
-boxes = json.load(sys.stdin)["boxes"]
+# The REST API returns every Box the account has ever had, including stopped and archived
+# ones; `box list` hides those by default (its --filter defaults to running only). Counting
+# them inflates the burn figure by an order of magnitude and makes the sweeper try to stop
+# Boxes that cost nothing. Only these states bill.
+BILLING_STATES = {"idle", "running", "pending", "stopping", "ready"}
+
+boxes = [b for b in json.load(sys.stdin)["boxes"] if (b.get("state") or "") in BILLING_STATES]
 
 over, no_deadline, under = [], [], []
 burn = 0.0
