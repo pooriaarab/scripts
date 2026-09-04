@@ -22,8 +22,87 @@ except Exception:
     raise SystemExit(0)
 
 operators = {"&&", "||", ";", "|", "&"}
-segments = []
+
+# A heredoc body is data the shell hands to another program, not commands the
+# shell runs. Scanning it judged the example inside `cat <<'EOF' ... EOF` as a
+# real call, which blocked writing a test or a doc that quotes one.
+#
+# Both of the rules below have to be quote-aware, or they fail OPEN -- the
+# dangerous direction. A `#` inside quotes is not a comment, and a `<<` inside
+# quotes does not open a heredoc, so scanning for either blindly let a real
+# `git checkout -b bad-name` on the next line go unjudged. A heredoc delimiter
+# also cannot start with a digit, which is what keeps the shift in
+# `$((1 << 2))` from being read as an opener that swallows the following lines.
+def scan(line):
+    """Return (code_before_any_comment, heredoc_delimiter_or_None)."""
+    out = []
+    delim = None
+    quote = None
+    arith = 0
+    index = 0
+    while index < len(line):
+        char = line[index]
+        if quote:
+            out.append(char)
+            if char == "\\" and quote == '"' and index + 1 < len(line):
+                out.append(line[index + 1]); index += 2; continue
+            if char == quote: quote = None
+            index += 1; continue
+        if char == "\\" and index + 1 < len(line):
+            out.append(char); out.append(line[index + 1]); index += 2; continue
+        if char in "'\"":
+            quote = char; out.append(char); index += 1; continue
+        if char == "#" and (not out or out[-1] in " \t;&|"):
+            break
+        if char == "(" and line.startswith("((", index):
+            # `$(( ))` and `(( ))` are arithmetic. A `<<` inside one is a shift,
+            # never a heredoc opener. Excluding only a DIGIT after `<<` was not
+            # enough: `$((1 << n))` shifts by a variable, so the delimiter test
+            # saw a letter, opened a heredoc, and swallowed every line after it
+            # -- including a real `git checkout -b`. That fails OPEN.
+            arith += 1
+            out.append(char); out.append(line[index + 1]); index += 2; continue
+        if char == ")" and line.startswith("))", index) and arith > 0:
+            arith -= 1
+            out.append(char); out.append(line[index + 1]); index += 2; continue
+        if char == "<" and line.startswith("<<", index) and not line.startswith("<<<", index):
+            if delim is None and arith == 0:
+                rest = index + 2
+                if rest < len(line) and line[rest] == "-": rest += 1
+                while rest < len(line) and line[rest] in " \t": rest += 1
+                # A delimiter starts with a letter, underscore, quote or
+                # backslash -- never a digit, so an arithmetic shift is not one.
+                if rest < len(line) and (line[rest].isalpha() or line[rest] in "_'\"\\"):
+                    word = []
+                    at = rest
+                    while at < len(line):
+                        current = line[at]
+                        if current == "\\" and at + 1 < len(line):
+                            word.append(line[at + 1]); at += 2; continue
+                        if current in "'\"":
+                            close = line.find(current, at + 1)
+                            if close == -1: break
+                            word.append(line[at + 1:close]); at = close + 1; continue
+                        if current.isalnum() or current in "_.-":
+                            word.append(current); at += 1; continue
+                        break
+                    if word: delim = "".join(word)
+            out.append(char); index += 1; continue
+        out.append(char); index += 1
+    return "".join(out), delim
+
+lines = []
+pending = None
 for line in command.split("\n"):
+    if pending is not None:
+        if line.strip() == pending: pending = None
+        continue
+    code, delim = scan(line)
+    lines.append(code)
+    if delim: pending = delim
+
+segments = []
+for line in lines:
     # Per LINE, not per command. An unbalanced quote anywhere -- a heredoc body
     # is the common one -- makes shlex raise, and wrapping the whole loop
     # discarded every segment already found on earlier lines. So a multi-line
@@ -223,7 +302,14 @@ while IFS= read -r encoded; do
   repo=$(normalize_repo "$repo")
   # `owner:branch` names a fork-qualified head. Git ref names cannot contain
   # ":", so stripping up to the first one is safe for plain branches too.
+  given="$branch"
   branch="${branch#*:}"
+  # A --head that carries only the fork qualifier (`--head owner:`) names no
+  # branch this hook can judge. Falling through here used the CHECKOUT's current
+  # branch instead, so a conforming PR was blocked by the name of whatever
+  # branch happened to be checked out -- a verdict about the wrong ref. Nothing
+  # knowable is being asserted, so fail open.
+  if [ "$kind" = gh ] && [ -n "$given" ] && [ -z "$branch" ]; then continue; fi
 
   if [ "$kind" = gh ] && [ -n "$repo" ]; then
     # A remote PR without --head has no safely knowable branch. Do not guess HEAD.
