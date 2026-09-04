@@ -1,0 +1,183 @@
+#!/usr/bin/env bash
+# Kick off Cursor Cloud Agents for pooriaarab repos, injecting secrets from a
+# local env file as session envVars (encrypted at rest, deleted with the agent).
+#
+# Durable Dashboard Secrets / saved Environments are NOT creatable via the public
+# Cloud Agents API (confirmed 404 on /v1/secrets and /v1/environments). This
+# script is the API-supported path: launch agents that use committed
+# `.cursor/environment.json` plus per-run envVars.
+#
+# Secrets file format (never commit it): KEY=value lines, # comments ok.
+# Default path: ~/Documents/Personal/.secrets/cursor-cloud-secrets.env
+#
+# Usage:
+#   ./cursor-cloud-env-setup --dry-run
+#   ./cursor-cloud-env-setup --repo offrouter --apply
+#   ./cursor-cloud-env-setup --apply --limit 5
+#   ./cursor-cloud-env-setup --secrets ~/Documents/Personal/.secrets/cursor-cloud-secrets.env --apply
+#
+set -u
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PREFIXES_FILE="$SCRIPT_DIR/repo-prefixes.json"
+OWNER="pooriaarab"
+SECRETS_FILE="${HOME}/Documents/Personal/.secrets/cursor-cloud-secrets.env"
+CURSOR_ENV="${HOME}/Documents/Personal/.secrets/cursor.env"
+DRY=1
+TARGET_REPO=""
+LIMIT=0
+MODEL="composer-2.5"
+SECRET_COUNT=0
+PROMPT='Confirm the cloud environment is ready: read .cursor/environment.json, print the install field, run a no-op (echo ok), and stop. Do not edit files or open a PR.'
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --apply) DRY=0; shift ;;
+    --dry-run) DRY=1; shift ;;
+    --repo)
+      [ $# -ge 2 ] || { echo "ERROR: --repo requires a value"; exit 1; }
+      TARGET_REPO="$2"; shift 2
+      ;;
+    --secrets)
+      [ $# -ge 2 ] || { echo "ERROR: --secrets requires a path"; exit 1; }
+      SECRETS_FILE="$2"; shift 2
+      ;;
+    --limit)
+      [ $# -ge 2 ] || { echo "ERROR: --limit requires a number"; exit 1; }
+      LIMIT="$2"; shift 2
+      ;;
+    --model)
+      [ $# -ge 2 ] || { echo "ERROR: --model requires a value"; exit 1; }
+      MODEL="$2"; shift 2
+      ;;
+    --help|-h) sed -n '2,18p' "$0"; exit 0 ;;
+    *) echo "unknown flag: $1"; exit 1 ;;
+  esac
+done
+
+[ -r "$CURSOR_ENV" ] || { echo "ERROR: missing $CURSOR_ENV"; exit 2; }
+# shellcheck disable=SC1090
+set -a; source "$CURSOR_ENV"; set +a
+KEY="${CURSOR_API_KEY:-${CURSOR_TOKEN:-}}"
+[ -n "$KEY" ] || { echo "ERROR: CURSOR_API_KEY not set in $CURSOR_ENV"; exit 2; }
+
+ENV_VARS_JSON='{}'
+if [ -r "$SECRETS_FILE" ]; then
+  ENV_VARS_JSON=$(SECRETS_FILE="$SECRETS_FILE" python3 - <<'PY'
+import json, os, re
+path = os.environ["SECRETS_FILE"]
+out = {}
+with open(path) as f:
+    for line in f:
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, _, v = line.partition("=")
+        k = k.strip()
+        v = v.strip().strip('"').strip("'")
+        if not k or k.startswith("CURSOR_"):
+            continue
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", k):
+            continue
+        if len(v.encode()) > 4096:
+            continue
+        out[k] = v
+        if len(out) >= 50:
+            break
+print(json.dumps(out))
+PY
+)
+  SECRET_COUNT=$(echo "$ENV_VARS_JSON" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')
+  echo "loaded $SECRET_COUNT secrets from $SECRETS_FILE (values not printed)"
+else
+  echo "WARN  no secrets file at $SECRETS_FILE — launching without envVars"
+fi
+
+if [ -n "$TARGET_REPO" ]; then
+  REPOS_LIST="$TARGET_REPO"
+else
+  REPOS_LIST=$(python3 -c "
+import json
+for r in sorted(json.load(open('$PREFIXES_FILE'))):
+    print(r)
+")
+fi
+
+done_c=0
+skip_c=0
+fail_c=0
+
+echo "=== Cursor Cloud env setup (dry-run=$DRY model=$MODEL) ==="
+
+while IFS= read -r repo; do
+  [ -z "$repo" ] && continue
+  if [ "$LIMIT" -gt 0 ] && [ "$done_c" -ge "$LIMIT" ]; then
+    break
+  fi
+
+  INFO=$(gh repo view "$OWNER/$repo" --json isArchived,isFork,diskUsage,visibility 2>/dev/null) || {
+    echo "SKIP  $repo  (can't view)"; skip_c=$((skip_c + 1)); continue
+  }
+  read -r ARCH FORK DISK VIS <<< "$(echo "$INFO" | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+print(str(d['isArchived']).lower(), str(d['isFork']).lower(), d['diskUsage'], d.get('visibility',''))
+")"
+  [ "$ARCH" = "true" ] && { echo "SKIP  $repo  (archived)"; skip_c=$((skip_c + 1)); continue; }
+  [ "$FORK" = "true" ] && { echo "SKIP  $repo  (fork)"; skip_c=$((skip_c + 1)); continue; }
+  [ "$DISK" -lt 10 ] && { echo "SKIP  $repo  (tiny)"; skip_c=$((skip_c + 1)); continue; }
+
+  if ! gh api "repos/$OWNER/$repo/contents/.cursor/environment.json" --jq .sha >/dev/null 2>&1; then
+    echo "SKIP  $repo  (no .cursor/environment.json on default branch)"
+    skip_c=$((skip_c + 1))
+    continue
+  fi
+
+  if [ "$DRY" -eq 1 ]; then
+    echo "WOULD  $repo  (launch agent + envVars secrets=$SECRET_COUNT visibility=$VIS)"
+    done_c=$((done_c + 1))
+    continue
+  fi
+
+  PAYLOAD=$(REPO="$repo" MODEL="$MODEL" PROMPT="$PROMPT" ENV_VARS_JSON="$ENV_VARS_JSON" OWNER="$OWNER" python3 - <<'PY'
+import json, os
+payload = {
+  "prompt": {"text": os.environ["PROMPT"]},
+  "model": {"id": os.environ["MODEL"]},
+  "repos": [{
+    "url": f"https://github.com/{os.environ['OWNER']}/{os.environ['REPO']}",
+    "startingRef": "main",
+  }],
+  "autoCreatePR": False,
+}
+env_vars = json.loads(os.environ.get("ENV_VARS_JSON") or "{}")
+if env_vars:
+  payload["envVars"] = env_vars
+print(json.dumps(payload))
+PY
+)
+
+  RESP=$(curl -sS -u "$KEY:" -H 'Content-Type: application/json' \
+    https://api.cursor.com/v1/agents -d "$PAYLOAD") || {
+    echo "FAIL  $repo  (curl)"
+    fail_c=$((fail_c + 1))
+    continue
+  }
+
+  AGENT_ID=$(echo "$RESP" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("id") or d.get("agentId") or "")' 2>/dev/null || true)
+  ERR=$(echo "$RESP" | python3 -c 'import json,sys; d=json.load(sys.stdin); e=d.get("error") or {}; print(e.get("message") or e.get("code") or "") if isinstance(e, dict) else print(e or "")' 2>/dev/null || true)
+  if [ -n "$AGENT_ID" ]; then
+    echo "START $repo  agent=$AGENT_ID"
+    done_c=$((done_c + 1))
+  else
+    echo "FAIL  $repo  ${ERR:-unknown} raw=$(echo "$RESP" | head -c 200)"
+    fail_c=$((fail_c + 1))
+  fi
+done <<< "$REPOS_LIST"
+
+echo ""
+echo "=== Summary ==="
+echo "started/would: $done_c  skipped: $skip_c  failed: $fail_c"
+echo ""
+echo "Note: Dashboard Secrets + named Environments still need cursor.com UI once."
+echo "This script injects session envVars and warms builds from .cursor/environment.json."
+[ "$fail_c" -eq 0 ] || exit 1

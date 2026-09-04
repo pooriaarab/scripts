@@ -17,3 +17,6 @@ node_modules/
 __pycache__/
 # skill-manager lock (machine state)
 .skill-lock.json
+# Cursor cloud — local secrets stay local
+.env.local
+.env.*.local

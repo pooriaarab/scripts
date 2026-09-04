@@ -1,0 +1,123 @@
+#!/usr/bin/env bash
+# box-claude — run a Claude agent on an ascii.dev Box, not the laptop (Slice A).
+#
+# WHY: `box prompt --provider claude` runs Claude ON the Box and bills ascii box
+# CREDITS, not your Claude weekly limit (verified 2026-09-03). This wraps it: the
+# agent clones the repo from origin on the Box (the hydrated snapshot is gh-authed
+# as pooriaarab, so private personal repos clone fine), does the task, and we
+# verify the diff ON the Box (never trust exit code), pull it back as a patch, and
+# ALWAYS stop the Box.
+#
+# The agent works from COMMITTED origin state, not your local uncommitted edits —
+# that is the right model for "run it in the cloud, not on my laptop." Push first
+# if the agent needs work-in-progress.
+#
+# USAGE (run inside the personal git repo, or pass --repo owner/name):
+#   box-claude "add a --json flag to the CLI and update the README"
+#   box-claude --repo pooriaarab/opensourceme "fix the typo in the header"
+#   box-claude --model opus --reasoning-effort high "..."
+#   box-claude --reuse bx_xxx "..."   # reuse a running Box
+#   box-claude --keep "..."           # leave the Box running afterwards
+set -euo pipefail
+export PATH="$HOME/.ascii/bin:$PATH"
+
+MODEL="sonnet"; EFFORT=""; REUSE=""; KEEP=0; REPO=""; PROMPT=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --model) MODEL="$2"; shift 2 ;;
+    --reasoning-effort) EFFORT="$2"; shift 2 ;;
+    --reuse) REUSE="$2"; shift 2 ;;
+    --repo) REPO="$2"; shift 2 ;;
+    --keep) KEEP=1; shift ;;
+    -h|--help) sed -n '2,26p' "$0"; exit 0 ;;
+    *) PROMPT="$1"; shift ;;
+  esac
+done
+[[ -n "$PROMPT" ]] || { echo "box-claude: need a prompt. See --help." >&2; exit 2; }
+
+# Resolve owner/repo from --repo or the current repo's origin.
+if [[ -z "$REPO" ]]; then
+  REMOTE="$(git remote get-url origin 2>/dev/null || true)"
+  [[ -n "$REMOTE" ]] || { echo "box-claude: not in a git repo and no --repo given." >&2; exit 2; }
+  REPO="$(printf '%s' "$REMOTE" | sed -E 's#(git@github.com:|https://github.com/)##; s#\.git$##')"
+fi
+# HARD GUARD: ascii.dev is third-party. Never put work/Mozilla source on a Box.
+# GitHub owner/repo names are case-insensitive, so match case-insensitively too.
+REPO_LOWER="$(printf '%s' "$REPO" | tr '[:upper:]' '[:lower:]')"
+case "$REPO_LOWER" in
+  *mozilla*|*moz-ocho*) echo "box-claude: REFUSING work repo ($REPO). Boxes are personal-only." >&2; exit 1 ;;
+esac
+SLUG="${REPO##*/}"
+REMOTE_DIR="/home/user/work/$SLUG"
+
+# --- Box lifecycle ---
+if [[ -n "$REUSE" ]]; then
+  BOX="$REUSE"; echo "box-claude: reusing $BOX"
+else
+  echo "box-claude: starting a Box from the hydrated snapshot..."
+  BOX="$(box new --from agent-roster-ready --environment agent-roster --json 2>/dev/null \
+        | sed -n 's/.*"id":"\(bx_[a-z0-9]*\)".*/\1/p' | head -1)"
+  [[ -n "$BOX" ]] || { echo "box-claude: could not create a Box" >&2; exit 1; }
+  echo "box-claude: Box=$BOX"
+fi
+
+# Stop a Box we created (it bills every second; nothing stops it for you) unless
+# --keep/--reuse asked us to leave it running. Confirm the stop took — the trap
+# alone has proven unreliable.
+cleanup() {
+  [[ "$KEEP" -eq 1 || -n "$REUSE" ]] && { echo "box-claude: leaving $BOX running (--keep/--reuse)"; return; }
+  echo "box-claude: stopping $BOX"
+  box stop "$BOX" >/dev/null 2>&1 || true
+  for _ in 1 2 3 4 5; do
+    # A failed/empty query is not the same as a confirmed-gone Box: retry it
+    # rather than reporting false confirmation (and don't let `set -e` abort
+    # this loop on a transient `box list` failure).
+    LIST_JSON="$(box list --json 2>/dev/null)" || LIST_JSON=""
+    if [[ -n "$LIST_JSON" ]] \
+       && st="$(printf '%s' "$LIST_JSON" | jq -r --arg id "$BOX" '.[]? | select(.id==$id) | .state' 2>/dev/null | head -1)"; then
+      case "$st" in
+        stopping|stopped) echo "box-claude: $BOX state=$st"; return ;;
+        "") echo "box-claude: $BOX state=gone"; return ;;
+      esac
+    fi
+    sleep 2
+  done
+  echo "box-claude: WARNING could not confirm $BOX stopped — run 'box stop $BOX'" >&2
+}
+trap cleanup EXIT
+
+# Wait until the Box is genuinely ready (a 404 right after create is a race).
+READY=0
+for _ in $(seq 1 40); do box exec "$BOX" --timeout 20 -- true >/dev/null 2>&1 && { READY=1; break; }; sleep 2; done
+[[ "$READY" -eq 1 ]] || { echo "box-claude: $BOX never became ready — aborting." >&2; exit 1; }
+
+# --- Run the agent: it clones from origin and does the task on the Box ---
+echo "box-claude: prompting claude/$MODEL to work on $REPO"
+EFFORT_ARG=(); [[ -n "$EFFORT" ]] && EFFORT_ARG=(--reasoning-effort "$EFFORT")
+SETUP="Using your bash tool: run 'mkdir -p /home/user/work && cd /home/user/work && rm -rf $SLUG && gh repo clone $REPO && cd $SLUG'. Then do this task in that repo and do NOT commit or push:"
+# Never trust this exit code either: a failed/errored prompt call must not skip
+# the on-Box verification below, since the agent may have already made edits.
+box prompt --provider claude --model "$MODEL" ${EFFORT_ARG[@]+"${EFFORT_ARG[@]}"} --json "$BOX" \
+  "$SETUP $PROMPT" 2>&1 | sed -n 's/.*"content":"\(.*\)","is_reverted.*/\1/p' | tail -1 || true
+
+# --- Verify ON the Box (load-bearing: never trust exit code) ---
+echo "box-claude: === git diff ON the Box ($REMOTE_DIR) ==="
+# Mark new files intent-to-add so they show up in `git diff` too — otherwise a
+# task that only creates untracked files produces an empty diff and no patch.
+box exec "$BOX" --cwd "$REMOTE_DIR" -- git add -N -- . >/dev/null 2>&1 || true
+RAW="$(box exec "$BOX" --cwd "$REMOTE_DIR" -- git --no-pager diff 2>/dev/null)" || RAW=""
+DIFF="$(printf '%s' "$RAW" | jq -r '.stdout // empty' 2>/dev/null)" || DIFF=""
+TRUNCATED="$(printf '%s' "$RAW" | jq -r '.stdoutTruncated // false' 2>/dev/null)" || TRUNCATED="false"
+if [[ -z "$DIFF" ]]; then
+  echo "box-claude: NO diff on the Box — the agent changed nothing (or wrote outside the repo)."
+elif [[ "$TRUNCATED" == "true" ]]; then
+  echo "box-claude: diff on the Box was TRUNCATED — refusing to save a partial patch." >&2
+  echo "box-claude: pull it manually:  box exec $BOX --cwd $REMOTE_DIR -- git diff" >&2
+else
+  PATCH="/tmp/box-claude-$SLUG-$(date +%s).patch"
+  printf '%s\n' "$DIFF" > "$PATCH"
+  head -40 "$PATCH"
+  echo "box-claude: full diff saved to $PATCH"
+  echo "box-claude: apply locally with:  git apply \"$PATCH\""
+fi
+echo "box-claude: done"

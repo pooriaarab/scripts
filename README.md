@@ -15,6 +15,10 @@ The [`agents`](https://github.com/pooriaarab/agents) repo is the hub — a porta
 | [scripts](https://github.com/pooriaarab/scripts) | Automation scripts |
 | [prompts](https://github.com/pooriaarab/prompts) | Refined prompts |
 
+## fleet-ci-census
+
+Fleet CI wall-time census. `./fleet-ci-census --help`.
+
 ## Diagnose CI in this order
 
 The four `ci-*` scripts are one workflow, not four tools. Run them in order. Each step
@@ -48,6 +52,7 @@ Not part of the diagnosis order above.
 | `claude-token-rotate` | Rotate a Claude OAuth token into every repo that runs the review action. Reads the token from a hidden prompt, never an argument, because an argument lands in shell history and the process list. |
 | `install-pr-hooks` | Installs the `pr-standards` pre-push hook into local pooriaarab checkouts that have adopted `.github/pr-standards.json`. Dry-run by default; `--apply` writes, `--uninstall --apply` removes. See [pr-standards.md](pr-standards.md). |
 | `fleet-digest` | One message a day that needs a person: owner-only label requests, failing default-branch CI, stale PRs and green PRs that wait for a human. Prints `Nothing needs you.` when empty. |
+| `fleet-ci-census` | Per repo and workflow: run count, p50/p95 wall time, total minutes, failure and cancellation rates. JSON by default; `--markdown` ranks by total minutes. A run count at the page cap is a floor, not a total. See [fleet-ci-census.md](fleet-ci-census.md). |
 
 ## Tests
 
@@ -66,6 +71,23 @@ python3 install-pr-hooks.test.py
 ./adopt-branch-pattern.test.sh
 ./pr-standards-rollout-labels.test.sh
 ```
+
+## spec-audit
+
+Scores every open issue on whether a delegate could implement it without
+guessing, and prints what each one is missing.
+
+```bash
+./spec-audit                      # every repo that adopted the standard
+./spec-audit --repo content-rabbit
+./spec-audit --ready              # only the dispatchable ones
+```
+
+Four things a weak model cannot supply for itself: a file to change, an existing
+thing to copy, a testable finish line, a named verification command. Measured
+across this fleet's 145 open issues, 10 had three or more. The rule and the two
+extra requirements for human-facing decisions are in
+[pr-standards.md](pr-standards.md).
 
 ## pr-standards
 
@@ -116,6 +138,7 @@ needs both.
 | `box-fast-attach` | Attach a worktree to a running Box in ~2s over `box host`, instead of ~84s through crabbox |
 | `box-unpack.sh` | Runs inside a Box: unpacks the delta `box-fast-attach` sends and installs only when the lockfile moved |
 | `agent-defect-rate` | Defect rate per `Assisted-by` agent: how often merged PRs get reverted or hot-fixed within the window. Shows the denominator next to every rate |
+| `mine-confirmed-defects` | Mine independently confirmed PR defects (revert, later fix, linked issue, human in-PR correction). Bots are never evidence. See [mine-confirmed-defects.md](mine-confirmed-defects.md). |
 
 ## pr-standards-rollout
 
@@ -155,3 +178,14 @@ Repos that are already configured are skipped.
 | `t3-code-on-a-box.md` | Running T3 Code on a Box and reaching it over `box host` |
 | `silent-failover-discipline.md` | Why a working primary/backup credential failover can take a whole fleet down silently, and what to alert on instead |
 - [cloudflare-auth-discipline.md](cloudflare-auth-discipline.md) — why wrangler, OAuth and the Cloudflare MCP cannot mint an API token, the one permission that can, and how to mint narrow per-purpose tokens that do not break on custom domains.
+
+## Agent routing
+
+The agent-worker roster lives in [agent-routing.json](agent-routing.json): three
+tiers (`route:mechanical`, `route:scoped`, `route:judgement`) mapped to workers
+with cost and benchmark indexes, plus an `unavailable` list with reasons. Not
+every worker has a `command`: the default `route:judgement` worker is the
+native Claude Code session doing the reviewing, not a CLI invocation, so it has
+none. Tier names are durable; model names and prices are not, so update the
+JSON instead of editing CLAUDE.md copies that drift. Retune tier defaults from
+`agent-defect-rate` output, not vibes.
