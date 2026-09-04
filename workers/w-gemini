@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# Gemini, non-interactive.
+#
+# The real binary, not the name: `gemini` on PATH is a zsh wrapper that calls
+# _offrouter_proxy_up and _gemini_personal_impl, and neither exists outside an
+# interactive login shell. The wrapper then prints "command not found", says it
+# is falling back, and returns nothing at all.
+#
+# -o json is not a preference. Text output comes back EMPTY; the answer is only
+# in .response of the JSON.
+set -uo pipefail
+BIN=/opt/homebrew/bin/gemini
+SECRETS="$HOME/Documents/Personal/.secrets/buzz.env"
+dir="${1:?usage: w-gemini <dir> "<prompt>" [model]}"; prompt="${2:?prompt required}"; model="${3:-}"
+
+[ -x "$BIN" ] || { echo "w-gemini: no binary at $BIN" >&2; exit 127; }
+key=$(grep -hoE '^(GEMINI_API_KEY|GOOGLE_API_KEY)=.*' "$SECRETS" 2>/dev/null | head -1 | cut -d= -f2-)
+[ -n "$key" ] || { echo "w-gemini: no GEMINI_API_KEY in $SECRETS" >&2; exit 78; }
+
+cd "$dir" || exit 1
+ERR="$(mktemp)"
+trap 'rm -f "$ERR"' EXIT
+GEMINI_API_KEY="$key" GEMINI_CLI_HOME="$HOME/.gemini-personal" \
+  "$BIN" -o json --skip-trust --approval-mode yolo ${model:+-m "$model"} -p "$prompt" 2>"$ERR" \
+  | python3 -c '
+import json, sys
+try:
+    data = json.load(sys.stdin)
+except ValueError:
+    stderr = open(sys.argv[1]).read().strip()
+    sys.exit(f"w-gemini: no JSON on stdout: {stderr}" if stderr else "w-gemini: no JSON on stdout")
+if data.get("error"):
+    sys.exit(f"w-gemini: {data['"'"'error'"'"']}")
+response = data.get("response")
+if not response:
+    stderr = open(sys.argv[1]).read().strip()
+    sys.exit(f"w-gemini: empty response: {stderr}" if stderr else "w-gemini: empty response")
+sys.stdout.write(response)
+' "$ERR"
