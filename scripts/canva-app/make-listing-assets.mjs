@@ -44,14 +44,15 @@ for (const { name, width, height, density } of TARGETS) {
       .png({ compressionLevel: 9 })
       .toFile(out);
     const meta = await sharp(out).metadata();
-    const kb = Math.round(statSync(out).size / 1024);
+    const bytes = statSync(out).size;
+    const kb = Math.round(bytes / 1024);
     const ok = meta.width === width && meta.height === height && !meta.hasAlpha;
     if (!ok) failed = true;
     console.log(
       `${ok ? "ok  " : "BAD "} ${out}  ${meta.width}x${meta.height}  ` +
         `channels=${meta.channels} alpha=${!!meta.hasAlpha}  ${kb}KB`,
     );
-    if (kb > 5 * 1024) {
+    if (bytes > 5 * 1024 * 1024) {
       failed = true;
       console.log(`BAD  ${out} exceeds Canva's 5MB limit`);
     }
