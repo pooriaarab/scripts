@@ -23,7 +23,11 @@
 #         t3-box-provision --reuse bx_x
 set -uo pipefail
 export PATH="$HOME/.ascii/bin:$PATH"
-REUSE=""; [[ "${1:-}" == "--reuse" ]] && REUSE="${2:-}"
+REUSE=""
+if [[ "${1:-}" == "--reuse" ]]; then
+  REUSE="${2:-}"
+  [[ -n "$REUSE" ]] || { echo "usage: t3-box-provision --reuse bx_x (missing box id)" >&2; exit 1; }
+fi
 
 if [[ -n "$REUSE" ]]; then BOX="$REUSE"; echo "reusing $BOX"; else
   echo "== creating standing Box =="
@@ -31,11 +35,13 @@ if [[ -n "$REUSE" ]]; then BOX="$REUSE"; echo "reusing $BOX"; else
   [[ -n "$BOX" ]] || { echo "could not create Box" >&2; exit 1; }
   echo "BOX=$BOX"
 fi
-for _ in $(seq 1 40); do box exec "$BOX" --timeout 20 -- true >/dev/null 2>&1 && break; sleep 2; done
+READY=""
+for _ in $(seq 1 40); do box exec "$BOX" --timeout 20 -- true >/dev/null 2>&1 && { READY=1; break; }; sleep 2; done
+[[ -n "$READY" ]] || { echo "could not reach $BOX via box exec — aborting" >&2; exit 1; }
 
 # never-reap + enable linger (idempotent)
 box exec "$BOX" -- touch /home/user/.box-reap-keep >/dev/null 2>&1 || true
-box exec "$BOX" -- loginctl enable-linger user >/dev/null 2>&1 || true
+box exec "$BOX" -- loginctl enable-linger user >/dev/null 2>&1 || echo "!! could not enable linger — service may not survive session end" >&2
 
 # on-box setup script (a FILE, to dodge box-exec arg mangling)
 TMP="$(mktemp)"; cat > "$TMP" <<'ONBOX'
@@ -50,21 +56,27 @@ DROP="$HOME/.config/systemd/user/t3code.service.d"; mkdir -p "$DROP"
 printf '[Service]\nEnvironment=T3CODE_HOST=0.0.0.0\nEnvironment=T3CODE_PORT=3773\nEnvironment=PATH=%%h/.local/bin:/usr/local/bin:/usr/bin:/bin\n' > "$DROP/override.conf"
 pkill -f "t3@latest" 2>/dev/null; sleep 1        # free 3773 from any foreground run
 systemctl --user daemon-reload
-systemctl --user enable --now t3code
+systemctl --user enable t3code
+systemctl --user restart t3code   # restart (not just enable --now) so a reused box picks up the drop-in
 for _ in $(seq 1 15); do ss -ltn 2>/dev/null | grep -q '0.0.0.0:3773' && break; sleep 2; done
-ss -ltn 2>/dev/null | grep ':3773' && echo T3_LISTENING || echo T3_NOT_LISTENING
+ss -ltn 2>/dev/null | grep -q '0.0.0.0:3773' && echo T3_LISTENING || echo T3_NOT_LISTENING
 # print ONLY the pairing token line (never the env dump)
-journalctl --user -u t3code -o cat 2>/dev/null | grep -aoE '/pair#token=[A-Za-z0-9]+' | tail -1
+journalctl --user -u t3code -o cat -n 200 2>/dev/null | grep -aoE '/pair#token=[A-Za-z0-9]+' | tail -1
 ONBOX
-box scp "$TMP" "$BOX:/home/user/t3-onbox-setup.sh" >/dev/null 2>&1
+box scp "$TMP" "$BOX:/home/user/t3-onbox-setup.sh" >/dev/null 2>&1 || { echo "could not copy setup script to $BOX" >&2; rm -f "$TMP"; exit 1; }
 RES="$(box exec "$BOX" --json --timeout 300 -- bash /home/user/t3-onbox-setup.sh 2>/dev/null | jq -r '.stdout')"
 rm -f "$TMP"
-echo "$RES" | grep -q T3_LISTENING && echo "== T3 listening on 0.0.0.0:3773 ==" || echo "!! T3 not listening — check 'box ssh $BOX' journalctl --user -u t3code"
+if ! echo "$RES" | grep -q T3_LISTENING; then
+  echo "!! T3 not listening — check 'box ssh $BOX' journalctl --user -u t3code" >&2
+  exit 1
+fi
+echo "== T3 listening on 0.0.0.0:3773 =="
 PAIR="$(printf '%s' "$RES" | grep -oE '/pair#token=[A-Za-z0-9]+' | tail -1)"
 
 # public URL (MUST be --public)
-URL="$(box host "$BOX" 3773 --public 2>/dev/null | sed -n 's/.*"url":"\([^"]*\)".*/\1/p')"
-[[ -z "$URL" ]] && URL="$(box host "$BOX" 3773 --public 2>/dev/null)"
+HOST_OUT="$(box host "$BOX" 3773 --public 2>/dev/null)"
+URL="$(printf '%s' "$HOST_OUT" | sed -n 's/.*"url":"\([^"]*\)".*/\1/p')"
+[[ -z "$URL" ]] && URL="$HOST_OUT"
 
 echo
 echo "================ T3 BOX READY ================"
