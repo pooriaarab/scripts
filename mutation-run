@@ -8,41 +8,37 @@
 # breaks is a witness that never testifies, and review cannot tell the two
 # apart by reading. This fleet has merged such tests repeatedly — guards
 # whose whole rule could be deleted or inverted while the suite stayed green,
-# each invisible until someone broke the code by hand and re-ran. Breaking
-# code by hand scales to one guess at a time, so it never happens before
-# merge.
+# each invisible until someone broke the code by hand and re-ran, which
+# scales to one guess at a time and so never happens before merge.
 #
 # WHY A RUNNER AND NOT A REVIEWER
 # Deciding what to break is judgement, and that stays with the reviewer. What
 # is mechanical is checking whether a break is caught: apply one edit in
 # isolation, run the tests the diff added or changed, restore the file, and
 # record whether the suite noticed. The part that must not fail is the
-# restore. Every mutation edits a real file, so the runner holds a backup
-# copy and a trap, restores after every mutation, and restores again on
-# SIGINT, SIGTERM, and EXIT. Non-code paths (.github, JSON, Markdown) are
-# never proposed, test files are never mutated, and the runner only reports:
-# it never pushes, never comments, and never fails the pull request.
+# restore, so the runner holds a backup and a trap, restoring after every
+# mutation and again on SIGINT, SIGTERM and EXIT. Non-code paths (.github,
+# JSON, Markdown) are never proposed, test files are never mutated, and the
+# runner only reports: it never pushes, comments, or fails the pull request.
 #
 # A repo opts in once, in .github/pr-standards.json:
 #
-#   { "mutation": { "enabled": true,
-#                   "testCommand": "npm test -- {files}",
+#   { "mutation": { "enabled": true, "testCommand": "npm test -- {files}",
 #                   "timeout": 60, "ceiling": 20 } }
 #
 # testCommand runs in the repo root; {files} is replaced with the test files
 # the diff added or changed. No command means no run and no failure. enabled
-# defaults to false; passing --test-command on the command line counts as an
-# explicit decision to run. timeout is per mutation in seconds (a run that
-# neither passes nor fails in time is TIMED OUT, not SURVIVED); ceiling caps
-# how many mutations are attempted.
+# defaults to false; --test-command counts as an explicit decision to run.
+# timeout is per mutation in seconds (a run that neither passes nor fails in
+# time is TIMED OUT, not SURVIVED); ceiling caps how many are attempted.
 #
 #   mutation-run [--repo DIR] [--diff FILE | --base REF]
 #                [--timeout S] [--ceiling N] [--test-command CMD] [--pr NUM]
 #
-# With --diff the runner reads a unified diff from a file and needs no git.
-# Otherwise it diffs the worktree against --base (default HEAD). Exit 0
-# whenever a report was produced, even with survivors; 2 on usage or
-# environment errors; 130 on interrupt.
+# With --diff the runner reads a unified diff and needs no git; otherwise it
+# diffs the worktree against --base (default HEAD). Exit 0 whenever a report
+# was produced, even with survivors; 2 on usage or environment errors; 130 on
+# interrupt.
 set -uo pipefail
 
 REPO="."; DIFF=""; BASE="HEAD"; TIMEOUT=""; CEILING=""; TESTCMD_CLI=""; PR="0"
