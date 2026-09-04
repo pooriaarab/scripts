@@ -1,0 +1,16 @@
+import canva from "@canva/app-eslint-plugin";
+
+// Canva runs `apps doctor` (and its own review tooling) against this config.
+// Its rules are app-specific -- notably no-literal-string-in-jsx, which catches
+// UI text that never made it into the translation file.
+export default [
+  ...canva.configs.apps,
+  {
+    rules: {
+      // Canva's shared config assumes the starter kit's Jest setup. This app has
+      // no test suite, so the other jest/* rules simply never match a file, but
+      // this one fails to load at all without a jest install to read a version from.
+      "jest/no-deprecated-functions": "off",
+    },
+  },
+];
