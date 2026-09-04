@@ -110,6 +110,26 @@ if (( seen == 1 )); then kill -INT "$pid"; wait "$pid"; rc=$?; else rc=99; kill 
 if (( seen == 1 && rc == 130 )) && grep -q 'SWITCH=false' "$FIX/app.sh" && ! grep -q 'SWITCH=true' "$FIX/app.sh" \
   && [ -z "$(git -C "$FIX" diff -- app.sh)" ] && grep -q 'interrupted.*restored' "$TMPALL/sigint.log"; then ok "SIGINT mid-run restores the tree"; else fail_msg "sigint — seen=$seen rc=$rc app=$(cat "$FIX/app.sh") log=$(cat "$TMPALL/sigint.log" 2>/dev/null)"; fi
 
+# 14b: a timed-out test's CHILD must die too. Killing only the wrapper subshell
+# orphans `bash -c "$cmd"` and anything it spawned, and an orphan can write into
+# the file under mutation after the runner has restored it and reported it clean.
+# The diff has to CHANGE a line carrying an operator, or nothing is proposed and
+# the run never reaches the timeout path this exercises.
+new_repo
+printf 'function f(a){ if (a === 1) { return 1 } return 2 }\n' > "$FIX/lib.js"
+mkdir -p "$FIX/tests"; printf 'ok\n' > "$FIX/tests/x.test.js"
+commit_all
+printf 'function f(a){ if (a === 0) { return 1 } return 2 }\n' > "$FIX/lib.js"
+printf 'ok2\n' > "$FIX/tests/x.test.js"; stage_pr
+wcfg "( sleep 3; echo ORPHAN_WROTE_HERE >> $FIX/lib.js ) & exec sleep 30" 1 1
+out=$("$SCRIPT" --repo "$FIX" 2>&1); rc=$?
+sleep 6   # an orphan would fire at +3s; look after it would have
+if ! grep -q ORPHAN_WROTE_HERE "$FIX/lib.js"; then
+  ok "a timed-out test's child is killed, not orphaned onto the restored file"
+else
+  fail_msg "orphaned child wrote into the restored file — rc=$rc"
+fi
+
 # 14: the suite adds nothing to this repo beyond the two deliverables.
 other=$(git -C "$SCRIPT_DIR" status --porcelain | grep -v '^?? mutation-run' | grep -v '^?? mutation-run.test.sh' || true)
 if [ -z "$other" ]; then ok "suite leaves no other files in repo"; else fail_msg "suite dirtied repo: $other"; fi
