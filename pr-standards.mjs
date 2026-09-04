@@ -499,8 +499,7 @@ function countUserAttachments(body) {
 }
 
 function hasValidProofNa(body) {
-  const visible = String(body || '').replace(/<!--[\s\S]*?-->/g, '');
-  const lines = visible.split('\n');
+  const lines = verificationSection(body, { unmatchedFenceHides: true }).split('\n');
   for (const line of lines) {
     const match = PROOF_NA_LINE.exec(line);
     if (match && match[1].trim().length >= 20) return true;
