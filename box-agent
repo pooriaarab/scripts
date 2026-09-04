@@ -160,10 +160,19 @@ fi
 
 # --- Verify ON the Box + pull patch ---
 echo "box-agent: === git diff ON the Box ($DIR) ==="
+# A missing/failed clone (native path: the agent runs its own setup and may not
+# have gotten to it) must not be reported as "no diff" -- that's a different,
+# more actionable failure than "the agent made no changes".
+if ! box exec "$BOX" --cwd "$DIR" -- true >/dev/null 2>&1; then
+  echo "box-agent: $DIR not found on the Box — clone/setup likely failed; see output above." >&2
+  exit 5
+fi
 # Mark new files intent-to-add so they show up in `git diff` too -- otherwise a
 # task that only creates untracked files produces an empty diff and no patch.
 box exec "$BOX" --cwd "$DIR" -- git add -N -- . >/dev/null 2>&1 || true
-RAW="$(box exec "$BOX" --json --cwd "$DIR" -- git --no-pager diff 2>/dev/null)" || RAW=""
+# --binary: without it, a patch touching a binary file can't be reapplied with
+# `git apply` (the payload is simply omitted from a plain diff).
+RAW="$(box exec "$BOX" --json --cwd "$DIR" -- git --no-pager diff --binary 2>/dev/null)" || RAW=""
 DIFF="$(printf '%s' "$RAW" | jq -r '.stdout // empty' 2>/dev/null)" || DIFF=""
 TRUNCATED="$(printf '%s' "$RAW" | jq -r '.stdoutTruncated // false' 2>/dev/null)" || TRUNCATED="false"
 if [[ -z "$DIFF" ]]; then
@@ -173,7 +182,10 @@ elif [[ "$TRUNCATED" == "true" ]]; then
   echo "box-agent: pull it manually:  box exec $BOX --cwd $DIR -- git diff" >&2
 else
   PATCH="$(mktemp "/tmp/box-agent-$SLUG-XXXXXX.patch")"; printf '%s\n' "$DIFF" > "$PATCH"
-  printf '%s\n' "$DIFF" | head -40
+  # Preview from the file, not a pipe from $DIFF: under `set -o pipefail`, a
+  # diff bigger than head's read means the producer gets SIGPIPE and set -e
+  # would abort the script before the "full diff ->" line below ever prints.
+  head -40 "$PATCH"
   echo "box-agent: full diff -> $PATCH  (apply: git apply \"$PATCH\")"
 fi
 echo "box-agent: done"
