@@ -1,0 +1,370 @@
+#!/usr/bin/env python3
+"""Provision trusted per-PR D1, KV, and R2 resources."""
+import argparse
+import copy
+import fcntl
+import hashlib
+import json
+import os
+import re
+import stat
+import sys
+import tempfile
+import urllib.error
+import urllib.parse
+import urllib.request
+from pathlib import Path
+
+API = "https://api.cloudflare.com/client/v4"
+KINDS = ("d1", "kv", "r2")
+TOP_KEYS = {"schema", "owner", "intended", "acquired"}
+OWNER_KEYS = {"repository", "pull_request", "branch", "head_sha", "workflow",
+              "run_id", "artifact", "artifact_id", "artifact_digest"}
+INTENDED_KEYS = {"target_worker", "preview", "d1", "kv", "r2", "access", "test_identity"}
+ACQUIRED_KEYS = {"preview", "d1", "kv", "r2", "access", "test_identity"}
+BINDING = re.compile(r"[A-Z][A-Z0-9_]{0,62}")
+DNS_LABEL = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
+ACCOUNT = re.compile(r"[0-9a-f]{32}")
+REPOSITORY = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
+BRANCH = re.compile(r"[a-z]{2,4}-[1-9][0-9]*-[a-z0-9]+(?:-[a-z0-9]+)*")
+CF_ID = {"d1": re.compile(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}"),
+         "kv": re.compile(r"[0-9a-f]{32}")}
+OPAQUE_ID = re.compile(r"[A-Za-z0-9_-]{8,128}")
+LIMITS = {"d1": 32, "kv": 512, "r2": 63, "access": 350,
+          "policy": 350, "ci": 350, "test-user": 350}
+MAX_INPUT = 1024 * 1024
+class ProvisionError(Exception):
+    pass
+class AmbiguousCreate(ProvisionError):
+    pass
+def no_duplicates(pairs):
+    value = {}
+    for key, item in pairs:
+        if key in value:
+            raise ProvisionError(f"duplicate JSON key: {key}")
+        value[key] = item
+    return value
+def load_json(path, label):
+    try:
+        if path.is_symlink() or not path.is_file() or path.stat().st_size > MAX_INPUT:
+            raise ProvisionError(f"{label} must be a regular JSON file of at most 1 MiB")
+        return json.loads(path.read_bytes(), object_pairs_hook=no_duplicates)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+        raise ProvisionError(f"{label} is not valid UTF-8 JSON") from error
+def resource_name(repository, branch, kind, binding=None):
+    suffix = kind if binding is None else f"{kind}-{binding.lower().replace('_', '-')}"
+    namespace = hashlib.sha256(repository.encode()).hexdigest()[:16]
+    candidate = f"{branch}-{namespace}-{suffix}"
+    limit = LIMITS[kind]
+    if len(candidate) <= limit:
+        return candidate
+    digest = hashlib.sha256(candidate.encode()).hexdigest()[:16]
+    branch_part = branch[:limit - len(kind) - len(digest) - 2].rstrip("-")
+    return f"{branch_part}-{kind}-{digest}"
+def validate_shape(value, plan_input):
+    if (not isinstance(value, dict) or set(value) != TOP_KEYS
+            or type(value.get("schema")) is not int or value["schema"] != 1):
+        raise ProvisionError("ownership plan has an unexpected schema")
+    owner, intended, acquired = value["owner"], value["intended"], value["acquired"]
+    if not isinstance(owner, dict) or set(owner) != OWNER_KEYS:
+        raise ProvisionError("ownership plan has an invalid owner")
+    branch_match = BRANCH.fullmatch(owner["branch"]) if isinstance(owner["branch"], str) else None
+    if (not isinstance(owner["repository"], str) or not REPOSITORY.fullmatch(owner["repository"])
+            or not branch_match
+            or len(owner["branch"]) > 63 or type(owner["pull_request"]) is not int
+            or owner["pull_request"] < 1 or not isinstance(owner["head_sha"], str) or not re.fullmatch(r"[0-9a-f]{40}", owner["head_sha"])
+            or owner["workflow"] != "Worker Preview Build" or owner["artifact"] != "worker-preview-bundle"
+            or any(type(owner[key]) is not int or owner[key] < 1 for key in ("run_id", "artifact_id"))
+            or not isinstance(owner["artifact_digest"], str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", owner["artifact_digest"])):
+        raise ProvisionError("ownership plan has an invalid PR owner")
+    if not isinstance(intended, dict) or set(intended) != INTENDED_KEYS:
+        raise ProvisionError("ownership plan has invalid intended resources")
+    if not isinstance(acquired, dict) or set(acquired) != ACQUIRED_KEYS:
+        raise ProvisionError("ownership plan has invalid acquired resources")
+    fixed = {"target_worker": {"name", "workers_dev"}, "preview": {"name", "hostname", "preview_domain"},
+             "access": {"application_name", "hostname", "policy_name", "service_token_name"}, "test_identity": {"name"}}
+    if any(not isinstance(intended[key], dict) or set(intended[key]) != keys for key, keys in fixed.items()):
+        raise ProvisionError("ownership plan has invalid non-data intent")
+    preview = intended["preview"]
+    worker, access = intended["target_worker"], intended["access"]
+    strings = [*preview.values(), *access.values(), intended["test_identity"]["name"]]
+    domain = preview["preview_domain"]
+    labels = domain.split(".") if isinstance(domain, str) else []; offset = 2 if labels[:2] == ["preview", "staging"] else 1
+    domain_ok = isinstance(domain, str) and len(domain) <= 253 and all(DNS_LABEL.fullmatch(label) for label in labels) and labels[:1] == ["preview"] and len(labels[offset:]) >= 2
+    if (any(not isinstance(item, str) for item in strings) or not isinstance(worker["name"], str)
+            or not re.fullmatch(r"[A-Za-z0-9-]{1,255}", worker["name"])
+            or worker["workers_dev"] and (len(worker["name"]) > 63 or worker["name"].startswith("-") or worker["name"].endswith("-"))
+            or type(worker["workers_dev"]) is not bool or not domain_ok or preview["name"] != owner["branch"]
+            or access["hostname"] != preview["hostname"] or len(preview["hostname"]) > 253
+            or preview["hostname"] != f"{owner['branch']}.{preview['preview_domain']}"
+            or access["application_name"] != resource_name(owner["repository"], owner["branch"], "access")
+            or access["policy_name"] != resource_name(owner["repository"], owner["branch"], "policy")
+            or access["service_token_name"] != resource_name(owner["repository"], owner["branch"], "ci")
+            or intended["test_identity"]["name"] != resource_name(owner["repository"], owner["branch"], "test-user")):
+        raise ProvisionError("ownership plan has inconsistent Preview intent")
+    other_acquired = {"preview": {"version_id"},
+                      "access": {"application_id", "policy_id", "service_token_id"},
+                      "test_identity": {"id"}}
+    if any(not isinstance(acquired[key], dict) or set(acquired[key]) != keys or any(
+            value is not None and (plan_input or not isinstance(value, str) or not OPAQUE_ID.fullmatch(value))
+            for value in acquired[key].values()) for key, keys in other_acquired.items()):
+        raise ProvisionError("ownership plan has unexpected non-data acquisition")
+    all_bindings = set()
+    for kind in KINDS:
+        items, records = intended[kind], acquired[kind]
+        if not isinstance(items, list) or not isinstance(records, dict) or len(items) > 64:
+            raise ProvisionError(f"ownership plan has invalid {kind} resources")
+        expected = set()
+        for item in items:
+            if not isinstance(item, dict) or set(item) != {"binding", "name"}:
+                raise ProvisionError(f"ownership plan has invalid {kind} intent")
+            binding = item["binding"]
+            if not isinstance(binding, str) or not BINDING.fullmatch(binding) or binding in all_bindings:
+                raise ProvisionError(f"ownership plan has invalid {kind} bindings")
+            if item["name"] != resource_name(owner["repository"], owner["branch"], kind, binding):
+                raise ProvisionError(f"ownership plan has an untrusted {kind} name")
+            expected.add(binding); all_bindings.add(binding)
+        if set(records) != expected:
+            raise ProvisionError(f"ownership plan has invalid {kind} acquisition keys")
+        field = "name" if kind == "r2" else "id"
+        for binding, record in records.items():
+            if not isinstance(record, dict) or set(record) != {field}:
+                raise ProvisionError(f"ownership plan has invalid {kind} acquisition")
+            identifier = record[field]
+            if plan_input and identifier is not None:
+                raise ProvisionError("input ownership plan must not contain acquired identifiers")
+            if identifier is not None and (not isinstance(identifier, str) or
+                    (kind != "r2" and not CF_ID[kind].fullmatch(identifier))):
+                raise ProvisionError(f"ownership state has an invalid {kind} identifier")
+            if kind == "r2" and identifier is not None and identifier != next(
+                    item["name"] for item in items if item["binding"] == binding):
+                raise ProvisionError("ownership state has a mismatched r2 name")
+    return value
+def secure_directory(path):
+    if path.is_symlink() or not path.is_dir():
+        raise ProvisionError("state directory must be a pre-existing directory")
+    info = path.stat()
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+        raise ProvisionError("state directory must be owner-only and owned by the current user")
+    return path.resolve()
+def sync_directory(path):
+    descriptor = os.open(path, os.O_RDONLY)
+    try: os.fsync(descriptor)
+    finally: os.close(descriptor)
+def atomic_write(path, value, create=False):
+    data = (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    temporary = tempfile.NamedTemporaryFile(prefix=f".{path.name}.", dir=path.parent, delete=False)
+    try:
+        with temporary:
+            os.fchmod(temporary.fileno(), 0o600)
+            temporary.write(data); temporary.flush(); os.fsync(temporary.fileno())
+        created = False
+        if create:
+            try:
+                os.link(temporary.name, path)
+                created = True
+            except FileExistsError as error:
+                raise ProvisionError("ownership state appeared during initialization") from error
+        else:
+            if path.is_symlink() or not path.is_file():
+                raise ProvisionError("ownership state must be a regular file")
+            os.replace(temporary.name, path)
+        try:
+            sync_directory(path.parent)
+        except OSError:
+            if created: path.unlink(missing_ok=True)
+            raise
+    finally:
+        Path(temporary.name).unlink(missing_ok=True)
+class Cloudflare:
+    def __init__(self, account, token):
+        self.account, self.token = account, token
+    def request(self, method, path, body=None):
+        data = json.dumps(body).encode() if body is not None else None
+        request = urllib.request.Request(API + path, data=data, method=method, headers={
+            "Authorization": f"Bearer {self.token}", "Content-Type": "application/json",
+            "User-Agent": "worker-preview-provision/1"})
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response: value = json.load(response)
+        except urllib.error.HTTPError as error:
+            if method == "POST" and error.code >= 500:
+                raise AmbiguousCreate("Cloudflare create result is ambiguous") from error
+            raise ProvisionError(f"Cloudflare API returned HTTP {error.code}") from error
+        except (urllib.error.URLError, TimeoutError, OSError) as error:
+            if method == "POST":
+                raise AmbiguousCreate("Cloudflare create result is ambiguous") from error
+            raise ProvisionError("Cloudflare API request failed") from error
+        except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as error:
+            if method == "POST": raise AmbiguousCreate("Cloudflare create result is ambiguous") from error
+            raise ProvisionError("Cloudflare returned invalid JSON") from error
+        if not isinstance(value, dict) or value.get("success") is not True:
+            raise ProvisionError("Cloudflare API rejected the request")
+        return value
+    def list(self, kind):
+        if kind == "r2":
+            items, cursor, seen = [], None, set()
+            while True:
+                query = urllib.parse.urlencode({"per_page": 1000, **({"cursor": cursor} if cursor else {})})
+                response = self.request("GET", f"/accounts/{self.account}/r2/buckets?{query}")
+                result = response.get("result")
+                if not isinstance(result, dict) or not isinstance(result.get("buckets", []), list):
+                    raise ProvisionError("Cloudflare returned an invalid r2 list")
+                items.extend(result.get("buckets", []))
+                info = response.get("result_info", {})
+                if not isinstance(info, dict): raise ProvisionError("Cloudflare returned invalid r2 pagination")
+                cursor = info.get("cursor")
+                if not cursor: return items
+                if not isinstance(cursor, str) or cursor in seen: raise ProvisionError("Cloudflare repeated an r2 cursor")
+                seen.add(cursor)
+        path = "d1/database" if kind == "d1" else "storage/kv/namespaces"
+        items, page = [], 1
+        while True:
+            response = self.request("GET", f"/accounts/{self.account}/{path}?page={page}&per_page=1000")
+            result, info = response.get("result"), response.get("result_info", {})
+            if not isinstance(result, list) or not isinstance(info, dict):
+                raise ProvisionError(f"Cloudflare returned an invalid {kind} list")
+            items.extend(result)
+            total = info.get("total_count")
+            if type(total) is not int or total < 0: raise ProvisionError(f"Cloudflare returned invalid {kind} pagination")
+            if len(items) >= total: return items
+            if not result: raise ProvisionError(f"Cloudflare truncated the {kind} list")
+            page += 1
+    def create(self, kind, name):
+        path, body = {"d1": ("d1/database", {"name": name}),
+                      "kv": ("storage/kv/namespaces", {"title": name}),
+                      "r2": ("r2/buckets", {"name": name})}[kind]
+        return self.request("POST", f"/accounts/{self.account}/{path}", body).get("result")
+def identity(kind, item):
+    name_key = "title" if kind == "kv" else "name"
+    if not isinstance(item, dict) or not isinstance(item.get(name_key), str):
+        return None, None
+    identifier = item[name_key] if kind == "r2" else item.get("uuid" if kind == "d1" else "id", item.get("id"))
+    if not isinstance(identifier, str) or (kind != "r2" and not CF_ID[kind].fullmatch(identifier)):
+        return item[name_key], None
+    return item[name_key], identifier
+def exact(api, kind, name):
+    matches = [identifier for item in api.list(kind)
+               if (found := identity(kind, item))[0] == name for identifier in [found[1]]]
+    if len(matches) > 1 or matches and matches[0] is None:
+        raise ProvisionError(f"Cloudflare returned ambiguous {kind} ownership")
+    return matches[0] if matches else None
+def provision(plan, state, api, persist, pending, dry_run=False):
+    actions = []
+    active = pending()
+    targets = [{"kind": kind, "binding": item["binding"], "name": item["name"]}
+               for kind in KINDS for item in plan["intended"][kind]]
+    if active is not None and active not in targets:
+        raise ProvisionError("pending mutation is not in the trusted plan")
+    completed_pending = None
+    if active is not None:
+        field = "name" if active["kind"] == "r2" else "id"
+        if state["acquired"][active["kind"]][active["binding"]][field] is not None:
+            completed_pending = active
+            active = None
+    unowned = [item for item in targets if state["acquired"][item["kind"]][item["binding"]][
+        "name" if item["kind"] == "r2" else "id"] is None]
+    if active is not None and (not unowned or active != unowned[0]):
+        raise ProvisionError("pending mutation does not match the next unowned resource")
+    for kind in KINDS:
+        field = "name" if kind == "r2" else "id"
+        for item in plan["intended"][kind]:
+            binding, name = item["binding"], item["name"]
+            owned = state["acquired"][kind][binding][field]
+            attempt = {"kind": kind, "binding": binding, "name": name}
+            existing = exact(api, kind, name)
+            if owned is not None:
+                if existing != owned:
+                    raise ProvisionError(f"owned {kind} resource no longer matches Cloudflare")
+                if completed_pending == attempt and not dry_run: persist("pending", None)
+                actions.append({"kind": kind, "binding": binding, "action": "unchanged"})
+                continue
+            if existing is not None and active != attempt:
+                raise ProvisionError(f"existing {kind} resource is not owned by this PR")
+            if dry_run:
+                actions.append({"kind": kind, "binding": binding,
+                                "action": "recover" if existing else "create"})
+                continue
+            persist("pending", attempt)
+            active = attempt
+            identifier = existing
+            if identifier is None:
+                try:
+                    result = api.create(kind, name)
+                except ProvisionError as error:
+                    if not isinstance(error, AmbiguousCreate): persist("pending", None); active = None; raise
+                    identifier = exact(api, kind, name)
+                else:
+                    found_name, identifier = identity(kind, result)
+                    if found_name != name or identifier is None:
+                        identifier = exact(api, kind, name)
+                if identifier is None:
+                    raise AmbiguousCreate(f"could not reconcile ambiguous {kind} create")
+            state["acquired"][kind][binding][field] = identifier
+            persist("state", state)
+            persist("pending", None)
+            active = None
+            actions.append({"kind": kind, "binding": binding, "action": "acquired"})
+    return actions
+def run(plan_path, state_directory, api, dry_run=False):
+    plan = validate_shape(load_json(plan_path, "ownership plan"), True)
+    directory = secure_directory(state_directory)
+    if not isinstance(api.account, str) or not ACCOUNT.fullmatch(api.account):
+        raise ProvisionError("Cloudflare account scope is invalid")
+    key = hashlib.sha256(plan["owner"]["repository"].encode()).hexdigest()[:16]
+    stem = f"{api.account}-{key}-pr-{plan['owner']['pull_request']}"
+    state_path, pending_path, lock_path = (directory / f"{stem}{suffix}"
+                                           for suffix in (".json", ".pending", ".lock"))
+    flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+    lock = os.open(lock_path, flags, 0o600)
+    try:
+        info = os.fstat(lock)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+            raise ProvisionError("PR lock must be an owner-only regular file")
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if state_path.exists():
+            state = validate_shape(load_json(state_path, "ownership state"), False)
+            stable = ("repository", "pull_request", "branch")
+            if any(state["owner"][key] != plan["owner"][key] for key in stable) or state["intended"] != plan["intended"]:
+                raise ProvisionError("ownership state does not match the trusted plan")
+            if state["owner"] != plan["owner"] and not dry_run:
+                state["owner"] = copy.deepcopy(plan["owner"]); atomic_write(state_path, state)
+        else:
+            state = copy.deepcopy(plan)
+            if not dry_run: atomic_write(state_path, state, create=True)
+        def get_pending():
+            if not pending_path.exists(): return None
+            value = load_json(pending_path, "pending mutation")
+            if not isinstance(value, dict) or set(value) != {"kind", "binding", "name"}:
+                raise ProvisionError("pending mutation is invalid")
+            return value
+        def persist(target, value):
+            path = state_path if target == "state" else pending_path
+            if value is None:
+                path.unlink(missing_ok=True); sync_directory(path.parent)
+            elif path.exists():
+                atomic_write(path, value)
+            else:
+                atomic_write(path, value, create=True)
+        actions = provision(plan, state, api, persist, get_pending, dry_run)
+        return {"state": str(state_path), "dry_run": dry_run, "actions": actions}
+    finally:
+        os.close(lock)
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("ownership_plan", type=Path)
+    parser.add_argument("state_directory", type=Path)
+    parser.add_argument("--dry-run", action="store_true")
+    args = parser.parse_args()
+    token, account = os.environ.get("CLOUDFLARE_API_TOKEN"), os.environ.get("CLOUDFLARE_ACCOUNT_ID")
+    if not token or not account or not ACCOUNT.fullmatch(account):
+        print("error: valid CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID are required", file=sys.stderr)
+        return 1
+    try:
+        result = run(args.ownership_plan, args.state_directory, Cloudflare(account, token), args.dry_run)
+    except (ProvisionError, OSError) as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+    print(json.dumps(result, sort_keys=True, separators=(",", ":")))
+    return 0
+if __name__ == "__main__":
+    raise SystemExit(main())

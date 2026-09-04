@@ -1,0 +1,196 @@
+name: post-merge-verify
+
+# Merged is not live. CI proves the change is good on a runner. Nothing else
+# proves it reached production, and a deploy that fails quietly leaves the old
+# build serving while every check stays green.
+on:
+  push:
+  workflow_dispatch:
+
+concurrency:
+  # Scoped by ref, not just repo: this is workflow-level concurrency, so it is
+  # assigned before the job's own branch check runs below. Without the ref, a
+  # push to any branch would join the same group as an in-progress
+  # default-branch run and cancel it, then skip itself -- silently dropping
+  # the verification instead of reporting it.
+  group: post-merge-verify-${{ github.repository }}-${{ github.ref }}
+  # A newer push means a newer commit is what should be live now, so a stale
+  # run polling for a SHA the fleet already moved past gets cancelled instead
+  # of running out its clock and filing a false "did not go live" issue.
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Verify the merged commit is live
+    # push fires on every branch, and not every repo in the fleet defaults to
+    # `main` — skip anything that isn't this repo's actual default branch.
+    #
+    # workflow_dispatch is held to the same rule rather than excused from it. It
+    # runs on whatever ref it was started from, so dispatching off a feature
+    # branch compared that branch's tip against the production live SHA and
+    # filed a "deploy did not go live" issue about a commit nobody deployed.
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    # The job only waits on an external API, so it takes the smallest runner.
+    runs-on: ubicloud-standard-2
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Check the deploy
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
+          REPORT: ${{ runner.temp }}/verify-failure.md
+        run: |
+          set -euo pipefail
+          python3 <<'PY'
+          import json, os, pathlib, sys, time, urllib.error, urllib.request
+
+          expected = os.environ["EXPECTED_SHA"]
+          report = pathlib.Path(os.environ["REPORT"])
+
+          def fail(reason):
+              report.write_text(reason)
+              sys.exit(reason)
+
+          # A missing file or a file with no postMergeVerify key means the repo
+          # does not opt in to this check, and must never carry a red branch
+          # for it. Malformed JSON is different: it is a broken config, not an
+          # absent one, so it fails loudly instead of silently passing as green.
+          try:
+              raw = pathlib.Path(".github/pr-standards.json").read_text()
+          except FileNotFoundError:
+              print("No pr-standards.json. Nothing to check.")
+              sys.exit(0)
+          try:
+              parsed = json.loads(raw)
+          except ValueError as error:
+              fail(f"- Failing step: parse `.github/pr-standards.json`\n"
+                   f"- Error: `{type(error).__name__}: {error}`\n")
+          # Valid JSON that isn't the expected shape (a bare list, a string, a
+          # postMergeVerify value that isn't itself an object) must not crash
+          # with an unhandled traceback on the dict-only accesses below.
+          config = parsed.get("postMergeVerify") if isinstance(parsed, dict) else None
+          if config is None:
+              print("No postMergeVerify config. Nothing to check.")
+              sys.exit(0)
+          if not isinstance(config, dict):
+              fail("- Failing step: read `postMergeVerify` from `.github/pr-standards.json`\n"
+                   "- Error: `postMergeVerify` is not an object\n")
+
+          url = config.get("url")
+          if not isinstance(url, str) or not url:
+              fail("- Failing step: read `postMergeVerify.url` from `.github/pr-standards.json`\n"
+                   "- Error: `url` is missing or not a string\n")
+          sha_path = config.get("shaPath")
+          if sha_path is not None and (not isinstance(sha_path, str) or not sha_path):
+              fail("- Failing step: read `postMergeVerify.shaPath` from `.github/pr-standards.json`\n"
+                   "- Error: `shaPath` is present but not a non-empty string\n")
+          sha_key = config.get("shaJsonKey", "sha")
+          if not isinstance(sha_key, str):
+              fail("- Failing step: read `postMergeVerify.shaJsonKey` from `.github/pr-standards.json`\n"
+                   "- Error: `shaJsonKey` is not a string\n")
+          timeout_seconds = config.get("timeoutSeconds", 900)
+          if not isinstance(timeout_seconds, (int, float)):
+              fail("- Failing step: read `postMergeVerify.timeoutSeconds` from `.github/pr-standards.json`\n"
+                   "- Error: `timeoutSeconds` is not a number\n")
+          # Capped below the job's 20-minute timeout so a long-poll config still
+          # fails through this script instead of being cancelled by the runner,
+          # which would skip the reporting step below entirely.
+          deadline = time.monotonic() + min(int(timeout_seconds), 1000)
+
+          def get(target):
+              request = urllib.request.Request(target, headers={"User-Agent": "post-merge-verify"})
+              with urllib.request.urlopen(request, timeout=15) as response:
+                  return response.status, response.read(65536).decode("utf-8", "replace")
+
+          # Poll the version endpoint until it reports the commit that just
+          # merged. Back off so a fleet of repos does not hammer one endpoint.
+          # Only the join with shaPath is normalized -- a shaPath configured
+          # without its leading slash (e.g. "api/version") must not glue onto
+          # url with no separator at all. The primary URL below is requested
+          # exactly as configured, since a server can require the trailing
+          # slash it has (e.g. a static host that only serves /app/ and 404s
+          # on /app).
+          if sha_path:
+              sha_url = url.rstrip("/") + "/" + sha_path.lstrip("/")
+              wait, last = 5, "(no response)"
+              while True:
+                  try:
+                      _, body = get(sha_url)
+                      last = body.strip()[:500]
+                      parsed = json.loads(body)
+                      live_sha = parsed.get(sha_key) if isinstance(parsed, dict) else None
+                      if isinstance(live_sha, str) and live_sha.strip() == expected:
+                          print(f"Live SHA is {expected}.")
+                          break
+                  except (urllib.error.URLError, ValueError, OSError) as error:
+                      last = f"{type(error).__name__}: {error}"
+                  if time.monotonic() >= deadline:
+                      fail(f"- Failing step: poll `{sha_url}` for the live SHA\n"
+                           f"- Expected SHA: `{expected}`\n"
+                           f"- Last response: `{last}`\n")
+                  time.sleep(wait)
+                  wait = min(wait * 2, 60)
+
+          # A version endpoint can report the new SHA while the site itself is
+          # broken, so ask the primary URL too.
+          try:
+              status, body = get(url)
+          except (urllib.error.URLError, OSError) as error:
+              fail(f"- Failing step: request `{url}`\n- Error: `{type(error).__name__}: {error}`\n")
+          if not 200 <= status < 300:
+              fail(f"- Failing step: request `{url}`\n- Status: `{status}`, expected 2xx\n"
+                   f"- Body: `{body.strip()[:500]}`\n")
+          print(f"{url} returned {status}.")
+          PY
+
+      # A failure nobody sees is the same as no check at all. One open issue per
+      # repo is enough: a deploy that stays broken across five pushes must not
+      # open five issues.
+      - name: Report a deploy that did not go live
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          REPORT: ${{ runner.temp }}/verify-failure.md
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          SHORT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          TITLE="Deploy did not go live: ${SHORT_SHA:0:7}"
+          MARKER="<!-- post-merge-verify -->"
+          {
+            echo "The post-merge check failed."
+            echo
+            cat "$REPORT" 2>/dev/null || echo "- The check failed before it wrote a reason."
+            echo "- Run: $RUN_URL"
+            echo
+            echo "$MARKER"
+          } > "$RUNNER_TEMP/issue-body.md"
+          # The title carries the short SHA, so it changes on every failing commit
+          # and can't be matched exactly across runs. A bare text search on
+          # "Deploy did not go live" would also happily match an unrelated,
+          # human-filed issue that just happens to share those words, and post
+          # this run's report as a comment there. The marker in the body is what
+          # actually identifies an issue this workflow opened.
+          #
+          # No title search either. The search was only a prefilter, but it
+          # decided which issues the marker check ever saw: rename the tracking
+          # issue and the next failure opens a second one, which is the outcome
+          # the marker exists to prevent. List open issues and match on the
+          # marker alone.
+          #
+          # Paginated: a repo can carry more than one page of open issues, and
+          # the marker issue (filed on an earlier failure) can be older than
+          # everything on the first page.
+          EXISTING=$(gh api --paginate "repos/$REPO/issues?state=open" \
+            --jq "[.[] | select(.pull_request == null) | select((.body // \"\") | contains(\"$MARKER\"))] | first.number // empty" \
+            | head -n1)
+          if [ -n "$EXISTING" ]; then
+            gh issue comment "$EXISTING" --repo "$REPO" --body-file "$RUNNER_TEMP/issue-body.md"
+          else
+            gh issue create --repo "$REPO" --title "$TITLE" --body-file "$RUNNER_TEMP/issue-body.md"
+          fi
