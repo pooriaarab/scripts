@@ -538,6 +538,30 @@ function isFenceCloser(line, fence) {
   return new RegExp(`^ {0,3}[${fence.char}]{${fence.len},}[ \\t]*$`).test(line);
 }
 
+// Strips HTML comments that open and close within the given text, and reports
+// whether an unterminated one started. Stateless with respect to a comment
+// carried in from a previous line -- the caller tracks that.
+function stripInlineComments(rest) {
+  let opened = false;
+  for (let marker = rest.indexOf('<!--'); marker !== -1; marker = rest.indexOf('<!--', marker + 1)) {
+    let slashes = 0;
+    for (let at = marker - 1; at >= 0 && rest[at] === '\\'; at -= 1) slashes += 1;
+    if (slashes % 2 !== 0) continue;
+    const close = rest.indexOf('-->', marker + 4);
+    if (close === -1) {
+      // An unterminated comment runs to the end of the document, but whatever
+      // sat BEFORE the marker on this line still renders. Dropping the whole
+      // line lost a hatch or a screenshot written ahead of it.
+      rest = rest.slice(0, marker);
+      opened = true;
+      break;
+    }
+    rest = rest.slice(0, marker) + rest.slice(close + 3);
+    marker -= 1;
+  }
+  return { rest, opened };
+}
+
 function visibleBody(body, { unmatchedFenceHides }) {
   // Normalise CRLF first: a closer ending in a bare \r never matched, so a
   // CRLF body left a closed fence looking unterminated.
@@ -590,25 +614,10 @@ function visibleBody(body, { unmatchedFenceHides }) {
     // so an even run leaves the marker live. A line can carry more than one
     // comment, so keep going until none is left -- stopping at the first let a
     // second comment's contents through as visible evidence.
-    let opened = false;
-    for (let marker = rest.indexOf('<!--'); marker !== -1; marker = rest.indexOf('<!--', marker + 1)) {
-      let slashes = 0;
-      for (let at = marker - 1; at >= 0 && rest[at] === '\\'; at -= 1) slashes += 1;
-      if (slashes % 2 !== 0) continue;
-      const close = rest.indexOf('-->', marker + 4);
-      if (close === -1) {
-        // An unterminated comment runs to the end of the document, but whatever
-        // sat BEFORE the marker on this line still renders. Dropping the whole
-        // line lost a hatch or a screenshot written ahead of it.
-        rest = rest.slice(0, marker);
-        opened = true;
-        break;
-      }
-      rest = rest.slice(0, marker) + rest.slice(close + 3);
-      marker -= 1;
-    }
+    const stripped = stripInlineComments(rest);
+    rest = stripped.rest;
     text[index] = rest;
-    if (opened) { inComment = true; if (!rest.trim()) hidden[index] = true; continue; }
+    if (stripped.opened) { inComment = true; if (!rest.trim()) hidden[index] = true; continue; }
 
     const quoted = isQuoted(rest);
     const opener = fenceOpener(quoted ? rest.replace(QUOTE_PREFIX, '') : rest);
@@ -620,9 +629,31 @@ function visibleBody(body, { unmatchedFenceHides }) {
     }
   }
 
-  // An unterminated fence is the one case the two callers disagree about.
+  // An unterminated fence is the one case the two callers disagree about. The
+  // "fails open" reading treats the swallowed lines as ordinary text again --
+  // the loop above never ran its comment pass over them, since it was hiding
+  // them as fenced content, so a comment inside one of these lines (say, one
+  // that wraps a screenshot) was never stripped and still read as visible.
   if (fence && !unmatchedFenceHides) {
-    for (let index = fenceStart; index < lines.length; index += 1) hidden[index] = false;
+    let reopened = false;
+    for (let index = fenceStart; index < lines.length; index += 1) {
+      let line = lines[index];
+      if (reopened) {
+        hidden[index] = true;
+        const close = line.indexOf('-->');
+        if (close === -1) continue;
+        line = line.slice(close + 3);
+        reopened = false;
+      }
+      const revealed = stripInlineComments(line);
+      text[index] = revealed.rest;
+      if (revealed.opened) {
+        reopened = true;
+        hidden[index] = !revealed.rest.trim();
+      } else {
+        hidden[index] = false;
+      }
+    }
   }
   return text.filter((_, index) => !hidden[index]).join('\n');
 }
