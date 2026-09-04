@@ -150,12 +150,30 @@ else
   box exec "$BOX" --json --timeout 180 -- gh repo clone "$REPO" "$DIR" >/dev/null 2>&1 || { echo "box-agent: clone failed" >&2; exit 4; }
   CMD="$(onbox_cmd "$PROVIDER")"
   echo "box-agent: running $PROVIDER CLI on the Box ($CLI) in $DIR"
-  # box exec joins argv into a remote shell command string, so the prompt travels
-  # base64-encoded and is decoded on the Box -- raw interpolation would let prompt
-  # text like $(...), backticks or quotes run as remote shell syntax (box-work's
-  # "one shell-safe word" lesson).
+  # `box exec` joins argv into a remote shell command string, so a quoted
+  # `bash -lc "cd X && ..."` loses its quotes and degenerates to `bash -lc` plus
+  # stray words -- box-fast-attach documents the same failure as `bash -c test`.
+  # The CLI then started in the Box's default cwd, left $DIR untouched, and this
+  # script reported "NO diff" as though the agent had simply done nothing.
+  #
+  # So do what box-work does: ship a runner script and invoke it with every
+  # argument as its own shell-safe word. The prompt still travels base64-encoded
+  # and is decoded on the Box, or prompt text like $(...), backticks or quotes
+  # would run as remote shell syntax.
+  runner="$(mktemp)"
+  cat > "$runner" <<RUNNER
+#!/usr/bin/env bash
+export PATH="\$HOME/.local/bin:\$HOME/.kimi-code/bin:\$HOME/.npm-global/bin:\$PATH"
+set -a; [ -f "\$HOME/.agents/agent-clis.env" ] && . "\$HOME/.agents/agent-clis.env"; set +a
+cd "$DIR" || { echo "box-agent-run: $DIR missing on the Box" >&2; exit 1; }
+P="\$(printf %s "\$1" | base64 -d)"
+$CMD "\$P"
+RUNNER
+  box scp "$runner" "$BOX:/home/user/box-agent-run.sh" >/dev/null 2>&1 \
+    || { rm -f "$runner"; echo "box-agent: could not copy the runner to the Box" >&2; exit 4; }
+  rm -f "$runner"
   B64PROMPT="$(printf '%s' "$PROMPT" | base64 | tr -d '\n')"
-  box exec "$BOX" --json --timeout 600 -- bash -lc "cd $DIR && P=\$(printf %s $B64PROMPT | base64 -d) && $CMD \"\$P\"" 2>/dev/null | jq -r '.stdout' | tail -20 || true
+  box exec "$BOX" --json --timeout 600 -- bash /home/user/box-agent-run.sh "$B64PROMPT" 2>/dev/null | jq -r '.stdout' | tail -20 || true
 fi
 
 # --- Verify ON the Box + pull patch ---
