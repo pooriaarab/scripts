@@ -1931,3 +1931,15 @@ test('--prefix narrows the check, it never widens it', () => {
     fs.rmSync(cwd, { recursive: true, force: true });
   }
 });
+
+test('a Proof n/a hatch inside an HTML comment is not an answer', () => {
+  // hasValidProofNa called a reader that no longer existed, so every proof
+  // check threw ReferenceError. It must scan the section it is handed, and it
+  // must not accept a hatch that is commented out.
+  const uiFiles = [{ filename: 'src/components/Button.tsx', status: 'modified' }];
+  const failed = (r) => r.failures.some((f) => f.check === 'proof of a visible change');
+  const body = (hatch) => ['## What', 'x', '## Why', 'y', '## How I verified', 'bun test -> pass', hatch].join('\n');
+  const reason = 'Proof: n/a — a checker with no user-visible surface at all';
+  assert.equal(failed(checkProof(body(reason), uiFiles, config)), false);
+  assert.equal(failed(checkProof(body(`<!-- ${reason} -->`), uiFiles, config)), true);
+});

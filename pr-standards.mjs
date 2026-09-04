@@ -498,8 +498,15 @@ function countUserAttachments(body) {
   return new Set(matches.map((url) => url.split(/[?#]/)[0].replace(/[.,;:!?]+$/, ''))).size;
 }
 
-function hasValidProofNa(body) {
-  const lines = verificationSection(body, { unmatchedFenceHides: true }).split('\n');
+// Every caller passes the already-extracted "How I verified" section, so this
+// scans the text it is given. It used to call a `verificationSection()` reader
+// that no longer exists in this file -- the merge of #153 kept this call and
+// dropped the function, so every proof check threw ReferenceError and 18 tests
+// went red on main. A hatch inside an HTML comment is not an answer, so the
+// comments come out before the scan.
+function hasValidProofNa(text) {
+  const visible = String(text || '').replace(/<!--[\s\S]*?-->/g, '');
+  const lines = visible.split('\n');
   for (const line of lines) {
     const match = PROOF_NA_LINE.exec(line);
     if (match && match[1].trim().length >= 20) return true;
@@ -1485,6 +1492,21 @@ function substituteTemplate(template, prefix) {
 
 const MALFORMED_BLOCK = Symbol('malformed-managed-block');
 
+// A marker WRITTEN ABOUT is not a marker. Documenting the block --
+// "the `<!-- pr-standards:start -->` block" -- put a second start in the file
+// and every drift check then read the whole managed block as malformed, so
+// explaining the rule broke the rule. Inline code is already treated as
+// not-a-claim by the proof check above; the marker scan needs the same rule.
+// A real marker occupies its own line, so requiring the occurrence to be
+// outside inline code costs nothing a rollout writes.
+function insideInlineCode(line, column) {
+  let ticks = 0;
+  for (let at = 0; at < column; at += 1) {
+    if (line[at] === '`') ticks += 1;
+  }
+  return ticks % 2 === 1;
+}
+
 // Extracting the first start/end pair and ignoring the rest would let a
 // correct block followed by a leftover stale one (a hand edit, or a rollout
 // repair appended after markers it wouldn't touch, see pr-standards-rollout)
@@ -1498,7 +1520,10 @@ const MALFORMED_BLOCK = Symbol('malformed-managed-block');
 function markerOffsets(content, marker) {
   const offsets = [];
   for (let at = content.indexOf(marker); at !== -1; at = content.indexOf(marker, at + marker.length)) {
-    offsets.push(at);
+    const lineStart = content.lastIndexOf('\n', at) + 1;
+    let lineEnd = content.indexOf('\n', at);
+    if (lineEnd === -1) lineEnd = content.length;
+    if (!insideInlineCode(content.slice(lineStart, lineEnd), at - lineStart)) offsets.push(at);
   }
   return offsets;
 }
