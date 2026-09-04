@@ -1972,3 +1972,20 @@ test('proof: the body reader keeps what renders around a comment', () => {
   // hatch written after the quote is visible rather than swallowed.
   assert.equal(failed(checkProof(body('> ```', '> example', hatch), uiFiles, config)), false);
 });
+
+test('proof: revealing an unmatched fence still hides comments inside it', () => {
+  // The lines an unmatched fence swallows never ran the comment pass the main
+  // loop runs on ordinary lines, so revealing them for the "fails open"
+  // reading must run that pass now -- otherwise a screenshot that only ever
+  // existed inside an HTML comment reads as visible evidence.
+  const uiFiles = [{ filename: 'src/components/Button.tsx', status: 'modified' }];
+  const url = (id) => `![shot](https://github.com/user-attachments/assets/${id})`;
+  const failed = (r) => r.failures.some((f) => f.check === 'proof of a visible change');
+  const body = (...lines) => [
+    '## What', 'x', '## Why', 'y', '## How I verified', 'bun test -> pass',
+    ...lines,
+  ].join('\n');
+
+  assert.equal(failed(checkProof(body('```', `<!-- ${url('aaa')} -->`), uiFiles, config)), true);
+  assert.equal(failed(checkProof(body('```', url('bbb')), uiFiles, config)), false);
+});
