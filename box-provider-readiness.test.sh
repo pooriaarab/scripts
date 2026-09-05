@@ -70,7 +70,7 @@ esac
 STUB
   chmod +x "$T/stubbin/box"
 }
-mkcli() { # <dir>: one generic fake provider CLI (muse/cursor-agent/pi) asserting its pinned route
+mkcli() { # <dir>: one generic fake provider CLI (muse/cursor-agent/pi/gemini/devin/kimi/codex) asserting its pinned route
   cat > "$1/provider-fake" <<'FAKE'
 #!/usr/bin/env bash
 T="${READINESS_TEST_T:?}"
@@ -78,7 +78,11 @@ name="$(basename "$0")"
 case "$name" in
   muse) [[ " $* " == *" --yolo "* && " $* " == *" --model muse-spark-1.3-contributor "* && " $* " == *" --prompt-file "* && " $* " == *" --workspace "* ]] || exit 1 ;;
   cursor-agent) [[ " $* " == *" --output-format json "* && " $* " == *" --model composer-2.5 "* ]] || exit 1 ;;
-  pi) [[ " $* " == *" -p "* && " $* " == *" --provider zai-api "* && " $* " == *" --model glm-5.3-flash "* && " $* " == *" --no-extensions "* && " $* " == *" -a "* ]] || exit 1 ;;
+  pi) [[ "${PI_WORKER:-}" == "1" && " $* " == *" -p "* && " $* " == *" --provider zai-api "* && " $* " == *" --model glm-5.3-flash "* && " $* " == *" --no-extensions "* && " $* " == *" -a "* && " $* " == *" --tools read,grep,find,ls,edit,write,bash "* ]] || exit 1 ;;
+  gemini) [[ "${GEMINI_API_KEY:-}" == fixture-gemini-no-secret && "${GEMINI_CLI_HOME:-}" == *.gemini-personal && -z "${GOOGLE_GENAI_USE_VERTEXAI:-}${GOOGLE_APPLICATION_CREDENTIALS:-}${GOOGLE_CLOUD_PROJECT:-}${GOOGLE_CLOUD_LOCATION:-}" && " $* " == *" --skip-trust "* && " $* " == *" --yolo "* && " $* " == *" -m gemini-3.8-flash "* && " $* " == *" -p "* ]] || exit 1
+    echo "gemini-home=${GEMINI_CLI_HOME:-unset}" >>"$T/calls.log" ;;
+  devin) [[ -z "${DEVIN_API_KEY:-}${DEVIN_TOKEN:-}${WINDSURF_API_KEY:-}" && " $* " == *" --model swe-1.7 "* && " $* " == *" --respect-workspace-trust false "* && " $* " == *" --permission-mode dangerous "* && " $* " == *" -p "* ]] || exit 1 ;;
+  kimi) [[ " $* " == *" -m moonshot-ai/kimi-k3 "* && " $* " == *" -p "* ]] || exit 1 ;;
   codex) [[ "${CODEX_HOME:-}" == *.codex-personal && " $* " == *" --skip-git-repo-check "* ]] || exit 1
     echo "codex-home=${CODEX_HOME:-unset}" >>"$T/calls.log" ;;
   *) exit 99 ;;
@@ -91,6 +95,7 @@ prod=$((BASH_REMATCH[1] * BASH_REMATCH[2]))
 [[ "$prompt" =~ to\ ([^[:space:]]+/result\.txt) ]] || exit 1
 res="${BASH_REMATCH[1]}"
 if [[ "$name" == muse && -f "$T/auth-fail" ]]; then echo "muse: Authentication required (test-fixture). MUSE_API_KEY=fake-leak-999" >&2; exit 1; fi
+if [[ -f "$T/scrub-leak" ]]; then printf 'api_key: leak-lower-1\n{"apiKey": "leak-json-2"}\nSECRET_TOKEN=leak-upper-3\n' >&2; exit 1; fi
 if [[ -f "$T/wrong-write" ]]; then printf '%s\n' "$prod"; printf '%s\n' "$((prod+1))" >"$res"; exit 0; fi
 # Non-canonical reply envelopes. The file stays correct so each case proves
 # the reply gate itself rejects: chatter around the digits, a JSON envelope
@@ -104,7 +109,7 @@ if [[ "$name" == cursor-agent && -f "$T/cursor-nondigit" ]]; then printf '{"resu
 printf '%s\n' "$prod" >"$res"
 if [[ "$name" == cursor-agent ]]; then printf '{"result":"%s","usage":{"requests":1}}\n' "$prod"; else printf '%s\n' "$prod"; fi
 FAKE
-  chmod +x "$1/provider-fake"; ln -s provider-fake "$1/muse"; ln -s provider-fake "$1/cursor-agent"; ln -s provider-fake "$1/pi"; ln -s provider-fake "$1/codex"
+  chmod +x "$1/provider-fake"; for n in muse cursor-agent pi gemini devin kimi codex; do ln -s provider-fake "$1/$n"; done
 }
 # Cursor's faithful shape is one JSON object carrying the answer in `result`
 # (observed --output-format flag contract); the helper must read that field,
@@ -125,20 +130,32 @@ FAKE
   cat > "$T/fakebin/git" <<'FAKE'
 #!/usr/bin/env bash
 # Fake git: proves ls-remote carries the canonical token as a Bearer header
-# for the intended repo. Never prints the header value.
+# for the intended repo through a 0600 include.path config file, and that
+# the token itself never appears on argv. Never prints the header value.
 C="$(cat "$READINESS_TEST_T/home/.agents/github-personal.token" 2>/dev/null)"
 if [[ -f "$READINESS_TEST_T/git-fail" ]]; then echo "fake-git: ls-remote failed" >&2; exit 1; fi
-[[ -n "$C" && " $* " == *"http.extraHeader=Authorization: Bearer $C"* && " $* " == *"github.com/testowner/testrepo.git"* ]] \
-  || { echo "fake-git: missing canonical Bearer header or wrong repo" >&2; exit 1; }
+[[ -n "$C" && " $* " != *"$C"* && " $* " != *"extraHeader=Authorization"* && " $* " == *"github.com/testowner/testrepo.git"* ]] \
+  || { echo "fake-git: token leaked on argv or wrong repo" >&2; exit 1; }
+inc=""; for a in "$@"; do case "$a" in include.path=*) inc="${a#include.path=}" ;; esac; done
+[[ -n "$inc" && -f "$inc" ]] || { echo "fake-git: no include.path credential config on argv" >&2; exit 1; }
+mode="$(stat -f%Lp "$inc" 2>/dev/null || stat -c%a "$inc" 2>/dev/null)"
+[[ "$mode" == "600" ]] || { echo "fake-git: credential config is not 0600 (got '$mode')" >&2; exit 1; }
+grep -qF "extraHeader = Authorization: Bearer $C" "$inc" \
+  || { echo "fake-git: include config missing the canonical Bearer header" >&2; exit 1; }
 FAKE
   chmod +x "$T/fakebin/git"
 }
 setup() { # flags become $T/<flag> markers (no-cred, no-gh, stale-env, gh-401, git-fail, timeout, auth-fail, wrong-write, no-binary)
   T="$(mktemp -d "${TMPDIR:-/tmp}/box-readiness-test.XXXXXX")"
-  mkdir -p "$T/stubbin" "$T/fakebin" "$T/home/.config/muse" "$T/home/.codex-personal" "$T/home/.agents"
+  mkdir -p "$T/stubbin" "$T/fakebin" "$T/home/.config/muse" "$T/home/.codex-personal" "$T/home/.agents" \
+    "$T/home/.pi/agent" "$T/home/.gemini-personal/.gemini" "$T/home/.local/share/devin" "$T/home/.kimi-code"
   printf '{"fixture":"test-fixture-no-secret"}\n' > "$T/home/.config/muse/auth.json"
   printf '{"fixture":"test-fixture-no-secret"}\n' > "$T/home/.codex-personal/auth.json"
   printf 'CURSOR_API_KEY=fixture-cursor-no-secret\n' > "$T/home/.agents/cursor.env"
+  printf '{"provider":"zai","fixture":"test-fixture-no-secret"}\n' > "$T/home/.pi/agent/auth.json"
+  printf 'GEMINI_API_KEY=fixture-gemini-no-secret\n' > "$T/home/.gemini-personal/.gemini/.env"
+  printf '[auth]\ntoken = "test-fixture-no-secret"\n' > "$T/home/.local/share/devin/credentials.toml"
+  printf '[auth]\ntoken = "test-fixture-no-secret"\n' > "$T/home/.kimi-code/config.toml"
   printf 'fixture-canonical-gh-token-000' > "$T/home/.agents/github-personal.token"
   printf '0' > "$T/probe_fails"; : > "$T/exec.log"; : > "$T/calls.log"; : > "$T/rm.log"
   for f in "$@"; do touch "$T/$f"; done; [[ -f "$T/no-gh" ]] && rm -f "$T/home/.agents/github-personal.token"
@@ -310,6 +327,45 @@ test_codex_personal() {
   grep -q "codex-home=.*\.codex-personal" "$T/calls.log" \
     && pass "codex probe runs under CODEX_HOME=*.codex-personal" || fail "codex personal route" "$(cat "$T/calls.log")"
 }
+# Each remaining provider's case branch builds a real CLI invocation the
+# fakes assert flag-for-flag; calls.log then proves the produced string.
+test_pi_invocation() {
+  setup
+  run_helper pi -- touch "$T/sentinel"
+  need_ok "pi probe reaches the sentinel"
+  grep -qF -- "-p --no-extensions --provider zai-api --model glm-5.3-flash -a --tools read,grep,find,ls,edit,write,bash" "$T/calls.log" \
+    && pass "pi probe runs the pinned zai-api invocation" || fail "pi invocation" "$(cat "$T/calls.log")"
+}
+test_gemini_invocation() {
+  setup
+  run_helper gemini -- touch "$T/sentinel"
+  need_ok "gemini probe reaches the sentinel"
+  grep -qF -- "--skip-trust --yolo -m gemini-3.8-flash -p" "$T/calls.log" \
+    && pass "gemini probe runs the pinned personal invocation" || fail "gemini invocation" "$(cat "$T/calls.log")"
+  grep -q "gemini-home=.*\.gemini-personal" "$T/calls.log" \
+    && pass "gemini probe runs under GEMINI_CLI_HOME=*.gemini-personal" || fail "gemini personal route" "$(cat "$T/calls.log")"
+}
+test_devin_invocation() {
+  setup
+  run_helper devin -- touch "$T/sentinel"
+  need_ok "devin probe reaches the sentinel"
+  grep -qF -- "--model swe-1.7 --respect-workspace-trust false --permission-mode dangerous -p" "$T/calls.log" \
+    && pass "devin probe runs the pinned invocation" || fail "devin invocation" "$(cat "$T/calls.log")"
+}
+test_kimi_invocation() {
+  setup
+  run_helper kimi -- touch "$T/sentinel"
+  need_ok "kimi probe reaches the sentinel"
+  grep -qF -- "kimi -m moonshot-ai/kimi-k3 -p" "$T/calls.log" \
+    && pass "kimi probe runs the pinned invocation" || fail "kimi invocation" "$(cat "$T/calls.log")"
+}
+test_scrub_shapes() {
+  setup scrub-leak
+  run_helper muse -- touch "$T/sentinel"
+  need_fail "provider stderr leak fails before the sentinel" "provider bootstrap"
+  ! grep -qE "leak-lower-1|leak-json-2|leak-upper-3" <<<"$out" && grep -q "redacted" <<<"$out" \
+    && pass "scrub redacts lowercase, colon and JSON secret shapes" || fail "scrub shapes" "$out"
+}
 test_timeouts_rejected() {
   setup
   run_raw --box bx --provider muse --cwd /home/user/f --ready-secs 0 --timeout 30 -- touch "$T/sentinel"
@@ -355,17 +411,23 @@ FAKE
 #!/usr/bin/env bash
 # Fake git: proves ls-remote and clone carry the canonical token for the
 # repo via an explicit https URL (never gh repo clone -- that would honor
-# the Box's configured git_protocol and could clone over ambient SSH).
+# the Box's configured git_protocol and could clone over ambient SSH). The
+# token must ride a 0600 include.path config file, never argv.
 C="$(cat "$GATE_T/boxhome/.agents/github-personal.token" 2>/dev/null)"
+[[ -n "$C" && " $* " != *"$C"* && " $* " != *"extraHeader=Authorization"* && " $* " == *"github.com/testowner/testrepo.git"* ]] \
+  || { echo "fake-git: token leaked on argv or wrong repo" >&2; exit 1; }
+inc=""; for a in "$@"; do case "$a" in include.path=*) inc="${a#include.path=}" ;; esac; done
+[[ -n "$inc" && -f "$inc" ]] || { echo "fake-git: no include.path credential config on argv" >&2; exit 1; }
+mode="$(stat -f%Lp "$inc" 2>/dev/null || stat -c%a "$inc" 2>/dev/null)"
+[[ "$mode" == "600" ]] || { echo "fake-git: credential config is not 0600 (got '$mode')" >&2; exit 1; }
+grep -qF "Bearer $C" "$inc" || { echo "fake-git: include config missing the canonical token" >&2; exit 1; }
 if [[ " $* " == *" clone "* ]]; then
   [[ -f "$GATE_T/git-fail" ]] && { echo "fake-git: clone failed" >&2; exit 1; }
-  [[ -n "$C" && " $* " == *"http.extraHeader=Authorization: Bearer $C"* && " $* " == *"github.com/testowner/testrepo.git"* ]] \
-    || { echo "fake-git-clone: expected the canonical token" >&2; exit 1; }
   dest="${@: -1}"
   mkdir -p "$dest"; echo "git-clone-ok testowner/testrepo" >>"$GATE_T/calls.log"; exit 0
 fi
 [[ -f "$GATE_T/git-fail" ]] && { echo "fake-git: ls-remote failed" >&2; exit 1; }
-[[ -n "$C" && " $* " == *"http.extraHeader=Authorization: Bearer $C"* && " $* " == *"github.com/testowner/testrepo.git"* ]] || exit 1
+exit 0
 FAKE
   chmod +x "$T2/fakebin/git"
   cat > "$T2/stubbin/box" <<'STUB'
@@ -500,7 +562,10 @@ for t in test_fresh_success test_resumed_transient_success test_missing_binary \
   test_cursor_json_success test_stale_env test_expired_gh test_missing_gh \
   test_git_repo_fail test_wrong_login test_reply_envelopes_rejected test_github_timeout \
   test_github_only test_github_only_sentinel_failure \
-  test_codex_personal test_timeouts_rejected test_models_rejected \
+  test_codex_personal \
+  test_pi_invocation test_gemini_invocation test_devin_invocation \
+  test_kimi_invocation test_scrub_shapes \
+  test_timeouts_rejected test_models_rejected \
   test_gate_success test_gate_bootstrap_failure \
   test_gate_clone_ordering test_gate_github_failure_no_clone \
   test_gate_probe_failure_no_launch test_gate_probe_timeout_no_launch; do "$t"; done
