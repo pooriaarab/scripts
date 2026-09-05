@@ -35,6 +35,20 @@ const config = {
   minBodyChars: 120,
 };
 
+test('box counts as a command, like docker already did', () => {
+  // Boxes are the sanctioned way to run heavy work, so evidence produced on one
+  // is the normal case. Without `box` in the list, a body whose whole
+  // verification is real Box output read as having no command at all.
+  const body = [
+    'Closes #1', '', '## What', 'A thing.', '',
+    '## Why', 'The reason it matters, stated plainly enough to be judged.', '',
+    '## How I verified', '```text',
+    "box exec bx_1 --cwd cr -- bash -lc 'bun install' -> 1695 packages installed, verified",
+    '```', '', 'Assisted-by: a:b', '',
+  ].join('\n');
+  assert.deepEqual(validateBody(body, 1, config).failures.map((f) => f.check), []);
+});
+
 test('a quoted Closes reference is a mention, not a reference', () => {
   // A body that explains a reference it was corrected away from has to name it
   // to explain it. Counting that mention failed the body for three references

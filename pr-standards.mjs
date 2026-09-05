@@ -422,7 +422,7 @@ const PROOF_NA_LINE = /^\s*Proof:\s*n\/a\s*[—–-]\s*(\S.*)\s*$/i;
 // cannot state that evidence at all — live as PR #205, whose body recorded
 // `bash worker-run.test.sh` and failed this check. `docker`, `curl`, and
 // `terraform` are the other runners in that same table that the list skipped.
-const PROOF_COMMAND_RE = /^(?:[$>`]\s*|\*\s*)?(?:bunx|bun|npm|pnpm|yarn|node|deno|cargo|go|pytest|python3|python|make|git|gh|npx|bash|sh|docker|curl|terraform|\.\/)\b[^\n]*/i;
+const PROOF_COMMAND_RE = /^(?:[$>`]\s*|\*\s*)?(?:bunx|bun|npm|pnpm|yarn|node|deno|cargo|go|pytest|python3|python|make|git|gh|npx|bash|sh|docker|curl|terraform|box|\.\/)\b[^\n]*/i;
 
 // Real tools do not all print "passed". oxlint prints "Found 0 warnings",
 // tsc prints "0 errors", docker prints "Successfully built", terraform
