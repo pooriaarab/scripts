@@ -3,7 +3,7 @@
 # repository facts BEFORE any Box, branch, or worker mutation.
 #
 # Usage:
-#   worker-dispatch-validate --manifest <file> [--checkout <dir>]
+#   worker-dispatch-validate --manifest <file> [--checkout <dir>] [--agent <cli>]
 #
 # Manifest (JSON). All fields required unless noted:
 #   repository   "owner/name" of the target repo
@@ -34,11 +34,12 @@ STATE="${WORKER_DISPATCH_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/worker-dis
 die() { echo "worker-dispatch-validate: $*" >&2; exit "${2:-1}"; }
 usage_error() { echo "worker-dispatch-validate: $*" >&2; exit 2; }
 
-MANIFEST=""; CHECKOUT=""
+MANIFEST=""; CHECKOUT=""; AGENT_CLI=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --manifest) [ $# -ge 2 ] || usage_error "--manifest needs a value"; MANIFEST="$2"; shift 2 ;;
     --checkout) [ $# -ge 2 ] || usage_error "--checkout needs a value"; CHECKOUT="$2"; shift 2 ;;
+    --agent) [ $# -ge 2 ] || usage_error "--agent needs a value"; AGENT_CLI="$2"; shift 2 ;;
     -h|--help) sed -n '2,30p' "$0"; exit 0 ;;
     *) usage_error "unknown flag: $1" ;;
   esac
@@ -93,12 +94,17 @@ esac
 case "$M_CLI" in claude|codex|gemini|pi|kimi|cursor|devin|muse) : ;;
   *) fail "unknown worker cli '$M_CLI'" ;;
 esac
+# Checked before any state is written: a caller-declared --agent that doesn't
+# match the manifest's cli must never leave a receipt behind for a dispatch
+# that the caller is about to abort.
+[ -z "$AGENT_CLI" ] || [ "$AGENT_CLI" = "$M_CLI" ] \
+  || fail "manifest declares cli '$M_CLI'; --agent '$AGENT_CLI' does not match"
 case "$M_MODEL" in ""|*[!A-Za-z0-9_./-]*|.*|*/|*//*)
   fail "invalid model '$M_MODEL'" ;;
 esac
 
 # --- Repository configuration: the prefix every branch/title check reads. ---
-CONFIG_JSON=""; CONFIG_SHA=""
+CONFIG_JSON=""; CONFIG_SHA=""; API_ERR=""; API_OUT=""
 if [ -n "$CHECKOUT" ]; then
   [ -d "$CHECKOUT" ] || usage_error "not a directory: $CHECKOUT"
   # Read from the pinned HEAD commit, not the worktree file: an uncommitted
@@ -111,7 +117,9 @@ else
   API_ERR="$(mktemp)"; API_OUT="$(mktemp)"
   # shellcheck disable=SC2064
   trap "rm -f '$API_ERR' '$API_OUT'" EXIT
-  if ! "$GH" api "repos/$M_REPOSITORY/contents/.github/pr-standards.json" \
+  # Pinned to base_sha (already validated as 40 lowercase hex), not the
+  # default branch: a base_ref other than default must read its own config.
+  if ! "$GH" api "repos/$M_REPOSITORY/contents/.github/pr-standards.json?ref=$M_BASE_SHA" \
       --jq '{sha: .sha, content: .content}' >"$API_OUT" 2>"$API_ERR"; then
     fail "cannot fetch repository configuration for $M_REPOSITORY: $(head -c 300 "$API_ERR")"
   fi
@@ -170,8 +178,23 @@ if [ -n "$CHECKOUT" ]; then
 fi
 
 # --- Ownership: a conflicting active record stops dispatch. A declared resume
-# --- must match the recorded coordinator, Box, and worker CLI exactly.
+# --- must match the recorded coordinator, Box, and worker CLI exactly. Locked
+# --- end to end via a portable mkdir lock (flock(1) is Linux-only and this
+# --- tool also runs from macOS): without it, two concurrent validations for
+# --- the same repo and issue could both see no receipt, both pass, and both
+# --- write -- dispatching conflicting workers under a check meant to prevent
+# --- exactly that.
+mkdir -p "$STATE" || fail "cannot create state directory $STATE"
 RECORD="$STATE/$(printf '%s' "$M_REPOSITORY" | tr '/' '_')-$M_ISSUE.json"
+LOCKDIR="$RECORD.lock"
+LOCK_DEADLINE=$(( $(date +%s) + 10 ))
+until mkdir "$LOCKDIR" 2>/dev/null; do
+  [ "$(date +%s)" -lt "$LOCK_DEADLINE" ] || fail "could not acquire dispatch lock for $M_REPOSITORY#$M_ISSUE within 10s"
+  sleep 0.2
+done
+# Replaces the earlier API-tempfile trap; chained here so both still run at exit.
+# shellcheck disable=SC2064
+trap "rm -f '$API_ERR' '$API_OUT'; rmdir '$LOCKDIR' 2>/dev/null" EXIT
 if [ -f "$RECORD" ]; then
   MISMATCH="$(python3 - "$RECORD" "$M_COORDINATOR" "$M_BOX" "$M_CLI" "$M_MODEL" "$M_RESUME" <<'PY'
 import json,sys
@@ -190,7 +213,6 @@ fi
 # --- Success: the only state this command ever writes. A write that fails
 # --- here must fail validation too -- reporting success without a receipt
 # --- would let a concurrent dispatch never see this one's ownership.
-mkdir -p "$STATE" || fail "cannot create state directory $STATE"
 python3 - "$RECORD" "$M_REPOSITORY" "$M_ISSUE" "$M_BRANCH" "$PREFIX" "$CONFIG_SHA" \
   "$M_BASE_REF" "$M_BASE_SHA" "$M_COORDINATOR" "$M_CLI" "$M_MODEL" "$M_BOX" <<'PY'
 import json,sys,datetime

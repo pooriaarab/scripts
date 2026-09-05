@@ -31,7 +31,7 @@ jqexpr=""
 while [ $# -gt 0 ]; do case "$1" in --jq) jqexpr="$2"; shift 2;; *) shift;; esac; done
 failmode="$(cat "$T/apifail" 2>/dev/null || echo none)"
 case "$endpoint" in
-  repos/*/contents/.github/pr-standards.json)
+  repos/*/contents/.github/pr-standards.json\?ref=*)
     case "$failmode" in config|all) echo "API 500 exploded" >&2; exit 1;; esac
     [ -f "$T/no-config" ] && { echo "404 not found" >&2; exit 1; }
     prefix="$(cat "$T/config-prefix")"
