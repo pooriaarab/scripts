@@ -100,9 +100,15 @@ elif [ -n "$MODEL" ]; then echo "box-provider-readiness: provider '$PROVIDER' ta
 fi
 fi
 
-# Never log values: name paths only, and redact KEY/TOKEN-shaped assignments
-# plus Bearer tokens from any provider output echoed below.
-scrub() { sed -E -e 's/[A-Za-z_]*((KEY|TOKEN|SECRET)[A-Za-z_]*)=[^[:space:]]+/\1=[redacted]/g' -e 's/Bearer [^[:space:]]+/Bearer [redacted]/g'; }
+# Never log values: name paths only, and redact key|token|secret-shaped
+# assignments from any provider output echoed below -- any case, "=" or ":"
+# separators, and JSON "name": "value" shapes -- plus Bearer tokens.
+scrub() {
+  sed -E \
+    -e 's/("[A-Za-z_-]*([Kk][Ee][Yy]|[Tt][Oo][Kk][Ee][Nn]|[Ss][Ee][Cc][Rr][Ee][Tt])[A-Za-z_-]*"[[:space:]]*:[[:space:]]*)"?[^",}[:space:]]*"?/\1"[redacted]"/g' \
+    -e 's/([A-Za-z_-]*([Kk][Ee][Yy]|[Tt][Oo][Kk][Ee][Nn]|[Ss][Ee][Cc][Rr][Ee][Tt])[A-Za-z_-]*[[:space:]]*[=:][[:space:]]*)"?[^",}[:space:]]+"?/\1[redacted]/g' \
+    -e 's/[Bb]earer [^[:space:]]+/Bearer [redacted]/g'
+}
 
 exec_json() { # <timeout> <argv...>: run on the Box, print the --json envelope
   local t="$1"; shift
@@ -227,7 +233,12 @@ GH_F="\$1"; GH_R="\$2"; GH_WANT="\$3"
 GH_T="\$(cat "\$GH_F")"; [ -n "\$GH_T" ] || { echo "box-provider-readiness: canonical github token empty on the Box" >&2; exit 1; }
 GH_L="\$(env -u GH_TOKEN -u GITHUB_TOKEN GH_TOKEN="\$GH_T" GITHUB_TOKEN="\$GH_T" gh api user --jq .login 2>&1)" || { printf '%s\n' "\$GH_L" >&2; echo "box-provider-readiness: github identity check failed (a stale/expired canonical token is a bootstrap failure)" >&2; exit 1; }
 [ "\$GH_L" = "\$GH_WANT" ] || { echo "box-provider-readiness: github identity '\$GH_L' is not the canonical personal account; refusing" >&2; exit 1; }
-env -u GH_TOKEN -u GITHUB_TOKEN git -c "http.extraHeader=Authorization: Bearer \$GH_T" ls-remote "https://github.com/\$GH_R.git" HEAD >/dev/null 2>&1 || { echo "box-provider-readiness: git ls-remote failed for \$GH_R" >&2; exit 1; }
+# The token never sits on argv, where any host process could read it from
+# /proc/*/cmdline: it rides a 0600 temp git config included by path only.
+GH_GITCFG="\$(mktemp)" && chmod 600 "\$GH_GITCFG" || { echo "box-provider-readiness: could not stage the git credential config" >&2; exit 1; }
+trap 'rm -f "\$GH_GITCFG"' EXIT
+printf '[http]\n\textraHeader = Authorization: Bearer %s\n' "\$GH_T" > "\$GH_GITCFG"
+env -u GH_TOKEN -u GITHUB_TOKEN git -c "include.path=\$GH_GITCFG" ls-remote "https://github.com/\$GH_R.git" HEAD >/dev/null 2>&1 || { echo "box-provider-readiness: git ls-remote failed for \$GH_R" >&2; exit 1; }
 RUNNER
 "$BOX" scp "$GH_RUNNER" "$BOXID:$GH_REMOTE" >/dev/null 2>&1 || { rm -f "$GH_RUNNER"; fail "could not copy the github gate runner to box $BOXID"; }
 rm -f "$GH_RUNNER"
@@ -283,7 +294,14 @@ GH_F="\$2"; GH_R="\${3:-}"; GH_WANT="\${4:-}"
 GH_T="\$(cat "\$GH_F")"; [ -n "\$GH_T" ] || { echo "box-provider-readiness: canonical github token empty on the Box" >&2; exit 1; }
 GH_L="\$(env -u GH_TOKEN -u GITHUB_TOKEN GH_TOKEN="\$GH_T" GITHUB_TOKEN="\$GH_T" gh api user --jq .login 2>&1)" || { printf '%s\n' "\$GH_L" >&2; echo "box-provider-readiness: github identity check failed (a stale/expired canonical token is a bootstrap failure)" >&2; exit 1; }
 [ "\$GH_L" = "\$GH_WANT" ] || { echo "box-provider-readiness: github identity '\$GH_L' is not the canonical personal account; refusing" >&2; exit 1; }
-if [ -n "\$GH_R" ]; then env -u GH_TOKEN -u GITHUB_TOKEN git -c "http.extraHeader=Authorization: Bearer \$GH_T" ls-remote "https://github.com/\$GH_R.git" HEAD >/dev/null 2>&1 || { echo "box-provider-readiness: git ls-remote failed for \$GH_R" >&2; exit 1; }; fi
+# Same argv rule as the github gate above: a 0600 temp git config carries
+# the Bearer header, included by path, never written on the command line.
+if [ -n "\$GH_R" ]; then
+  GH_GITCFG="\$(mktemp)" && chmod 600 "\$GH_GITCFG" || { echo "box-provider-readiness: could not stage the git credential config" >&2; exit 1; }
+  trap 'rm -f "\$GH_GITCFG"' EXIT
+  printf '[http]\n\textraHeader = Authorization: Bearer %s\n' "\$GH_T" > "\$GH_GITCFG"
+  env -u GH_TOKEN -u GITHUB_TOKEN git -c "include.path=\$GH_GITCFG" ls-remote "https://github.com/\$GH_R.git" HEAD >/dev/null 2>&1 || { echo "box-provider-readiness: git ls-remote failed for \$GH_R" >&2; exit 1; }
+fi
 $CMD
 RUNNER
 "$BOX" scp "$RUNNER" "$BOXID:$REMOTE" >/dev/null 2>&1 || { rm -f "$RUNNER"; fail "could not copy the probe runner to box $BOXID"; }

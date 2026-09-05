@@ -200,7 +200,12 @@ rm -rf "\$DEST"
 # honors the Box's configured git_protocol, so a Box set to ssh would clone
 # via ambient SSH credentials and ignore GH_T entirely -- the same failure
 # mode box-provider-readiness's own ls-remote gate avoids by never calling gh.
-exec git -c "http.extraHeader=Authorization: Bearer \$GH_T" clone "https://github.com/\$REPO.git" "\$DEST"
+# The token never sits on argv either (/proc/*/cmdline is host-readable): it
+# rides a 0600 temp git config included by path, removed by the EXIT trap.
+GH_GITCFG="\$(mktemp)" && chmod 600 "\$GH_GITCFG" || { echo "box-agent: could not stage the git credential config" >&2; exit 1; }
+trap 'rm -f "\$GH_GITCFG"' EXIT
+printf '[http]\n\textraHeader = Authorization: Bearer %s\n' "\$GH_T" > "\$GH_GITCFG"
+git -c "include.path=\$GH_GITCFG" clone "https://github.com/\$REPO.git" "\$DEST"
 RUNNER
   box scp "$clone_runner" "$BOX:$CLONE_REMOTE" >/dev/null 2>&1 \
     || { rm -f "$clone_runner"; echo "box-agent: could not copy the clone runner to the Box" >&2; exit 4; }
