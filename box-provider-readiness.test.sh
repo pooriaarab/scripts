@@ -38,7 +38,25 @@ case "$sub" in
         printf '{"stdout":"","stderr":"","exitCode":%d}\n' "$ec" ;;
       mktemp) d="$(mktemp -d "${cmd[2]}")"; o="$(mktemp)"; printf '%s\n' "$d" >"$o"; e="$(mktemp)"; : >"$e"; jout "$o" "$e" 0 ;;
       bash)
-        if [[ -f "$T/timeout" ]]; then echo "box: exec timed out after 30s" >&2; exit 124; fi
+        # Timeout fixture: the transport gives up while the owned runner is
+        # still computing. Plant a REAL local sleeping-child tree (root plus
+        # child plus grandchild) and record its root pid where the helper's
+        # reaper looks, so reap-and-verify executes for real. Only the
+        # timed-out runner is faked; the reaper below runs for real.
+        runner=""; case "${cmd[1]:-}" in
+          *box-provider-probe-*) runner=probe ;;
+          *box-provider-github-*) runner=github ;;
+        esac
+        if [[ "$runner" == probe && -f "$T/timeout" ]] || [[ "$runner" == github && -f "$T/github-timeout" ]]; then
+          if [[ "$runner" == probe ]]; then pidf="${cmd[6]}/pid"; else pidf="${cmd[5]}"; fi
+          nonce="$(basename "${cmd[1]}" .sh)"; nonce="${nonce#box-provider-probe-}"; nonce="${nonce#box-provider-github-}"
+          tree="$T/fixture-tree-$nonce.sh"
+          printf '#!/usr/bin/env bash\nsleep 120 &\n( sleep 120 & wait ) &\nwait\n' >"$tree"
+          chmod +x "$tree"
+          setsid "$tree" >/dev/null 2>&1 < /dev/null &
+          echo $! >"$T/fixture.pid"; echo $! >"$pidf"
+          echo "box: exec timed out after 30s" >&2; exit 124
+        fi
         extra=(); [[ -f "$T/stale-env" ]] && extra=(GH_TOKEN=stale-inherited-1 GITHUB_TOKEN=stale-inherited-2)
         env -i PATH="$T/fakebin:/usr/bin:/bin" READINESS_TEST_T="$T" BOX_PROBE_BASE="$T/home" "${extra[@]}" \
           bash "${cmd[@]:1}" >"$T/probe.out" 2>"$T/probe.err"; jout "$T/probe.out" "$T/probe.err" "$?" ;;
@@ -134,6 +152,12 @@ run_helper() { # <provider> -- <sentinel...>: always pins --repo so ls-remote is
     --repo testowner/testrepo --ready-secs 30 --timeout 30 "$@" 2>&1)
   rc=$?
 }
+run_github_only() { # [-- <sentinel...>]: pre-clone gate from an existing cwd, no provider probe
+  out=$(BOX_CLI="$T/stubbin/box" BOX_PROBE_BASE="$T/home" \
+    "$SCRIPT" --box bx_test123 --cwd /home/user/work \
+    --repo testowner/testrepo --ready-secs 30 --timeout 30 --github-only "$@" 2>&1)
+  rc=$?
+}
 run_raw() {
   out=$(BOX_CLI="$T/stubbin/box" BOX_PROBE_BASE="$T/home" "$SCRIPT" "$@" 2>&1)
   rc=$?
@@ -177,10 +201,30 @@ test_wrong_write() {
   need_fail "wrong probe file fails before the sentinel" "wrote.*expected"
   cleaned "wrong write: unique probe dir cleaned on failure"
 }
+# After a timeout run: every pid the reaper reported must be dead (checked
+# with kill -0, the same predicate the reaper used), and exec.log must show
+# no global kill. Lingering fixture pids are killed by explicit pid only.
+fixture_dead() { # <label>
+  local p dead=1 all
+  all="$(grep -oE 'confirmed dead \(reaped(-after-kill)?:[0-9 ]+\)' <<<"$out" | grep -oE '[0-9]+')"
+  [[ -n "$all" ]] || { fail "$1: no reaped pid list" "$out"; return; }
+  for p in $all; do kill -0 "$p" 2>/dev/null && dead=0; done
+  (( dead )) && pass "$1: every reaped pid is dead" || fail "$1: a reaped pid survived" "$all"
+  ! grep -qE 'pkill|killall' "$T/exec.log" \
+    && pass "$1: no global kills issued" || fail "$1: global kill" "$(cat "$T/exec.log")"
+  for p in $all; do kill -KILL "$p" 2>/dev/null || true; done
+}
 test_timeout() {
   setup timeout
   run_helper muse -- touch "$T/sentinel"
-  need_fail "probe timeout fails before the sentinel" "failed before returning"
+  need_fail "probe timeout fails before the sentinel" "owned probe tree confirmed dead"
+  fixture_dead "probe timeout"
+}
+test_github_timeout() {
+  setup github-timeout
+  run_github_only -- touch "$T/sentinel"
+  need_fail "github-gate timeout fails before the sentinel" "owned gate tree confirmed dead"
+  fixture_dead "github-gate timeout"
 }
 test_cursor_json_success() {
   setup
@@ -240,6 +284,24 @@ test_reply_envelopes_rejected() {
   rm -rf "$T"; setup cursor-nondigit
   run_helper cursor -- touch "$T/sentinel"
   need_fail "cursor non-digit result fails explicitly" "not canonical"
+}
+test_github_only() {
+  setup
+  run_github_only -- touch "$T/sentinel"
+  need_ok "github-only gate reaches the sentinel without a provider probe"
+  grep -q "READY github=pooriaarab repo=testowner/testrepo" <<<"$out" \
+    && pass "github-only gate proves the personal identity and repo access" || fail "github-only gate identity proof" "$out"
+  grep -q "box-provider-github-" "$T/exec.log" && ! grep -q "box-provider-probe-" "$T/exec.log" \
+    && pass "github-only gate ships only the identity runner, no provider probe" || fail "github-only gate runners" "$(cat "$T/exec.log")"
+  rm -rf "$T"; setup gh-wrong-login
+  run_github_only -- touch "$T/sentinel"
+  need_fail "github-only gate rejects a wrong identity" "not the canonical personal account"
+}
+test_github_only_sentinel_failure() {
+  setup
+  run_github_only -- sh -c 'exit 7'
+  (( rc == 7 )) && pass "github-only gate propagates the sentinel's exit status" \
+    || fail "github-only gate propagates the sentinel's exit status" "rc=$rc out=$out"
 }
 test_codex_personal() {
   setup
@@ -330,7 +392,16 @@ case "$sub" in
       command) printf '{"stdout":"/home/user/.local/bin/pi","stderr":"","exitCode":0}\n' ;;
       test) if [[ -s "$(map "${cmd[2]}")" ]]; then printf '{"stdout":"","stderr":"","exitCode":0}\n'; else printf '{"stdout":"","stderr":"","exitCode":1}\n'; fi ;;
       mktemp) d="$(mktemp -d "$(map "${cmd[2]}")")"; o="$(mktemp)"; printf '%s\n' "$d" >"$o"; e="$(mktemp)"; : >"$e"; jout "$o" "$e" 0 ;;
-      bash) if [[ "$(map "${cmd[1]}")" == *box-agent-run.sh ]]; then printf 'runner-executed\n' >>"$T/runner.log"; printf '{"stdout":"simulated agent run","stderr":"","exitCode":0}\n';
+      bash) if [[ -f "$T/timeout" && "${cmd[1]:-}" == *box-provider-probe-* ]]; then
+          nonce="$(basename "${cmd[1]}" .sh)"; nonce="${nonce#box-provider-probe-}"
+          tree="$T/fixture-tree-$nonce.sh"
+          printf '#!/usr/bin/env bash\nsleep 120 &\n( sleep 120 & wait ) &\nwait\n' >"$tree"
+          chmod +x "$tree"
+          setsid "$tree" >/dev/null 2>&1 < /dev/null &
+          echo $! >"$T/fixture.pid"; echo $! >"${cmd[6]}/pid"
+          echo "box: exec timed out after 30s" >&2; exit 124
+        fi
+        if [[ "$(map "${cmd[1]}")" == *box-agent-run.sh ]]; then printf 'runner-executed\n' >>"$T/runner.log"; printf '{"stdout":"simulated agent run","stderr":"","exitCode":0}\n';
         else margs=(); for a in "${cmd[@]:2}"; do case "$a" in /home/user/*) margs+=("$(map "$a")");; *) margs+=("$a");; esac; done
           extra=(); [[ -f "$T/stale-clone-env" ]] && extra=(GH_TOKEN=stale-inherited-9 GITHUB_TOKEN=stale-inherited-9)
           env -i PATH="$T/fakebin:/usr/bin:/bin" GATE_T="$T" READINESS_TEST_T="$T" BOX_PROBE_BASE="$T/boxhome" "${extra[@]}" \
@@ -409,15 +480,30 @@ test_gate_probe_failure_no_launch() {
   rm -rf "$T2"
   (( ok )) && pass "dispatch gate: failed probe assertion blocks every task launch, Box stopped" || fail "dispatch gate: probe failure blocks launch" "rc=$rc out=$out"
 }
+test_gate_probe_timeout_no_launch() {
+  gate_setup timeout
+  out=$(BOX_BIN="$T2/stubbin/box" PATH="$T2/stubbin:$PATH" GATE_T="$T2" BOX_PROBE_BASE="$T2/boxhome" "$DIR/box-agent" pi --repo testowner/testrepo "add a probe note" 2>&1); rc=$?
+  ok=1; (( rc == 3 )) || ok=0
+  grep -q "confirmed dead" <<<"$out" || ok=0
+  grep -q "box-agent-run.sh" "$T2/scp.log" 2>/dev/null && ok=0
+  [[ -e "$T2/runner.log" ]] && ok=0
+  [[ -s "$T2/stop.log" ]] || ok=0
+  all="$(grep -oE 'confirmed dead \(reaped(-after-kill)?:[0-9 ]+\)' <<<"$out" | grep -oE '[0-9]+')"
+  [[ -n "$all" ]] || ok=0
+  for p in $all; do kill -0 "$p" 2>/dev/null && ok=0; done
+  for p in $all; do kill -KILL "$p" 2>/dev/null || true; done
+  rm -rf "$T2"
+  (( ok )) && pass "dispatch gate: probe timeout reaps the owned tree, blocks every task launch, Box stopped" || fail "dispatch gate: probe timeout blocks launch" "rc=$rc out=$out"
+}
 for t in test_fresh_success test_resumed_transient_success test_missing_binary \
   test_missing_credential test_invalid_auth test_wrong_write test_timeout \
   test_cursor_json_success test_stale_env test_expired_gh test_missing_gh \
-  test_git_repo_fail test_wrong_login test_reply_envelopes_rejected \
+  test_git_repo_fail test_wrong_login test_reply_envelopes_rejected test_github_timeout \
   test_github_only test_github_only_sentinel_failure \
   test_codex_personal test_timeouts_rejected test_models_rejected \
   test_gate_success test_gate_bootstrap_failure \
   test_gate_clone_ordering test_gate_github_failure_no_clone \
-  test_gate_probe_failure_no_launch; do "$t"; done
+  test_gate_probe_failure_no_launch test_gate_probe_timeout_no_launch; do "$t"; done
 echo
 echo "pass=$PASS fail=$FAIL"
 (( FAIL == 0 ))
