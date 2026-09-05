@@ -403,6 +403,26 @@ else
   fail_msg "unattributed stays separate — output: $out"
 fi
 
+# Test 12: a strict match on a later line outranks a loose match on an
+# earlier malformed line, matching assisted-by.mjs's parseAssistedByLabel.
+write_prs <<'JSON'
+[
+  {"number":95,"title":"Malformed first line","body":"Assisted-by: oops\nAssisted-by: cursor:composer","mergedAt":"2025-01-10T10:00:00Z","baseRefName":"main"}
+]
+JSON
+write_commits <<'JSON'
+[]
+JSON
+write_files 95 <<'JSON'
+["h95.txt"]
+JSON
+out=$(run owner/repo --since 2025-01-01 --window-days 7)
+if echo "$out" | grep -q "cursor:composer" && ! echo "$out" | grep -q "oops"; then
+  ok "strict match on a later line wins over a loose match on an earlier line"
+else
+  fail_msg "strict match should outrank earlier loose match — output: $out"
+fi
+
 echo "---"
 echo "$pass passed, $fail failed"
 if (( fail > 0 )); then exit 1; fi

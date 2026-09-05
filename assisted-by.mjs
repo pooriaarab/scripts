@@ -39,7 +39,7 @@ export function loadAssistedByAliases(routingPath = ROUTING_PATH) {
       aliasToCanonical.set(alias, canonical);
     }
   }
-  return { canonicalToAliases, aliasToCanonical };
+  return { aliasToCanonical };
 }
 
 export function normalizeAssistedByLabel(label, aliasToCanonical) {

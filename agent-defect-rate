@@ -340,24 +340,27 @@ def load_assisted_by_aliases():
         with open(routing_path) as f:
             raw = json.load(f)
     except Exception:
-        return {}, {}
+        return {}
     canonical_to_aliases = raw.get("assistedByAliases") or {}
     alias_to_canonical = {}
     for canonical, aliases in canonical_to_aliases.items():
         for alias in aliases:
             alias_to_canonical[alias] = canonical
-    return alias_to_canonical, canonical_to_aliases
+    return alias_to_canonical
 
 def parse_agent(body):
     if not body:
         return "unattributed"
-    for line in (body or "").split("\n"):
-        if not re.match(r"^\s*assisted-by:", line, re.I):
-            continue
+    # Mirror assisted-by.mjs's parseAssistedByLabel: a strict match on any
+    # line outranks a loose match on the first line, so a malformed line
+    # ahead of a well-formed one does not shadow the well-formed one.
+    lines = [line for line in body.split("\n") if re.match(r"^\s*assisted-by:", line, re.I)]
+    for line in lines:
         m = re.match(r"^\s*Assisted-by:\s*([^\s:,/`]+):([^\s:,]+)\s*$", line, re.I)
         if m:
             return f"{m.group(1)}:{m.group(2)}"
-        loose = re.match(r"^\s*Assisted-by:\s*(\S+)", line, re.I)
+    if lines:
+        loose = re.match(r"^\s*Assisted-by:\s*(\S+)", lines[0], re.I)
         if loose:
             val = loose.group(1).strip().rstrip(".,;)]")
             if val:
@@ -376,7 +379,7 @@ def format_agent_label(canonical, merged_from):
         return canonical
     return f"{canonical} (merged {', '.join(merged_from)})"
 
-alias_to_canonical, canonical_to_aliases = load_assisted_by_aliases()
+alias_to_canonical = load_assisted_by_aliases()
 
 def closing_issue_numbers(body, repo):
     # Extract issue numbers from GitHub closing keywords.
