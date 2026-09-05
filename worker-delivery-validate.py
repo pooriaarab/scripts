@@ -14,6 +14,7 @@ LOCK_INSTALL = {k: re.compile(v, re.I) for k, v in {
     "bun.lockb": r"\bbun install\b.*--frozen-lockfile", "pnpm-lock.yaml": r"\bpnpm install\b.*--frozen-lockfile",
     "yarn.lock": r"\byarn install\b.*--frozen-lockfile", "Cargo.lock": r"\bcargo fetch\b"}.items()}
 FORGE_CMD = re.compile(r"(?i)^\s*(?:\\|(?:command|builtin)\s+)*(?:echo|printf|print)\b")
+SHELL_WRAP = re.compile(r"(?i)^\s*(?:bash|sh|zsh|dash|ksh)\s+(?:-\S+\s+)*-c\s+(['\"])([\s\S]*)\1\s*$")
 SEGMENT_SPLIT = re.compile(r"(&&|\|\||;|\|)")
 BUCKET_OK = {"pass": {"success", "pass"}, "fail": {"failure", "fail", "cancelled", "timed_out", "action_required"},
              "pending": {"pending", "in_progress", "queued"}, "skipped": {"skipped", "skipping"}}
@@ -27,12 +28,19 @@ BOUND_SIZE = ("import {DEFAULT_CONFIG,validateConfig,summarizeFiles,checkSize,de
 
 def git(c, *a): return subprocess.run(["git", "-C", c, *a], text=True, capture_output=True)
 
+def segment_installs(segment):
+    segment = segment.strip()
+    if FORGE_CMD.match(segment): return False
+    wrapped = SHELL_WRAP.match(segment)
+    if wrapped: return segment_installs(wrapped.group(2))
+    return True
+
 def guaranteed_segments(cmd):
     guaranteed, segments = True, []
     for tok in SEGMENT_SPLIT.split(cmd):
         if tok == "||": guaranteed = False; continue
         if tok in ("&&", ";", "|"): guaranteed = True; continue
-        if guaranteed and not FORGE_CMD.match(tok.strip()): segments.append(tok)
+        if guaranteed and segment_installs(tok): segments.append(tok)
         guaranteed = True
     return segments
 
