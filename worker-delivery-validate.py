@@ -1,20 +1,29 @@
 #!/usr/bin/env python3
-import json, os, re, subprocess, sys
+import base64, json, os, re, subprocess, sys
 from datetime import datetime
 
 fail = lambda msg: (print("worker-delivery-validate: FAIL: %s" % msg, file=sys.stderr) or sys.exit(1))
 HEX40 = re.compile(r"^[0-9a-f]{40}$")
-CLOSE = re.compile(r"(?i)\bcloses?\s*:?\s*(?:([\w.-]+/[\w.-]+))?#([0-9]+)\b")
+CLOSES = re.compile(r"(?i)\bcloses\s*:?\s*(?:([\w.-]+/[\w.-]+))?#([0-9]+)\b")
+ANY_CLOSE = re.compile(r"(?i)\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s*(?:([\w.-]+/[\w.-]+))?#([0-9]+)\b")
+TITLE_TAG = re.compile(r"^\[([A-Za-z]{2,4})-([1-9][0-9]*)\]\s+(.+)$")
 ASSIST = re.compile(r"^[^\s:,]+:[^\s,]+$")
 LOCKS = ("package-lock.json", "bun.lock", "bun.lockb", "pnpm-lock.yaml", "yarn.lock", "Cargo.lock")
 LOCK_INSTALL = {k: re.compile(v, re.I) for k, v in {
     "package-lock.json": r"\bnpm ci\b", "bun.lock": r"\bbun install\b.*--frozen-lockfile",
     "bun.lockb": r"\bbun install\b.*--frozen-lockfile", "pnpm-lock.yaml": r"\bpnpm install\b.*--frozen-lockfile",
     "yarn.lock": r"\byarn install\b.*--frozen-lockfile", "Cargo.lock": r"\bcargo fetch\b"}.items()}
+FORGE_CMD = re.compile(r"(?i)^\s*(?:echo|printf|print)\b")
+SEGMENT_SPLIT = re.compile(r"&&|\|\||;|\|")
 BUCKET_OK = {"pass": {"success", "pass"}, "fail": {"failure", "fail", "cancelled", "timed_out", "action_required"},
              "pending": {"pending", "in_progress", "queued"}, "skipped": {"skipped", "skipping"}}
 REQ = ("repository", "issue", "branch", "head", "tested_head", "outcome", "closing_ref", "implementation_status",
        "verification_commands", "setup_commands", "unresolved_failures", "claimed_counts", "assisted_by", "ci")
+BOUND_SIZE = ("import {DEFAULT_CONFIG,validateConfig,summarizeFiles,checkSize,derivePrefix} from './pr-standards.mjs';"
+    "const repoName=process.argv[2],overrides=JSON.parse(process.argv[3]||'{}'),config={...DEFAULT_CONFIG,...overrides};"
+    "if(!config.prefix)config.prefix=derivePrefix(repoName);validateConfig(config);"
+    "const files=JSON.parse(process.argv[1]),summary=summarizeFiles(files,config),size=checkSize(summary,config);"
+    "console.log(JSON.stringify({summary,sizeFailures:size.failures,prefix:config.prefix}));")
 
 def git(c, *a): return subprocess.run(["git", "-C", c, *a], text=True, capture_output=True)
 
@@ -35,6 +44,51 @@ def gh_items(gh, path, key):
 def bound_head(label, value, head):
     if not HEX40.match(value) or value != head: fail("bound %s head %s does not match checkout HEAD %s" % (label, value[:12] or "?", head[:12]))
 
+def visible(text):
+    out = re.sub(r"<!--[\s\S]*?-->", "", str(text or ""))
+    out = re.sub(r"^ {0,3}(`{3,}|~{3,})[\s\S]*?^ {0,3}\1[ \t]*$", "", out, flags=re.M)
+    return re.sub(r"`[^`\n]*`", "", out)
+
+def fetch_config_overrides(gh, repo, base_ref):
+    proc = subprocess.run([gh, "api", "repos/%s/contents/.github/pr-standards.json?ref=%s" % (repo, base_ref)], text=True, capture_output=True)
+    if proc.returncode:
+        if re.search(r"\b404\b|not found", proc.stderr, re.I): return {}
+        fail("cannot read %s .github/pr-standards.json @ %s: %s" % (repo, base_ref, proc.stderr.strip()))
+    doc = json.loads(proc.stdout)
+    if doc.get("encoding") != "base64" or not isinstance(doc.get("content"), str):
+        fail("%s .github/pr-standards.json must be a base64 contents payload" % repo)
+    content = base64.b64decode(doc["content"]).decode("utf-8")
+    if not content.strip(): fail("%s .github/pr-standards.json is empty" % repo)
+    try: overrides = json.loads(content)
+    except json.JSONDecodeError as exc: fail("%s .github/pr-standards.json contains invalid JSON: %s" % (repo, exc))
+    if not overrides or isinstance(overrides, list) or not isinstance(overrides, dict):
+        fail("%s .github/pr-standards.json must contain a JSON object" % repo)
+    return overrides
+
+def bound_size(root, repo, files, overrides):
+    proc = subprocess.run(["node", "--input-type=module", "-e", BOUND_SIZE, json.dumps(files), repo.split("/")[-1], json.dumps(overrides)],
+                          cwd=root, text=True, capture_output=True)
+    if proc.returncode: fail("cannot compute counted size: %s" % proc.stderr.strip())
+    doc = json.loads(proc.stdout)
+    if doc.get("sizeFailures"):
+        f = doc["sizeFailures"][0]
+        fail("checkout exceeds bound: %s (expected %s)" % (f.get("got", "?"), f.get("expected", "?")))
+    return doc["summary"], doc["prefix"]
+
+def validate_live_pr(pr, issue, repo, prefix):
+    if str(pr.get("state") or "").lower() != "open": fail("live PR is %s, not open for review" % (pr.get("state") or "?"))
+    if pr.get("draft"): fail("live PR is a draft and not reviewable")
+    title, body = str(pr.get("title") or ""), str(pr.get("body") or "")
+    parsed = TITLE_TAG.match(title)
+    if not parsed: fail("live PR title must match [%s-%d] subject format" % (prefix.upper(), issue))
+    if parsed.group(1).upper() != prefix.upper() or int(parsed.group(2)) != issue:
+        fail("live PR title issue tag does not match expected issue #%s" % issue)
+    vis = visible(title + "\n" + body)
+    all_refs, closes = ANY_CLOSE.findall(vis), CLOSES.findall(vis)
+    if len(all_refs) != 1: fail("live PR must carry exactly one closing reference; found %d" % len(all_refs))
+    if len(closes) != 1 or int(closes[0][1]) != issue: fail("live PR must close issue #%s with Closes exactly once" % issue)
+    if closes[0][0] and closes[0][0].lower() != repo.lower(): fail("live PR closing reference targets wrong repo")
+
 def validate(report_path):
     checkout, head = os.environ["CHECKOUT"], os.environ["CHECKOUT_HEAD"]
     checkout_branch, checkout_repo = os.environ["CHECKOUT_BRANCH"], os.environ["CHECKOUT_REPO"]
@@ -52,7 +106,7 @@ def validate(report_path):
     except Exception as exc: fail("invalid report JSON: %s" % exc)
     if doc.get("schema") != 1 or [k for k in REQ if k not in doc]: fail("report schema/fields invalid")
     issue, repo, branch = doc["issue"], str(doc["repository"]), str(doc["branch"])
-    if not isinstance(issue, int) or issue < 1 or issue != expected_issue: fail("report issue #%s does not match coordinator expected issue #%s" % (issue, expected_issue))
+    if type(issue) is not int or issue < 1 or issue != expected_issue: fail("report issue #%s does not match coordinator expected issue #%s" % (issue, expected_issue))
     if str(doc["outcome"]).strip() != expected_outcome.strip(): fail("report outcome does not match coordinator expected outcome")
     if repo.lower() != expected_repo.lower() or branch != expected_branch: fail("report repository/branch do not match coordinator contract")
     if checkout_repo.lower() != expected_repo.lower() or checkout_branch != expected_branch: fail("checkout repository/branch do not match coordinator contract")
@@ -62,7 +116,7 @@ def validate(report_path):
     dirty = git(checkout, "status", "--porcelain")
     if dirty.returncode: fail("cannot read checkout status: %s" % dirty.stderr.strip())
     if dirty.stdout.strip(): fail("checkout has uncommitted or untracked changes outside review scope")
-    refs = CLOSE.findall(str(doc["closing_ref"]))
+    refs = CLOSES.findall(str(doc["closing_ref"]))
     if len(refs) != 1 or int(refs[0][1]) != issue: fail("closing_ref must contain exactly one Closes for issue #%s" % issue)
     if refs[0][0] and refs[0][0].lower() != repo.lower(): fail("closing_ref targets wrong repo")
     if str(doc["implementation_status"]) == "plan": fail("plan-only delivery is not implementation")
@@ -73,11 +127,13 @@ def validate(report_path):
     if not any(str(i.get("command", "")).strip() == bound_verify_cmd and i.get("exit") == 0 for i in ver):
         fail("report verification_commands do not match bound verify execution")
     if doc["unresolved_failures"]: fail("unresolved failures remain: %s" % "; ".join(map(str, doc["unresolved_failures"])))
-    locks = [name for name in LOCKS if name in set(git(checkout, "ls-files").stdout.splitlines())]
+    locks = [name for name in LOCKS if name in {p.rsplit("/", 1)[-1] for p in git(checkout, "ls-files").stdout.splitlines()}]
     if locks:
         if not bound_setup_cmd or bound_setup_exit != "0": fail("bound setup command is required when lockfiles are committed")
         bound_head("setup", bound_setup_head, head)
-        bad = [name for name in locks if not LOCK_INSTALL[name].search(bound_setup_cmd)]
+        segments = [s for s in SEGMENT_SPLIT.split(bound_setup_cmd) if not FORGE_CMD.match(s.strip())]
+        if not segments: fail("bound setup command %r does not install; it only prints text" % bound_setup_cmd)
+        bad = [name for name in locks if not any(LOCK_INSTALL[name].search(seg) for seg in segments)]
         if bad: fail("bound setup does not satisfy committed lockfiles: %s" % ", ".join(bad))
         setup = doc.get("setup_commands") or []
         if not any(str(i.get("command", "")).strip() == bound_setup_cmd and i.get("exit") == 0 for i in setup if isinstance(i, dict)):
@@ -89,31 +145,29 @@ def validate(report_path):
         fail("assisted_by must list agent:model entries")
     if doc.get("merge_signed_off_by"): fail("merge_signed_off_by must not be set; root signoff cannot be inferred")
     if doc.get("merge_attribution") not in (None, "", "unknown"): fail("merge_attribution must be omitted or 'unknown'")
-    diff = git(checkout, "diff", "--numstat", "%s...HEAD" % base)
-    if diff.returncode: fail("cannot diff checkout against %s: %s" % (base, diff.stderr.strip()))
-    files = [{"filename": p[2], "additions": int(p[0]), "deletions": int(p[1])} for p in (line.split("\t") for line in diff.stdout.splitlines()) if len(p) == 3 and p[0] != "-"]
-    count = subprocess.run(["node", "--input-type=module", "-e",
-        "import {summarizeFiles,DEFAULT_CONFIG} from './pr-standards.mjs';"
-        "console.log(JSON.stringify(summarizeFiles(JSON.parse(process.argv[1]),DEFAULT_CONFIG)));", json.dumps(files)],
-        cwd=root, text=True, capture_output=True)
-    if count.returncode: fail("cannot compute counted size: %s" % count.stderr.strip())
-    actual = json.loads(count.stdout)
-    if claimed["lines"] != actual["countedLines"] or claimed["files"] != actual["countedFiles"]:
-        fail("claimed %d/%d counted lines/files but checkout has %d/%d" % (claimed["lines"], claimed["files"], actual["countedLines"], actual["countedFiles"]))
-    if actual["countedLines"] > 500 or actual["countedFiles"] > 40: fail("checkout exceeds 500 lines or 40 files")
-    ci = doc["ci"]
-    if not isinstance(ci, dict) or not HEX40.match(str(ci.get("head", ""))) or ci["head"] != head: fail("ci.head must match checkout HEAD")
-    report_checks = ci.get("checks")
-    if not isinstance(report_checks, list) or not report_checks: fail("ci.checks must list every verified check")
     proc = subprocess.run([gh, "api", "repos/%s/pulls/%s" % (expected_repo, pull)], text=True, capture_output=True)
     if proc.returncode: fail("cannot read GitHub API repos/%s/pulls/%s: %s" % (expected_repo, pull, proc.stderr.strip()))
     pr = json.loads(proc.stdout)
     pr_head = str(pr.get("head", {}).get("sha", "")); pr_branch = str(pr.get("head", {}).get("ref", ""))
     pr_repo = str((pr.get("head") or {}).get("repo", {}).get("full_name", "")); pr_base = str(pr.get("base", {}).get("sha", ""))
+    pr_base_ref = str(pr.get("base", {}).get("ref") or base)
     if not HEX40.match(pr_head) or pr_head != head: fail("PR head %s does not match tested checkout head %s" % (pr_head[:12], head[:12]))
     if pr_branch != expected_branch or pr_repo.lower() != expected_repo.lower(): fail("PR repository/branch do not match coordinator contract")
     base_sha = git(checkout, "rev-parse", base).stdout.strip()
     if not HEX40.match(base_sha) or base_sha != pr_base: fail("PR base %s does not match coordinator base-ref %s" % (pr_base[:12], base_sha[:12]))
+    overrides = fetch_config_overrides(gh, expected_repo, pr_base_ref)
+    diff = git(checkout, "diff", "--numstat", "%s...HEAD" % base)
+    if diff.returncode: fail("cannot diff checkout against %s: %s" % (base, diff.stderr.strip()))
+    files = [{"filename": p[2], "additions": 0 if p[0] == "-" else int(p[0]), "deletions": 0 if p[1] == "-" else int(p[1])}
+             for p in (line.split("\t") for line in diff.stdout.splitlines()) if len(p) == 3]
+    actual, prefix = bound_size(root, expected_repo, files, overrides)
+    validate_live_pr(pr, issue, repo, prefix)
+    if claimed["lines"] != actual["countedLines"] or claimed["files"] != actual["countedFiles"]:
+        fail("claimed %d/%d counted lines/files but checkout has %d/%d" % (claimed["lines"], claimed["files"], actual["countedLines"], actual["countedFiles"]))
+    ci = doc["ci"]
+    if not isinstance(ci, dict) or not HEX40.match(str(ci.get("head", ""))) or ci["head"] != head: fail("ci.head must match checkout HEAD")
+    report_checks = ci.get("checks")
+    if not isinstance(report_checks, list) or not report_checks: fail("ci.checks must list every verified check")
     live = {}; seq = [0]
     def when(value):
         if not value: return datetime.min
