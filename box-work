@@ -15,6 +15,7 @@
 # Usage
 #   box-work <repo>                    start or reuse a Box, sync local edits, print how to enter
 #   box-work <repo> --agent pi "brief" run one agent headlessly on the Box and print its output
+#   box-work <repo> --manifest m.json [--agent ...] validate the dispatch manifest first; invalid stops before any Box call
 #   box-work <repo> --ssh              open a shell on the Box
 #   box-work <repo> --stop             stop this repo's Box
 #   box-work --list                    every Box this tool started, and what it costs
@@ -94,11 +95,12 @@ esac
 NAME="$(basename -s .git "$REMOTE")"
 IDFILE="$STATE/$NAME.id"
 
-MODE=start; AGENT=""; BRIEF=""
+MODE=start; AGENT=""; BRIEF=""; MANIFEST=""
 while (( $# )); do
   case "$1" in
     --stop) MODE=stop; shift ;;
     --ssh) MODE=ssh; shift ;;
+    --manifest) MANIFEST="${2:-}"; shift 2 || shift $# ;;
     --agent) MODE=agent; AGENT="${2:-}"; BRIEF="${3:-}"; shift 3 || shift $# ;;
     *) die "unknown argument: $1" ;;
   esac
@@ -114,6 +116,14 @@ if [[ "$MODE" == stop ]]; then
   fi
   echo "FAILED to stop $NAME ($id) -- keeping the id so you can retry" >&2
   exit 1
+fi
+
+# A declared manifest is validated before any Box, branch, or worker mutation:
+# an invalid dispatch never reaches reuse, start, sync, or exec below.
+if [[ -n "$MANIFEST" && "$MODE" != stop ]]; then
+  VALIDATE="${WORKER_DISPATCH_VALIDATE:-$(cd "$(dirname "$0")" && pwd)/worker-dispatch-validate}"
+  "$VALIDATE" --manifest "$MANIFEST" --checkout "$REPO_DIR" \
+    || die "dispatch manifest invalid; refusing to touch a Box"
 fi
 
 # Reuse a live Box before starting another. Starts are capped at 50/hour, and a
