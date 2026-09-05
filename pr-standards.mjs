@@ -57,6 +57,11 @@ export const DEFAULT_EXCLUDE_GLOBS = [
   // PR that untracked them counted 93,162 deleted lines against the cap and the
   // only way to pass was to leave the logs in the tree.
   '**/*.log',
+  // Same deadlock, different artifact: untracking a TypeScript incremental
+  // build cache counted its whole body against the cap. pooriaarab/usegeoaeo#71
+  // passed only because a tsbuildinfo is minified onto one line; a
+  // pretty-printed one would have had no path to green.
+  '**/*.tsbuildinfo',
   '**/*.{svg,png,jpg,jpeg,gif,webp,ico,woff,woff2,ttf,otf,mp4,pdf,zip}',
 ];
 
