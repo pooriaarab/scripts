@@ -1,37 +1,45 @@
 #!/usr/bin/env bash
 # worker-delivery-validate — reject unsupported worker completion claims.
-# Usage: worker-delivery-validate --report FILE --checkout DIR --pull N
-#   --expected-issue N --expected-outcome TEXT [--base-ref REF]
-#   [--bound-verify-command CMD] [--bound-verify-exit N]
+# Usage: worker-delivery-validate --report FILE --checkout DIR --pull N --expected-repository REPO
+#   --expected-branch BRANCH --expected-issue N --expected-outcome TEXT [--base-ref REF]
+#   --bound-verify-command CMD --bound-verify-exit N --bound-verify-head SHA
+#   [--bound-setup-command CMD --bound-setup-exit N --bound-setup-head SHA]
 set -uo pipefail
 ROOT="${PR_STANDARDS_ROOT:-$(cd "$(dirname "$0")" && pwd)}"
 GIT="${GIT_CLI:-git}"
 usage(){ echo "worker-delivery-validate: $*" >&2; exit 2; }
 REPORT=""; CHECKOUT=""; BASE_REF="main"; PULL=""
-EXPECTED_ISSUE=""; EXPECTED_OUTCOME=""
-BOUND_VERIFY_CMD=""; BOUND_VERIFY_EXIT=""
+EXPECTED_REPOSITORY=""; EXPECTED_BRANCH=""; EXPECTED_ISSUE=""; EXPECTED_OUTCOME=""
+BOUND_VERIFY_CMD=""; BOUND_VERIFY_EXIT=""; BOUND_VERIFY_HEAD=""
+BOUND_SETUP_CMD=""; BOUND_SETUP_EXIT=""; BOUND_SETUP_HEAD=""
 while [ $# -gt 0 ]; do case "$1" in
   --report) [ $# -ge 2 ] || usage "--report needs a value"; REPORT="$2"; shift 2 ;;
   --checkout) [ $# -ge 2 ] || usage "--checkout needs a value"; CHECKOUT="$2"; shift 2 ;;
   --base-ref) [ $# -ge 2 ] || usage "--base-ref needs a value"; BASE_REF="$2"; shift 2 ;;
   --pull) [ $# -ge 2 ] || usage "--pull needs a value"; PULL="$2"; shift 2 ;;
+  --expected-repository) [ $# -ge 2 ] || usage "--expected-repository needs a value"; EXPECTED_REPOSITORY="$2"; shift 2 ;;
+  --expected-branch) [ $# -ge 2 ] || usage "--expected-branch needs a value"; EXPECTED_BRANCH="$2"; shift 2 ;;
   --expected-issue) [ $# -ge 2 ] || usage "--expected-issue needs a value"; EXPECTED_ISSUE="$2"; shift 2 ;;
   --expected-outcome) [ $# -ge 2 ] || usage "--expected-outcome needs a value"; EXPECTED_OUTCOME="$2"; shift 2 ;;
   --bound-verify-command) [ $# -ge 2 ] || usage "--bound-verify-command needs a value"; BOUND_VERIFY_CMD="$2"; shift 2 ;;
   --bound-verify-exit) [ $# -ge 2 ] || usage "--bound-verify-exit needs a value"; BOUND_VERIFY_EXIT="$2"; shift 2 ;;
-  -h|--help) sed -n '2,6p' "$0"; exit 0 ;;
+  --bound-verify-head) [ $# -ge 2 ] || usage "--bound-verify-head needs a value"; BOUND_VERIFY_HEAD="$2"; shift 2 ;;
+  --bound-setup-command) [ $# -ge 2 ] || usage "--bound-setup-command needs a value"; BOUND_SETUP_CMD="$2"; shift 2 ;;
+  --bound-setup-exit) [ $# -ge 2 ] || usage "--bound-setup-exit needs a value"; BOUND_SETUP_EXIT="$2"; shift 2 ;;
+  --bound-setup-head) [ $# -ge 2 ] || usage "--bound-setup-head needs a value"; BOUND_SETUP_HEAD="$2"; shift 2 ;;
+  -h|--help) sed -n '2,7p' "$0"; exit 0 ;;
   *) usage "unknown flag: $1" ;;
 esac; done
 [ -n "$REPORT" ] && [ -f "$REPORT" ] || usage "--report is required"
 [ -n "$CHECKOUT" ] && [ -d "$CHECKOUT" ] || usage "--checkout is required"
-[ -n "$PULL" ] || usage "--pull is required"
-[ -n "$EXPECTED_ISSUE" ] || usage "--expected-issue is required"
-[ -n "$EXPECTED_OUTCOME" ] || usage "--expected-outcome is required"
+[ -n "$PULL$EXPECTED_REPOSITORY$EXPECTED_BRANCH$EXPECTED_ISSUE$EXPECTED_OUTCOME$BOUND_VERIFY_CMD$BOUND_VERIFY_EXIT$BOUND_VERIFY_HEAD" ] \
+  || usage "--pull, --expected-repository, --expected-branch, --expected-issue, --expected-outcome, and bound verify fields are required"
 command -v python3 >/dev/null || usage "python3 is required"
 "$GIT" -C "$CHECKOUT" rev-parse HEAD >/dev/null 2>&1 || usage "checkout has no commits"
 [ -f "$ROOT/worker-delivery-validate.py" ] || usage "missing worker-delivery-validate.py"
 export CHECKOUT CHECKOUT_HEAD="$("$GIT" -C "$CHECKOUT" rev-parse HEAD)"
 export CHECKOUT_BRANCH="$("$GIT" -C "$CHECKOUT" symbolic-ref --short HEAD 2>/dev/null || true)"
 export CHECKOUT_REPO="$(printf '%s' "$("$GIT" -C "$CHECKOUT" remote get-url origin 2>/dev/null || true)" | sed -E 's#(git@github.com:|https://github.com/)##; s#\.git$##')"
-export BASE_REF PULL ROOT EXPECTED_ISSUE EXPECTED_OUTCOME BOUND_VERIFY_CMD BOUND_VERIFY_EXIT GH_CLI="${GH_CLI:-gh}"
+export BASE_REF PULL ROOT EXPECTED_REPOSITORY EXPECTED_BRANCH EXPECTED_ISSUE EXPECTED_OUTCOME
+export BOUND_VERIFY_CMD BOUND_VERIFY_EXIT BOUND_VERIFY_HEAD BOUND_SETUP_CMD BOUND_SETUP_EXIT BOUND_SETUP_HEAD GH_CLI="${GH_CLI:-gh}"
 exec python3 "$ROOT/worker-delivery-validate.py" "$REPORT"
