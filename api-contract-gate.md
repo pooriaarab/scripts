@@ -59,7 +59,7 @@ evidence.
 
 Size the runner small. The job waits on HTTP, so it needs no cores.
 
-## The two traps
+## The three traps
 
 ### `--ci` defaults the coverage floor to 100
 
@@ -84,6 +84,29 @@ localhost URL staged after a local run.
 Two ways to live with it. Leave those keys out of the file and rely on the
 defaults, so nothing looks effective that is not. Or snapshot and restore the
 file around the run. `scout-gate.sh` does both.
+
+### `sweep` has no `--header`, and the fix has a security edge
+
+The docs list `--header` under request options for `call`, `sweep` and `fuzz`.
+That is wrong for `sweep`. It has only `--auth-profile`, and passing a header
+kills the run with `error: unknown option '--header'`.
+
+Pass headers to `init` instead. It accepts `--header` and persists them into the
+config every later command in the run reads.
+
+Use base headers, not an `authProfile`, for **edge** auth such as Cloudflare
+Access. Scout strips only the spec-declared credential header for the
+`missing-auth` probe and leaves every other header alone. So base headers
+survive that probe and it reaches the application.
+
+Get this backwards and the gate quietly stops testing anything. If the edge
+credential is stripped too, every `missing-auth` probe gets the edge's 403
+rather than the app's 401, and an operation with no authorization check at all
+sails through.
+
+This only holds because the spec declares its security scheme. With no declared
+security, scout falls back to a name pattern for guessing which headers are
+credentials, and that pattern may well match an edge header.
 
 ## Exit codes
 

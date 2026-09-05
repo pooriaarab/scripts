@@ -104,7 +104,22 @@ if [ ${#headers[@]} -gt 0 ]; then
 fi
 
 echo "Scout gate against ${BASE_URL}"
-scout init --base-url "$BASE_URL"
+
+# TRAP 3. The headers go on `init`, not on `sweep`. `sweep` has no --header
+# option -- only --auth-profile -- so passing one fails the whole run with
+# "error: unknown option '--header'". The docs list --header under request
+# options for call, sweep and fuzz, which is wrong for sweep. `init` persists
+# them into the config every later command in the run reads.
+#
+# They must be base headers rather than an authProfile. Scout strips only the
+# spec-declared credential header for the missing-auth probe and leaves every
+# other header alone, so edge-auth headers survive that probe. That matters: if
+# they were stripped, the probe would hit the edge's 403 and never reach the
+# app, and a missing app-level auth check would pass the gate.
+#
+# An empty array expands as unbound under `set -u` in bash 3.2, which macOS
+# still ships. The `${a[@]+"${a[@]}"}` form is the portable guard.
+scout init --base-url "$BASE_URL" ${headers[@]+"${headers[@]}"}
 
 # `scout init` just reset policy.rateLimit and policy.budget to its own
 # defaults (see TRAP 1 above). The on-disk file gets put back at EXIT, but
@@ -129,9 +144,7 @@ if [ -z "${SCOUT_MAX_REQUESTS:-}" ] && [ -n "$BACKED_UP_BUDGET" ]; then
   MAX_REQUESTS="$BACKED_UP_BUDGET"
 fi
 
-# An empty array expands as unbound under `set -u` in bash 3.2, which macOS
-# still ships. The `${a[@]+"${a[@]}"}` form is the portable guard.
-scout sweep --max-requests "$MAX_REQUESTS" ${headers[@]+"${headers[@]}"}
+scout sweep --max-requests "$MAX_REQUESTS"
 
 # TRAP 2. `report --ci` defaults --min-coverage to 100, which no sweep can
 # satisfy. Always pass it explicitly or the gate can never go green.
