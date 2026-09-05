@@ -36,9 +36,11 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-[ -d "$REPO/.git" ] || { echo "not a git repo: $REPO" >&2; exit 2; }
+git -C "$REPO" rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo "not a git repo: $REPO" >&2; exit 2; }
 cd "$REPO"
 NAME=$(basename "$(pwd)")
+
+json_escape() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
 
 write() { # write <path> <<<content, unless it exists
   local path="$1"
@@ -61,14 +63,14 @@ if [ -z "$SPEC" ]; then
   # shellcheck disable=SC2016  # literal text for a JSON value, not shell
   SPEC_LINE='  "//spec": "PENDING - generate in CI with `vibeqa spec .`, or point at a served /openapi.json",'
 else
-  SPEC_LINE="  \"spec\": \"$SPEC\","
+  SPEC_LINE="  \"spec\": \"$(json_escape "$SPEC")\","
 fi
 
 write scout.json <<JSON
 {
   "\$schema": "https://tester.army/scout.schema.json",
 $SPEC_LINE
-  "baseUrl": "http://localhost:3000$BASE_PATH",
+  "baseUrl": "http://localhost:3000$(json_escape "$BASE_PATH")",
   "policy": {
     "allowMutations": false,
     "allowedMethods": ["GET"]
@@ -160,6 +162,9 @@ response schemas to validate against. The number is real; it measures less than
 it looks like it measures.
 MARKDOWN
 
+if [ -s .gitignore ] && [ "$(tail -c1 .gitignore | wc -l)" -eq 0 ]; then
+  printf '\n' >> .gitignore
+fi
 for entry in ".scout/" "scout-report.json"; do
   if [ -f .gitignore ] && grep -qxF "$entry" .gitignore; then
     echo "  skip   .gitignore ($entry present)"
@@ -176,7 +181,7 @@ if [ -f .github/workflows/worker-preview.yml ]; then
   echo "Do not add it as a step inside the preview job: a failed probe would"
   echo "trip the teardown step and delete the deployment you need to debug it."
   echo
-  cat <<'YAML'
+  snippet=$(cat <<'YAML'
   scout:
     name: Scout API gate
     needs: lifecycle
@@ -193,14 +198,16 @@ if [ -f .github/workflows/worker-preview.yml ]; then
           CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
           CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
         # TODO confirm this repo's preview URL pattern before enabling.
-        run: npx vibeqa api "https://$HEAD_REF.staging.example.com/api"
+        run: npx vibeqa api "https://$HEAD_REF.staging.example.com__BASE_PATH__"
 YAML
+)
+  printf '%s\n' "${snippet//__BASE_PATH__/$BASE_PATH}"
 else
   echo "This repo has NO preview workflow, so there is no per-PR URL to probe."
   echo "Gate the deployed environment on merge instead, and treat adding"
   echo "previews as separate work."
   echo
-  cat <<'YAML'
+  snippet=$(cat <<'YAML'
   scout:
     name: Scout API gate
     if: github.ref == 'refs/heads/main'
@@ -214,8 +221,10 @@ else
           CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
           CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
         # TODO point at this repo's staging host.
-        run: npx vibeqa api "https://staging.example.com/api"
+        run: npx vibeqa api "https://staging.example.com__BASE_PATH__"
 YAML
+)
+  printf '%s\n' "${snippet//__BASE_PATH__/$BASE_PATH}"
 fi
 
 echo
