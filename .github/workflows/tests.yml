@@ -86,6 +86,15 @@ jobs:
           set -euo pipefail
           ./fleet-ci-census.test.sh
 
+      - name: Run worker delivery validate tests
+        id: worker-delivery-validate-tests
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          chmod +x worker-delivery-validate
+          ./worker-delivery-validate.test.sh
+
       # Every group above runs even after one fails, so one run names every
       # failure instead of only the first. This step turns the outcomes back
       # into a single verdict, and names the group that failed.
@@ -101,10 +110,11 @@ jobs:
           branch_pattern_tests: ${{ steps.branch-pattern-tests.outcome }}
           rollout_label_tests: ${{ steps.rollout-label-tests.outcome }}
           fleet_ci_census_tests: ${{ steps.fleet-ci-census-tests.outcome }}
+          worker_delivery_validate_tests: ${{ steps.worker-delivery-validate-tests.outcome }}
         run: |
           set -uo pipefail
           failed=0
-          for group in node_tests guard_tests prefix_tests hook_install_tests branch_pattern_tests rollout_label_tests fleet_ci_census_tests; do
+          for group in node_tests guard_tests prefix_tests hook_install_tests branch_pattern_tests rollout_label_tests fleet_ci_census_tests worker_delivery_validate_tests; do
             outcome="${!group}"
             printf '%-22s %s\n' "$group" "$outcome"
             [ "$outcome" = success ] || failed=1
