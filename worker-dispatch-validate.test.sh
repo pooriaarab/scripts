@@ -162,6 +162,7 @@ lowercase closes reference is accepted||closing_ref=closes #976|checkout|pass||
 colon Closes reference is accepted||closing_ref=Closes: #976|checkout|pass||
 two closing references fail before the sentinel||closing_ref=Closes #976 and Fixes #977|checkout|fail|
 two Closes references fail before the sentinel||closing_ref=Closes #976 and Closes #977|checkout|fail|
+Closes reference to another issue fails||closing_ref=Closes #977|checkout|fail|closing_ref|
 stale base_sha fails before the sentinel||base_sha=0000000000000000000000000000000000000000|checkout|fail|differ
 short base_sha is rejected||base_sha=abcdef12|checkout|fail|base_sha
 long base_sha is rejected||base_sha=abcdef0123456789abcdef0123456789abcdef012|checkout|fail|base_sha
