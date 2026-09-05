@@ -5,6 +5,8 @@ import { execFile, execFileSync, spawnSync } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 
+import { assistedByLinesFromBody, isValidAssistedByLine } from './assisted-by.mjs';
+
 const execFileAsync = promisify(execFile);
 const PREFIX_REGISTRY_PATH = fileURLToPath(new URL('./repo-prefixes.json', import.meta.url));
 const TEMPLATES_DIR = fileURLToPath(new URL('./pr-standards-templates/', import.meta.url));
@@ -969,8 +971,8 @@ export function validateBody(body, issueNumber, config = DEFAULT_CONFIG) {
     // passed silently. Commas are excluded from both fields too: `[^\s]+`
     // alone accepts a comma-separated list that has no space after the
     // comma, contradicting the documented rule that the list fails.
-    const assistedByLines = visibleSource.split('\n').filter((line) => /^\s*assisted-by:/i.test(line));
-    const badLine = assistedByLines.find((line) => !/^Assisted-by:\s*[^\s:,]+:[^\s,]+\s*$/i.test(line));
+    const assistedByLines = assistedByLinesFromBody(visibleSource);
+    const badLine = assistedByLines.find((line) => !isValidAssistedByLine(line));
     if (assistedByLines.length === 0) {
       failures.push(fail(
         'Assisted-by line',
