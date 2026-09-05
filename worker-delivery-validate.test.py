@@ -82,6 +82,7 @@ reports = {"valid": doc(), "stale": doc(tested_head="a"*40), "prhead": doc(), "f
            "plan": doc(implementation_status="plan"), "setup": doc(setup_commands=[]),
            "forged": doc(setup_commands=[{"command": "echo 'npm ci'", "exit": 0}]),
            "forgedchain": doc(setup_commands=[{"command": "true && echo npm ci", "exit": 0}]),
+           "forgedwrap": doc(setup_commands=[{"command": "bash -c 'echo npm ci'", "exit": 0}]),
            "bun": doc(setup_commands=[{"command": "npm ci", "exit": 0}]), "stalesetup": doc(), "staleverify": doc(),
            "fixes": doc(closing_ref="Fixes #321"), "closeword": doc(closing_ref="Close #321"), "verify": doc(),
            "defect": doc(unresolved_failures=["tests still fail locally"]), "big": doc(claimed_counts={"lines": 999, "files": 99}),
@@ -116,6 +117,7 @@ cases = [
     ("missing setup evidence is rejected", "setup", (), 1, "bound setup"),
     ("forged quoted setup is rejected", "forged", (), 1, "does not install"),
     ("forged setup chained after a real command is rejected", "forgedchain", (), 1, "does not satisfy"),
+    ("forged setup wrapped in a shell -c is rejected", "forgedwrap", (), 1, "does not install"),
     ("absent bun.lock install is rejected", "bun", (), 1, "bound setup"),
     ("nested lockfile at any depth is detected", "nestedlock", (), 1, "bound setup"),
     ("binary files are counted toward the size cap", "binary", (), 1, "claimed"),
@@ -179,7 +181,9 @@ def run_case(name, extra=(), after=None):
         subprocess.run(["git", "-C", checkout, "commit", "-qm", "bun"], check=True); args = bound_args(sync_report("bun", subprocess.check_output(["git", "-C", checkout, "rev-parse", "HEAD"], text=True).strip()))
     if name == "nestedlock": case_head = commit_extra("nestedlock", "backend/yarn.lock", "# yarn lockfile\n", "nested lock"); args = bound_args(case_head)
     if name == "binary": case_head = commit_extra("binary", "asset.bin", b"\x00\x01binary", "binary asset", mode="wb"); args = bound_args(case_head)
-    if name in ("forged", "forgedchain"): args = bound_args(head, "echo 'npm ci'" if name == "forged" else "true && echo npm ci")
+    if name in ("forged", "forgedchain", "forgedwrap"):
+        forged_cmd = {"forged": "echo 'npm ci'", "forgedchain": "true && echo npm ci", "forgedwrap": "bash -c 'echo npm ci'"}[name]
+        args = bound_args(head, forged_cmd)
     write_ci(pr_head=over.get("pr_head", case_head), pr_branch=over.get("pr_branch", branch), checks=over.get("checks"), page2=over.get("page2"),
              title=over.get("title", PR_TITLE), body=over.get("body", PR_BODY), state=over.get("state", "open"), draft=over.get("draft", False))
     if name == "norepo":
