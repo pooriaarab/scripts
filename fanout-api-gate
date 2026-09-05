@@ -27,10 +27,16 @@ REPO="$1"; shift
 SPEC=""
 BASE_PATH="/api"
 FORCE=0
+is_known_flag() { case "$1" in --spec|--base-path|--force) return 0 ;; *) return 1 ;; esac; }
+
 while [ $# -gt 0 ]; do
   case "$1" in
-    --spec) SPEC="${2:?--spec needs a value}"; shift 2 ;;
-    --base-path) BASE_PATH="${2:?--base-path needs a value}"; shift 2 ;;
+    --spec)
+      is_known_flag "${2:-}" && { echo "fanout-api-gate: --spec needs a value" >&2; exit 2; }
+      SPEC="${2:?--spec needs a value}"; shift 2 ;;
+    --base-path)
+      is_known_flag "${2:-}" && { echo "fanout-api-gate: --base-path needs a value" >&2; exit 2; }
+      BASE_PATH="${2:?--base-path needs a value}"; shift 2 ;;
     --force) FORCE=1; shift ;;
     *) usage ;;
   esac
@@ -168,7 +174,7 @@ if [ -s .gitignore ] && [ "$(tail -c1 .gitignore | wc -l)" -eq 0 ]; then
   printf '\n' >> .gitignore
 fi
 for entry in ".scout/" "scout-report.json"; do
-  if [ -f .gitignore ] && grep -qxF "$entry" .gitignore; then
+  if [ -f .gitignore ] && grep -qxF "$entry" <(tr -d '\r' < .gitignore); then
     echo "  skip   .gitignore ($entry present)"
   else
     printf '%s\n' "$entry" >> .gitignore
