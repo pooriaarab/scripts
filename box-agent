@@ -196,7 +196,11 @@ GH_F="\$BASE/.agents/github-personal.token"
 [ -s "\$GH_F" ] || { echo "box-agent: canonical github token missing on the Box" >&2; exit 1; }
 GH_T="\$(cat "\$GH_F")"; [ -n "\$GH_T" ] || { echo "box-agent: canonical github token empty on the Box" >&2; exit 1; }
 rm -rf "\$DEST"
-exec env -u GH_TOKEN -u GITHUB_TOKEN GH_TOKEN="\$GH_T" GITHUB_TOKEN="\$GH_T" gh repo clone "\$REPO" "\$DEST"
+# git clone (not gh repo clone) against an explicit https URL: gh repo clone
+# honors the Box's configured git_protocol, so a Box set to ssh would clone
+# via ambient SSH credentials and ignore GH_T entirely -- the same failure
+# mode box-provider-readiness's own ls-remote gate avoids by never calling gh.
+exec git -c "http.extraHeader=Authorization: Bearer \$GH_T" clone "https://github.com/\$REPO.git" "\$DEST"
 RUNNER
   box scp "$clone_runner" "$BOX:$CLONE_REMOTE" >/dev/null 2>&1 \
     || { rm -f "$clone_runner"; echo "box-agent: could not copy the clone runner to the Box" >&2; exit 4; }

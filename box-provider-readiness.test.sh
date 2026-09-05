@@ -280,15 +280,9 @@ gate_setup() { # stub Box serving the real box-agent and the real helper, provid
   mkcli "$T2/fakebin"
   cat > "$T2/fakebin/gh" <<'FAKE'
 #!/usr/bin/env bash
-# Fake gh: canonical token wins over stale inheritance; repo clone creates
-# the checkout. Never prints values, only a login name.
+# Fake gh: canonical token wins over stale inheritance. Never prints values,
+# only a login name. Clone goes through git now, not gh (see fake git below).
 C="$(cat "$GATE_T/boxhome/.agents/github-personal.token" 2>/dev/null)"
-if [[ "${1:-}" == "repo" && "${2:-}" == "clone" ]]; then
-  [[ -f "$GATE_T/gh-401" ]] && { echo "Bad credentials (HTTP 401)" >&2; exit 1; }
-  [[ -n "$C" && "${GH_TOKEN:-}" == "$C" && "${GITHUB_TOKEN:-}" == "$C" ]] \
-    || { echo "fake-gh-clone: expected the canonical token" >&2; exit 1; }
-  mkdir -p "${4:?}"; echo "gh-clone-ok $3" >>"$GATE_T/calls.log"; exit 0
-fi
 [[ -f "$GATE_T/gh-401" ]] && { echo "Bad credentials (HTTP 401)" >&2; exit 1; }
 [[ -n "$C" && "${GH_TOKEN:-}" == "$C" && "${GITHUB_TOKEN:-}" == "$C" ]] || exit 1
 echo "gh-ok" >>"$GATE_T/calls.log"
@@ -297,8 +291,17 @@ FAKE
   chmod +x "$T2/fakebin/gh"
   cat > "$T2/fakebin/git" <<'FAKE'
 #!/usr/bin/env bash
-# Fake git: proves ls-remote carries the canonical token for the repo.
+# Fake git: proves ls-remote and clone carry the canonical token for the
+# repo via an explicit https URL (never gh repo clone -- that would honor
+# the Box's configured git_protocol and could clone over ambient SSH).
 C="$(cat "$GATE_T/boxhome/.agents/github-personal.token" 2>/dev/null)"
+if [[ " $* " == *" clone "* ]]; then
+  [[ -f "$GATE_T/git-fail" ]] && { echo "fake-git: clone failed" >&2; exit 1; }
+  [[ -n "$C" && " $* " == *"http.extraHeader=Authorization: Bearer $C"* && " $* " == *"github.com/testowner/testrepo.git"* ]] \
+    || { echo "fake-git-clone: expected the canonical token" >&2; exit 1; }
+  dest="${@: -1}"
+  mkdir -p "$dest"; echo "git-clone-ok testowner/testrepo" >>"$GATE_T/calls.log"; exit 0
+fi
 [[ -f "$GATE_T/git-fail" ]] && { echo "fake-git: ls-remote failed" >&2; exit 1; }
 [[ -n "$C" && " $* " == *"http.extraHeader=Authorization: Bearer $C"* && " $* " == *"github.com/testowner/testrepo.git"* ]] || exit 1
 FAKE
@@ -372,7 +375,7 @@ test_gate_clone_ordering() {
   out=$(BOX_BIN="$T2/stubbin/box" PATH="$T2/stubbin:$PATH" GATE_T="$T2" BOX_PROBE_BASE="$T2/boxhome" "$DIR/box-agent" pi --repo testowner/testrepo "add a probe note" 2>&1); rc=$?
   ok=1; (( rc == 0 )) || ok=0
   for p in "READY github=pooriaarab" "READY box=bx_9gate7x provider=pi" "box-agent: NO diff"; do grep -q "$p" <<<"$out" || ok=0; done
-  for p in "gh-ok" "gh-clone-ok testowner/testrepo"; do grep -q "$p" "$T2/calls.log" 2>/dev/null || ok=0; done
+  for p in "gh-ok" "git-clone-ok testowner/testrepo"; do grep -q "$p" "$T2/calls.log" 2>/dev/null || ok=0; done
   g=$(grep -n "box-provider-github-" "$T2/exec.log" 2>/dev/null | head -1 | cut -d: -f1)
   c=$(grep -n "box-agent-clone-" "$T2/exec.log" 2>/dev/null | head -1 | cut -d: -f1)
   pr=$(grep -n "box-provider-probe-" "$T2/exec.log" 2>/dev/null | head -1 | cut -d: -f1)
