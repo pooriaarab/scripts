@@ -48,6 +48,8 @@ common = [SCRIPT, "--checkout", checkout, "--base-ref", base, "--pull", "313", "
           "--expected-branch", branch, "--expected-issue", str(issue), "--expected-outcome", outcome, *bound]
 T0, T1, T2 = "2026-01-01T00:00:00Z", "2026-01-01T00:00:01Z", "2026-01-01T00:00:02Z"
 PR_TITLE, PR_BODY = "[SCR-321] Validate exact worker delivery evidence", "Closes #321\n\n## What\nValidator.\n\n## Why\nWorkers lie.\n\n## How I verified\npass"
+FORGED = dict(forged="echo 'npm ci'", forgedchain="true && echo npm ci", forgedwrap="bash -c 'echo npm ci'",
+              skipsemi="false && npm ci; true", skipor="false || npm ci", multiinstall="npm ci && cd backend && npm ci")
 
 def check_run(rid, name, status="completed", conclusion="success", started=T0, app=1):
     return {"id": rid, "name": name, "status": status, "conclusion": conclusion, "started_at": started, "app": {"id": app}}
@@ -80,12 +82,6 @@ reports = {"valid": doc(), "stale": doc(tested_head="a"*40), "prhead": doc(), "f
            "page2": doc(ci=ci([{"name": "tests", "bucket": "pass"}, {"name": "lint", "bucket": "pass"}])),
            "empty": doc(), "emptyrep": doc(ci=ci([])), "dirty": doc(), "issue": doc(issue=999, closing_ref="Closes #999"),
            "plan": doc(implementation_status="plan"), "setup": doc(setup_commands=[]),
-           "forged": doc(setup_commands=[{"command": "echo 'npm ci'", "exit": 0}]),
-           "forgedchain": doc(setup_commands=[{"command": "true && echo npm ci", "exit": 0}]),
-           "forgedwrap": doc(setup_commands=[{"command": "bash -c 'echo npm ci'", "exit": 0}]),
-           "skipsemi": doc(setup_commands=[{"command": "false && npm ci; true", "exit": 0}]),
-           "skipor": doc(setup_commands=[{"command": "false || npm ci", "exit": 0}]),
-           "multiinstall": doc(setup_commands=[{"command": "npm ci && cd backend && npm ci", "exit": 0}]),
            "bun": doc(setup_commands=[{"command": "npm ci", "exit": 0}]), "stalesetup": doc(), "staleverify": doc(),
            "fixes": doc(closing_ref="Fixes #321"), "closeword": doc(closing_ref="Close #321"), "verify": doc(),
            "defect": doc(unresolved_failures=["tests still fail locally"]), "big": doc(claimed_counts={"lines": 999, "files": 99}),
@@ -94,6 +90,7 @@ reports = {"valid": doc(), "stale": doc(tested_head="a"*40), "prhead": doc(), "f
            "queued": doc(), "cancelwin": doc(ci=ci([{"name": "PR standards", "bucket": "pass"}])),
            "nestedlock": doc(), "binary": doc(), "livewrong": doc(), "livefixes": doc(), "liveextra": doc(),
            "draftpr": doc(), "closedpr": doc(), "badconfig": doc(), "configcap": doc(), "configsha": doc(), "issuepr": doc(), "issueclosed": doc()}
+for n, cmd in FORGED.items(): reports[n] = doc(setup_commands=[{"command": cmd, "exit": 0}])
 for n, p in reports.items(): json.dump(p, open(os.path.join(T, "reports", n + ".json"), "w"))
 ci_over = {"fg": {"checks": [check_run(1, "tests", conclusion="failure")]}, "pend": {"checks": [check_run(1, "tests", status="in_progress", conclusion=None)]},
            "omit": {"checks": [check_run(1, "tests"), check_run(2, "lint", conclusion="failure", started=T1)]},
@@ -105,54 +102,54 @@ ci_over = {"fg": {"checks": [check_run(1, "tests", conclusion="failure")]}, "pen
            "livewrong": {"body": PR_BODY.replace("#321", "#999")}, "livefixes": {"body": PR_BODY.replace("Closes #321", "Fixes #321")},
            "liveextra": {"body": PR_BODY + "\nCloses #999"}, "draftpr": {"draft": True}, "closedpr": {"state": "closed"}}
 cases = [
-    ("valid delivery accepts bound checkout", "valid", (), 0, "delivery evidence valid"),
-    ("stale tested_head is rejected", "stale", (), 1, "stale tested_head"),
-    ("newer PR head with old report is rejected", "prhead", (), 1, "PR head"),
-    ("false-green CI is rejected", "fg", (), 1, "live CI not acceptable"),
-    ("pending CI reported as pass is rejected", "pend", (), 1, "live CI not acceptable"),
-    ("failed omitted check is rejected", "omit", (), 1, "live CI not acceptable"),
-    ("failed page-two check is rejected", "page2", (), 1, "live CI not acceptable"),
-    ("empty CI check list is rejected", "empty", (), 1, "no CI checks"),
-    ("empty report ci.checks is rejected", "emptyrep", (), 1, "ci.checks must list"),
-    ("dirty checkout is rejected", "dirty", (), 1, "uncommitted or untracked"),
-    ("wrong intended issue is rejected", "issue", (), 1, "expected issue"),
-    ("plan-only delivery is rejected", "plan", (), 1, "plan-only"),
-    ("missing setup evidence is rejected", "setup", (), 1, "bound setup"),
-    ("forged quoted setup is rejected", "forged", (), 1, "does not install"),
-    ("forged setup chained after a real command is rejected", "forgedchain", (), 1, "does not satisfy"),
-    ("forged setup wrapped in a shell -c is rejected", "forgedwrap", (), 1, "unsupported compound shell"),
-    ("semicolon setup that skips install is rejected", "skipsemi", (), 1, "unsupported compound shell"),
-    ("or-chained setup that skips install is rejected", "skipor", (), 1, "unsupported compound shell"),
-    ("multi-workspace && install chain is accepted", "multiinstall", (), 0, "delivery evidence valid"),
-    ("absent bun.lock install is rejected", "bun", (), 1, "bound setup"),
-    ("nested lockfile at any depth is detected", "nestedlock", (), 1, "bound setup"),
-    ("binary files are counted toward the size cap", "binary", (), 1, "claimed"),
-    ("stale setup receipt is rejected", "stalesetup", ("--bound-setup-head", "a"*40), 1, "bound setup head"),
-    ("stale verify receipt is rejected", "staleverify", ("--bound-verify-head", "a"*40), 1, "bound verify head"),
-    ("Fixes closing reference is rejected", "fixes", (), 1, "exactly one Closes"),
-    ("Close without s is rejected", "closeword", (), 1, "exactly one Closes"),
-    ("stale verification receipt is rejected", "verify", ("--bound-verify-exit", "1"), 1, "bound verify"),
-    ("known unresolved defects block completion", "defect", (), 1, "unresolved"),
-    ("oversized or wrong counted claim is rejected", "big", (), 1, "claimed"),
-    ("inferred root merge signoff is rejected", "root", (), 1, "merge_signed_off_by"),
-    ("wrong repository binding is rejected", "repo", (), 1, "coordinator contract"),
-    ("wrong expected branch is rejected", "branch", (), 1, "coordinator contract"),
-    ("neutral unresolved bot is rejected unconditionally", "neutral", (), 1, "is neutral"),
-    ("expected skipped bot with reason is accepted", "exskip", (), 0, "delivery evidence valid"),
-    ("expected_skipped cannot approve neutral", "exskipneutral", (), 1, "cannot approve neutral"),
-    ("newer queued attempt blocks delivery", "queued", (), 1, "live CI not acceptable"),
-    ("older cancelled attempt cannot replace later success", "cancelwin", (), 0, "delivery evidence valid"),
-    ("live PR wrong Closes issue is rejected", "livewrong", (), 1, "live PR must close issue"),
-    ("live PR Fixes keyword is rejected", "livefixes", (), 1, "Closes exactly once"),
-    ("live PR extra closing reference is rejected", "liveextra", (), 1, "exactly one closing reference"),
-    ("open draft PR with green checks is accepted", "draftpr", (), 0, "delivery evidence valid"),
-    ("closed live PR is rejected", "closedpr", (), 1, "not open for review"),
-    ("malformed target pr-standards config fails loudly", "badconfig", (), 1, "invalid JSON"),
-    ("target config override changes counted bound", "configcap", (), 1, "checkout exceeds bound"),
-    ("pinned base SHA ignores moved branch config", "configsha", (), 0, "delivery evidence valid"),
-    ("issue endpoint rejects pull request objects", "issuepr", (), 1, "is a pull request"),
-    ("closed expected issue is rejected", "issueclosed", (), 1, "not open"),
-    ("missing expected-repository is rejected", "norepo", (), 2, "--expected-repository is required"),
+    ("valid delivery passes", "valid", (), 0, "delivery evidence valid"),
+    ("stale tested_head fails", "stale", (), 1, "stale tested_head"),
+    ("newer PR head fails", "prhead", (), 1, "PR head"),
+    ("false-green CI fails", "fg", (), 1, "live CI not acceptable"),
+    ("pending CI fails", "pend", (), 1, "live CI not acceptable"),
+    ("failed omitted check fails", "omit", (), 1, "live CI not acceptable"),
+    ("failed page-two check fails", "page2", (), 1, "live CI not acceptable"),
+    ("empty CI list fails", "empty", (), 1, "no CI checks"),
+    ("empty ci.checks fails", "emptyrep", (), 1, "ci.checks must list"),
+    ("dirty checkout fails", "dirty", (), 1, "uncommitted or untracked"),
+    ("wrong issue fails", "issue", (), 1, "expected issue"),
+    ("plan-only fails", "plan", (), 1, "plan-only"),
+    ("missing setup fails", "setup", (), 1, "bound setup"),
+    ("forged quoted setup fails", "forged", (), 1, "does not install"),
+    ("forged chained setup fails", "forgedchain", (), 1, "does not satisfy"),
+    ("shell -c forged setup fails", "forgedwrap", (), 1, "unsupported shell"),
+    ("semicolon skip install fails", "skipsemi", (), 1, "unsupported shell"),
+    ("or-chained skip install fails", "skipor", (), 1, "unsupported shell"),
+    ("multi-workspace && install passes", "multiinstall", (), 0, "delivery evidence valid"),
+    ("absent bun.lock install fails", "bun", (), 1, "bound setup"),
+    ("nested lockfile detected", "nestedlock", (), 1, "bound setup"),
+    ("binary files count toward cap", "binary", (), 1, "claimed"),
+    ("stale setup receipt fails", "stalesetup", ("--bound-setup-head", "a"*40), 1, "bound setup head"),
+    ("stale verify receipt fails", "staleverify", ("--bound-verify-head", "a"*40), 1, "bound verify head"),
+    ("Fixes closing ref fails", "fixes", (), 1, "exactly one Closes"),
+    ("Close without s fails", "closeword", (), 1, "exactly one Closes"),
+    ("stale verification receipt fails", "verify", ("--bound-verify-exit", "1"), 1, "bound verify"),
+    ("unresolved defects block", "defect", (), 1, "unresolved"),
+    ("wrong counted claim fails", "big", (), 1, "claimed"),
+    ("root merge signoff fails", "root", (), 1, "merge_signed_off_by"),
+    ("wrong repository fails", "repo", (), 1, "coordinator contract"),
+    ("wrong expected branch fails", "branch", (), 1, "coordinator contract"),
+    ("neutral bot fails", "neutral", (), 1, "is neutral"),
+    ("expected skipped bot passes", "exskip", (), 0, "delivery evidence valid"),
+    ("expected_skipped not neutral", "exskipneutral", (), 1, "cannot approve neutral"),
+    ("queued attempt blocks", "queued", (), 1, "live CI not acceptable"),
+    ("cancelled cannot replace success", "cancelwin", (), 0, "delivery evidence valid"),
+    ("live wrong Closes fails", "livewrong", (), 1, "live PR must close issue"),
+    ("live Fixes fails", "livefixes", (), 1, "Closes exactly once"),
+    ("live extra closing fails", "liveextra", (), 1, "exactly one closing reference"),
+    ("open draft PR passes", "draftpr", (), 0, "delivery evidence valid"),
+    ("closed live PR fails", "closedpr", (), 1, "not open for review"),
+    ("bad pr-standards config fails", "badconfig", (), 1, "invalid JSON"),
+    ("config override changes bound", "configcap", (), 1, "checkout exceeds bound"),
+    ("pinned base SHA ignores moved config", "configsha", (), 0, "delivery evidence valid"),
+    ("issue endpoint rejects PR objects", "issuepr", (), 1, "is a pull request"),
+    ("closed expected issue fails", "issueclosed", (), 1, "not open"),
+    ("missing expected-repository fails", "norepo", (), 2, "--expected-repository is required"),
 ]
 dirty_path, bunlock, passed, failed = os.path.join(checkout, "dirty.txt"), os.path.join(checkout, "bun.lock"), 0, 0
 def sync_report(name, case_head):
@@ -187,10 +184,7 @@ def run_case(name, extra=(), after=None):
         subprocess.run(["git", "-C", checkout, "commit", "-qm", "bun"], check=True); args = bound_args(sync_report("bun", subprocess.check_output(["git", "-C", checkout, "rev-parse", "HEAD"], text=True).strip()))
     if name == "nestedlock": case_head = commit_extra("nestedlock", "backend/yarn.lock", "# yarn lockfile\n", "nested lock"); args = bound_args(case_head)
     if name == "binary": case_head = commit_extra("binary", "asset.bin", b"\x00\x01binary", "binary asset", mode="wb"); args = bound_args(case_head)
-    if name in ("forged", "forgedchain", "forgedwrap", "skipsemi", "skipor"):
-        forged_cmd = {"forged": "echo 'npm ci'", "forgedchain": "true && echo npm ci", "forgedwrap": "bash -c 'echo npm ci'",
-                      "skipsemi": "false && npm ci; true", "skipor": "false || npm ci"}[name]
-        args = bound_args(head, forged_cmd)
+    if name in FORGED and name != "multiinstall": args = bound_args(head, FORGED[name])
     if name == "multiinstall":
         case_head = commit_extra("multiinstall", "backend/package-lock.json", "{}\n", "backend lock")
         args = bound_args(case_head, "npm ci && cd backend && npm ci")
