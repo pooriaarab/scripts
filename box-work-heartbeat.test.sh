@@ -14,7 +14,7 @@ pass() { echo "ok - $1"; PASS=$((PASS+1)); }
 fail() { echo "FAIL - $1"; echo "  $2"; FAIL=$((FAIL+1)); }
 
 T=""
-FAKEREPO_CREATED=0
+REPONAME=""
 SENTINEL_PID=""
 cleanup() {
   if [[ -n "$SENTINEL_PID" ]]; then kill "$SENTINEL_PID" 2>/dev/null || true; fi
@@ -26,9 +26,6 @@ cleanup() {
     pkill -f "$T/captured-runner.sh" 2>/dev/null || true
     rm -rf "$T"
   fi
-  # Only remove the repo fixture dir when this run created it; a pre-existing
-  # one belongs to someone else.
-  if [[ "$FAKEREPO_CREATED" = "1" ]]; then rm -rf /home/user/fakerepo; fi
 }
 trap cleanup EXIT
 
@@ -99,16 +96,16 @@ setup() {
   T="$(mktemp -d "${TMPDIR:-/tmp}/box-work-hb-test.XXXXXX")"
   FAKEHOME="$T/home"
   FAKEBOX="$T/boxhome"
-  if [[ ! -d /home/user/fakerepo ]]; then
-    mkdir -p /home/user/fakerepo
-    FAKEREPO_CREATED=1
-  fi
+  # Unique fixture-owned repo path: no fixed /home/user/<name> is created or
+  # asserted anywhere in this suite, so concurrent or repeated runs cannot
+  # collide and nothing outside the fixture is touched.
+  REPONAME="hbrepo-$BASHPID-$RANDOM"
   mkdir -p "$FAKEHOME/.agents" "$T/stubbin" "$T/xdg/box-work" \
-    "$FAKEBOX/.agents" "$FAKEBOX/.local/bin"
+    "$FAKEBOX/.agents" "$FAKEBOX/.local/bin" "$FAKEBOX/$REPONAME"
   REPO="$T/repo"
   git init -q "$REPO" 2>/dev/null
-  git -C "$REPO" remote add origin https://github.com/pooriaarab/fakerepo.git
-  printf 'bx_test123\n' > "$T/xdg/box-work/fakerepo.id"
+  git -C "$REPO" remote add origin "https://github.com/pooriaarab/$REPONAME.git"
+  printf 'bx_test123\n' > "$T/xdg/box-work/$REPONAME.id"
   : > "$T/exec.log"
   : > "$FAKEHOME/.agents/agent-clis.env"
   : > "$FAKEBOX/.agents/agent-clis.env"
@@ -243,7 +240,7 @@ grep -q "bx_test123" "$T/exec.log" \
 grep -q "bash /home/user/box-work-run.sh" "$T/exec.log" \
   && pass "dispatch runs the uploaded runner script" \
   || fail "dispatch runs the uploaded runner script" "$(cat "$T/exec.log")"
-grep -qF 'cd "/home/user/fakerepo"' "$T/captured-runner.sh" \
+grep -qF "cd \"\$HOME/$REPONAME\"" "$T/captured-runner.sh" \
   && pass "runner keeps the explicit repository cwd" \
   || fail "runner keeps the explicit repository cwd" "cd line missing"
 grep -qF "HEARTBEAT_SECS=\"1\"" "$T/captured-runner.sh" \
@@ -304,6 +301,11 @@ irc=$?
 # Wait only for the watcher: a bare `wait` would also wait for the sentinel,
 # which lives until cleanup, hanging the suite here.
 wait "$watcherpid" 2>/dev/null || true
+# The snapshot must be non-empty: an empty tree would let the descendant
+# assertions below pass vacuously, proving nothing.
+[ -s "$T/int.tree" ] \
+  && pass "SIGINT tree snapshot is non-empty" \
+  || fail "SIGINT tree snapshot is non-empty" "snapshot empty; descendant checks below are vacuous"
 # shellcheck disable=SC2046
 assert_all_dead "SIGINT kills every worker descendant" $(cat "$T/int.tree" 2>/dev/null)
 runner_live \
@@ -334,10 +336,11 @@ runner_live \
   || pass "SIGTERM leaves no helper"
 
 # 8. An explicit invalid interval fails the generated runner clearly: 30 is
-# only the omitted default, never a silent fallback. Each case dispatches a
-# real runner through the stub box and runs it -- no evaluation of the
-# runner's own guard text.
-for bad in bogus 0 ""; do
+# only the omitted default, never a silent fallback. Every zero-only form
+# (0, 00, 000, ...) fails too -- a zero sleep would spin the helper tight.
+# Each case dispatches a real runner through the stub box and runs it -- no
+# evaluation of the runner's own guard text.
+for bad in bogus 0 00 000 ""; do
   gen_dispatch "BOX_WORK_HEARTBEAT_SECS=$bad" "BOX_WORK_HEARTBEAT_FILE=$T/hb-bad" -- pi "anything"
   [ "$(cat "$T/gen.rc")" = "2" ] \
     && pass "invalid interval '$bad' exits 2" \

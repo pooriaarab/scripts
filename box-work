@@ -225,21 +225,54 @@ export PATH="\$HOME/.local/bin:\$HOME/.kimi-code/bin:\$HOME/.npm-global/bin:\$PA
 set -a
 [ -f "\$HOME/.agents/agent-clis.env" ] && . "\$HOME/.agents/agent-clis.env"
 set +a
-cd "/home/user/$NAME" || exit 1
+# On the Box $HOME is /home/user, so this is the same cwd there; going
+# through $HOME (not a literal) lets tests run the runner under a
+# fixture-owned home instead of a fixed /home/user path.
+cd "\$HOME/$NAME" || exit 1
 # Job-scoped liveness: box-reap never reaps on state alone, and a worker
 # waiting on a provider looks idle by CPU. Touch the in-Box heartbeat while
 # the agent runs; the EXIT trap stops updates when the job ends, so a dead
 # job's file goes stale and keeps no exemption. The helper also exits when
-# its parent is gone, so even an uncatchable kill leaves no orphan.
+# its parent is gone, a zombie, or a recycled PID (identity plus start-time
+# check), so even an uncatchable kill leaves no orphan.
 HEARTBEAT_FILE="$HB_FILE_ESC"
 HEARTBEAT_SECS="$HB_SECS_ESC"
-case "\$HEARTBEAT_SECS" in ''|*[!0-9]*|0)
+case "\$HEARTBEAT_SECS" in ''|*[!0-9]*)
   echo "box-work-run: invalid BOX_WORK_HEARTBEAT_SECS \"\$HEARTBEAT_SECS\": positive integer seconds required" >&2
   exit 2 ;;
 esac
+# All-zero digit strings (0, 00, 000, ...) are numeric but not positive: a
+# zero sleep would spin the helper tight, so every zero-only form fails.
+_hb_nozero="\${HEARTBEAT_SECS//0/}"
+if [ -z "\$_hb_nozero" ]; then
+  echo "box-work-run: invalid BOX_WORK_HEARTBEAT_SECS \"\$HEARTBEAT_SECS\": positive integer seconds required" >&2
+  exit 2
+fi
 touch "\$HEARTBEAT_FILE" 2>/dev/null || echo "box-work-run: warning: cannot touch \$HEARTBEAT_FILE; idle-reaper exemption inactive" >&2
 HEARTBEAT_PPID=\$$
-( exec bash -c 'while kill -0 "\$1" 2>/dev/null; do sleep "\$2"; touch "\$3" 2>/dev/null || true; done' box-work-heartbeat-loop "\$HEARTBEAT_PPID" "\$HEARTBEAT_SECS" "\$HEARTBEAT_FILE" ) &
+HEARTBEAT_START="\$(ps -o lstart= -p \$HEARTBEAT_PPID 2>/dev/null)"
+# The helper watches its parent by identity, not PID alone. A bare `kill -0`
+# stays true for a zombie parent and can go true again after the PID is
+# recycled, either of which would keep a dead job's exemption. The state
+# check ends the helper on zombies; the start-time check ends it when the
+# parent PID has been reused by an unrelated process.
+( exec bash -c '
+  _hp_pid="\$1"; _hp_start="\$2"; _hp_secs="\$3"; _hp_file="\$4"
+  _hp_alive() {
+    local _st _now
+    if command -v ps >/dev/null 2>&1; then
+      _st="\$(ps -o stat= -p \$_hp_pid 2>/dev/null)" || return 1
+      case "\$_st" in ""|*Z*) return 1;; esac
+      if [ -n "\$_hp_start" ]; then
+        _now="\$(ps -o lstart= -p \$_hp_pid 2>/dev/null)" || return 1
+        [ "\$_now" = "\$_hp_start" ] || return 1
+      fi
+      return 0
+    fi
+    kill -0 "\$_hp_pid" 2>/dev/null
+  }
+  while _hp_alive; do sleep "\$_hp_secs"; touch "\$_hp_file" 2>/dev/null || true; done
+' box-work-heartbeat-loop "\$HEARTBEAT_PPID" "\$HEARTBEAT_START" "\$HEARTBEAT_SECS" "\$HEARTBEAT_FILE" ) &
 HEARTBEAT_PID=\$!
 stop_heartbeat() { kill "\$HEARTBEAT_PID" 2>/dev/null || true; wait "\$HEARTBEAT_PID" 2>/dev/null || true; }
 kill_tree() { # TERM a process subtree, children before parents
