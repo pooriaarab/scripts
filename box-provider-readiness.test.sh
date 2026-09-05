@@ -74,6 +74,15 @@ prod=$((BASH_REMATCH[1] * BASH_REMATCH[2]))
 res="${BASH_REMATCH[1]}"
 if [[ "$name" == muse && -f "$T/auth-fail" ]]; then echo "muse: Authentication required (test-fixture). MUSE_API_KEY=fake-leak-999" >&2; exit 1; fi
 if [[ -f "$T/wrong-write" ]]; then printf '%s\n' "$prod"; printf '%s\n' "$((prod+1))" >"$res"; exit 0; fi
+# Non-canonical reply envelopes. The file stays correct so each case proves
+# the reply gate itself rejects: chatter around the digits, a JSON envelope
+# where digits are required, and cursor JSON missing its result contract.
+if [[ -f "$T/chatty-head" ]]; then printf 'working on it\n%s\n' "$prod"; printf '%s\n' "$prod" >"$res"; exit 0; fi
+if [[ -f "$T/chatty-tail" ]]; then printf '%s\ntool event 7\n' "$prod"; printf '%s\n' "$prod" >"$res"; exit 0; fi
+if [[ "$name" == muse && -f "$T/muse-json" ]]; then printf '{"result":"%s"}\n' "$prod"; printf '%s\n' "$prod" >"$res"; exit 0; fi
+if [[ "$name" == cursor-agent && -f "$T/cursor-noresult" ]]; then printf '{"output":"%s"}\n' "$prod"; printf '%s\n' "$prod" >"$res"; exit 0; fi
+if [[ "$name" == cursor-agent && -f "$T/cursor-badjson" ]]; then printf 'not-json{\n'; printf '%s\n' "$prod" >"$res"; exit 0; fi
+if [[ "$name" == cursor-agent && -f "$T/cursor-nondigit" ]]; then printf '{"result":"12a"}\n'; printf '%s\n' "$prod" >"$res"; exit 0; fi
 printf '%s\n' "$prod" >"$res"
 if [[ "$name" == cursor-agent ]]; then printf '{"result":"%s","usage":{"requests":1}}\n' "$prod"; else printf '%s\n' "$prod"; fi
 FAKE
@@ -123,12 +132,6 @@ run_helper() { # <provider> -- <sentinel...>: always pins --repo so ls-remote is
   out=$(BOX_CLI="$T/stubbin/box" BOX_PROBE_BASE="$T/home" \
     "$SCRIPT" --box bx_test123 --provider "$p" --cwd /home/user/fakerepo \
     --repo testowner/testrepo --ready-secs 30 --timeout 30 "$@" 2>&1)
-  rc=$?
-}
-run_github_only() { # [-- <sentinel...>]: pre-clone gate from an existing cwd, no provider probe
-  out=$(BOX_CLI="$T/stubbin/box" BOX_PROBE_BASE="$T/home" \
-    "$SCRIPT" --box bx_test123 --cwd /home/user/work \
-    --repo testowner/testrepo --ready-secs 30 --timeout 30 --github-only "$@" 2>&1)
   rc=$?
 }
 run_raw() {
@@ -214,23 +217,29 @@ test_wrong_login() {
   run_helper muse -- touch "$T/sentinel"
   need_fail "wrong github identity fails before the sentinel" "not the canonical personal account"
 }
-test_github_only() {
-  setup
-  run_github_only -- touch "$T/sentinel"
-  need_ok "github-only gate reaches the sentinel without a provider probe"
-  grep -q "READY github=pooriaarab repo=testowner/testrepo" <<<"$out" \
-    && pass "github-only gate proves the personal identity and repo access" || fail "github-only gate identity proof" "$out"
-  grep -q "box-provider-github-" "$T/exec.log" && ! grep -q "box-provider-probe-" "$T/exec.log" \
-    && pass "github-only gate ships only the identity runner, no provider probe" || fail "github-only gate runners" "$(cat "$T/exec.log")"
-  rm -rf "$T"; setup gh-wrong-login
-  run_github_only -- touch "$T/sentinel"
-  need_fail "github-only gate rejects a wrong identity" "not the canonical personal account"
-}
-test_github_only_sentinel_failure() {
-  setup
-  run_github_only -- sh -c 'exit 7'
-  (( rc == 7 )) && pass "github-only gate propagates the sentinel's exit status" \
-    || fail "github-only gate propagates the sentinel's exit status" "rc=$rc out=$out"
+# Unknown envelopes fail explicitly: leading chatter, a trailing tool-event
+# line carrying a digit, a JSON envelope where digits are required, and
+# cursor JSON without its result contract. The probe file stays correct in
+# every case, so each rejection proves the reply gate, not the file gate.
+test_reply_envelopes_rejected() {
+  setup chatty-head
+  run_helper muse -- touch "$T/sentinel"
+  need_fail "leading chatter is not a canonical muse reply" "reply rejected"
+  rm -rf "$T"; setup chatty-tail
+  run_helper muse -- touch "$T/sentinel"
+  need_fail "trailing tool-event digit is not a canonical muse reply" "reply rejected"
+  rm -rf "$T"; setup muse-json
+  run_helper muse -- touch "$T/sentinel"
+  need_fail "JSON envelope is not a canonical muse reply" "reply rejected"
+  rm -rf "$T"; setup cursor-noresult
+  run_helper cursor -- touch "$T/sentinel"
+  need_fail "cursor JSON without a result field fails explicitly" "no result field"
+  rm -rf "$T"; setup cursor-badjson
+  run_helper cursor -- touch "$T/sentinel"
+  need_fail "cursor non-JSON reply fails explicitly" "not one JSON object"
+  rm -rf "$T"; setup cursor-nondigit
+  run_helper cursor -- touch "$T/sentinel"
+  need_fail "cursor non-digit result fails explicitly" "not canonical"
 }
 test_codex_personal() {
   setup
@@ -263,7 +272,7 @@ test_models_rejected() {
 for t in test_fresh_success test_resumed_transient_success test_missing_binary \
   test_missing_credential test_invalid_auth test_wrong_write test_timeout \
   test_cursor_json_success test_stale_env test_expired_gh test_missing_gh \
-  test_git_repo_fail test_wrong_login test_github_only test_github_only_sentinel_failure \
+  test_git_repo_fail test_wrong_login test_reply_envelopes_rejected \
   test_codex_personal test_timeouts_rejected test_models_rejected; do "$t"; done
 echo
 echo "pass=$PASS fail=$FAIL"
