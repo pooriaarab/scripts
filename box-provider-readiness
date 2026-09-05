@@ -154,11 +154,12 @@ GH_EXIT="$(printf '%s' "$GH_RAW" | python3 -c 'import sys,json; print(json.load(
 "$BOX" exec --cwd "$CWD" "$BOXID" -- rm -f "$GH_REMOTE" >/dev/null 2>&1 || true
 [ "$GH_EXIT" = "0" ] || { printf '%s\n' "$GH_ERR" | scrub | tail -5 >&2; fail "github identity/access check failed on box $BOXID (a stale/expired canonical token is a bootstrap failure)"; }
 echo "box-provider-readiness: READY github=$EXPECTED_GH_LOGIN repo=$REPO box=$BOXID"
+SENTINEL_RC=0
 if [ "${#SENTINEL[@]}" -gt 0 ]; then
   echo "box-provider-readiness: running sentinel"
-  "${SENTINEL[@]}"
+  "${SENTINEL[@]}" || SENTINEL_RC=$?
 fi
-exit 0
+exit "$SENTINEL_RC"
 fi
 
 A=$((RANDOM % 400 + 11)); B=$((RANDOM % 400 + 11)); EXPECTED=$((A * B)); NONCE="$(date +%s)-$$-$RANDOM"
