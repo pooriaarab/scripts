@@ -175,6 +175,16 @@ else
   box exec "$BOX" -- mkdir -p /home/user/work >/dev/null 2>&1 || true
   box exec "$BOX" -- rm -rf "$DIR" >/dev/null 2>&1 || true
   box exec "$BOX" --json --timeout 180 -- gh repo clone "$REPO" "$DIR" >/dev/null 2>&1 || { echo "box-agent: clone failed" >&2; exit 4; }
+  # SCR-310 readiness gate: prove this Box can actually run the provider
+  # (real binary, canonical personal credential, live arithmetic/file probe)
+  # before the real runner is shipped. A bootstrap failure exits 3 here with
+  # the Box stopped by the EXIT trap; it is never a source defect.
+  READINESS_GATE="$(cd "$(dirname "$0")" && pwd)/box-provider-readiness"
+  if [[ -x "$READINESS_GATE" ]]; then
+    "$READINESS_GATE" --box "$BOX" --provider "$PROVIDER" --cwd "$DIR" || exit 3
+  else
+    echo "box-agent: box-provider-readiness not found next to box-agent; refusing unwired dispatch" >&2; exit 3
+  fi
   CMD="$(onbox_cmd "$PROVIDER")"
   echo "box-agent: running $PROVIDER CLI on the Box ($CLI) in $DIR"
   # `box exec` joins argv into a remote shell command string, so a quoted
