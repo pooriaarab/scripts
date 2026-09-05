@@ -32,7 +32,8 @@ https://github.com/pooriaarab/scripts/blob/main/pr-standards.md
 
 ## Merge gates
 
-Run `bun run ci:local` or `npm run ci:local` before every `git push`.
+Run the repo `ci:local` script before every `git push` when it exists.
+Else run the same lint, typecheck, and unit tests CI runs.
 Do not push a red local gate. Do not use CI as the test runner.
 
 For a change a user can see, or that talks to a third party, walk the
