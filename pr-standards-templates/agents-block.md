@@ -30,4 +30,29 @@ no one to ask for one. Split the change.
 Settings for this repo are in `.github/pr-standards.json`. The standard is at
 https://github.com/pooriaarab/scripts/blob/main/pr-standards.md
 
+## Merge gates
+
+Run the repo `ci:local` script before every `git push` when it exists.
+Else run the same lint, typecheck, and unit tests CI runs.
+Do not push a red local gate. Do not use CI as the test runner.
+
+For a change a user can see, or that talks to a third party, walk the
+Cloudflare Worker Preview before merge. Quote the Preview URL and status
+codes. A 2xx on the site home is not that walk.
+
+Wait for one LLM review APPROVED. Red CI blocks merge even when GitHub
+does not require checks.
+
+## Agent presence
+
+Before you cut a branch:
+
+```
+bin/fleet-presence claim pooriaarab/<repo> <N> --goal "..." --branch <branch>
+```
+
+One sticky GitHub comment per agent. Create once, then PATCH. Same-machine
+lock is local. Name harness, model, host, start time, and goal. Do not dump
+transcripts. Full rule: pooriaarab/agents-private `rules/agent-presence.md`.
+
 <!-- pr-standards:end -->
