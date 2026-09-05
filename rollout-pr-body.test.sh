@@ -19,6 +19,9 @@ PREFIX_UPPER=CR
 ISSUE_NUM=997
 BRANCH="$PREFIX-$ISSUE_NUM-adopt-pr-standard"
 DEFAULT_BRANCH=main
+# The rollout now refuses to guess who is running it; give the extracted body
+# the same trailer a real invocation would set.
+ASSISTED_BY=claude-code:sonnet-5
 
 # The precheck block seeds its scratch dir from $CONFIG_JSON, same as the real
 # rollout builds it from the real template -- not hand-copied, so this cannot
@@ -36,8 +39,8 @@ print(json.dumps(cfg, indent=2))
 eval "$(sed -n '/^  # The PR that installs the standard has to obey it/,/^  gh pr create/p' "$ROLLOUT" \
   | sed '/^  gh pr create/d; /^    continue$/d; /^  fi$/d; /^  if \[ "\$PRECHECK_STATUS"/,/fail_c=/d')"
 
-BODY=$(sed -n '/^    --body "Closes #\$ISSUE_NUM/,/^Assisted-by: pooriaarab\/scripts:pr-standards-rollout" \\$/p' "$ROLLOUT" \
-  | sed '1s/^    --body "//; $s/" \\$//')
+BODY=$(sed -n '/^    --body "Closes #\$ISSUE_NUM/,/^Assisted-by:/p' "$ROLLOUT" \
+  | sed '1s/^    --body "//; $s/".*$//')
 BODY=$(eval "cat <<ROLLOUT_BODY_EOF
 $BODY
 ROLLOUT_BODY_EOF")
