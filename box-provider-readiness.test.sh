@@ -269,11 +269,152 @@ test_models_rejected() {
   need_fail "unsupported provider fails before any probe" "unsupported provider"
   [[ -s "$T/exec.log" ]] && fail "model/provider rejects run no probe" "$(cat "$T/exec.log")" || pass "model/provider rejects run no probe"
 }
+gate_setup() { # stub Box serving the real box-agent and the real helper, provider pi
+  # Args become $T2/<marker> files: no-cred, gh-401, git-fail, gh-wrong-login, stale-clone-env.
+  T2="$(mktemp -d "${TMPDIR:-/tmp}/box-gate-test.XXXXXX")"
+  mkdir -p "$T2/stubbin" "$T2/fakebin" "$T2/boxhome/.pi/agent" "$T2/boxhome/.agents"
+  for m in "$@"; do touch "$T2/$m"; done
+  [[ -f "$T2/no-cred" ]] || printf '{"provider":"zai","fixture":"no-secret"}\n' > "$T2/boxhome/.pi/agent/auth.json"
+  printf 'fixture-canonical-gh-token-000' > "$T2/boxhome/.agents/github-personal.token"
+  export GATE_T="$T2" READINESS_TEST_T="$T2"
+  mkcli "$T2/fakebin"
+  cat > "$T2/fakebin/gh" <<'FAKE'
+#!/usr/bin/env bash
+# Fake gh: canonical token wins over stale inheritance; repo clone creates
+# the checkout. Never prints values, only a login name.
+C="$(cat "$GATE_T/boxhome/.agents/github-personal.token" 2>/dev/null)"
+if [[ "${1:-}" == "repo" && "${2:-}" == "clone" ]]; then
+  [[ -f "$GATE_T/gh-401" ]] && { echo "Bad credentials (HTTP 401)" >&2; exit 1; }
+  [[ -n "$C" && "${GH_TOKEN:-}" == "$C" && "${GITHUB_TOKEN:-}" == "$C" ]] \
+    || { echo "fake-gh-clone: expected the canonical token" >&2; exit 1; }
+  mkdir -p "${4:?}"; echo "gh-clone-ok $3" >>"$GATE_T/calls.log"; exit 0
+fi
+[[ -f "$GATE_T/gh-401" ]] && { echo "Bad credentials (HTTP 401)" >&2; exit 1; }
+[[ -n "$C" && "${GH_TOKEN:-}" == "$C" && "${GITHUB_TOKEN:-}" == "$C" ]] || exit 1
+echo "gh-ok" >>"$GATE_T/calls.log"
+if [[ -f "$GATE_T/gh-wrong-login" ]]; then printf 'someone-else\n'; else printf 'pooriaarab\n'; fi
+FAKE
+  chmod +x "$T2/fakebin/gh"
+  cat > "$T2/fakebin/git" <<'FAKE'
+#!/usr/bin/env bash
+# Fake git: proves ls-remote carries the canonical token for the repo.
+C="$(cat "$GATE_T/boxhome/.agents/github-personal.token" 2>/dev/null)"
+[[ -f "$GATE_T/git-fail" ]] && { echo "fake-git: ls-remote failed" >&2; exit 1; }
+[[ -n "$C" && " $* " == *"http.extraHeader=Authorization: Bearer $C"* && " $* " == *"github.com/testowner/testrepo.git"* ]] || exit 1
+FAKE
+  chmod +x "$T2/fakebin/git"
+  cat > "$T2/stubbin/box" <<'STUB'
+#!/usr/bin/env bash
+T="${GATE_T:?}"
+map() { case "$1" in /home/user/*) printf '%s/%s' "$T/boxhome" "${1#/home/user/}" ;; *) printf '%s' "$1" ;; esac; }
+jout() { python3 -c 'import json,sys; print(json.dumps({"stdout":open(sys.argv[1]).read(),"stderr":open(sys.argv[2]).read(),"exitCode":int(sys.argv[3])}))' "$1" "$2" "$3"; }
+sub="${1:-}"; shift || true
+case "$sub" in
+  new) printf '1' >>"$T/new-count"; echo '{"id":"bx_9gate7x"}' ;;
+  scp) cp "$1" "$(map "${2#*:}")"; printf '%s\n' "${2#*:}" >>"$T/scp.log" ;;
+  stop) printf '%s\n' "$*" >>"$T/stop.log" ;;
+  list) echo '[]' ;;
+  exec)
+    printf '%s\n' "$*" >>"$T/exec.log"
+    after=0; cmd=(); json=0
+    for a in "$@"; do
+      [[ "$a" == "--json" ]] && json=1
+      if (( after )); then cmd+=("$a"); continue; fi
+      [[ "$a" == "--" ]] && after=1
+    done
+    (( json )) || exit 0
+    case "${cmd[0]:-}" in
+      command) printf '{"stdout":"/home/user/.local/bin/pi","stderr":"","exitCode":0}\n' ;;
+      test) if [[ -s "$(map "${cmd[2]}")" ]]; then printf '{"stdout":"","stderr":"","exitCode":0}\n'; else printf '{"stdout":"","stderr":"","exitCode":1}\n'; fi ;;
+      mktemp) d="$(mktemp -d "$(map "${cmd[2]}")")"; o="$(mktemp)"; printf '%s\n' "$d" >"$o"; e="$(mktemp)"; : >"$e"; jout "$o" "$e" 0 ;;
+      bash) if [[ "$(map "${cmd[1]}")" == *box-agent-run.sh ]]; then printf 'runner-executed\n' >>"$T/runner.log"; printf '{"stdout":"simulated agent run","stderr":"","exitCode":0}\n';
+        else margs=(); for a in "${cmd[@]:2}"; do case "$a" in /home/user/*) margs+=("$(map "$a")");; *) margs+=("$a");; esac; done
+          extra=(); [[ -f "$T/stale-clone-env" ]] && extra=(GH_TOKEN=stale-inherited-9 GITHUB_TOKEN=stale-inherited-9)
+          env -i PATH="$T/fakebin:/usr/bin:/bin" GATE_T="$T" READINESS_TEST_T="$T" BOX_PROBE_BASE="$T/boxhome" "${extra[@]}" \
+            bash "$(map "${cmd[1]}")" "${margs[@]}" >"$T/probe.out" 2>"$T/probe.err"; jout "$T/probe.out" "$T/probe.err" "$?"; fi ;;
+      cat) o="$(mktemp)"; e="$(mktemp)"; cat "$(map "${cmd[1]}")" >"$o" 2>"$e"; rc=$?; jout "$o" "$e" "$rc" ;;
+      rm|mkdir|true|gh|git) printf '{"stdout":"","stderr":"","exitCode":0}\n' ;;
+      *) echo "gate stub box exec: unknown: ${cmd[*]}" >&2; exit 99 ;;
+    esac
+    ;;
+  *) echo "gate stub box: unknown $sub" >&2; exit 99 ;;
+esac
+STUB
+  chmod +x "$T2/stubbin/box"
+}
+test_gate_success() {
+  gate_setup
+  out=$(BOX_BIN="$T2/stubbin/box" PATH="$T2/stubbin:$PATH" GATE_T="$T2" BOX_PROBE_BASE="$T2/boxhome" "$DIR/box-agent" pi --repo testowner/testrepo "add a probe note" 2>&1); rc=$?
+  ok=1; (( rc == 0 )) || ok=0
+  for p in "READY github=pooriaarab" "READY box=bx_9gate7x provider=pi" "box-agent: NO diff"; do grep -q "$p" <<<"$out" || ok=0; done
+  grep -q "box-agent-run.sh" "$T2/scp.log" 2>/dev/null || ok=0
+  grep -q "runner-executed" "$T2/runner.log" 2>/dev/null || ok=0
+  [[ "$(cat "$T2/new-count" 2>/dev/null)" == "1" ]] || ok=0
+  grep -q -- "--provider zai-api" "$T2/calls.log" 2>/dev/null || ok=0
+  rm -rf "$T2"
+  (( ok )) && pass "dispatch gate: ready Box passes the live probe, then the runner ships once" || fail "dispatch gate: ready Box passes the probe, then runs" "rc=$rc out=$out"
+}
+test_gate_bootstrap_failure() {
+  gate_setup no-cred
+  out=$(BOX_BIN="$T2/stubbin/box" PATH="$T2/stubbin:$PATH" GATE_T="$T2" BOX_PROBE_BASE="$T2/boxhome" "$DIR/box-agent" pi --repo testowner/testrepo "add a probe note" 2>&1); rc=$?
+  ok=1; (( rc == 3 )) || ok=0
+  for p in "canonical credential.*missing or empty" "provider bootstrap"; do grep -q "$p" <<<"$out" || ok=0; done
+  grep -q "box-agent-clone-" "$T2/scp.log" 2>/dev/null || ok=0
+  [[ -e "$T2/runner.log" ]] && ok=0
+  grep -q "box-agent-run.sh" "$T2/scp.log" 2>/dev/null && ok=0
+  [[ -s "$T2/stop.log" ]] || ok=0
+  [[ "$(cat "$T2/new-count" 2>/dev/null)" == "1" ]] || ok=0
+  rm -rf "$T2"
+  (( ok )) && pass "dispatch gate: bootstrap failure exits 3, worker runner never ships, Box stopped" || fail "dispatch gate: bootstrap failure exits 3 with no worker runner" "rc=$rc out=$out"
+}
+test_gate_clone_ordering() {
+  gate_setup stale-clone-env
+  out=$(BOX_BIN="$T2/stubbin/box" PATH="$T2/stubbin:$PATH" GATE_T="$T2" BOX_PROBE_BASE="$T2/boxhome" "$DIR/box-agent" pi --repo testowner/testrepo "add a probe note" 2>&1); rc=$?
+  ok=1; (( rc == 0 )) || ok=0
+  for p in "READY github=pooriaarab" "READY box=bx_9gate7x provider=pi" "box-agent: NO diff"; do grep -q "$p" <<<"$out" || ok=0; done
+  for p in "gh-ok" "gh-clone-ok testowner/testrepo"; do grep -q "$p" "$T2/calls.log" 2>/dev/null || ok=0; done
+  g=$(grep -n "box-provider-github-" "$T2/exec.log" 2>/dev/null | head -1 | cut -d: -f1)
+  c=$(grep -n "box-agent-clone-" "$T2/exec.log" 2>/dev/null | head -1 | cut -d: -f1)
+  pr=$(grep -n "box-provider-probe-" "$T2/exec.log" 2>/dev/null | head -1 | cut -d: -f1)
+  w=$(grep -n "box-agent-run.sh" "$T2/exec.log" 2>/dev/null | head -1 | cut -d: -f1)
+  [[ -n "$g" && -n "$c" && -n "$pr" && -n "$w" && "$g" -lt "$c" && "$c" -lt "$pr" && "$pr" -lt "$w" ]] || ok=0
+  [[ "$(cat "$T2/new-count" 2>/dev/null)" == "1" ]] || ok=0
+  rm -rf "$T2"
+  (( ok )) && pass "dispatch gate: stale inheritance loses, canonical clone runs after the identity gate, worker ships last" || fail "dispatch gate: clone ordering with stale env" "rc=$rc out=$out"
+}
+test_gate_github_failure_no_clone() {
+  gate_setup gh-401
+  out=$(BOX_BIN="$T2/stubbin/box" PATH="$T2/stubbin:$PATH" GATE_T="$T2" BOX_PROBE_BASE="$T2/boxhome" "$DIR/box-agent" pi --repo testowner/testrepo "add a probe note" 2>&1); rc=$?
+  ok=1; (( rc == 3 )) || ok=0
+  grep -q "bootstrap failure" <<<"$out" || ok=0
+  grep -q "box-agent-clone-" "$T2/exec.log" 2>/dev/null && ok=0
+  grep -q "box-agent-run.sh" "$T2/scp.log" 2>/dev/null && ok=0
+  [[ -e "$T2/runner.log" ]] && ok=0
+  [[ -s "$T2/stop.log" ]] || ok=0
+  [[ "$(cat "$T2/new-count" 2>/dev/null)" == "1" ]] || ok=0
+  rm -rf "$T2"
+  (( ok )) && pass "dispatch gate: expired canonical token fails before clone, worker never ships, Box stopped" || fail "dispatch gate: github failure blocks clone" "rc=$rc out=$out"
+}
+test_gate_probe_failure_no_launch() {
+  gate_setup wrong-write
+  out=$(BOX_BIN="$T2/stubbin/box" PATH="$T2/stubbin:$PATH" GATE_T="$T2" BOX_PROBE_BASE="$T2/boxhome" "$DIR/box-agent" pi --repo testowner/testrepo "add a probe note" 2>&1); rc=$?
+  ok=1; (( rc == 3 )) || ok=0
+  grep -q "wrote.*expected" <<<"$out" || ok=0
+  grep -q "box-agent-run.sh" "$T2/scp.log" 2>/dev/null && ok=0
+  [[ -e "$T2/runner.log" ]] && ok=0
+  [[ -s "$T2/stop.log" ]] || ok=0
+  rm -rf "$T2"
+  (( ok )) && pass "dispatch gate: failed probe assertion blocks every task launch, Box stopped" || fail "dispatch gate: probe failure blocks launch" "rc=$rc out=$out"
+}
 for t in test_fresh_success test_resumed_transient_success test_missing_binary \
   test_missing_credential test_invalid_auth test_wrong_write test_timeout \
   test_cursor_json_success test_stale_env test_expired_gh test_missing_gh \
   test_git_repo_fail test_wrong_login test_reply_envelopes_rejected \
-  test_codex_personal test_timeouts_rejected test_models_rejected; do "$t"; done
+  test_github_only test_github_only_sentinel_failure \
+  test_codex_personal test_timeouts_rejected test_models_rejected \
+  test_gate_success test_gate_bootstrap_failure \
+  test_gate_clone_ordering test_gate_github_failure_no_clone \
+  test_gate_probe_failure_no_launch; do "$t"; done
 echo
 echo "pass=$PASS fail=$FAIL"
 (( FAIL == 0 ))
