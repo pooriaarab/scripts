@@ -249,6 +249,32 @@ test_verify_fail_and_worker_fail_is_exit_1() {
   fi
 }
 
+# Case 8c. --setup runs before --verify and its failure on a real change is
+# exit 3, distinct from 2, the same way a failed --verify is.
+test_setup_fail_on_real_change_is_exit_3() {
+  local fix
+  fix=$(new_repo)
+  run_worker "$fix" --setup 'test -f /nonexistent-setup-target' -- bash -c 'echo edited > tracked.txt'
+  if (( rc == 3 )) && echo "$out" | grep -q "setup failed"; then
+    pass "--setup failing on a real change exits 3, distinct from 2"
+  else
+    fail "--setup failing on a real change exits 3, distinct from 2" "rc=$rc out=$out"
+  fi
+}
+
+# Case 8d. A worker that both fails on its own AND leaves setup broken must
+# report exit 1, not 3, the same rule that governs a failed --verify.
+test_setup_fail_and_worker_fail_is_exit_1() {
+  local fix
+  fix=$(new_repo)
+  run_worker "$fix" --setup 'test -f /nonexistent-setup-target' -- bash -c 'echo half-done > tracked.txt; exit 1'
+  if (( rc == 1 )) && echo "$out" | grep -q "changed files but exited 1"; then
+    pass "a worker that fails and also fails setup exits 1, not 3"
+  else
+    fail "a worker that fails and also fails setup exits 1, not 3" "rc=$rc out=$out"
+  fi
+}
+
 # Case 9a. Usage errors must fail loudly with 4 before any worker runs — a
 # missing --dir would otherwise look like "the worker did nothing".
 test_usage_missing_dir_is_exit_4() {
@@ -441,6 +467,8 @@ test_failed_worker_with_change_is_exit_1
 test_verify_pass_on_real_change_is_exit_0
 test_verify_fail_on_real_change_is_exit_3
 test_verify_fail_and_worker_fail_is_exit_1
+test_setup_fail_on_real_change_is_exit_3
+test_setup_fail_and_worker_fail_is_exit_1
 test_usage_missing_dir_is_exit_4
 test_usage_no_command_is_exit_4
 test_usage_not_a_git_checkout_is_exit_4
