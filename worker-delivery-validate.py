@@ -15,7 +15,7 @@ LOCK_INSTALL = {k: re.compile(v, re.I) for k, v in {
     "yarn.lock": r"\byarn install\b.*--frozen-lockfile", "Cargo.lock": r"\bcargo fetch\b"}.items()}
 FORGE_CMD = re.compile(r"(?i)^\s*(?:\\|(?:command|builtin)\s+)*(?:echo|printf|print)\b")
 SHELL_WRAP = re.compile(r"(?i)^\s*(?:bash|sh|zsh|dash|ksh)\s+(?:-\S+\s+)*-c\s+(['\"])([\s\S]*)\1\s*$")
-SEGMENT_SPLIT = re.compile(r"(&&|\|\||;|\|)")
+COMPOUND_SHELL = re.compile(r"(?:;|\|\||(?<!\|)\|(?!\|)|\(|\)|`|\$\(|[<>]|[\n\r])")
 BUCKET_OK = {"pass": {"success", "pass"}, "fail": {"failure", "fail", "cancelled", "timed_out", "action_required"},
              "pending": {"pending", "in_progress", "queued"}, "skipped": {"skipped", "skipping"}}
 REQ = ("repository", "issue", "branch", "head", "tested_head", "outcome", "closing_ref", "implementation_status",
@@ -35,14 +35,18 @@ def segment_installs(segment):
     if wrapped: return segment_installs(wrapped.group(2))
     return True
 
-def guaranteed_segments(cmd):
-    guaranteed, segments = True, []
-    for tok in SEGMENT_SPLIT.split(cmd):
-        if tok == "||": guaranteed = False; continue
-        if tok in ("&&", ";", "|"): guaranteed = True; continue
-        if guaranteed and segment_installs(tok): segments.append(tok)
-        guaranteed = True
-    return segments
+def parse_bounded_setup_steps(cmd):
+    cmd = cmd.strip()
+    if not cmd: return None, "bound setup command is empty"
+    if COMPOUND_SHELL.search(cmd):
+        return None, "bound setup command %r uses unsupported compound shell; use &&-chained steps only" % cmd
+    steps = [part.strip() for part in re.split(r"\s*&&\s*", cmd)]
+    if any(not step for step in steps):
+        return None, "bound setup command %r has an empty && step" % cmd
+    for step in steps:
+        if SHELL_WRAP.match(step):
+            return None, "bound setup command %r uses unsupported compound shell; use &&-chained steps only" % cmd
+    return steps, None
 
 def gh_items(gh, path, key):
     out, page, total = [], 1, None
@@ -148,9 +152,11 @@ def validate(report_path):
     if locks:
         if not bound_setup_cmd or bound_setup_exit != "0": fail("bound setup command is required when lockfiles are committed")
         bound_head("setup", bound_setup_head, head)
-        segments = guaranteed_segments(bound_setup_cmd)
-        if not segments: fail("bound setup command %r does not install; it only prints text" % bound_setup_cmd)
-        bad = [name for name in locks if not any(LOCK_INSTALL[name].search(seg) for seg in segments)]
+        steps, setup_err = parse_bounded_setup_steps(bound_setup_cmd)
+        if setup_err: fail(setup_err)
+        install_steps = [step for step in steps if segment_installs(step)]
+        if not install_steps: fail("bound setup command %r does not install; it only prints text" % bound_setup_cmd)
+        bad = [name for name in locks if not any(LOCK_INSTALL[name].search(step) for step in install_steps)]
         if bad: fail("bound setup does not satisfy committed lockfiles: %s" % ", ".join(bad))
         setup = doc.get("setup_commands") or []
         if not any(str(i.get("command", "")).strip() == bound_setup_cmd and i.get("exit") == 0 for i in setup if isinstance(i, dict)):
