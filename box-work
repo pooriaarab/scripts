@@ -233,13 +233,32 @@ cd "/home/user/$NAME" || exit 1
 # its parent is gone, so even an uncatchable kill leaves no orphan.
 HEARTBEAT_FILE="$HB_FILE_ESC"
 HEARTBEAT_SECS="$HB_SECS_ESC"
-case "\$HEARTBEAT_SECS" in ''|*[!0-9]*|0)
+case "\$HEARTBEAT_SECS" in ''|*[!0-9]*)
   echo "box-work-run: invalid BOX_WORK_HEARTBEAT_SECS \"\$HEARTBEAT_SECS\": positive integer seconds required" >&2
   exit 2 ;;
 esac
+case "\$HEARTBEAT_SECS" in
+  # An all-zero digit string ("0", "00", ...) passed the digits-only check
+  # above; without this, \`sleep "\$HEARTBEAT_SECS"\` returns instantly and the
+  # heartbeat loop busy-spins. A string with at least one non-zero digit is a
+  # valid positive count and falls through.
+  *[!0]*) : ;;
+  *)
+    echo "box-work-run: invalid BOX_WORK_HEARTBEAT_SECS \"\$HEARTBEAT_SECS\": positive integer seconds required" >&2
+    exit 2 ;;
+esac
 touch "\$HEARTBEAT_FILE" 2>/dev/null || echo "box-work-run: warning: cannot touch \$HEARTBEAT_FILE; idle-reaper exemption inactive" >&2
 HEARTBEAT_PPID=\$$
-( exec bash -c 'while kill -0 "\$1" 2>/dev/null; do sleep "\$2"; touch "\$3" 2>/dev/null || true; done' box-work-heartbeat-loop "\$HEARTBEAT_PPID" "\$HEARTBEAT_SECS" "\$HEARTBEAT_FILE" ) &
+( exec bash -c 'warned=0
+while kill -0 "\$1" 2>/dev/null; do
+  sleep "\$2"
+  if touch "\$3" 2>/dev/null; then
+    warned=0
+  elif [ "\$warned" = 0 ]; then
+    echo "box-work-run: warning: heartbeat touch failing for \$3; idle-reaper exemption may be inactive" >&2
+    warned=1
+  fi
+done' box-work-heartbeat-loop "\$HEARTBEAT_PPID" "\$HEARTBEAT_SECS" "\$HEARTBEAT_FILE" ) &
 HEARTBEAT_PID=\$!
 stop_heartbeat() { kill "\$HEARTBEAT_PID" 2>/dev/null || true; wait "\$HEARTBEAT_PID" 2>/dev/null || true; }
 kill_tree() { # TERM a process subtree, children before parents
@@ -313,8 +332,12 @@ esac
 }
 run_worker "\$1" &
 AGENT_PID=\$!
-trap 'kill_tree "\$AGENT_PID"; stop_heartbeat; trap - EXIT INT TERM; kill -INT \$\$' INT
-trap 'kill_tree "\$AGENT_PID"; stop_heartbeat; trap - EXIT INT TERM; kill -TERM \$\$' TERM
+trap 'kill_tree "\$AGENT_PID"; stop_heartbeat; trap - EXIT INT TERM HUP; kill -INT \$\$' INT
+trap 'kill_tree "\$AGENT_PID"; stop_heartbeat; trap - EXIT INT TERM HUP; kill -TERM \$\$' TERM
+# HUP has no trap of its own by default, so an unhandled HUP would only run
+# the bare EXIT trap above (stop_heartbeat) and leave the agent subtree
+# orphaned; mirror the INT/TERM handling so HUP tears down the whole job too.
+trap 'kill_tree "\$AGENT_PID"; stop_heartbeat; trap - EXIT INT TERM HUP; kill -HUP \$\$' HUP
 # Short poll, not a bare `wait`: bash defers a trapped SIGINT until a waited-for
 # child exits, so a bare wait would stall a PID-only interrupt for the whole
 # agent lifetime. The 0.5s sleep bounds trap latency; `wait` still reaps the
