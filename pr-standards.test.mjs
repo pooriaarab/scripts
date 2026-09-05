@@ -23,6 +23,7 @@ import {
   matchesGlob,
   summarizeFiles,
   multisetDifference,
+  splitBlobLines,
   validateBody,
   validateBranchName,
   validateTitle,
@@ -2146,4 +2147,16 @@ test('multiset difference keeps duplicates that the other side lacks', () => {
   assert.deepEqual(multisetDifference(['a'], ['a', 'a']), []);
   assert.deepEqual(multisetDifference([], ['a']), []);
   assert.deepEqual(multisetDifference(['x', 'x'], []), ['x', 'x']);
+});
+
+test('splitBlobLines drops the phantom line a trailing newline would add', () => {
+  // A blob from GitHub's contents API is raw file bytes. Splitting on '\n'
+  // alone turns a trailing newline into an extra empty element that is not a
+  // real line -- left in, it can falsely cancel against an unrelated real
+  // blank-line change elsewhere in the diff and grant an unearned move
+  // discount.
+  assert.deepEqual(splitBlobLines('alpha\nbeta\n'), ['alpha', 'beta']);
+  assert.deepEqual(splitBlobLines('alpha\nbeta'), ['alpha', 'beta']);
+  assert.deepEqual(splitBlobLines(''), []);
+  assert.deepEqual(splitBlobLines('\n'), ['']);
 });

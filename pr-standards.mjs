@@ -1446,6 +1446,18 @@ export function multisetDifference(left, right) {
   return out;
 }
 
+// text.split('\n') turns a trailing newline into a spurious empty final
+// element that is not a real line. Left in, a huge added/removed file whose
+// blob ends in a newline (nearly all of them) manufactures a phantom blank
+// line that can falsely cancel against an unrelated real blank-line change
+// elsewhere in the diff, granting a move discount that was never earned.
+export function splitBlobLines(text) {
+  if (text === '') return [];
+  const lines = text.split('\n');
+  if (text.endsWith('\n')) lines.pop();
+  return lines;
+}
+
 async function fetchBlobLines(repo, path, ref) {
   try {
     const meta = await apiRequest(`contents/${path.split('/').map(encodeURIComponent).join('/')}?ref=${ref}`, repo);
@@ -1455,7 +1467,7 @@ async function fetchBlobLines(repo, path, ref) {
     // and be counted as a byte-equal move. A fatal decoder refuses instead of
     // guessing, which is what keeps the move check honest.
     const text = new TextDecoder('utf-8', { fatal: true }).decode(Buffer.from(meta.content, 'base64'));
-    return text.split('\n');
+    return splitBlobLines(text);
   } catch {
     return null;
   }
