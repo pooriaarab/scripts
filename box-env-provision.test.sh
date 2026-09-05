@@ -13,18 +13,16 @@ pass() { echo "ok - $1"; PASS=$((PASS+1)); }
 fail() { echo "FAIL - $1"; echo "  $2"; FAIL=$((FAIL+1)); }
 
 T="$(mktemp -d "${TMPDIR:-/tmp}/box-env-provision-test.XXXXXX")"
-cleanup() { rm -rf "$T"; }
-trap cleanup EXIT
+trap 'rm -rf "$T"' EXIT
 
 mkdir -p "$T/stubbin"
 cat > "$T/stubbin/box" <<'STUB'
 #!/usr/bin/env bash
 echo "box $*" >>"${BOX_ENV_TEST_T:?}/box.log"
-exit 0
 STUB
 cat > "$T/stubbin/gh" <<'STUB'
 #!/usr/bin/env bash
-if [[ "$*" == *"defaultBranchRef"* ]]; then echo "main"; fi
+[[ "$*" == *"defaultBranchRef"* ]] && echo "main"
 exit 0
 STUB
 chmod +x "$T/stubbin/box" "$T/stubbin/gh"
@@ -34,8 +32,6 @@ export PATH="$T/stubbin:$PATH"
 REPO="$T/repo"
 git init -q "$REPO" 2>/dev/null
 git -C "$REPO" remote add origin https://github.com/pooriaarab/fakerepo.git
-
-# 1. Requested agent provisioning without its manifest must fail loudly.
 AGENT_CRED_DIR="$T/empty" \
   bash "$SCRIPT" --with-agents "$REPO" >"$T/out1" 2>"$T/err1"
 rc=$?
@@ -48,8 +44,6 @@ grep -q "manifest" "$T/err1" \
 [ ! -e "$T/box.log" ] \
   && pass "missing agent manifest provisions nothing" \
   || fail "missing agent manifest provisions nothing" "$(cat "$T/box.log")"
-
-# 2. A present manifest provisions the listed agent files (dry run).
 mkdir -p "$T/creds"
 printf 'x' > "$T/creds/credfile"
 printf '[[".config/test/cred","credfile","note"]]\n' > "$T/creds/manifest.json"
@@ -62,14 +56,11 @@ rc=$?
 grep -q "agent CLI credentials: 1 file(s)" "$T/out2" \
   && pass "present manifest provisions one agent file" \
   || fail "present manifest provisions one agent file" "$(cat "$T/out2")"
-
-# 3. Without --with-agents a missing manifest is irrelevant.
 AGENT_CRED_DIR="$T/empty" \
   bash "$SCRIPT" --dry-run "$REPO" >"$T/out3" 2>"$T/err3"
 rc=$?
 [ "$rc" = "0" ] \
   && pass "plain provisioning ignores the manifest" \
   || fail "plain provisioning ignores the manifest" "rc=$rc err: $(cat "$T/err3")"
-
 echo "pass=$PASS fail=$FAIL"
 [ "$FAIL" = "0" ]

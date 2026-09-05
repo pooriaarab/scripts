@@ -12,24 +12,8 @@ FAIL=0
 pass() { echo "ok - $1"; PASS=$((PASS+1)); }
 fail() { echo "FAIL - $1"; echo "  $2"; FAIL=$((FAIL+1)); }
 
-TMPDIRS=()
-cleanup() {
-  local d
-  for d in "${TMPDIRS[@]:-}"; do
-    [ -n "$d" ] && rm -rf "$d"
-  done
-  rmdir /home/user/fakerepo 2>/dev/null || true
-  return 0
-}
+cleanup() { rm -rf "${T:-}"; rmdir /home/user/fakerepo 2>/dev/null || true; }
 trap cleanup EXIT
-
-newtd() {
-  mktemp -d "${TMPDIR:-/tmp}/box-work-test.XXXXXX"
-}
-
-T=""
-FAKEHOME=""
-REPO=""
 
 write_stub() {
   cat > "$T/stubbin/box" <<'STUB'
@@ -78,15 +62,12 @@ esac
 STUB
   chmod +x "$T/stubbin/box"
 }
-
 write_fake() { # <name> <body...>: body via stdin
   cat > "$FAKEHOME/.local/bin/$1"
   chmod +x "$FAKEHOME/.local/bin/$1"
 }
-
 setup() {
-  T=$(newtd)
-  TMPDIRS+=("$T")
+  T="$(mktemp -d "${TMPDIR:-/tmp}/box-work-test.XXXXXX")"
   FAKEHOME="$T/home"
   mkdir -p "$FAKEHOME/.agents" "$FAKEHOME/.local/bin" "$T/stubbin" "$T/xdg/box-work"
   REPO="$T/repo"
@@ -146,7 +127,6 @@ done
 echo "GEMINI-OK $*"
 FAKE
 }
-
 # Run box-work in agent mode; result lands in $T/bw.{out,err,rc}.
 run_agent() { # <agent> <brief>
   HOME="$FAKEHOME" XDG_STATE_HOME="$T/xdg" BOX_CLI="$T/stubbin/box" \
@@ -154,7 +134,6 @@ run_agent() { # <agent> <brief>
     bash "$SCRIPT" "$REPO" --agent "$1" "$2" >"$T/bw.out" 2>"$T/bw.err"
   printf '%s' "$?" >"$T/bw.rc"
 }
-
 ok_rc() {
   [ "$(cat "$T/bw.rc")" = "0" ] && pass "$1" || fail "$1" "rc=$(cat "$T/bw.rc") err: $(cat "$T/bw.err")"
 }

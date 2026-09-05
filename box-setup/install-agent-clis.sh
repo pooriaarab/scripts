@@ -226,7 +226,21 @@ if [ ! -s "$HOME/.pi/agent/models.json" ]; then
 JSON
   note "wrote ~/.pi/agent/models.json"
 else
-  note "~/.pi/agent/models.json already present, left alone"
+  # Upgrade path: merge ONLY the deepseek cap into an existing config.
+  # Malformed configs (or conflicting shapes) fail loud and are left alone;
+  # everything else in the file is preserved byte-for-byte in effect.
+  if ! have python3; then
+    mark pi-models-upgrade "SKIPPED (no python3)"
+  elif ! python3 - "$HOME/.pi/agent/models.json" <<'PY' 2>>"$STATUS_FILE"; then
+import json,os,sys
+p=sys.argv[1]
+try:
+ d=json.load(open(p));e=d.setdefault("providers",{}).setdefault("openrouter",{}).setdefault("modelOverrides",{}).setdefault("deepseek/deepseek-v3.2",{})
+ assert isinstance(e,dict);e["maxTokens"]=8192;t=p+".tmp";json.dump(d,open(t,"w"),indent=2);os.replace(t,p);print("merged maxTokens=8192")
+except Exception as ex: sys.exit(f"merge refused: {ex}")
+PY
+    mark pi-models-upgrade "FAILED (left alone)"
+  fi
 fi
 
 # --------------------------------------------------------------- wrappers ----
