@@ -9,7 +9,7 @@
 #   2  the wrapped command exited 0 and changed nothing
 #   3  the worktree changed and --verify failed
 #   4  usage or environment error
-#
+#   5  the worktree changed and delivery evidence failed
 # To run the suite against a modified copy of the script (e.g. a mutation that
 # removes the untracked-file hashing from `fingerprint`):
 #   WORKER_RUN_UNDER_TEST=/tmp/mutant bash worker-run.test.sh
@@ -317,6 +317,23 @@ test_ignored_files_are_not_work() {
   fi
 }
 
+# Case 11. After real work, --delivery-report runs worker-delivery-validate
+# against the same checkout. A stale or incomplete report must fail with 5.
+test_delivery_report_failure_is_exit_5() {
+  local fix rep
+  fix=$(new_repo)
+  rep="$fix/bad-report.json"
+  cat > "$rep" <<'JSON'
+{"schema":1,"repository":"pooriaarab/scripts","issue":311,"branch":"x","head":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","tested_head":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","outcome":"x","closing_ref":"Closes #311","implementation_status":"complete","verification_commands":[{"command":"true","exit":0}],"setup_commands":[],"unresolved_failures":[],"claimed_counts":{"lines":0,"files":0},"assisted_by":["a:b"]}
+JSON
+  run_worker "$fix" --delivery-report "$rep" -- bash -c 'echo edited > tracked.txt'
+  if (( rc == 5 )) && echo "$out" | grep -qi "delivery evidence failed"; then
+    pass "a bad delivery report after real work exits 5"
+  else
+    fail "a bad delivery report after real work exits 5" "rc=$rc out=$out"
+  fi
+}
+
 # --help prints the contract (the header comment) and exits 0.
 test_help() {
   run_worker_x --help
@@ -343,6 +360,7 @@ test_usage_no_command_is_exit_4
 test_usage_not_a_git_checkout_is_exit_4
 test_usage_no_commits_is_exit_4
 test_ignored_files_are_not_work
+test_delivery_report_failure_is_exit_5
 test_help
 
 echo ""
