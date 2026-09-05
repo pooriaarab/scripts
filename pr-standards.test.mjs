@@ -22,6 +22,8 @@ import {
   loadConfig,
   matchesGlob,
   summarizeFiles,
+  multisetDifference,
+  splitBlobLines,
   validateBody,
   validateBranchName,
   validateTitle,
@@ -294,6 +296,10 @@ test('counts changed lines after exclusions and reports raw totals', () => {
   assert.deepEqual(summary, {
     rawLines: 1110,
     countedLines: 300,
+    grossCountedLines: 300,
+    // No patch text on these fixtures, so no move can be proven and nothing is
+    // discounted. That is the intended direction: prove it or pay for it.
+    movedLines: 0,
     excludedLines: 810,
     rawFiles: 3,
     countedFiles: 1,
@@ -1971,4 +1977,186 @@ test('proof: the body reader keeps what renders around a comment', () => {
   // A fence opened inside a blockquote ends with the quote container, so a
   // hatch written after the quote is visible rather than swallowed.
   assert.equal(failed(checkProof(body('> ```', '> example', hatch), uiFiles, config)), false);
+});
+
+test('a line moved verbatim between files counts zero', () => {
+  // The relocation that surfaced this: text leaves one file and arrives
+  // unchanged in another, so the PR authored nothing and used to be billed for
+  // it twice. See pooriaarab/scripts#299.
+  const body = ['alpha one', 'beta two', 'gamma three'];
+  const summary = summarizeFiles([
+    { filename: 'src/big.md', additions: 0, deletions: 3, patch: body.map((l) => `-${l}`).join('\n') },
+    { filename: 'src/refs/part.md', additions: 3, deletions: 0, patch: body.map((l) => `+${l}`).join('\n') },
+  ], config);
+  assert.equal(summary.movedLines, 3);
+  assert.equal(summary.grossCountedLines, 6);
+  assert.equal(summary.countedLines, 0);
+});
+
+test('a line changed during a move still counts', () => {
+  // The anti-gaming property. Byte equality is the whole test, so editing while
+  // moving is billed for the edit.
+  const summary = summarizeFiles([
+    { filename: 'src/big.md', additions: 0, deletions: 3, patch: '-alpha one\n-beta two\n-gamma three' },
+    { filename: 'src/refs/part.md', additions: 3, deletions: 0, patch: '+alpha one\n+beta TWO\n+gamma three' },
+  ], config);
+  assert.equal(summary.movedLines, 2);
+  assert.equal(summary.countedLines, 6 - 4);
+});
+
+test('a plain addition is not discounted', () => {
+  const summary = summarizeFiles([
+    { filename: 'src/new.md', additions: 3, deletions: 0, patch: '+alpha one\n+beta two\n+gamma three' },
+  ], config);
+  assert.equal(summary.movedLines, 0);
+  assert.equal(summary.countedLines, 3);
+});
+
+test('a rewrite of the same size is not discounted', () => {
+  const summary = summarizeFiles([
+    { filename: 'src/a.md', additions: 3, deletions: 3, patch: '-old one\n-old two\n-old three\n+new one\n+new two\n+new three' },
+  ], config);
+  assert.equal(summary.movedLines, 0);
+  assert.equal(summary.countedLines, 6);
+});
+
+test('a missing patch blocks the discount rather than granting it', () => {
+  // GitHub omits `patch` for very large or binary files. Without it the move
+  // cannot be proven, so it is not discounted. Silently discounting what the
+  // checker could not read would be the worse failure.
+  const summary = summarizeFiles([
+    { filename: 'src/big.md', additions: 0, deletions: 3, patch: '-alpha one\n-beta two\n-gamma three' },
+    { filename: 'src/huge.md', additions: 3, deletions: 0 },
+  ], config);
+  assert.equal(summary.movedLines, 0);
+  assert.equal(summary.countedLines, 6);
+});
+
+test('an excluded file cannot fund a discount', () => {
+  // Generated output is not counted, so it must not cancel counted lines
+  // either -- otherwise deleting a lockfile line would pay for a source line.
+  const summary = summarizeFiles([
+    { filename: 'dist/app.js', additions: 0, deletions: 3, patch: '-alpha one\n-beta two\n-gamma three' },
+    { filename: 'src/app.js', additions: 3, deletions: 0, patch: '+alpha one\n+beta two\n+gamma three' },
+  ], config);
+  assert.equal(summary.movedLines, 0);
+  assert.equal(summary.countedLines, 3);
+});
+
+test('a line removed and re-added in the same file is not a move', () => {
+  // The discount is for a RELOCATION -- content leaving one file for another.
+  // A line reordered within a single file is not that, and matching it there
+  // would let two unrelated same-file edits net out to zero merely for
+  // sharing a common line (a blank line, a closing brace, a Markdown rule).
+  const summary = summarizeFiles([
+    { filename: 'src/a.md', additions: 1, deletions: 1, patch: '-alpha one\n+alpha one' },
+  ], config);
+  assert.equal(summary.movedLines, 0);
+  assert.equal(summary.countedLines, 2);
+});
+
+test('a line moved out of a file and a different line moved in still cancel correctly', () => {
+  // Three files, so the match must pick partners across files without ever
+  // pairing a file with itself, even when that file has both a removal and
+  // an addition of lines that also appear elsewhere.
+  const summary = summarizeFiles([
+    { filename: 'src/a.md', additions: 1, deletions: 1, patch: '-shared\n+only-in-a' },
+    { filename: 'src/b.md', additions: 0, deletions: 1, patch: '-only-in-a' },
+    { filename: 'src/c.md', additions: 1, deletions: 0, patch: '+shared' },
+  ], config);
+  assert.equal(summary.movedLines, 2);
+  assert.equal(summary.countedLines, 4 - 4);
+});
+
+test('a patch line beginning with a second + or - is not mistaken for a diff header', () => {
+  // GitHub's per-file `patch` never carries `---`/`+++` file headers (the
+  // filename is already a separate field), so a content line that happens to
+  // start with `++` or `--` -- an increment statement, a Markdown rule or
+  // frontmatter delimiter -- must still be read as real content once
+  // diff-prefixed to `+++i;` or `----`.
+  const summary = summarizeFiles([
+    { filename: 'src/old.md', additions: 0, deletions: 1, patch: '----' },
+    { filename: 'src/new.md', additions: 1, deletions: 0, patch: '+---' },
+  ], config);
+  assert.equal(summary.movedLines, 1);
+  assert.equal(summary.countedLines, 0);
+});
+
+test('a patchless added file backfills its blob and still proves a move', async () => {
+  // The motivating case (agents-private#170) was a MODIFIED file too large
+  // for GitHub to attach a patch to. The other side of a move -- a brand-new
+  // file that is just as large -- gets the same treatment from GitHub, and
+  // used to be skipped outright because backfill excluded `added`/`removed`
+  // status. An `added` file has no base blob to fetch; the fix is to treat
+  // that side as empty, not to give up on the file.
+  const originalPath = process.env.PATH;
+  const originalToken = process.env.GITHUB_TOKEN;
+  const originalFetch = globalThis.fetch;
+  const originalWrite = process.stdout.write;
+  process.env.PATH = '';
+  process.env.GITHUB_TOKEN = 'test-token';
+  process.env.GITHUB_REPOSITORY = 'other/repo';
+  let output = '';
+  process.stdout.write = (chunk) => { output += chunk; return true; };
+
+  globalThis.fetch = async (url) => {
+    if (url.includes('contents/.github/pr-standards.json')) {
+      return { ok: false, status: 404, text: async () => 'Not Found' };
+    }
+    if (url.includes('pulls/21/commits')) {
+      return { ok: true, json: async () => ([{ sha: 'abc1234', commit: { message: 'Move the guide' } }]) };
+    }
+    if (url.includes('pulls/21/files')) {
+      return { ok: true, json: async () => ([
+        { filename: 'src/old.md', status: 'modified', additions: 0, deletions: 3, patch: '-line one\n-line two\n-line three' },
+        { filename: 'docs/new.md', status: 'added', additions: 3, deletions: 0 },
+      ]) };
+    }
+    if (url.includes('/compare/')) {
+      return { ok: true, json: async () => ({ behind_by: 0, merge_base_commit: { sha: '1234567' } }) };
+    }
+    if (url.includes('contents/docs/new.md')) {
+      return { ok: true, json: async () => ({ encoding: 'base64', content: Buffer.from('line one\nline two\nline three').toString('base64') }) };
+    }
+    if (url.match(/pulls\/21$/)) {
+      return { ok: true, json: async () => ({ head: { ref: 'refactor', sha: 'headsha1' }, base: { ref: 'main', sha: 'basesha1' }, title: 'x', body: 'x', labels: [] }) };
+    }
+    throw new Error(`Unexpected fetch URL: ${url}`);
+  };
+
+  try {
+    await main(['pr', '--repo', 'test/repo', '--number', '21', '--json']);
+    const result = JSON.parse(output);
+    assert.equal(result.size.movedLines, 3);
+    assert.equal(result.size.countedLines, 0);
+  } finally {
+    process.stdout.write = originalWrite;
+    process.env.PATH = originalPath;
+    process.env.GITHUB_TOKEN = originalToken;
+    globalThis.fetch = originalFetch;
+    delete process.env.GITHUB_REPOSITORY;
+  }
+});
+
+test('multiset difference keeps duplicates that the other side lacks', () => {
+  // The blob fallback derives a patch from this alone, with no diff algorithm:
+  // what left a file is base minus head, what arrived is head minus base.
+  // Duplicates have to survive, or a file that legitimately repeats a line
+  // would look like it lost one.
+  assert.deepEqual(multisetDifference(['a', 'b', 'a', 'c'], ['a', 'c']), ['b', 'a']);
+  assert.deepEqual(multisetDifference(['a'], ['a', 'a']), []);
+  assert.deepEqual(multisetDifference([], ['a']), []);
+  assert.deepEqual(multisetDifference(['x', 'x'], []), ['x', 'x']);
+});
+
+test('splitBlobLines drops the phantom line a trailing newline would add', () => {
+  // A blob from GitHub's contents API is raw file bytes. Splitting on '\n'
+  // alone turns a trailing newline into an extra empty element that is not a
+  // real line -- left in, it can falsely cancel against an unrelated real
+  // blank-line change elsewhere in the diff and grant an unearned move
+  // discount.
+  assert.deepEqual(splitBlobLines('alpha\nbeta\n'), ['alpha', 'beta']);
+  assert.deepEqual(splitBlobLines('alpha\nbeta'), ['alpha', 'beta']);
+  assert.deepEqual(splitBlobLines(''), []);
+  assert.deepEqual(splitBlobLines('\n'), ['']);
 });
