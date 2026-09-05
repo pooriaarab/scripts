@@ -12,7 +12,7 @@ FAIL=0
 pass() { echo "ok - $1"; PASS=$((PASS+1)); }
 fail() { echo "FAIL - $1"; echo "  $2"; FAIL=$((FAIL+1)); }
 
-cleanup() { rm -rf "${T:-}"; rmdir /home/user/fakerepo 2>/dev/null || true; }
+cleanup() { rm -rf "${T:-}"; }
 trap cleanup EXIT
 
 write_stub() {
@@ -73,7 +73,9 @@ setup() {
   REPO="$T/repo"
   git init -q "$REPO" 2>/dev/null
   git -C "$REPO" remote add origin https://github.com/pooriaarab/fakerepo.git
-  mkdir -p /home/user/fakerepo
+  # Fixture-owned repo dir: the generated runner cds $HOME/$NAME, and the stub
+  # runs it with HOME=$T/home, so no fixed /home/user path is needed here.
+  mkdir -p "$FAKEHOME/fakerepo"
   printf 'bx_test123\n' > "$T/xdg/box-work/fakerepo.id"
   printf '0' > "$T/probe_fails"
   : > "$T/exec.log"

@@ -201,6 +201,17 @@ case "$MODE" in
   agent)
     [[ -n "$AGENT" && -n "$BRIEF" ]] || die "--agent needs a CLI name and a brief"
     runner="$(mktemp)"
+    # Bake the caller's heartbeat knobs into the runner as safe double-quoted
+    # literals: a raw value containing `$`, a backtick, `"` or `\` must never
+    # resurface as executable syntax when the uploaded script is parsed a
+    # second time, on the Box.
+    hb_dq_escape() {
+      local s="$1"
+      s="${s//\\/\\\\}"; s="${s//\"/\\\"}"; s="${s//\$/\\\$}"; s="${s//\`/\\\`}"
+      printf '%s' "$s"
+    }
+    HB_FILE_ESC="$(hb_dq_escape "${BOX_WORK_HEARTBEAT_FILE:-/home/user/.box-reap-heartbeat}")"
+    HB_SECS_ESC="$(hb_dq_escape "${BOX_WORK_HEARTBEAT_SECS-30}")"
     # Never a bare `claude`: ascii injects its own CLAUDE_CODE_OAUTH_TOKEN and
     # that silently bills the wrong subscription.
     cat > "$runner" <<RUNNER
@@ -214,13 +225,95 @@ export PATH="\$HOME/.local/bin:\$HOME/.kimi-code/bin:\$HOME/.npm-global/bin:\$PA
 set -a
 [ -f "\$HOME/.agents/agent-clis.env" ] && . "\$HOME/.agents/agent-clis.env"
 set +a
-cd "/home/user/$NAME" || exit 1
+# On the Box $HOME is /home/user, so this is the same cwd there; going
+# through $HOME (not a literal) lets tests run the runner under a
+# fixture-owned home instead of a fixed /home/user path.
+cd "\$HOME/$NAME" || exit 1
+# Job-scoped liveness: box-reap never reaps on state alone, and a worker
+# waiting on a provider looks idle by CPU. Touch the in-Box heartbeat while
+# the agent runs; the EXIT trap stops updates when the job ends, so a dead
+# job's file goes stale and keeps no exemption. The helper also exits when
+# its parent is gone, a zombie, or a recycled PID (identity plus start-time
+# check), so even an uncatchable kill leaves no orphan.
+HEARTBEAT_FILE="$HB_FILE_ESC"
+HEARTBEAT_SECS="$HB_SECS_ESC"
+case "\$HEARTBEAT_SECS" in ''|*[!0-9]*)
+  echo "box-work-run: invalid BOX_WORK_HEARTBEAT_SECS \"\$HEARTBEAT_SECS\": positive integer seconds required" >&2
+  exit 2 ;;
+esac
+# All-zero digit strings (0, 00, 000, ...) are numeric but not positive: a
+# zero sleep would spin the helper tight, so every zero-only form fails.
+_hb_nozero="\${HEARTBEAT_SECS//0/}"
+if [ -z "\$_hb_nozero" ]; then
+  echo "box-work-run: invalid BOX_WORK_HEARTBEAT_SECS \"\$HEARTBEAT_SECS\": positive integer seconds required" >&2
+  exit 2
+fi
+touch "\$HEARTBEAT_FILE" 2>/dev/null || echo "box-work-run: warning: cannot touch \$HEARTBEAT_FILE; idle-reaper exemption inactive" >&2
+command -v ps >/dev/null 2>&1 || { echo "box-work-run: ps is required for heartbeat identity but not found" >&2; exit 2; }
+HEARTBEAT_PPID=\$$
+HEARTBEAT_START="\$(ps -o lstart= -p \$HEARTBEAT_PPID 2>/dev/null)"
+[ -n "\$HEARTBEAT_START" ] || { echo "box-work-run: cannot determine parent start time (ps -o lstart failed)" >&2; exit 2; }
+# Identity, not PID alone: zombies and recycled PIDs end the exemption.
+( exec bash -c '
+  _hp_pid="\$1"; _hp_start="\$2"; _hp_secs="\$3"; _hp_file="\$4"; warned=0
+  _hp_alive() {
+    _st="\$(ps -o stat= -p \$_hp_pid 2>/dev/null)" || return 1
+    case "\$_st" in ""|*Z*) return 1;; esac
+    _now="\$(ps -o lstart= -p \$_hp_pid 2>/dev/null)" || return 1
+    [ "\$_now" = "\$_hp_start" ] || return 1
+  }
+  while _hp_alive; do
+    sleep "\$_hp_secs"
+    _hp_alive || break # parent may have exited mid-sleep: never touch then
+    if touch "\$_hp_file" 2>/dev/null; then
+      warned=0
+    elif [ "\$warned" = 0 ]; then
+      echo "box-work-run: warning: heartbeat touch failing for \$_hp_file; idle-reaper exemption may be inactive" >&2
+      warned=1
+    fi
+  done
+' box-work-heartbeat-loop "\$HEARTBEAT_PPID" "\$HEARTBEAT_START" "\$HEARTBEAT_SECS" "\$HEARTBEAT_FILE" ) &
+HEARTBEAT_PID=\$!
+stop_heartbeat() { kill "\$HEARTBEAT_PID" 2>/dev/null || true; wait "\$HEARTBEAT_PID" 2>/dev/null || true; }
+kill_tree() { # list a process subtree's pids, deepest descendants first
+  local _kt_p="\$1" _kt_c
+  for _kt_c in \$(ps -o pid= --ppid "\$_kt_p" 2>/dev/null); do kill_tree "\$_kt_c"; done
+  echo "\$_kt_p"
+}
+reap_tree() { # TERM the whole subtree, then SIGKILL survivors after a grace
+              # period. Every PID's start time is recorded before TERM and
+              # rechecked before KILL, so a recycled PID is never killed.
+  local _rt_pids _rt_p _rt_id _rt_want _rt_st _rt_now _rt_map=""
+  _rt_pids="\$(kill_tree "\$1")"
+  for _rt_p in \$_rt_pids; do
+    _rt_id="\$(ps -o lstart= -p "\$_rt_p" 2>/dev/null)"
+    [ -n "\$_rt_id" ] && _rt_map="\$_rt_map
+\$_rt_p \$_rt_id"
+    kill -TERM "\$_rt_p" 2>/dev/null || true
+  done
+  sleep 1
+  for _rt_p in \$_rt_pids; do
+    _rt_want="\$(printf '%s\n' "\$_rt_map" | sed -n "s/^\$_rt_p //p")"
+    [ -n "\$_rt_want" ] || continue
+    _rt_st="\$(ps -o stat= -p "\$_rt_p" 2>/dev/null)" || continue
+    case "\$_rt_st" in ""|*Z*) continue;; esac
+    _rt_now="\$(ps -o lstart= -p "\$_rt_p" 2>/dev/null)" || continue
+    [ "\$_rt_now" = "\$_rt_want" ] || continue
+    kill -KILL "\$_rt_p" 2>/dev/null || true
+  done
+  true
+}
+trap stop_heartbeat EXIT
 # The brief arrives base64-encoded. `box exec` joins argv into a shell command
 # string, so a multi-word brief passed raw is split across argv and the agent
 # receives only its first word -- it then asks a clarifying question and does
 # nothing, while the call still reports success.
 BRIEF="\$(printf %s "\$1" | base64 -d)"
 set -- "\$BRIEF"
+# The worker runs in the background under a short-poll supervisor so a trapped
+# signal is answered promptly even when the agent itself would run on: the
+# trap stops the agent and the heartbeat, then re-raises for exact status.
+run_worker() {
 case "$AGENT" in
   pi)     PI_WORKER=1 pi -p --no-extensions --provider zai-api --model glm-5.3-flash -a --tools read,grep,find,ls,edit,write,bash "\$1" ;;
   muse)
@@ -273,6 +366,22 @@ case "$AGENT" in
     env -u GOOGLE_GENAI_USE_VERTEXAI -u GOOGLE_APPLICATION_CREDENTIALS -u GOOGLE_CLOUD_PROJECT -u GOOGLE_CLOUD_LOCATION GEMINI_CLI_HOME="\$HOME/.gemini-personal" GEMINI_API_KEY="\$GEMINI_API_KEY" GEMINI_CLI_TRUST_WORKSPACE=true gemini --skip-trust --yolo -m gemini-3.8-flash -p "\$1" ;;
   *) echo "unsupported agent: $AGENT" >&2; exit 2 ;;
 esac
+}
+run_worker "\$1" &
+AGENT_PID=\$!
+trap 'reap_tree "\$AGENT_PID"; stop_heartbeat; trap - EXIT INT TERM HUP; kill -INT \$\$' INT
+trap 'reap_tree "\$AGENT_PID"; stop_heartbeat; trap - EXIT INT TERM HUP; kill -TERM \$\$' TERM
+# HUP has no trap of its own by default, so an unhandled HUP would only run
+# the bare EXIT trap above (stop_heartbeat) and leave the agent subtree
+# orphaned; mirror the INT/TERM handling so HUP tears down the whole job too.
+trap 'reap_tree "\$AGENT_PID"; stop_heartbeat; trap - EXIT INT TERM HUP; kill -HUP \$\$' HUP
+# Short poll, not a bare `wait`: bash defers a trapped SIGINT until a waited-for
+# child exits, so a bare wait would stall a PID-only interrupt for the whole
+# agent lifetime. The 0.5s sleep bounds trap latency; `wait` still reaps the
+# exact worker status afterwards.
+while kill -0 "\$AGENT_PID" 2>/dev/null; do sleep 0.5; done
+wait "\$AGENT_PID" 2>/dev/null; WORKER_RC=\$?
+exit \$WORKER_RC
 RUNNER
     "$BOX" scp "$runner" "$ID:/home/user/box-work-run.sh" >/dev/null 2>&1
     rm -f "$runner"
