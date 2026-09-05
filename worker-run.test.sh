@@ -455,6 +455,76 @@ PY
   fi
 }
 
+# Case 11c2. A setup command can exit 0 without running install when shell
+# operators hide the skip. Delivery validation must reject that receipt.
+test_delivery_report_skipped_install_is_exit_5() {
+  local fix rep ghdir verify_cmd setup_cmd finalize head base
+  fix=$(new_repo); ghdir="$(newtd)"; TMPDIRS+=("$ghdir")
+  finalize="$(newtd)/finalize.py"; TMPDIRS+=("$(dirname "$finalize")")
+  git -C "$fix" remote add origin https://github.com/pooriaarab/scripts.git 2>/dev/null || true
+  git -C "$fix" checkout -qb scr-322-require-worker-delivery-evidence
+  echo work >> "$fix/tracked.txt" && git -C "$fix" add tracked.txt && git -C "$fix" commit -qm work
+  echo '{}' > "$fix/package-lock.json" && git -C "$fix" add package-lock.json && git -C "$fix" commit -qm lock
+  head="$(git -C "$fix" rev-parse HEAD)"
+  base="$(git -C "$fix" rev-parse HEAD~2)"
+  delivery_write_ci "$ghdir" "$head" "$base"
+  mkdir -p "$ghdir/bin" && cat > "$ghdir/bin/gh" <<GH
+#!/usr/bin/env bash
+set -uo pipefail
+[ "\${1:-}" = api ] || exit 9
+p="\${2:-}"
+case "\$p" in
+  repos/*/issues/*) cat "$ghdir/issue.json" ;;
+  repos/*/pulls/*) cat "$ghdir/pr.json" ;;
+  repos/*/contents/.github/pr-standards.json*)
+    if [[ "\$p" == *"ref=main"* ]]; then
+      cat "$ghdir/pr-standards-config-main.json"
+    else
+      cat "$ghdir/pr-standards-config-sha.json"
+    fi
+    ;;
+  repos/*/commits/*/check-runs*) cat "$ghdir/check-runs.json" ;;
+  repos/*/commits/*/statuses*) cat "$ghdir/statuses.json" ;;
+  *) exit 9 ;;
+esac
+GH
+  chmod +x "$ghdir/bin/gh"
+  rep="$ghdir/report.json"; verify_cmd='test "$(cat tracked.txt)" = edited'
+  setup_cmd='false && npm ci; true'
+  mkdir -p "$ghdir/bin"
+  printf '%s\n' '#!/bin/sh' 'echo "npm ci must not run" >&2' 'exit 9' > "$ghdir/bin/npm"
+  chmod +x "$ghdir/bin/npm"
+  cat > "$finalize" <<'PY'
+import json, subprocess, sys
+rep, pr_json, root = sys.argv[1:4]
+head = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+base = subprocess.check_output(["git", "rev-parse", "HEAD~2"], text=True).strip()
+files = [{"filename": p[2], "additions": int(p[0]), "deletions": int(p[1])} for p in (line.split("\t") for line in subprocess.check_output(["git", "diff", "--numstat", f"{base}...HEAD"], text=True).splitlines()) if len(p) == 3 and p[0] != "-"]
+node = "import {summarizeFiles,DEFAULT_CONFIG} from './pr-standards.mjs';console.log(JSON.stringify(summarizeFiles(JSON.parse(process.argv[1]),DEFAULT_CONFIG)));"
+actual = json.loads(subprocess.check_output(["node", "--input-type=module", "-e", node, json.dumps(files)], cwd=root, text=True))
+doc = {"schema": 1, "repository": "pooriaarab/scripts", "issue": 322, "branch": "scr-322-require-worker-delivery-evidence", "head": head, "tested_head": head, "outcome": "Require delivery evidence before worker completion", "closing_ref": "Closes #322", "implementation_status": "complete", "setup_commands": [{"command": sys.argv[5], "exit": 0}], "verification_commands": [{"command": sys.argv[4], "exit": 0}], "unresolved_failures": [], "claimed_counts": {"lines": actual["countedLines"], "files": actual["countedFiles"]}, "assisted_by": ["cursor:composer-2.5"], "merge_attribution": "unknown", "ci": {"head": head, "checks": [{"name": "tests", "bucket": "pass"}]}}
+json.dump(doc, open(rep, "w", encoding="utf-8"))
+json.dump({
+  "state": "open", "draft": True,
+  "title": "[SCR-322] Require delivery evidence before worker completion",
+  "body": "Closes #322\n\n## What\nWiring.\n\n## Why\nProof.\n\n## How I verified\n./worker-run.test.sh pass",
+  "head": {"sha": head, "ref": "scr-322-require-worker-delivery-evidence", "repo": {"full_name": "pooriaarab/scripts"}},
+  "base": {"sha": base, "ref": "main"},
+}, open(pr_json, "w", encoding="utf-8"))
+PY
+  out=$( cd "$fix" && PATH="$ghdir/bin:$PATH" GH_CLI="$ghdir/bin/gh" PR_STANDARDS_ROOT="$DIR" \
+    "$SCRIPT" --dir "$fix" --pull 313 --expected-repository pooriaarab/scripts --expected-branch scr-322-require-worker-delivery-evidence \
+    --expected-issue 322 --expected-outcome "Require delivery evidence before worker completion" \
+    --base-ref HEAD~2 --setup "$setup_cmd" --verify "$verify_cmd" --delivery-report "$rep" \
+    -- bash -c 'echo edited > tracked.txt && git add tracked.txt && git commit -qm edited && python3 "$1" "$2" "$3" "$4" "$5" "$6"' _ "$finalize" "$rep" "$ghdir/pr.json" "$DIR" "$verify_cmd" "$setup_cmd" 2>&1 )
+  rc=$?
+  if (( rc == 5 )) && echo "$out" | grep -qi "unsupported shell"; then
+    pass "a setup that exits 0 without install is rejected with exit 5"
+  else
+    fail "a setup that exits 0 without install is rejected with exit 5" "rc=$rc out=$out"
+  fi
+}
+
 # Case 11d. --setup can fail independently of the worker command. When the
 # worker succeeded and changed files but setup fails, that is a setup
 # failure, not a worker failure: exit 3.
@@ -511,6 +581,7 @@ test_ignored_files_are_not_work
 test_delivery_report_failure_is_exit_5
 test_delivery_report_missing_pull_is_exit_4
 test_delivery_report_success_is_exit_0
+test_delivery_report_skipped_install_is_exit_5
 test_setup_failure_after_change_is_exit_3
 test_setup_and_worker_failure_is_exit_1
 test_help
