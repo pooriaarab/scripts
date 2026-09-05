@@ -356,7 +356,15 @@ export function validateTitle(title, prefix, issueNumber) {
 export function countClosingReferences(body) {
   const references = [];
   const pattern = /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s*(?:([\w.-]+\/[\w.-]+))?#([0-9]+)\b/gi;
-  const visibleBody = String(body || '').replace(/<!--[\s\S]*?-->/g, '');
+  // Quoted text is not a claim -- the same rule the proof checks and the marker
+  // scan already apply. A body that explains a reference it was corrected away
+  // from ("this originally claimed `Closes #84`") has to name it to explain it,
+  // and counting that mention failed the body for having three references when
+  // it had one. Fenced blocks go first so a ``` example cannot leak either.
+  const visibleBody = String(body || '')
+    .replace(/<!--[\s\S]*?-->/g, '')
+    .replace(/^ {0,3}(`{3,}|~{3,})[\s\S]*?^ {0,3}\1[ \t]*$/gm, '')
+    .replace(/`[^`\n]*`/g, '');
   for (const match of visibleBody.matchAll(pattern)) {
     references.push({ repo: match[1] || null, number: Number(match[2]) });
   }
