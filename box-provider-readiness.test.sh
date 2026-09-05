@@ -226,6 +226,12 @@ test_github_only() {
   run_github_only -- touch "$T/sentinel"
   need_fail "github-only gate rejects a wrong identity" "not the canonical personal account"
 }
+test_github_only_sentinel_failure() {
+  setup
+  run_github_only -- sh -c 'exit 7'
+  (( rc == 7 )) && pass "github-only gate propagates the sentinel's exit status" \
+    || fail "github-only gate propagates the sentinel's exit status" "rc=$rc out=$out"
+}
 test_codex_personal() {
   setup
   run_helper codex -- touch "$T/sentinel"
@@ -257,8 +263,8 @@ test_models_rejected() {
 for t in test_fresh_success test_resumed_transient_success test_missing_binary \
   test_missing_credential test_invalid_auth test_wrong_write test_timeout \
   test_cursor_json_success test_stale_env test_expired_gh test_missing_gh \
-  test_git_repo_fail test_wrong_login test_github_only test_codex_personal \
-  test_timeouts_rejected test_models_rejected; do "$t"; done
+  test_git_repo_fail test_wrong_login test_github_only test_github_only_sentinel_failure \
+  test_codex_personal test_timeouts_rejected test_models_rejected; do "$t"; done
 echo
 echo "pass=$PASS fail=$FAIL"
 (( FAIL == 0 ))
