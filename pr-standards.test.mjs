@@ -323,6 +323,12 @@ test('Assisted-by rejects a slash in the agent field, backticks, and internal wh
   assert.equal(backtick.ok, false);
   assert.match(assistedBy(backtick).got, /`/);
 
+  const backtickInModel = validateBody(
+    bodyWithTrailer('Assisted-by: cursor:composer-2.`5'), 142, config,
+  );
+  assert.equal(backtickInModel.ok, false);
+  assert.match(assistedBy(backtickInModel).got, /`/);
+
   const spacedModel = validateBody(
     bodyWithTrailer('Assisted-by: cursor:composer 2.5'), 142, config,
   );

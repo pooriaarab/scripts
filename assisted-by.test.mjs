@@ -14,6 +14,7 @@ test('valid Assisted-by lines match the documented shape', () => {
   assert.equal(isValidAssistedByLine('Assisted-by: claude-personal-1:swe-1.7'), true);
   assert.equal(isValidAssistedByLine('Assisted-by: pooriaarab/scripts:pr-standards-rollout'), false);
   assert.equal(isValidAssistedByLine('Assisted-by: `:`'), false);
+  assert.equal(isValidAssistedByLine('Assisted-by: cursor:composer-2.`5'), false);
 });
 
 test('parseAssistedByLabel reads the first valid trailer', () => {

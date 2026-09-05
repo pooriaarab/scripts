@@ -19,6 +19,9 @@ PREFIX_UPPER=CR
 ISSUE_NUM=997
 BRANCH="$PREFIX-$ISSUE_NUM-adopt-pr-standard"
 DEFAULT_BRANCH=main
+# The rollout now refuses to guess who is running it; give the extracted body
+# the same trailer a real invocation would set.
+ASSISTED_BY=claude-code:sonnet-5
 
 # The precheck block seeds its scratch dir from $CONFIG_JSON, same as the real
 # rollout builds it from the real template -- not hand-copied, so this cannot

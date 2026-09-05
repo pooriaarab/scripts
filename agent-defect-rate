@@ -339,7 +339,13 @@ def load_assisted_by_aliases():
     try:
         with open(routing_path) as f:
             raw = json.load(f)
-    except Exception:
+    except FileNotFoundError:
+        return {}
+    except Exception as e:
+        # A present-but-broken routing file silently re-fragments the agent
+        # table with no visible sign the merge regressed, so say why on stderr
+        # instead of returning {} without a trace.
+        print(f"warning: {routing_path} unreadable, alias merging disabled: {e}", file=sys.stderr)
         return {}
     canonical_to_aliases = raw.get("assistedByAliases") or {}
     alias_to_canonical = {}
@@ -356,7 +362,7 @@ def parse_agent(body):
     # ahead of a well-formed one does not shadow the well-formed one.
     lines = [line for line in body.split("\n") if re.match(r"^\s*assisted-by:", line, re.I)]
     for line in lines:
-        m = re.match(r"^\s*Assisted-by:\s*([^\s:,/`]+):([^\s:,]+)\s*$", line, re.I)
+        m = re.match(r"^\s*Assisted-by:\s*([^\s:,/`]+):([^\s:,`]+)\s*$", line, re.I)
         if m:
             return f"{m.group(1)}:{m.group(2)}"
     if lines:

@@ -3,8 +3,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 // Exactly `Assisted-by: <agent>:<model>`. Agent has no slash or backtick;
-// neither field has internal whitespace or commas.
-export const ASSISTED_BY_VALID_RE = /^Assisted-by:\s*([^\s:,/`]+):([^\s:,]+)\s*$/i;
+// neither field has internal whitespace, commas, or backticks.
+export const ASSISTED_BY_VALID_RE = /^Assisted-by:\s*([^\s:,/`]+):([^\s:,`]+)\s*$/i;
 
 const ROUTING_PATH = fileURLToPath(new URL('./agent-routing.json', import.meta.url));
 
