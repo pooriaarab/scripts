@@ -36,11 +36,13 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-git -C "$REPO" rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo "not a git repo: $REPO" >&2; exit 2; }
-cd "$REPO"
+TOPLEVEL=$(git -C "$REPO" rev-parse --show-toplevel 2>/dev/null) || { echo "not a git repo: $REPO" >&2; exit 2; }
+cd "$TOPLEVEL"
 NAME=$(basename "$(pwd)")
 
-json_escape() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+json_escape() {
+  printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/\r/\\r/g' -e 's/\t/\\t/g' -e ':a' -e 'N' -e '$!ba' -e 's/\n/\\n/g'
+}
 
 write() { # write <path> <<<content, unless it exists
   local path="$1"
