@@ -249,27 +249,18 @@ if [ -z "\$_hb_nozero" ]; then
   exit 2
 fi
 touch "\$HEARTBEAT_FILE" 2>/dev/null || echo "box-work-run: warning: cannot touch \$HEARTBEAT_FILE; idle-reaper exemption inactive" >&2
+command -v ps >/dev/null 2>&1 || { echo "box-work-run: ps is required for heartbeat identity but not found" >&2; exit 2; }
 HEARTBEAT_PPID=\$$
 HEARTBEAT_START="\$(ps -o lstart= -p \$HEARTBEAT_PPID 2>/dev/null)"
-# The helper watches its parent by identity, not PID alone. A bare `kill -0`
-# stays true for a zombie parent and can go true again after the PID is
-# recycled, either of which would keep a dead job's exemption. The state
-# check ends the helper on zombies; the start-time check ends it when the
-# parent PID has been reused by an unrelated process.
+[ -n "\$HEARTBEAT_START" ] || { echo "box-work-run: cannot determine parent start time (ps -o lstart failed)" >&2; exit 2; }
+# Identity, not PID alone: zombies and recycled PIDs end the exemption.
 ( exec bash -c '
   _hp_pid="\$1"; _hp_start="\$2"; _hp_secs="\$3"; _hp_file="\$4"; warned=0
   _hp_alive() {
-    local _st _now
-    if command -v ps >/dev/null 2>&1; then
-      _st="\$(ps -o stat= -p \$_hp_pid 2>/dev/null)" || return 1
-      case "\$_st" in ""|*Z*) return 1;; esac
-      if [ -n "\$_hp_start" ]; then
-        _now="\$(ps -o lstart= -p \$_hp_pid 2>/dev/null)" || return 1
-        [ "\$_now" = "\$_hp_start" ] || return 1
-      fi
-      return 0
-    fi
-    kill -0 "\$_hp_pid" 2>/dev/null
+    _st="\$(ps -o stat= -p \$_hp_pid 2>/dev/null)" || return 1
+    case "\$_st" in ""|*Z*) return 1;; esac
+    _now="\$(ps -o lstart= -p \$_hp_pid 2>/dev/null)" || return 1
+    [ "\$_now" = "\$_hp_start" ] || return 1
   }
   while _hp_alive; do
     sleep "\$_hp_secs"
