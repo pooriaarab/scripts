@@ -187,11 +187,12 @@ bw() {
 reset; mkmanifest "$T/gate-bad.json" branch="pc-976-fix-the-widget" title="[PC-976] Fix the widget output"
 grc="$(bw "$T/gate-bad.json" "$T/gate.log" --agent pi "do work")"
 (( grc != 0 )) && [ ! -f "$T/box-called" ] && pass "box-work with an invalid manifest makes no Box call" || fail "box-work with an invalid manifest makes no Box call" "rc=$grc log=$(cat "$T/gate.log")"
-# CLI mismatch: rejected before any receipt, Box, start, sync, or worker effect.
+# CLI mismatch (and empty --agent): rejected before any receipt, Box, start, sync, or worker effect.
 reset; mkmanifest "$T/gate-mismatch.json"
 mrc="$(bw "$T/gate-mismatch.json" "$T/mismatch.log" --agent pi "do work")"
-if (( mrc != 0 )) && [ ! -f "$T/box-called" ] && [ -z "$(ls "$T"/state/*.json 2>/dev/null)" ] \
-  && grep -q "does not match" "$T/mismatch.log"; then pass "box-work cli mismatch writes no receipt and makes no Box call"; else fail "box-work cli mismatch writes no receipt and makes no Box call" "rc=$mrc log=$(cat "$T/mismatch.log")"; fi
+mrc2="$(bw "$T/gate-mismatch.json" "$T/empty-agent.log" --agent "" "do work")"
+if (( mrc != 0 )) && (( mrc2 != 0 )) && [ ! -f "$T/box-called" ] && [ -z "$(ls "$T"/state/*.json 2>/dev/null)" ] \
+  && grep -q "does not match" "$T/mismatch.log" && grep -q "needs a CLI name" "$T/empty-agent.log"; then pass "box-work cli mismatch writes no receipt and makes no Box call"; else fail "box-work cli mismatch writes no receipt and makes no Box call" "rc=$mrc/$mrc2 log=$(cat "$T/mismatch.log")"; fi
 # Valid manifest through box-work: exactly one Box start and one receipt.
 reset; mkmanifest "$T/gate-ok.json"
 okrc="$(HOME="$T/fakehome" BOX_CLI="$T/bin/box-ok" GH_CLI="$T/bin/gh" "$BOXWORK" "$T/checkout" --manifest "$T/gate-ok.json" >"$T/ok.log" 2>&1; echo $?)"

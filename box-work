@@ -101,7 +101,7 @@ while (( $# )); do
     --stop) MODE=stop; shift ;;
     --ssh) MODE=ssh; shift ;;
     --manifest) [[ $# -ge 2 && -n "${2:-}" ]] || die "--manifest needs a value"; MANIFEST="$2"; shift 2 ;;
-    --agent) MODE=agent; AGENT="${2:-}"; BRIEF="${3:-}"; shift 3 || shift $# ;;
+    --agent) MODE=agent; AGENT="${2:-}"; BRIEF="${3:-}"; [[ -n "$AGENT" ]] || die "--agent needs a CLI name and a brief"; shift 3 || shift $# ;;
     *) die "unknown argument: $1" ;;
   esac
 done
