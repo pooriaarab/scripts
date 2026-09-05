@@ -1046,22 +1046,45 @@ export function matchesGlob(filename, pattern) {
 // still count. That is also the only review question a relocation has -- did
 // anything get lost -- so the exemption and the proof are one computation.
 export function countMovedLines(files) {
+  // Per line content, per-file counts -- a line removed and re-added in the
+  // SAME file is a reorder, not a relocation, and must never be matched. The
+  // GitHub `patch` field has no file-header lines (the filename is already a
+  // separate property), so every `+`/`-` line is real content, including one
+  // that happens to start with a second `+` or `-` (e.g. `++i;`, or a Markdown
+  // `---` rule/frontmatter delimiter which becomes `----` once diff-prefixed).
   const removed = new Map();
   const added = new Map();
-  const bump = (map, key) => map.set(key, (map.get(key) || 0) + 1);
+  const bump = (map, key, filename) => {
+    if (!map.has(key)) map.set(key, new Map());
+    const byFile = map.get(key);
+    byFile.set(filename, (byFile.get(filename) || 0) + 1);
+  };
   for (const file of files) {
     // GitHub omits `patch` for very large or binary files. Without it we cannot
     // prove a move, so we do not discount one. A checker that silently
     // discounts what it could not read is worse than one that never discounts.
     if (typeof file.patch !== 'string') return { moved: 0, complete: false };
     for (const line of file.patch.split('\n')) {
-      if (line.startsWith('+++') || line.startsWith('---')) continue;
-      if (line.startsWith('+')) bump(added, line.slice(1));
-      else if (line.startsWith('-')) bump(removed, line.slice(1));
+      if (line.startsWith('+')) bump(added, line.slice(1), file.filename);
+      else if (line.startsWith('-')) bump(removed, line.slice(1), file.filename);
     }
   }
   let moved = 0;
-  for (const [line, count] of removed) moved += Math.min(count, added.get(line) || 0);
+  for (const [line, removedByFile] of removed) {
+    const addedByFile = added.get(line);
+    if (!addedByFile) continue;
+    for (const [removedFile, removedCount] of removedByFile) {
+      let remaining = removedCount;
+      for (const [addedFile, addedCount] of addedByFile) {
+        if (remaining <= 0) break;
+        if (addedFile === removedFile || addedCount <= 0) continue;
+        const take = Math.min(remaining, addedCount);
+        remaining -= take;
+        addedByFile.set(addedFile, addedCount - take);
+        moved += take;
+      }
+    }
+  }
   return { moved, complete: true };
 }
 
@@ -1396,9 +1419,13 @@ async function backfillMissingPatches(files, repo, pull) {
   const headSha = pull?.head?.sha;
   if (!baseSha || !headSha) return;
   for (const file of files) {
-    if (typeof file.patch === 'string' || file.status === 'removed' || file.status === 'added') continue;
-    const base = await fetchBlobLines(repo, file.previous_filename || file.filename, baseSha);
-    const head = await fetchBlobLines(repo, file.filename, headSha);
+    if (typeof file.patch === 'string') continue;
+    // The destination of a move can be just as large as the source it
+    // emptied, so an `added` (or `removed`) file loses its patch on the same
+    // terms a `modified` one does. Its missing side is not unreadable, it is
+    // empty: nothing to fetch, not a reason to skip the file.
+    const base = file.status === 'added' ? [] : await fetchBlobLines(repo, file.previous_filename || file.filename, baseSha);
+    const head = file.status === 'removed' ? [] : await fetchBlobLines(repo, file.filename, headSha);
     if (!base || !head) continue;
     const minus = multisetDifference(base, head).map((line) => `-${line}`);
     const plus = multisetDifference(head, base).map((line) => `+${line}`);
@@ -1423,10 +1450,11 @@ async function fetchBlobLines(repo, path, ref) {
   try {
     const meta = await apiRequest(`contents/${path.split('/').map(encodeURIComponent).join('/')}?ref=${ref}`, repo);
     if (!meta || meta.encoding !== 'base64' || typeof meta.content !== 'string') return null;
-    const text = Buffer.from(meta.content, 'base64').toString('utf8');
-    // A binary file round-trips through the replacement character; refusing it
-    // keeps the move check honest rather than matching garbage against garbage.
-    if (text.includes('\u0000')) return null;
+    // A lossy decode maps every invalid byte sequence to the same replacement
+    // character, so two different binary blobs can decode to identical "text"
+    // and be counted as a byte-equal move. A fatal decoder refuses instead of
+    // guessing, which is what keeps the move check honest.
+    const text = new TextDecoder('utf-8', { fatal: true }).decode(Buffer.from(meta.content, 'base64'));
     return text.split('\n');
   } catch {
     return null;

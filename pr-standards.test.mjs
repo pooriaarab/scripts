@@ -2042,6 +2042,101 @@ test('an excluded file cannot fund a discount', () => {
   assert.equal(summary.countedLines, 3);
 });
 
+test('a line removed and re-added in the same file is not a move', () => {
+  // The discount is for a RELOCATION -- content leaving one file for another.
+  // A line reordered within a single file is not that, and matching it there
+  // would let two unrelated same-file edits net out to zero merely for
+  // sharing a common line (a blank line, a closing brace, a Markdown rule).
+  const summary = summarizeFiles([
+    { filename: 'src/a.md', additions: 1, deletions: 1, patch: '-alpha one\n+alpha one' },
+  ], config);
+  assert.equal(summary.movedLines, 0);
+  assert.equal(summary.countedLines, 2);
+});
+
+test('a line moved out of a file and a different line moved in still cancel correctly', () => {
+  // Three files, so the match must pick partners across files without ever
+  // pairing a file with itself, even when that file has both a removal and
+  // an addition of lines that also appear elsewhere.
+  const summary = summarizeFiles([
+    { filename: 'src/a.md', additions: 1, deletions: 1, patch: '-shared\n+only-in-a' },
+    { filename: 'src/b.md', additions: 0, deletions: 1, patch: '-only-in-a' },
+    { filename: 'src/c.md', additions: 1, deletions: 0, patch: '+shared' },
+  ], config);
+  assert.equal(summary.movedLines, 2);
+  assert.equal(summary.countedLines, 4 - 4);
+});
+
+test('a patch line beginning with a second + or - is not mistaken for a diff header', () => {
+  // GitHub's per-file `patch` never carries `---`/`+++` file headers (the
+  // filename is already a separate field), so a content line that happens to
+  // start with `++` or `--` -- an increment statement, a Markdown rule or
+  // frontmatter delimiter -- must still be read as real content once
+  // diff-prefixed to `+++i;` or `----`.
+  const summary = summarizeFiles([
+    { filename: 'src/old.md', additions: 0, deletions: 1, patch: '----' },
+    { filename: 'src/new.md', additions: 1, deletions: 0, patch: '+---' },
+  ], config);
+  assert.equal(summary.movedLines, 1);
+  assert.equal(summary.countedLines, 0);
+});
+
+test('a patchless added file backfills its blob and still proves a move', async () => {
+  // The motivating case (agents-private#170) was a MODIFIED file too large
+  // for GitHub to attach a patch to. The other side of a move -- a brand-new
+  // file that is just as large -- gets the same treatment from GitHub, and
+  // used to be skipped outright because backfill excluded `added`/`removed`
+  // status. An `added` file has no base blob to fetch; the fix is to treat
+  // that side as empty, not to give up on the file.
+  const originalPath = process.env.PATH;
+  const originalToken = process.env.GITHUB_TOKEN;
+  const originalFetch = globalThis.fetch;
+  const originalWrite = process.stdout.write;
+  process.env.PATH = '';
+  process.env.GITHUB_TOKEN = 'test-token';
+  process.env.GITHUB_REPOSITORY = 'other/repo';
+  let output = '';
+  process.stdout.write = (chunk) => { output += chunk; return true; };
+
+  globalThis.fetch = async (url) => {
+    if (url.includes('contents/.github/pr-standards.json')) {
+      return { ok: false, status: 404, text: async () => 'Not Found' };
+    }
+    if (url.includes('pulls/21/commits')) {
+      return { ok: true, json: async () => ([{ sha: 'abc1234', commit: { message: 'Move the guide' } }]) };
+    }
+    if (url.includes('pulls/21/files')) {
+      return { ok: true, json: async () => ([
+        { filename: 'src/old.md', status: 'modified', additions: 0, deletions: 3, patch: '-line one\n-line two\n-line three' },
+        { filename: 'docs/new.md', status: 'added', additions: 3, deletions: 0 },
+      ]) };
+    }
+    if (url.includes('/compare/')) {
+      return { ok: true, json: async () => ({ behind_by: 0, merge_base_commit: { sha: '1234567' } }) };
+    }
+    if (url.includes('contents/docs/new.md')) {
+      return { ok: true, json: async () => ({ encoding: 'base64', content: Buffer.from('line one\nline two\nline three').toString('base64') }) };
+    }
+    if (url.match(/pulls\/21$/)) {
+      return { ok: true, json: async () => ({ head: { ref: 'refactor', sha: 'headsha1' }, base: { ref: 'main', sha: 'basesha1' }, title: 'x', body: 'x', labels: [] }) };
+    }
+    throw new Error(`Unexpected fetch URL: ${url}`);
+  };
+
+  try {
+    await main(['pr', '--repo', 'test/repo', '--number', '21', '--json']);
+    const result = JSON.parse(output);
+    assert.equal(result.size.movedLines, 3);
+    assert.equal(result.size.countedLines, 0);
+  } finally {
+    process.stdout.write = originalWrite;
+    process.env.PATH = originalPath;
+    process.env.GITHUB_TOKEN = originalToken;
+    globalThis.fetch = originalFetch;
+    delete process.env.GITHUB_REPOSITORY;
+  }
+});
+
 test('multiset difference keeps duplicates that the other side lacks', () => {
   // The blob fallback derives a patch from this alone, with no diff algorithm:
   // what left a file is base minus head, what arrived is head minus base.
