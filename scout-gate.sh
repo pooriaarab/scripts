@@ -84,9 +84,14 @@ scout sweep --max-requests "$MAX_REQUESTS" ${headers[@]+"${headers[@]}"}
 
 # TRAP 2. `report --ci` defaults --min-coverage to 100, which no sweep can
 # satisfy. Always pass it explicitly or the gate can never go green.
+#
+# The JSON report exits nonzero on a gate failure. Do not let `set -e` kill the
+# script here. The human-readable report below is what makes that failure
+# legible in the CI log, and it must still run. The final command's exit code is
+# what gates.
 scout report --ci \
   --min-coverage "$MIN_COVERAGE" \
   --severity-threshold "$SEVERITY" \
-  --json > "$REPORT"
+  --json > "$REPORT" || true
 
 scout report --ci --min-coverage "$MIN_COVERAGE" --severity-threshold "$SEVERITY"
