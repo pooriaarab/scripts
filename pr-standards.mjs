@@ -1069,21 +1069,33 @@ export function countMovedLines(files) {
       else if (line.startsWith('-')) bump(removed, line.slice(1), file.filename);
     }
   }
+  // Maximum matching, not first-fit. A greedy pass over file order can pair the
+  // wrong sides and miss a provable move: with A(-x), B(-x,+x), C(+x) the two
+  // real relocations are A->B and B->C, but consuming B's addition against A's
+  // removal first leaves B's own removal unmatchable, since same-file pairs are
+  // forbidden. That undercounts the discount, which is the opposite of this
+  // rule's purpose and breaks the exact-multiset guarantee it claims.
+  //
+  // For one line value the graph is complete bipartite minus same-file edges,
+  // so the maximum has a closed form: it is capped by each side's total, and by
+  // the file that dominates one side, which can only pair with what lies
+  // outside itself.
   let moved = 0;
   for (const [line, removedByFile] of removed) {
     const addedByFile = added.get(line);
     if (!addedByFile) continue;
-    for (const [removedFile, removedCount] of removedByFile) {
-      let remaining = removedCount;
-      for (const [addedFile, addedCount] of addedByFile) {
-        if (remaining <= 0) break;
-        if (addedFile === removedFile || addedCount <= 0) continue;
-        const take = Math.min(remaining, addedCount);
-        remaining -= take;
-        addedByFile.set(addedFile, addedCount - take);
-        moved += take;
-      }
+    let totalRemoved = 0;
+    let totalAdded = 0;
+    for (const count of removedByFile.values()) totalRemoved += count;
+    for (const count of addedByFile.values()) totalAdded += count;
+    let limit = Math.min(totalRemoved, totalAdded);
+    for (const filename of new Set([...removedByFile.keys(), ...addedByFile.keys()])) {
+      const outside =
+        (totalRemoved - (removedByFile.get(filename) || 0)) +
+        (totalAdded - (addedByFile.get(filename) || 0));
+      limit = Math.min(limit, outside);
     }
+    moved += Math.max(limit, 0);
   }
   return { moved, complete: true };
 }
@@ -1414,7 +1426,11 @@ async function fetchPullFiles(repo, number, pull) {
 // multiset difference. That needs no diff algorithm: what left the file is
 // base minus head, what arrived is head minus base, which is precisely what
 // the move check consumes.
-async function backfillMissingPatches(files, repo, pull) {
+// `readBlob` is injectable so the two-fetch path can be tested. The case that
+// motivated the whole backfill -- a MODIFIED file too large for GitHub to
+// attach a patch to, needing both a base and a head blob -- was otherwise
+// provable only by a run against a private repo, which no CI can reproduce.
+export async function backfillMissingPatches(files, repo, pull, readBlob = fetchBlobLines) {
   const baseSha = pull?.base?.sha;
   const headSha = pull?.head?.sha;
   if (!baseSha || !headSha) return;
@@ -1424,8 +1440,8 @@ async function backfillMissingPatches(files, repo, pull) {
     // emptied, so an `added` (or `removed`) file loses its patch on the same
     // terms a `modified` one does. Its missing side is not unreadable, it is
     // empty: nothing to fetch, not a reason to skip the file.
-    const base = file.status === 'added' ? [] : await fetchBlobLines(repo, file.previous_filename || file.filename, baseSha);
-    const head = file.status === 'removed' ? [] : await fetchBlobLines(repo, file.filename, headSha);
+    const base = file.status === 'added' ? [] : await readBlob(repo, file.previous_filename || file.filename, baseSha);
+    const head = file.status === 'removed' ? [] : await readBlob(repo, file.filename, headSha);
     if (!base || !head) continue;
     const minus = multisetDifference(base, head).map((line) => `-${line}`);
     const plus = multisetDifference(head, base).map((line) => `+${line}`);

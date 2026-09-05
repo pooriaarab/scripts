@@ -23,6 +23,7 @@ import {
   matchesGlob,
   summarizeFiles,
   multisetDifference,
+  backfillMissingPatches,
   validateBody,
   validateBranchName,
   validateTitle,
@@ -2146,4 +2147,71 @@ test('multiset difference keeps duplicates that the other side lacks', () => {
   assert.deepEqual(multisetDifference(['a'], ['a', 'a']), []);
   assert.deepEqual(multisetDifference([], ['a']), []);
   assert.deepEqual(multisetDifference(['x', 'x'], []), ['x', 'x']);
+});
+
+test('a move through a file that also reorders is fully matched', () => {
+  // A(-x), B(-x,+x), C(+x): two real relocations, A->B and B->C. A greedy pass
+  // over file order pairs B's addition with A's removal first and then cannot
+  // place B's own removal, since same-file pairs are forbidden -- reporting 1
+  // where 2 are provable, and undercounting the discount.
+  const summary = summarizeFiles([
+    { filename: 'src/a.md', additions: 0, deletions: 1, patch: '-x' },
+    { filename: 'src/b.md', additions: 1, deletions: 1, patch: '-x\n+x' },
+    { filename: 'src/c.md', additions: 1, deletions: 0, patch: '+x' },
+  ], config);
+  assert.equal(summary.movedLines, 2);
+});
+
+test('a reorder inside one file matches nothing', () => {
+  const summary = summarizeFiles([
+    { filename: 'src/a.md', additions: 3, deletions: 3, patch: '-x\n-y\n-z\n+z\n+y\n+x' },
+  ], config);
+  assert.equal(summary.movedLines, 0);
+  assert.equal(summary.countedLines, 6);
+});
+
+test('the smaller side caps the match', () => {
+  const summary = summarizeFiles([
+    { filename: 'src/a.md', additions: 0, deletions: 2, patch: '-x\n-x' },
+    { filename: 'src/b.md', additions: 1, deletions: 0, patch: '+x' },
+  ], config);
+  assert.equal(summary.movedLines, 1);
+});
+
+test('a patchless modified file is rebuilt from both blobs', () => {
+  // The case the backfill exists for: agents-private#170 emptied one 333KB
+  // SKILL.md, GitHub omitted its patch, and without this the discount silently
+  // did not apply to the change it was written for. Both refs must be read.
+  const asked = [];
+  const blobs = {
+    base: ['keep', 'moved one', 'moved two'],
+    head: ['keep', 'new summary'],
+  };
+  const readBlob = async (repo, path, ref) => {
+    asked.push([path, ref]);
+    return ref === 'BASE' ? blobs.base : blobs.head;
+  };
+  const files = [{ filename: 'skills/big/SKILL.md', status: 'modified', additions: 1, deletions: 2 }];
+  return backfillMissingPatches(files, 'o/r', { base: { sha: 'BASE' }, head: { sha: 'HEAD' } }, readBlob)
+    .then(() => {
+      assert.deepEqual(asked, [['skills/big/SKILL.md', 'BASE'], ['skills/big/SKILL.md', 'HEAD']]);
+      assert.equal(files[0].patchDerived, true);
+      assert.deepEqual(files[0].patch.split('\n').sort(), ['+new summary', '-moved one', '-moved two']);
+    });
+});
+
+test('a rename reads the base blob under its previous name', () => {
+  const asked = [];
+  const readBlob = async (repo, path, ref) => { asked.push([path, ref]); return ['a']; };
+  const files = [{ filename: 'new/path.md', previous_filename: 'old/path.md', status: 'renamed' }];
+  return backfillMissingPatches(files, 'o/r', { base: { sha: 'B' }, head: { sha: 'H' } }, readBlob)
+    .then(() => assert.deepEqual(asked, [['old/path.md', 'B'], ['new/path.md', 'H']]));
+});
+
+test('an unreadable blob leaves the file without a patch', () => {
+  // No patch means no proof means no discount. Silently deriving an empty diff
+  // here would discount everything the checker could not read.
+  const files = [{ filename: 'a.bin', status: 'modified' }];
+  return backfillMissingPatches(files, 'o/r', { base: { sha: 'B' }, head: { sha: 'H' } }, async () => null)
+    .then(() => assert.equal(files[0].patch, undefined));
 });
