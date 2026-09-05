@@ -1,0 +1,420 @@
+#!/usr/bin/env bash
+# mutation-run — apply each proposed mutation in isolation and report the ones
+# the suite cannot catch.
+#
+# THE PROBLEM
+# A green suite only proves the tests pass with the code as written. It says
+# nothing about whether any of those tests could fail: a test that never
+# breaks is a witness that never testifies, and review cannot tell the two
+# apart by reading. This fleet has merged such tests repeatedly — guards
+# whose whole rule could be deleted or inverted while the suite stayed green,
+# each invisible until someone broke the code by hand and re-ran, which
+# scales to one guess at a time and so never happens before merge.
+#
+# WHY A RUNNER AND NOT A REVIEWER
+# Deciding what to break is judgement, and that stays with the reviewer. What
+# is mechanical is checking whether a break is caught: apply one edit in
+# isolation, run the tests the diff added or changed, restore the file, and
+# record whether the suite noticed. The part that must not fail is the
+# restore, so the runner holds a backup and a trap, restoring after every
+# mutation and again on SIGINT, SIGTERM and EXIT. Non-code paths (.github,
+# JSON, Markdown) are never proposed, test files are never mutated, and the
+# runner only reports: it never pushes, comments, or fails the pull request.
+#
+# A repo opts in once, in .github/pr-standards.json:
+#
+#   { "mutation": { "enabled": true, "testCommand": "npm test -- {files}",
+#                   "timeout": 60, "ceiling": 20 } }
+#
+# testCommand runs in the repo root; {files} is replaced with the test files
+# the diff added or changed. No command means no run and no failure. enabled
+# defaults to false; --test-command counts as an explicit decision to run.
+# timeout is per mutation in seconds (a run that neither passes nor fails in
+# time is TIMED OUT, not SURVIVED); ceiling caps how many are attempted.
+#
+#   mutation-run [--repo DIR] [--diff FILE | --base REF]
+#                [--timeout S] [--ceiling N] [--test-command CMD] [--pr NUM]
+#
+# With --diff the runner reads a unified diff and needs no git; otherwise it
+# diffs the worktree against --base (default HEAD). Exit 0 whenever a report
+# was produced, even with survivors; 2 on usage or environment errors; 130 on
+# interrupt.
+set -uo pipefail
+
+REPO="."; DIFF=""; BASE="HEAD"; TIMEOUT=""; CEILING=""; TESTCMD_CLI=""; PR="0"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --repo) REPO="${2:?mutation-run: --repo needs a directory}"; shift 2 ;;
+    --diff) DIFF="${2:?mutation-run: --diff needs a file}"; shift 2 ;;
+    --base) BASE="${2:?mutation-run: --base needs a ref}"; shift 2 ;;
+    --timeout) TIMEOUT="${2:?mutation-run: --timeout needs seconds}"; shift 2 ;;
+    --ceiling) CEILING="${2:?mutation-run: --ceiling needs a number}"; shift 2 ;;
+    --test-command) TESTCMD_CLI="${2:?mutation-run: --test-command needs a command}"; shift 2 ;;
+    --pr) PR="${2:?mutation-run: --pr needs a number}"; shift 2 ;;
+    -h|--help) sed -n '2,42p' "$0"; exit 0 ;;
+    *) echo "mutation-run: unknown flag: $1" >&2; exit 2 ;;
+  esac
+done
+
+[ -d "$REPO" ] || { echo "mutation-run: not a directory: $REPO" >&2; exit 2; }
+[[ "$PR" =~ ^[0-9]+$ ]] || { echo "mutation-run: --pr needs a number" >&2; exit 2; }
+
+CFG_VALS="$(python3 - "$REPO/.github/pr-standards.json" <<'PY'
+import json, sys
+path = sys.argv[1]
+cfg = {}
+try:
+    with open(path) as fh: cfg = json.load(fh)
+except FileNotFoundError: cfg = {}
+except Exception as e: sys.exit("mutation-run: cannot parse %s: %s" % (path, e))
+m = cfg.get('mutation')
+if not isinstance(m, dict):
+    m = {}
+def q(s):
+    return "'" + str(s).replace("'", "'\"'\"'") + "'"
+print("CFG_ENABLED=%s" % ('1' if m.get('enabled') is True else '0'))
+print("CFG_TESTCMD=%s" % q(m.get('testCommand') or cfg.get('mutationTestCommand') or ''))
+print("CFG_TIMEOUT=%s" % q(m.get('timeout', 60)))
+print("CFG_CEILING=%s" % q(m.get('ceiling', m.get('maxMutations', 20))))
+PY
+)" || { echo "mutation-run: cannot read config" >&2; exit 2; }
+eval "$CFG_VALS"
+
+TESTCMD="${TESTCMD_CLI:-$CFG_TESTCMD}"
+T="${TIMEOUT:-$CFG_TIMEOUT}"; C="${CEILING:-$CFG_CEILING}"
+[[ "$T" =~ ^[0-9]+$ ]] && (( T > 0 )) || T=60
+[[ "$C" =~ ^[0-9]+$ ]] || C=20
+
+if [ -z "$TESTCMD" ]; then
+  echo "mutation-run: no test command configured in .github/pr-standards.json — no run, no failure."
+  exit 0
+fi
+if [ -z "$TESTCMD_CLI" ] && [ "$CFG_ENABLED" != "1" ]; then
+  echo "mutation-run: off. Set mutation.enabled to true in .github/pr-standards.json to opt in."
+  exit 0
+fi
+
+TMPD="$(mktemp -d "${TMPDIR:-/tmp}/mutation-run.XXXXXX")"
+CURRENT_FILE=""; CURRENT_BAK=""; TEST_PID=""; RESTORE_FAILED=0
+restore_current() {
+  if [ -n "$CURRENT_FILE" ] && [ -n "$CURRENT_BAK" ] && [ -f "$CURRENT_BAK" ]; then
+    if ! cp -f "$CURRENT_BAK" "$CURRENT_FILE"; then
+      echo "mutation-run: FAILED TO RESTORE $CURRENT_FILE from backup — worktree is left mutated." >&2
+      RESTORE_FAILED=1
+    fi
+  fi
+  CURRENT_FILE=""; CURRENT_BAK=""
+}
+# Kill the whole process group, then the wrapper as a fallback for a shell
+# that gave it no group of its own.
+kill_test_tree() {
+  [ -n "$TEST_PID" ] || return 0
+  kill -KILL -- "-$TEST_PID" 2>/dev/null || true
+  kill -KILL "$TEST_PID" 2>/dev/null || true
+}
+cleanup() { kill_test_tree; restore_current; [ -n "$TMPD" ] && rm -rf "$TMPD"; TMPD=""; }
+on_signal() {
+  # Kill first, restore second. A test process still running can write into
+  # the mutated file, so restoring before it is dead can hand back a file that
+  # is corrupted a moment later and reported as restored.
+  kill_test_tree
+  restore_current
+  if [ "$RESTORE_FAILED" -eq 1 ]; then
+    echo "mutation-run: interrupted — worktree NOT fully restored, see errors above." >&2
+  else
+    echo "mutation-run: interrupted — worktree restored." >&2
+  fi
+  exit 130
+}
+trap on_signal INT TERM
+trap cleanup EXIT
+
+if [ -n "$DIFF" ]; then
+  [ -r "$DIFF" ] || { echo "mutation-run: cannot read --diff file: $DIFF" >&2; exit 2; }
+  cp "$DIFF" "$TMPD/diff.patch"
+else
+  git -C "$REPO" rev-parse --git-dir >/dev/null 2>&1 || { echo "mutation-run: not a git checkout: $REPO" >&2; exit 2; }
+  git -C "$REPO" rev-parse --verify "$BASE" >/dev/null 2>&1 || { echo "mutation-run: unknown base: $BASE" >&2; exit 2; }
+  git -C "$REPO" diff --no-color --no-ext-diff --unified=3 "$BASE" -- > "$TMPD/diff.patch" \
+    || { echo "mutation-run: git diff against $BASE failed" >&2; exit 2; }
+fi
+remote="$(git -C "$REPO" remote get-url origin 2>/dev/null || true)"
+remote="${remote%.git}"
+if [[ "$remote" == *"/"* ]]; then
+  REPO_NAME="$(basename "$(dirname "$remote")")/$(basename "$remote")"
+else
+  REPO_NAME="$(basename "$(cd "$REPO" && pwd)")"
+fi
+
+emit_event() { # attempted survived killed timed_out ceiling_hit(bare true/false)
+  python3 - "$REPO_NAME" "$PR" "$1" "$2" "$3" "$4" "$5" <<'PY'
+import json, sys
+repo, pr, a, s, k, t, ch = sys.argv[1:8]
+print("EVENT mutation_run_completed %s" % json.dumps({
+  "repo": repo, "pr_number": int(pr), "mutations_attempted": int(a),
+  "survived": int(s), "killed": int(k), "timed_out": int(t),
+  "ceiling_hit": ch == "true"}, sort_keys=True))
+PY
+}
+
+python3 - "$TMPD/diff.patch" "$REPO" > "$TMPD/cands.tsv" 2> "$TMPD/propose.err" <<'PY'
+import re, sys
+diff_path = sys.argv[1]
+def is_test(p):
+    segs = p.split('/')
+    if any(s in ('test', 'tests', '__tests__', 'spec') for s in segs[:-1]):
+        return True
+    b = segs[-1]
+    if b in ('conftest.py', 'test', 'tests') or b.startswith('test_') or b.startswith('test-') or b.startswith('test.') or b.split('.')[0] in ('test', 'tests', 'spec', 'specs'):
+        return True
+    if '.test.' in b or '.spec.' in b:
+        return True
+    if re.search(r'_test\.[^.]+$', b):
+        return True
+    return False
+def skip_path(p):
+    if p.startswith('.github/'):
+        return True
+    if p.endswith(('.json', '.md', '.lock')):
+        return True
+    return False
+TABLE = [
+    ('widen-zero-count', r'\b0(\s+)(warnings?|errors?)\b', r'999\1\2'),
+    ('zero-compare', r'===\s*0\b', '>= 0'),
+    ('zero-compare', r'(?<!=)==(?!=)\s*0\b', '>= 0'),
+    ('invert-zero-check', r'!==\s*0\b', '== 0'),
+    ('invert-zero-check', r'!=(?!=)\s*0\b', '== 0'),
+    ('and-to-or', r'&&', '||'),
+    ('or-to-and', r'\|\|', '&&'),
+    ('weaken-gte', r'(?<![=!])>=(?!=)', '>'),
+    ('weaken-lte', r'(?<![=!])<=(?!=)', '<'),
+    ('strengthen-gt', r'(?<![=!<>0-9-])>(?![=<>&])', '>='),
+    ('strengthen-lt', r'(?<![=!<>0-9-])<(?![=<>&/])', '<='),
+    ('true-to-false', r'\btrue\b', 'false'),
+    ('false-to-true', r'\bfalse\b', 'true'),
+    ('exit-zero-to-one', r'\bexit 0\b', 'exit 1'),
+    ('return-zero-to-one', r'\breturn 0\b', 'return 1'),
+    ('return-one-to-zero', r'\breturn 1\b', 'return 0'),
+    ('empty-spread', r'\[\.\.\.[^\[\]]+?\]', '[]'),
+    ('drop-negation', r'(^|[(\s\[])!([A-Za-z_($])', r'\1\2'),
+    ('exec-to-nonempty', r'(\[\s+)-x(\s)', r'\1-n\2'),
+    ('nonempty-to-empty', r'(\[\s+)-n(\s)', r'\1-z\2'),
+    ('empty-to-nonempty', r'(\[\s+)-z(\s)', r'\1-n\2'),
+]
+def ops(line):
+    s = line.strip()
+    if not s or s.startswith('#') or s.startswith('//'):
+        return []
+    r = []
+    for (name, pat, rep) in TABLE:
+        new, n = re.subn(pat, rep, line, count=1)
+        if n:
+            r.append((name, new))
+    return r
+cur = None
+cur_skip = False
+newno = 0
+added = {}
+tests = set()
+try:
+    with open(diff_path, encoding='utf-8', errors='replace') as fh:
+        diff = fh.read().splitlines()
+except OSError as e:
+    sys.stderr.write("mutation-run: %s\n" % e)
+    sys.exit(2)
+for ln in diff:
+    if ln.startswith('+++ '):
+        p = ln[4:].strip().strip('"')
+        if p == '/dev/null':
+            cur = None
+            continue
+        if p.startswith('b/'):
+            p = p[2:]
+        cur = p
+        is_t = is_test(p)
+        if is_t:
+            tests.add(p)
+        cur_skip = is_t or skip_path(p)
+    elif ln.startswith('@@'):
+        m = re.search(r'\+(\d+)', ln)
+        newno = int(m.group(1)) if m else 1
+    elif cur is None:
+        continue
+    elif ln.startswith('+') and not ln.startswith('+++'):
+        if not cur_skip:
+            added.setdefault(cur, []).append((newno, ln[1:]))
+        newno += 1
+    elif ln.startswith('-') and not ln.startswith('---'):
+        pass
+    elif ln.startswith(' '):
+        newno += 1
+for t in sorted(tests):
+    print("TESTS\t%s" % t)
+for f in sorted(added):
+    if is_test(f) or skip_path(f):
+        continue
+    for (n, text) in added[f]:
+        for (op, new) in ops(text):
+            print("CAND\t%s\x1f%s\x1f%s\x1f%s\x1f%s" % (f, n, op, text, new))
+PY
+[ $? -eq 0 ] || { cat "$TMPD/propose.err" >&2; exit 2; }
+cat "$TMPD/propose.err" >&2 || true
+
+TEST_FILES=(); CAND_LINES=()
+while IFS= read -r line; do
+  case "$line" in
+    CAND?*) CAND_LINES+=("${line#CAND?}") ;;
+    TESTS?*) TEST_FILES+=("${line#TESTS?}") ;;
+  esac
+done < "$TMPD/cands.tsv"
+
+if [ "${#TEST_FILES[@]}" -eq 0 ]; then
+  echo "mutation-run: SKIP — the diff adds no tests, so there is nothing to mutate against."
+  emit_event 0 0 0 0 false
+  exit 0
+fi
+if [ "${#CAND_LINES[@]}" -eq 0 ]; then
+  echo "mutation-run: no mutations proposed for the non-test code this diff touches."
+  emit_event 0 0 0 0 false
+  exit 0
+fi
+
+if [[ "$TESTCMD" == *"{files}"* ]]; then
+  joined=""
+  for f in "${TEST_FILES[@]}"; do
+    printf -v qf '%q' "$f"
+    joined="$joined $qf"
+  done
+  joined="${joined# }"
+  BASE_CMD="${TESTCMD//\{files\}/$joined}"
+else
+  BASE_CMD="$TESTCMD"
+fi
+echo "mutation-run: $REPO_NAME PR #$PR — ${#TEST_FILES[@]} test file(s), ${#CAND_LINES[@]} mutation(s) proposed."
+echo "mutation-run: test command: $BASE_CMD"
+
+# A blocking `wait` on the test child would defer the INT/TERM trap until the
+# child exits, so a hanging test would hold the restore hostage. Poll instead
+# for a sentinel file the child writes on exit: only short-lived foreground
+# commands run here, so a pending trap runs within ~0.2s, and the deadline is
+# enforced by this loop rather than by an external `timeout` binary.
+run_test() { # timeout-secs, command, outfile; sets RUN_RC, RUN_TIMEDOUT
+  local t="$1" cmd="$2" out="$3" deadline
+  RUN_RC=0; RUN_TIMEDOUT=0
+  rm -f "$TMPD/rc"
+  # Job control gives the subshell its own process group, so `kill -PGID`
+  # reaches the test command and anything it spawned. Killing $TEST_PID alone
+  # kills the wrapper subshell and orphans `bash -c "$cmd"`, which then keeps
+  # running -- and can write into the mutated file after it has been restored,
+  # which is the one property this tool must not get wrong.
+  set -m
+  ( cd "$REPO" && bash -c "$cmd" >"$out" 2>&1; echo "$?" >"$TMPD/rc" ) & TEST_PID=$!
+  set +m
+  deadline=$((SECONDS + t))
+  while [ ! -f "$TMPD/rc" ]; do
+    if (( SECONDS >= deadline )); then
+      kill_test_tree
+      RUN_TIMEDOUT=1
+      break
+    fi
+    sleep 0.2 2>/dev/null || sleep 1
+  done
+  if (( RUN_TIMEDOUT == 0 )); then RUN_RC=$(cat "$TMPD/rc" 2>/dev/null); fi
+  [[ "$RUN_RC" =~ ^[0-9]+$ ]] || RUN_RC=1
+  # The wrapper subshell exiting only means `bash -c "$cmd"` returned; a
+  # command that backgrounds a child leaves it running in the same process
+  # group. Kill the group even on a clean exit, or that child survives past
+  # this call and can write into the file after it has been restored.
+  kill_test_tree
+  wait "$TEST_PID" 2>/dev/null || true
+  TEST_PID=""
+}
+
+run_test "$T" "$BASE_CMD" "$TMPD/baseline.log"
+if [ "$RUN_TIMEDOUT" -eq 1 ]; then
+  echo "mutation-run: BASELINE TIMED OUT after ${T}s — stopping. Every mutation would misread."
+  sed 's/^/    /' "$TMPD/baseline.log" | head -n 15 || true
+  emit_event 0 0 0 0 false
+  exit 0
+fi
+if [ "$RUN_RC" -ne 0 ]; then
+  echo "mutation-run: BASELINE RED (exit $RUN_RC) — stopping. Every mutation would read as KILLED."
+  sed 's/^/    /' "$TMPD/baseline.log" | head -n 15 || true
+  emit_event 0 0 0 0 false
+  exit 0
+fi
+echo "mutation-run: baseline green."
+
+attempted=0; survived=0; killed=0; timedout=0; ceiling_hit=false; broke=false
+SURV_REPORT=""; TIMEOUT_REPORT=""
+for cline in "${CAND_LINES[@]}"; do
+  if (( attempted >= C )); then broke=true; break; fi
+  rest="${cline#CAND	}"
+  IFS=$'\x1f' read -r mfile mline mop morig mnew <<< "$rest"
+  case "$mfile" in
+    /*|*..*) echo "mutation-run: rejecting mutation outside repo: $mfile" >&2; continue ;;
+  esac
+  target="$REPO/$mfile"
+  if [ ! -f "$target" ]; then echo "mutation-run: stale mutation, file gone: $mfile" >&2; continue; fi
+  # The lexical check above cannot see a symlink. A path inside the repo whose
+  # target resolves outside it would be followed by `cp` and written through by
+  # the mutation, overwriting a file this tool has no business touching -- with
+  # replacement text taken from the diff, which on an external pull request is
+  # not ours to trust. Resolve both sides and compare.
+  if ! target=$(python3 -c 'import os,sys
+r, t = os.path.realpath(sys.argv[1]), os.path.realpath(sys.argv[2])
+sys.exit(1) if not (t == r or t.startswith(r + os.sep)) else print(t)' "$REPO" "$target"); then
+    echo "mutation-run: rejecting mutation that resolves outside repo: $mfile" >&2; continue
+  fi
+  if ! cp -f "$target" "$TMPD/bak"; then
+    echo "mutation-run: cannot back up $mfile — skipping mutation" >&2
+    continue
+  fi
+  CURRENT_FILE="$target"; CURRENT_BAK="$TMPD/bak"
+  if ! python3 - "$target" "$mline" "$morig" "$mnew" <<'PY'
+import sys
+path, n, old, new = sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4]
+lines = open(path, encoding='utf-8', errors='replace').read().splitlines(keepends=True)
+if n < 1 or n > len(lines) or (old and old not in lines[n - 1]):
+    sys.exit(3)
+lines[n - 1] = lines[n - 1].replace(old, new, 1) if old else new + "\n"
+open(path, 'w', encoding='utf-8').write(''.join(lines))
+PY
+  then
+    echo "mutation-run: stale mutation, line changed: $mfile:$mline" >&2
+    restore_current
+    continue
+  fi
+  attempted=$((attempted + 1))
+  echo "mutation-run: trying $mfile:$mline [$mop]"
+  run_test "$T" "$BASE_CMD" "$TMPD/mut.log"
+  restore_current
+  if [ "$RESTORE_FAILED" -eq 1 ]; then
+    echo "mutation-run: stopping — could not restore $mfile, worktree may be mutated." >&2
+    break
+  fi
+  if [ "$RUN_TIMEDOUT" -eq 1 ]; then
+    timedout=$((timedout + 1))
+    TIMEOUT_REPORT="${TIMEOUT_REPORT}TIMED OUT $mfile:$mline [$mop] '$morig' => '$mnew' after ${T}s (test: ${TEST_FILES[*]})"$'\n'
+  elif [ "$RUN_RC" -eq 0 ]; then
+    survived=$((survived + 1))
+    SURV_REPORT="${SURV_REPORT}SURVIVED $mfile:$mline [$mop] '$morig' => '$mnew' (test: ${TEST_FILES[*]})"$'\n'
+  else
+    killed=$((killed + 1))
+  fi
+done
+if $broke; then ceiling_hit=true; fi
+[ -n "$SURV_REPORT" ] && printf '%s' "$SURV_REPORT"
+[ -n "$TIMEOUT_REPORT" ] && printf '%s' "$TIMEOUT_REPORT"
+echo "mutation-run: attempted $attempted, survived $survived, killed $killed, timed_out $timedout."
+if $ceiling_hit; then
+  echo "mutation-run: CEILING HIT — attempted $attempted of ${#CAND_LINES[@]} proposed (ceiling $C)."
+fi
+if [ "$RESTORE_FAILED" -eq 1 ]; then
+  echo "mutation-run: worktree NOT fully restored — see errors above."
+  emit_event "$attempted" "$survived" "$killed" "$timedout" "$ceiling_hit"
+  exit 2
+fi
+echo "mutation-run: worktree restored."
+emit_event "$attempted" "$survived" "$killed" "$timedout" "$ceiling_hit"
+exit 0
