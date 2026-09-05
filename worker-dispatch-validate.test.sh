@@ -99,7 +99,7 @@ json.dump(m, open(out,"w"))
 PY
 }
 
-reset() { rm -f "$T"/state/*.json "$T"/state/.receipt-*.tmp "$T/sentinel" "$T/box-called" "$T/gh.log" "$T/boxcalls.log"; rm -rf "$T"/state/*.lock; : > "$T/gh.log"; rm -f "$T/no-config"; printf 'none' > "$T/apifail"; printf 'open' > "$T/issue-state"; }
+reset() { rm -f "$T"/state/*.json "$T"/state/.receipt-*.tmp "$T/sentinel" "$T/box-called" "$T/gh.log" "$T/boxcalls.log"; rm -rf "$T"/state/*.lock; : > "$T/gh.log"; rm -f "$T/no-config"; printf 'none' > "$T/apifail"; printf 'open' > "$T/issue-state"; printf 'pop' > "$T/config-prefix"; }
 
 # The sentinel stands in for the Box/branch/worker mutation: it runs only
 # when validation passes, so its absence proves rejection came first.
@@ -136,6 +136,7 @@ run_case() {
     closed) printf 'closed' > "$T/issue-state" ;;
     noconfig) touch "$T/no-config" ;;
     apifail=*) printf '%s' "${setup#apifail=}" > "$T/apifail" ;;
+    prefix=*) printf '%s' "${setup#prefix=}" > "$T/config-prefix" ;;
     seed-owned) mkmanifest "$T/owned.json"; attempt "$T/owned.json" --checkout "$T/checkout" ;;
     drift)
       first="$(cat "$T/live-sha")"
@@ -169,6 +170,7 @@ long base_sha is rejected||base_sha=abcdef0123456789abcdef0123456789abcdef012|ch
 uppercase base_sha is rejected||base_sha=ABCDEF0123456789ABCDEF0123456789ABCDEF01|checkout|fail|base_sha
 missing field fails before the sentinel||model=@DROP@|checkout|fail|missing required
 missing repository configuration fails before the sentinel|noconfig||api|fail|configuration
+present but invalid prefix fails before the sentinel|prefix=POP123||api|fail|invalid prefix
 API failure fails before the sentinel with no fallback|apifail=all||api|fail|
 conflicting ownership is rejected|seed-owned|coordinator=coord-b;branch=pop-976-other-attempt;box=bx_other999|checkout|fail|conflict
 explicit matching resume passes|keep|resume=true|checkout|pass|
@@ -205,8 +207,7 @@ for i in 1 2 3 4 5 6 7 8; do
   ("$SCRIPT" --manifest "$T/race-$i.json" --checkout "$T/checkout" >"$T/race-out-$i" 2>&1; echo "$?" >"$T/race-rc-$i") &
 done
 wait
-wins="$(grep -l '^0$' "$T"/race-rc-* 2>/dev/null | wc -l)"
-nreceipts="$(ls "$T"/state/*.json 2>/dev/null | wc -l)"
+wins="$(grep -l '^0$' "$T"/race-rc-* 2>/dev/null | wc -l)"; nreceipts="$(ls "$T"/state/*.json 2>/dev/null | wc -l)"
 wcoord="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("coordinator",""))' "$T"/state/*.json 2>/dev/null)"
 case "$wcoord" in coord-race-[1-8]) wok=1 ;; *) wok=0 ;; esac
 losers_ok=1
