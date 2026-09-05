@@ -483,20 +483,31 @@ function proofCommand(text) {
 // (usegeoaeo#71, popcornteam#1205, beeloud#164, pooriaarab.com#225).
 // Output lines are results; the command that printed them is not.
 // `echo '(none tracked)'` on a command line is not evidence.
+//
+// Both the count and the guard only mean something as the output of a
+// `git ls-files` invocation. A bare "1" / "2" pair, or a standalone
+// "(none)", can follow any command in the section — `npm audit` printing
+// vulnerability counts, or a scanner printing "(none)" for unrelated
+// reasons — so the line only counts when the nearest preceding command
+// line actually ran `git ls-files`.
 const PROOF_NONE_GUARD_RE = /^\(\s*none(?:\s+tracked)?\s*\)$/i;
 const PROOF_COUNT_LINE_RE = /^\d+$/;
-
-function proofOutputLines(text) {
-  return String(text)
-    .split('\n')
-    .map((line) => line.trim())
-    .filter((line) => line && !PROOF_COMMAND_RE.test(line));
-}
+const LS_FILES_COMMAND_RE = /\bgit\s+ls-files\b/i;
 
 function hasIndexStateResult(text) {
-  const lines = proofOutputLines(text);
-  if (lines.some((line) => PROOF_NONE_GUARD_RE.test(line))) return true;
-  return lines.filter((line) => PROOF_COUNT_LINE_RE.test(line)).length >= 2;
+  const lines = String(text).split('\n').map((line) => line.trim()).filter(Boolean);
+  let followsLsFiles = false;
+  let counts = 0;
+  for (const line of lines) {
+    if (PROOF_COMMAND_RE.test(line)) {
+      followsLsFiles = LS_FILES_COMMAND_RE.test(line);
+      continue;
+    }
+    if (!followsLsFiles) continue;
+    if (PROOF_NONE_GUARD_RE.test(line)) return true;
+    if (PROOF_COUNT_LINE_RE.test(line)) counts += 1;
+  }
+  return counts >= 2;
 }
 
 function proofResult(text) {

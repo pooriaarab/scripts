@@ -1869,6 +1869,38 @@ test('an index-only change is proved by a git ls-files delta, not by a suite', (
   );
 });
 
+test('the index-delta result must actually follow a git ls-files command', () => {
+  // The count and the guard only mean something as git ls-files output.
+  // Without anchoring to that command, any two bare digit lines, or any
+  // standalone "(none)", would pass regardless of what produced them --
+  // npm audit printing a vulnerability count, a scanner printing "(none)"
+  // for an unrelated reason, the same unrelated number appearing twice.
+  const body = (verified) => [
+    '## What', 'One sentence.',
+    '## Why', 'Because of the reason.',
+    '## How I verified', verified,
+    'Assisted-by: agent:model',
+  ].join('\n\n');
+  const fails = (text) => validateBody(body(text), 142, config)
+    .failures.some((f) => f.check === '## How I verified');
+
+  assert.equal(
+    fails('$ npm audit\n1\n2'),
+    true,
+    'two bare counts after an unrelated command are not a git ls-files delta',
+  );
+  assert.equal(
+    fails('$ npm audit\n337\n337'),
+    true,
+    'the same number twice after an unrelated command is not a delta either',
+  );
+  assert.equal(
+    fails("$ npm audit\n(none)"),
+    true,
+    '(none) after an unrelated command is not a ls-files guard',
+  );
+});
+
 test('a nonzero failed count is not masked by "passed" in the same result', () => {
   // "12 passed, 2 failed" matches `pass(?:ed)?` on its own, the same way
   // "Found 7 warnings and 0 errors" matched a clean "0 errors" until the
