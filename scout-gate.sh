@@ -24,7 +24,11 @@
 # it from output. So the secret never reaches the process table or a log line.
 set -euo pipefail
 
-BASE_URL="${1:?usage: scout-gate.sh <base-url>}"
+if [ $# -lt 1 ]; then
+  echo "usage: scout-gate.sh <base-url>" >&2
+  exit 2
+fi
+BASE_URL="$1"
 MIN_COVERAGE="${SCOUT_MIN_COVERAGE:-90}"
 SEVERITY="${SCOUT_SEVERITY:-high}"
 MAX_REQUESTS="${SCOUT_MAX_REQUESTS:-300}"
@@ -75,8 +79,39 @@ if [ -n "${API_TOKEN:-}" ]; then
   headers+=(--header 'Authorization: Bearer $API_TOKEN')
 fi
 
+# Credentials go out in a --header only when one of the above set one. Refuse
+# to send them to a plaintext, non-local target -- scout attaches whatever
+# header we hand it to whatever host is in BASE_URL, with no scheme check of
+# its own.
+if [ ${#headers[@]} -gt 0 ]; then
+  case "$BASE_URL" in
+    https://*|http://localhost*|http://127.0.0.1*|http://\[::1\]*) ;;
+    *)
+      echo "Refusing to send credentials to a non-HTTPS, non-local base URL: ${BASE_URL}" >&2
+      echo "Use https://, or drop API_TOKEN/CF_ACCESS_CLIENT_* for a plain HTTP target." >&2
+      exit 2
+      ;;
+  esac
+fi
+
 echo "Scout gate against ${BASE_URL}"
 scout init --base-url "$BASE_URL"
+
+# `scout init` just reset policy.rateLimit to its own default (see TRAP 1
+# above). The on-disk file gets put back at EXIT, but that is too late for
+# this sweep -- reapply the preserved rate limit before it runs, so a limit
+# set for a fragile API is actually honoured this run, not just next time
+# someone reads scout.json.
+node -e '
+  const fs = require("fs");
+  const backup = JSON.parse(fs.readFileSync("scout.json.gate-bak", "utf8"));
+  const rateLimit = backup.policy && backup.policy.rateLimit;
+  if (rateLimit === undefined) process.exit(0);
+  const cfg = JSON.parse(fs.readFileSync("scout.json", "utf8"));
+  cfg.policy = cfg.policy || {};
+  cfg.policy.rateLimit = rateLimit;
+  fs.writeFileSync("scout.json", JSON.stringify(cfg, null, 2));
+'
 
 # An empty array expands as unbound under `set -u` in bash 3.2, which macOS
 # still ships. The `${a[@]+"${a[@]}"}` form is the portable guard.
