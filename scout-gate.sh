@@ -45,12 +45,14 @@ if [ ! -f scout.json ]; then
   exit 2
 fi
 
-# Scout needs Node 22.12+. Fail with the reason, not a stack trace.
+# Scout needs Node 22.12+. Fail with the reason, not a stack trace. Exit 2:
+# an old runtime is a usage/environment error, not "a finding at or above
+# severity threshold" (exit 1 in the documented contract).
 # shellcheck disable=SC2016  # this is JavaScript, not shell; nothing to expand
 node -e 'const [a,b] = process.versions.node.split(".").map(Number);
   if (a < 22 || (a === 22 && b < 12)) {
     console.error(`scout needs Node >=22.12, got ${process.versions.node}`);
-    process.exit(1);
+    process.exit(2);
   }'
 
 # TRAP 1. `scout init` rewrites scout.json from its flags. It keeps
@@ -97,21 +99,28 @@ fi
 echo "Scout gate against ${BASE_URL}"
 scout init --base-url "$BASE_URL"
 
-# `scout init` just reset policy.rateLimit to its own default (see TRAP 1
-# above). The on-disk file gets put back at EXIT, but that is too late for
-# this sweep -- reapply the preserved rate limit before it runs, so a limit
-# set for a fragile API is actually honoured this run, not just next time
-# someone reads scout.json.
-node -e '
+# `scout init` just reset policy.rateLimit and policy.budget to its own
+# defaults (see TRAP 1 above). The on-disk file gets put back at EXIT, but
+# that is too late for this sweep -- reapply both preserved values before it
+# runs, so a limit or budget set for a fragile API is actually honoured this
+# run, not just next time someone reads scout.json. Also print the preserved
+# budget so the shell side can cap --max-requests at it: passing --max-requests
+# 300 while scout.json asked for a lower budget would overrun the very API
+# this is meant to protect.
+BACKED_UP_BUDGET=$(node -e '
   const fs = require("fs");
   const backup = JSON.parse(fs.readFileSync("scout.json.gate-bak", "utf8"));
-  const rateLimit = backup.policy && backup.policy.rateLimit;
-  if (rateLimit === undefined) process.exit(0);
+  const policy = backup.policy || {};
   const cfg = JSON.parse(fs.readFileSync("scout.json", "utf8"));
   cfg.policy = cfg.policy || {};
-  cfg.policy.rateLimit = rateLimit;
+  if (policy.rateLimit !== undefined) cfg.policy.rateLimit = policy.rateLimit;
+  if (policy.budget !== undefined) cfg.policy.budget = policy.budget;
   fs.writeFileSync("scout.json", JSON.stringify(cfg, null, 2));
-'
+  process.stdout.write(policy.budget === undefined ? "" : String(policy.budget));
+')
+if [ -z "${SCOUT_MAX_REQUESTS:-}" ] && [ -n "$BACKED_UP_BUDGET" ]; then
+  MAX_REQUESTS="$BACKED_UP_BUDGET"
+fi
 
 # An empty array expands as unbound under `set -u` in bash 3.2, which macOS
 # still ships. The `${a[@]+"${a[@]}"}` form is the portable guard.
@@ -123,7 +132,11 @@ scout sweep --max-requests "$MAX_REQUESTS" ${headers[@]+"${headers[@]}"}
 # The JSON report exits nonzero on a gate failure. Do not let `set -e` kill the
 # script here. The human-readable report below is what makes that failure
 # legible in the CI log, and it must still run. The final command's exit code is
-# what gates.
+# what gates. Create the report's directory first: otherwise a bad SCOUT_REPORT
+# path fails the redirection itself, and `|| true` would swallow that write
+# failure the same way it swallows a gate failure, leaving the artifact
+# missing with nothing said about it.
+mkdir -p "$(dirname -- "$REPORT")"
 scout report --ci \
   --min-coverage "$MIN_COVERAGE" \
   --severity-threshold "$SEVERITY" \
