@@ -16,6 +16,7 @@ fail() { echo "FAIL - $1"; echo "  $2"; FAIL=$((FAIL+1)); }
 T=""
 cleanup() {
   if [[ -n "$T" && -d "$T" ]]; then
+    pkill -f "box-work-heartbeat-loop" 2>/dev/null || true
     pkill -f "$T/captured-runner.sh" 2>/dev/null || true
     rm -rf "$T"
   fi
@@ -24,7 +25,10 @@ cleanup() {
 trap cleanup EXIT
 
 mtime() { python3 -c 'import os,sys; print(int(os.stat(sys.argv[1]).st_mtime))' "$1"; }
-runner_live() { pgrep -f "$T/captured-runner.sh" >/dev/null 2>&1; }
+# The heartbeat helper execs into a `bash -c` carrying this marker, so this
+# matches the helper loop only -- not the runner, its worker subshell, or an
+# orphaned agent child, which share the runner script path in their cmdlines.
+runner_live() { pgrep -f "box-work-heartbeat-loop" >/dev/null 2>&1; }
 
 write_stub() {
   cat > "$T/stubbin/box" <<'STUB'
@@ -175,7 +179,10 @@ grep -qF "HEARTBEAT_SECS=\"1\"" "$T/captured-runner.sh" \
   && pass "heartbeat interval is baked into the runner" \
   || fail "heartbeat interval is baked into the runner" "interval not baked"
 
-# 6. Even an uncatchable kill leaves no orphan: the helper exits on its own.
+# 6. Even an uncatchable kill stops the heartbeat: the helper exits on its own
+# once its parent is gone. (A PID-only SIGKILL can still strand the worker
+# subshell itself -- no shell can trap SIGKILL -- but the stranded worker no
+# longer beats the heartbeat, so the reaper exemption ends with the job.)
 b64="$(printf '%s' "probe" | base64 | tr -d '\n')"
 FAKE_AGENT_MODE=wait30 HOME="$FAKEBOX" PATH="$FAKEBOX/.local/bin:$PATH" \
   bash "$T/captured-runner.sh" "$b64" >"$T/direct.out" 2>"$T/direct.err" &
@@ -191,6 +198,71 @@ m6="$(mtime "$T/hb-term")"; sleep 2.2
 [ "$(mtime "$T/hb-term")" = "$m6" ] \
   && pass "heartbeat goes stale after SIGKILL" \
   || fail "heartbeat goes stale after SIGKILL" "mtime kept moving"
+
+# 7. A foreground SIGINT is answered promptly with status 130. `timeout`
+# delivers INT to a foreground runner -- the honest harness, because a `&`
+# background job inherits SIGINT ignored and no shell can trap that, while
+# `box exec` runs the real job in the foreground. `--preserve-status` keeps
+# the runner's own status: bare `timeout` reports 124 whenever it fires, even
+# when the child died correctly, which would mask a real 130 as a failure.
+b64="$(printf '%s' "trap probe" | base64 | tr -d '\n')"
+FAKE_AGENT_MODE=wait30 HOME="$FAKEBOX" PATH="$FAKEBOX/.local/bin:$PATH" \
+  timeout --preserve-status -s INT 4 bash "$T/captured-runner.sh" "$b64" >"$T/int.out" 2>"$T/int.err"
+irc=$?
+[ "$irc" = "130" ] \
+  && pass "foreground SIGINT reports 130" \
+  || fail "foreground SIGINT reports 130" "rc=$irc"
+runner_live \
+  && fail "SIGINT leaves no helper" "captured-runner.sh still alive" \
+  || pass "SIGINT leaves no helper"
+m7="$(mtime "$T/hb-term")"; sleep 2.2
+[ "$(mtime "$T/hb-term")" = "$m7" ] \
+  && pass "heartbeat goes stale after SIGINT" \
+  || fail "heartbeat goes stale after SIGINT" "mtime kept moving"
+
+FAKE_AGENT_MODE=wait30 HOME="$FAKEBOX" PATH="$FAKEBOX/.local/bin:$PATH" \
+  bash "$T/captured-runner.sh" "$b64" >"$T/term.out" 2>"$T/term.err" &
+rpid=$!
+sleep 2
+kill -TERM "$rpid" 2>/dev/null || true
+wait "$rpid" 2>/dev/null; trc2=$?
+[ "$trc2" = "143" ] \
+  && pass "SIGTERM to the runner reports 143" \
+  || fail "SIGTERM to the runner reports 143" "rc=$trc2"
+runner_live \
+  && fail "SIGTERM leaves no helper" "captured-runner.sh still alive" \
+  || pass "SIGTERM leaves no helper"
+
+# 8. The interval guard in the shipped runner resets bad values to 30s.
+guard="$(grep -F 'HEARTBEAT_SECS=30 ;; esac' "$T/captured-runner.sh")"
+[ -n "$guard" ] \
+  && pass "runner carries the interval guard" \
+  || fail "runner carries the interval guard" "guard line missing"
+bad=0
+for v in "" 0 abc; do
+  got="$(HEARTBEAT_SECS="$v"; eval "$guard"; printf '%s' "$HEARTBEAT_SECS")"
+  [ "$got" = "30" ] || bad=1
+done
+[ "$bad" = "0" ] \
+  && pass "bad intervals fall back to 30s" \
+  || fail "bad intervals fall back to 30s" "guard let one through"
+got="$(HEARTBEAT_SECS=5; eval "$guard"; printf '%s' "$HEARTBEAT_SECS")"
+[ "$got" = "5" ] \
+  && pass "a valid interval is kept" \
+  || fail "a valid interval is kept" "got $got"
+
+# 9. An unwritable heartbeat file warns loudly but does not fail the job.
+HOME="$FAKEHOME" XDG_STATE_HOME="$T/xdg" BOX_CLI="$T/stubbin/box" \
+  BOX_WORK_HEARTBEAT_SECS=1 BOX_WORK_HEARTBEAT_FILE="$T/no-such-dir/hb" \
+  FAKE_AGENT_MODE=ok \
+  bash "$SCRIPT" "$REPO" --agent pi "anything" >"$T/bw.out" 2>"$T/bw.err"
+rc9=$?
+[ "$rc9" = "0" ] \
+  && pass "unwritable heartbeat still runs the job" \
+  || fail "unwritable heartbeat still runs the job" "rc=$rc9 err: $(cat "$T/bw.err")"
+grep -q "idle-reaper exemption inactive" "$T/bw.err" \
+  && pass "unwritable heartbeat warns on stderr" \
+  || fail "unwritable heartbeat warns on stderr" "$(cat "$T/bw.err")"
 
 echo "pass=$PASS fail=$FAIL"
 [ "$FAIL" = "0" ]

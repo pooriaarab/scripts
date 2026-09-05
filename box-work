@@ -223,20 +223,22 @@ cd "/home/user/$NAME" || exit 1
 HEARTBEAT_FILE="${BOX_WORK_HEARTBEAT_FILE:-/home/user/.box-reap-heartbeat}"
 HEARTBEAT_SECS="${BOX_WORK_HEARTBEAT_SECS:-30}"
 case "\$HEARTBEAT_SECS" in ''|*[!0-9]*|0) HEARTBEAT_SECS=30 ;; esac
-touch "\$HEARTBEAT_FILE" 2>/dev/null || true
+touch "\$HEARTBEAT_FILE" 2>/dev/null || echo "box-work-run: warning: cannot touch \$HEARTBEAT_FILE; idle-reaper exemption inactive" >&2
 HEARTBEAT_PPID=\$$
-( while kill -0 "\$HEARTBEAT_PPID" 2>/dev/null; do sleep "\$HEARTBEAT_SECS"; touch "\$HEARTBEAT_FILE" 2>/dev/null || true; done ) &
+( exec bash -c 'while kill -0 "\$1" 2>/dev/null; do sleep "\$2"; touch "\$3" 2>/dev/null || true; done' box-work-heartbeat-loop "\$HEARTBEAT_PPID" "\$HEARTBEAT_SECS" "\$HEARTBEAT_FILE" ) &
 HEARTBEAT_PID=\$!
 stop_heartbeat() { kill "\$HEARTBEAT_PID" 2>/dev/null || true; wait "\$HEARTBEAT_PID" 2>/dev/null || true; }
 trap stop_heartbeat EXIT
-trap 'stop_heartbeat; trap - EXIT INT TERM; kill -INT \$\$' INT
-trap 'stop_heartbeat; trap - EXIT INT TERM; kill -TERM \$\$' TERM
 # The brief arrives base64-encoded. `box exec` joins argv into a shell command
 # string, so a multi-word brief passed raw is split across argv and the agent
 # receives only its first word -- it then asks a clarifying question and does
 # nothing, while the call still reports success.
 BRIEF="\$(printf %s "\$1" | base64 -d)"
 set -- "\$BRIEF"
+# The worker runs in the background under a short-poll supervisor so a trapped
+# signal is answered promptly even when the agent itself would run on: the
+# trap stops the agent and the heartbeat, then re-raises for exact status.
+run_worker() {
 case "$AGENT" in
   pi)     PI_WORKER=1 pi -p --no-extensions --provider zai-api --model glm-5.3-flash -a --tools read,grep,find,ls,edit,write,bash "\$1" ;;
   muse)
@@ -289,6 +291,18 @@ case "$AGENT" in
     env -u GOOGLE_GENAI_USE_VERTEXAI -u GOOGLE_APPLICATION_CREDENTIALS -u GOOGLE_CLOUD_PROJECT -u GOOGLE_CLOUD_LOCATION GEMINI_CLI_HOME="\$HOME/.gemini-personal" GEMINI_API_KEY="\$GEMINI_API_KEY" GEMINI_CLI_TRUST_WORKSPACE=true gemini --skip-trust --yolo -m gemini-3.8-flash -p "\$1" ;;
   *) echo "unsupported agent: $AGENT" >&2; exit 2 ;;
 esac
+}
+run_worker "\$1" &
+AGENT_PID=\$!
+trap 'kill -TERM "\$AGENT_PID" 2>/dev/null || true; stop_heartbeat; trap - EXIT INT TERM; kill -INT \$\$' INT
+trap 'kill -TERM "\$AGENT_PID" 2>/dev/null || true; stop_heartbeat; trap - EXIT INT TERM; kill -TERM \$\$' TERM
+# Short poll, not a bare `wait`: bash defers a trapped SIGINT until a waited-for
+# child exits, so a bare wait would stall a PID-only interrupt for the whole
+# agent lifetime. The 0.5s sleep bounds trap latency; `wait` still reaps the
+# exact worker status afterwards.
+while kill -0 "\$AGENT_PID" 2>/dev/null; do sleep 0.5; done
+wait "\$AGENT_PID" 2>/dev/null; WORKER_RC=\$?
+exit \$WORKER_RC
 RUNNER
     "$BOX" scp "$runner" "$ID:/home/user/box-work-run.sh" >/dev/null 2>&1
     rm -f "$runner"
