@@ -135,7 +135,8 @@ if [ -n "$DIFF" ]; then
 else
   git -C "$REPO" rev-parse --git-dir >/dev/null 2>&1 || { echo "mutation-run: not a git checkout: $REPO" >&2; exit 2; }
   git -C "$REPO" rev-parse --verify "$BASE" >/dev/null 2>&1 || { echo "mutation-run: unknown base: $BASE" >&2; exit 2; }
-  git -C "$REPO" diff --no-color --no-ext-diff --unified=3 "$BASE" -- > "$TMPD/diff.patch"
+  git -C "$REPO" diff --no-color --no-ext-diff --unified=3 "$BASE" -- > "$TMPD/diff.patch" \
+    || { echo "mutation-run: git diff against $BASE failed" >&2; exit 2; }
 fi
 remote="$(git -C "$REPO" remote get-url origin 2>/dev/null || true)"
 remote="${remote%.git}"
@@ -211,6 +212,7 @@ def ops(line):
             r.append((name, new))
     return r
 cur = None
+cur_skip = False
 newno = 0
 added = {}
 tests = set()
@@ -229,15 +231,18 @@ for ln in diff:
         if p.startswith('b/'):
             p = p[2:]
         cur = p
-        if is_test(p):
+        is_t = is_test(p)
+        if is_t:
             tests.add(p)
+        cur_skip = is_t or skip_path(p)
     elif ln.startswith('@@'):
         m = re.search(r'\+(\d+)', ln)
         newno = int(m.group(1)) if m else 1
     elif cur is None:
         continue
     elif ln.startswith('+') and not ln.startswith('+++'):
-        added.setdefault(cur, []).append((newno, ln[1:]))
+        if not cur_skip:
+            added.setdefault(cur, []).append((newno, ln[1:]))
         newno += 1
     elif ln.startswith('-') and not ln.startswith('---'):
         pass
