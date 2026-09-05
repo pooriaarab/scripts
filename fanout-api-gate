@@ -1,0 +1,223 @@
+#!/usr/bin/env bash
+# Scaffold the API contract gate into a repo.
+#
+#   fanout-api-gate <repo-path> [--spec <path-or-url>] [--base-path /api]
+#
+# Writes scout.json, .agents/tests/README.md and manifest.yaml, and the
+# .gitignore entries. Then prints the CI job to add, shaped for whatever that
+# repo uses for previews.
+#
+# Idempotent. Re-running skips every file that already exists, so it is safe to
+# run again after a partial setup. Pass --force to overwrite.
+#
+# It deliberately does NOT edit a workflow file. The fleet survey found two
+# shapes and no safe generic edit: some repos hang the gate off an existing
+# worker-preview.yml, others have no preview workflow at all. A script that
+# rewrites CI across a dozen repos on a guess breaks a dozen deployments at
+# once. It prints; a human places it.
+#
+# It also does not write a generated OpenAPI document to disk. A committed
+# generated spec rots from the first route change. The spec belongs to CI.
+set -euo pipefail
+
+usage() { echo "usage: fanout-api-gate <repo-path> [--spec <path-or-url>] [--base-path /api] [--force]" >&2; exit 2; }
+
+[ $# -ge 1 ] || usage
+REPO="$1"; shift
+SPEC=""
+BASE_PATH="/api"
+FORCE=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --spec) SPEC="${2:?--spec needs a value}"; shift 2 ;;
+    --base-path) BASE_PATH="${2:?--base-path needs a value}"; shift 2 ;;
+    --force) FORCE=1; shift ;;
+    *) usage ;;
+  esac
+done
+
+[ -d "$REPO/.git" ] || { echo "not a git repo: $REPO" >&2; exit 2; }
+cd "$REPO"
+NAME=$(basename "$(pwd)")
+
+write() { # write <path> <<<content, unless it exists
+  local path="$1"
+  if [ -e "$path" ] && [ "$FORCE" -eq 0 ]; then
+    echo "  skip   $path (exists)"
+    cat > /dev/null
+    return
+  fi
+  mkdir -p "$(dirname "$path")"
+  cat > "$path"
+  echo "  write  $path"
+}
+
+echo "Scaffolding the API gate into $NAME"
+
+# A spec source is required for the gate to mean anything. Record that it is
+# pending rather than inventing one: a spec with invented paths makes the gate
+# report success against fiction.
+if [ -z "$SPEC" ]; then
+  # shellcheck disable=SC2016  # literal text for a JSON value, not shell
+  SPEC_LINE='  "//spec": "PENDING - generate in CI with `vibeqa spec .`, or point at a served /openapi.json",'
+else
+  SPEC_LINE="  \"spec\": \"$SPEC\","
+fi
+
+write scout.json <<JSON
+{
+  "\$schema": "https://tester.army/scout.schema.json",
+$SPEC_LINE
+  "baseUrl": "http://localhost:3000$BASE_PATH",
+  "policy": {
+    "allowMutations": false,
+    "allowedMethods": ["GET"]
+  }
+}
+JSON
+
+write .agents/tests/manifest.yaml <<YAML
+# The test inventory for this repo. Agents read this file first.
+#
+# The repo is the source of truth. Every suite here is checked in, reviewed in
+# pull requests, and runs on tooling we host ourselves - no QA vendor account.
+#
+# schema: one entry per suite.
+#   id        stable slug, referenced by CI job names
+#   tool      what executes it
+#   gate      G1 pre-PR - G2 PR CI - G4 merge - G5 release
+#   target    what it runs against
+#   blocking  whether a failure stops the merge
+
+version: 1
+
+suites:
+  - id: api-contract
+    tool: scout
+    gate: [G1, G2]
+    target: "\${PREVIEW_URL}$BASE_PATH"
+    blocking: true
+    config: scout.json
+    probes: [happy-path, missing-auth, invalid-auth, not-found-shape]
+    description: >-
+      Probes the spec's GET operations for contract drift and missing
+      authorization. Read-only: GET only, mutations refused by policy.
+    gaps:
+      - >-
+        A derived spec carries no response schemas, so happy-path cannot
+        schema-validate. The auth probes are the value here.
+YAML
+
+write .agents/tests/README.md <<MARKDOWN
+# Tests
+
+The inventory of what is tested in this repo, and where each gate runs. This
+directory is the source of truth: tests are reviewed in pull requests like any
+other code.
+
+Read \`manifest.yaml\` first. It is the index.
+
+## API - Scout
+
+[Scout](https://github.com/tester-army/scout) reads the OpenAPI spec and probes
+every operation four ways:
+
+- \`happy-path\` - the documented success response, validated against its schema
+- \`missing-auth\` - no credentials at all
+- \`invalid-auth\` - a credential that is well-formed but wrong
+- \`not-found-shape\` - the 404 body matches the documented error envelope
+
+\`missing-auth\` is the one that earns its keep. It catches an operation that
+forgot its authorization check, which no amount of happy-path testing finds.
+
+Scout is safe to point at a live preview: mutations are refused, this repo
+narrows it to \`GET\` only, requests are pinned to the base-URL host, rate
+limited to 5 per second and capped at 300 per run.
+
+### Running it
+
+\`\`\`sh
+npx vibeqa api http://localhost:3000$BASE_PATH
+\`\`\`
+
+Behind Cloudflare Access, export the service token first:
+
+\`\`\`sh
+export CF_ACCESS_CLIENT_ID=... CF_ACCESS_CLIENT_SECRET=...
+npx vibeqa api https://<preview-host>$BASE_PATH
+\`\`\`
+
+### Exit codes
+
+\`0\` pass - \`1\` a finding at or above the severity threshold - \`2\` usage
+error - \`3\` incomplete run.
+
+## Reading the coverage number honestly
+
+An unauthenticated sweep proves operations reject anonymous callers. It does
+not exercise a successful authenticated response, and a derived spec has no
+response schemas to validate against. The number is real; it measures less than
+it looks like it measures.
+MARKDOWN
+
+for entry in ".scout/" "scout-report.json"; do
+  if [ -f .gitignore ] && grep -qxF "$entry" .gitignore; then
+    echo "  skip   .gitignore ($entry present)"
+  else
+    printf '%s\n' "$entry" >> .gitignore
+    echo "  write  .gitignore += $entry"
+  fi
+done
+
+# The CI shape differs per repo, so print the one that fits rather than guess.
+echo
+if [ -f .github/workflows/worker-preview.yml ]; then
+  echo "This repo has worker-preview.yml. Add the gate as its OWN job."
+  echo "Do not add it as a step inside the preview job: a failed probe would"
+  echo "trip the teardown step and delete the deployment you need to debug it."
+  echo
+  cat <<'YAML'
+  scout:
+    name: Scout API gate
+    needs: lifecycle
+    if: github.event.action != 'closed'
+    runs-on: ubicloud-standard-2
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: '${{ github.event.pull_request.head.sha }}' }
+      - uses: actions/setup-node@v4
+        with: { node-version: '24' }
+      - name: Probe the Preview API
+        env:
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+          CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+        # TODO confirm this repo's preview URL pattern before enabling.
+        run: npx vibeqa api "https://$HEAD_REF.staging.example.com/api"
+YAML
+else
+  echo "This repo has NO preview workflow, so there is no per-PR URL to probe."
+  echo "Gate the deployed environment on merge instead, and treat adding"
+  echo "previews as separate work."
+  echo
+  cat <<'YAML'
+  scout:
+    name: Scout API gate
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubicloud-standard-2
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '24' }
+      - name: Probe the deployed API
+        env:
+          CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+          CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+        # TODO point at this repo's staging host.
+        run: npx vibeqa api "https://staging.example.com/api"
+YAML
+fi
+
+echo
+[ -n "$SPEC" ] || echo "NOTE: no spec source set. The gate cannot mean anything until one exists."
+echo "Done. Review the diff before committing."
