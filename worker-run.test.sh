@@ -249,32 +249,6 @@ test_verify_fail_and_worker_fail_is_exit_1() {
   fi
 }
 
-# Case 8c. --setup runs before --verify and its failure on a real change is
-# exit 3, distinct from 2, the same way a failed --verify is.
-test_setup_fail_on_real_change_is_exit_3() {
-  local fix
-  fix=$(new_repo)
-  run_worker "$fix" --setup 'test -f /nonexistent-setup-target' -- bash -c 'echo edited > tracked.txt'
-  if (( rc == 3 )) && echo "$out" | grep -q "setup failed"; then
-    pass "--setup failing on a real change exits 3, distinct from 2"
-  else
-    fail "--setup failing on a real change exits 3, distinct from 2" "rc=$rc out=$out"
-  fi
-}
-
-# Case 8d. A worker that both fails on its own AND leaves setup broken must
-# report exit 1, not 3, the same rule that governs a failed --verify.
-test_setup_fail_and_worker_fail_is_exit_1() {
-  local fix
-  fix=$(new_repo)
-  run_worker "$fix" --setup 'test -f /nonexistent-setup-target' -- bash -c 'echo half-done > tracked.txt; exit 1'
-  if (( rc == 1 )) && echo "$out" | grep -q "changed files but exited 1"; then
-    pass "a worker that fails and also fails setup exits 1, not 3"
-  else
-    fail "a worker that fails and also fails setup exits 1, not 3" "rc=$rc out=$out"
-  fi
-}
-
 # Case 9a. Usage errors must fail loudly with 4 before any worker runs — a
 # missing --dir would otherwise look like "the worker did nothing".
 test_usage_missing_dir_is_exit_4() {
@@ -394,11 +368,22 @@ test_delivery_report_missing_pull_is_exit_4() {
 delivery_write_ci() {
   local t="$1" pr_head="$2" pr_base="${3:-}"
   [ -n "$pr_base" ] || pr_base="$(git -C "${4:-}" rev-parse HEAD~1 2>/dev/null || echo main)"
-  printf '{"head":{"sha":"%s","ref":"scr-322-require-delivery-evidence-before-worker-completion","repo":{"full_name":"pooriaarab/scripts"}},"base":{"sha":"%s","ref":"main"}}\n' "$pr_head" "$pr_base" > "$t/pr.json"
+  cat > "$t/pr.json" <<JSON
+{"state":"open","draft":true,"title":"[SCR-322] Require delivery evidence before worker completion","body":"Closes #322\\n\\n## What\\nWiring.\\n\\n## Why\\nProof.\\n\\n## How I verified\\n./worker-run.test.sh pass","head":{"sha":"$pr_head","ref":"scr-322-require-worker-delivery-evidence","repo":{"full_name":"pooriaarab/scripts"}},"base":{"sha":"$pr_base","ref":"main"}}
+JSON
   cat > "$t/check-runs.json" <<'JSON'
 {"check_runs":[{"id":1,"name":"tests","status":"completed","conclusion":"success","started_at":"2026-01-01T00:00:00Z","app":{"id":1}}]}
 JSON
   echo '[]' > "$t/statuses.json"
+  echo '{"state":"open"}' > "$t/issue.json"
+  python3 - "$t" <<'PY'
+import base64, json, sys
+t = sys.argv[1]
+cfg = {"prefix": "scr"}
+payload = {"encoding": "base64", "content": base64.b64encode(json.dumps(cfg).encode()).decode()}
+open(f"{t}/pr-standards-config-sha.json", "w", encoding="utf-8").write(json.dumps(payload))
+open(f"{t}/pr-standards-config-main.json", "w", encoding="utf-8").write(json.dumps(payload))
+PY
 }
 
 # Case 11c. Bound setup/verify pass through worker-run end-to-end.
@@ -407,14 +392,32 @@ test_delivery_report_success_is_exit_0() {
   fix=$(new_repo); ghdir="$(newtd)"; TMPDIRS+=("$ghdir")
   finalize="$(newtd)/finalize.py"; TMPDIRS+=("$(dirname "$finalize")")
   git -C "$fix" remote add origin https://github.com/pooriaarab/scripts.git 2>/dev/null || true
-  git -C "$fix" checkout -qb scr-322-require-delivery-evidence-before-worker-completion
+  git -C "$fix" checkout -qb scr-322-require-worker-delivery-evidence
   echo work >> "$fix/tracked.txt" && git -C "$fix" add tracked.txt && git -C "$fix" commit -qm work
   echo '{}' > "$fix/package-lock.json" && git -C "$fix" add package-lock.json && git -C "$fix" commit -qm lock
   head="$(git -C "$fix" rev-parse HEAD)"
   base="$(git -C "$fix" rev-parse HEAD~2)"
   delivery_write_ci "$ghdir" "$head" "$base"
-  mkdir -p "$ghdir/bin" && printf '%s\n' '#!/usr/bin/env bash' '[ "${1:-}" = api ] || exit 9' \
-    'case "${2:-}" in repos/*/pulls/*) cat "'"$ghdir"'/pr.json" ;; repos/*/commits/*/check-runs*) cat "'"$ghdir"'/check-runs.json" ;; repos/*/commits/*/statuses*) cat "'"$ghdir"'/statuses.json" ;; *) exit 9 ;; esac' > "$ghdir/bin/gh"
+  mkdir -p "$ghdir/bin" && cat > "$ghdir/bin/gh" <<GH
+#!/usr/bin/env bash
+set -uo pipefail
+[ "\${1:-}" = api ] || exit 9
+p="\${2:-}"
+case "\$p" in
+  repos/*/issues/*) cat "$ghdir/issue.json" ;;
+  repos/*/pulls/*) cat "$ghdir/pr.json" ;;
+  repos/*/contents/.github/pr-standards.json*)
+    if [[ "\$p" == *"ref=main"* ]]; then
+      cat "$ghdir/pr-standards-config-main.json"
+    else
+      cat "$ghdir/pr-standards-config-sha.json"
+    fi
+    ;;
+  repos/*/commits/*/check-runs*) cat "$ghdir/check-runs.json" ;;
+  repos/*/commits/*/statuses*) cat "$ghdir/statuses.json" ;;
+  *) exit 9 ;;
+esac
+GH
   chmod +x "$ghdir/bin/gh"
   rep="$ghdir/report.json"; verify_cmd='test "$(cat tracked.txt)" = edited'
   setup_cmd='npm ci'
@@ -429,12 +432,18 @@ base = subprocess.check_output(["git", "rev-parse", "HEAD~2"], text=True).strip(
 files = [{"filename": p[2], "additions": int(p[0]), "deletions": int(p[1])} for p in (line.split("\t") for line in subprocess.check_output(["git", "diff", "--numstat", f"{base}...HEAD"], text=True).splitlines()) if len(p) == 3 and p[0] != "-"]
 node = "import {summarizeFiles,DEFAULT_CONFIG} from './pr-standards.mjs';console.log(JSON.stringify(summarizeFiles(JSON.parse(process.argv[1]),DEFAULT_CONFIG)));"
 actual = json.loads(subprocess.check_output(["node", "--input-type=module", "-e", node, json.dumps(files)], cwd=root, text=True))
-doc = {"schema": 1, "repository": "pooriaarab/scripts", "issue": 322, "branch": "scr-322-require-delivery-evidence-before-worker-completion", "head": head, "tested_head": head, "outcome": "Require delivery evidence before worker completion", "closing_ref": "Closes #322", "implementation_status": "complete", "setup_commands": [{"command": sys.argv[5], "exit": 0}], "verification_commands": [{"command": sys.argv[4], "exit": 0}], "unresolved_failures": [], "claimed_counts": {"lines": actual["countedLines"], "files": actual["countedFiles"]}, "assisted_by": ["cursor:composer-2.5"], "merge_attribution": "unknown", "ci": {"head": head, "checks": [{"name": "tests", "bucket": "pass"}]}}
+doc = {"schema": 1, "repository": "pooriaarab/scripts", "issue": 322, "branch": "scr-322-require-worker-delivery-evidence", "head": head, "tested_head": head, "outcome": "Require delivery evidence before worker completion", "closing_ref": "Closes #322", "implementation_status": "complete", "setup_commands": [{"command": sys.argv[5], "exit": 0}], "verification_commands": [{"command": sys.argv[4], "exit": 0}], "unresolved_failures": [], "claimed_counts": {"lines": actual["countedLines"], "files": actual["countedFiles"]}, "assisted_by": ["cursor:composer-2.5"], "merge_attribution": "unknown", "ci": {"head": head, "checks": [{"name": "tests", "bucket": "pass"}]}}
 json.dump(doc, open(rep, "w", encoding="utf-8"))
-json.dump({"head": {"sha": head, "ref": "scr-322-require-delivery-evidence-before-worker-completion", "repo": {"full_name": "pooriaarab/scripts"}}, "base": {"sha": base, "ref": "main"}}, open(pr_json, "w", encoding="utf-8"))
+json.dump({
+  "state": "open", "draft": True,
+  "title": "[SCR-322] Require delivery evidence before worker completion",
+  "body": "Closes #322\n\n## What\nWiring.\n\n## Why\nProof.\n\n## How I verified\n./worker-run.test.sh pass",
+  "head": {"sha": head, "ref": "scr-322-require-worker-delivery-evidence", "repo": {"full_name": "pooriaarab/scripts"}},
+  "base": {"sha": base, "ref": "main"},
+}, open(pr_json, "w", encoding="utf-8"))
 PY
   out=$( cd "$fix" && PATH="$ghdir/bin:$PATH" GH_CLI="$ghdir/bin/gh" PR_STANDARDS_ROOT="$DIR" \
-    "$SCRIPT" --dir "$fix" --pull 313 --expected-repository pooriaarab/scripts --expected-branch scr-322-require-delivery-evidence-before-worker-completion \
+    "$SCRIPT" --dir "$fix" --pull 313 --expected-repository pooriaarab/scripts --expected-branch scr-322-require-worker-delivery-evidence \
     --expected-issue 322 --expected-outcome "Require delivery evidence before worker completion" \
     --base-ref HEAD~2 --setup "$setup_cmd" --verify "$verify_cmd" --delivery-report "$rep" \
     -- bash -c 'echo edited > tracked.txt && git add tracked.txt && git commit -qm edited && python3 "$1" "$2" "$3" "$4" "$5" "$6"' _ "$finalize" "$rep" "$ghdir/pr.json" "$DIR" "$verify_cmd" "$setup_cmd" 2>&1 )
@@ -443,6 +452,33 @@ PY
     pass "a matching delivery report after real work exits 0"
   else
     fail "a matching delivery report after real work exits 0" "rc=$rc out=$out"
+  fi
+}
+
+# Case 11d. --setup can fail independently of the worker command. When the
+# worker succeeded and changed files but setup fails, that is a setup
+# failure, not a worker failure: exit 3.
+test_setup_failure_after_change_is_exit_3() {
+  local fix
+  fix=$(new_repo)
+  run_worker "$fix" --setup 'exit 7' -- bash -c 'echo edited > tracked.txt'
+  if (( rc == 3 )) && echo "$out" | grep -q "worker changed files but setup failed"; then
+    pass "a worker that changes files with a failing --setup exits 3"
+  else
+    fail "a worker that changes files with a failing --setup exits 3" "rc=$rc out=$out"
+  fi
+}
+
+# Case 11e. When both the worker command and --setup fail, the worker's own
+# failure takes priority: exit 1, not 3.
+test_setup_and_worker_failure_is_exit_1() {
+  local fix
+  fix=$(new_repo)
+  run_worker "$fix" --setup 'exit 7' -- bash -c 'echo edited > tracked.txt; exit 5'
+  if (( rc == 1 )) && echo "$out" | grep -q "setup also failed"; then
+    pass "a failing worker with a failing --setup exits 1"
+  else
+    fail "a failing worker with a failing --setup exits 1" "rc=$rc out=$out"
   fi
 }
 
@@ -467,8 +503,6 @@ test_failed_worker_with_change_is_exit_1
 test_verify_pass_on_real_change_is_exit_0
 test_verify_fail_on_real_change_is_exit_3
 test_verify_fail_and_worker_fail_is_exit_1
-test_setup_fail_on_real_change_is_exit_3
-test_setup_fail_and_worker_fail_is_exit_1
 test_usage_missing_dir_is_exit_4
 test_usage_no_command_is_exit_4
 test_usage_not_a_git_checkout_is_exit_4
@@ -477,6 +511,8 @@ test_ignored_files_are_not_work
 test_delivery_report_failure_is_exit_5
 test_delivery_report_missing_pull_is_exit_4
 test_delivery_report_success_is_exit_0
+test_setup_failure_after_change_is_exit_3
+test_setup_and_worker_failure_is_exit_1
 test_help
 
 echo ""
