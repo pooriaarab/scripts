@@ -181,7 +181,7 @@ else
   # the Box stopped by the EXIT trap; it is never a source defect.
   READINESS_GATE="$(cd "$(dirname "$0")" && pwd)/box-provider-readiness"
   if [[ -x "$READINESS_GATE" ]]; then
-    "$READINESS_GATE" --box "$BOX" --provider "$PROVIDER" --cwd "$DIR" || exit 3
+    "$READINESS_GATE" --box "$BOX" --provider "$PROVIDER" --cwd "$DIR" --repo "$REPO" || exit 3
   else
     echo "box-agent: box-provider-readiness not found next to box-agent; refusing unwired dispatch" >&2; exit 3
   fi
