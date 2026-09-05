@@ -185,6 +185,97 @@ test_wrong_model() {
   fi
 }
 
+gate_setup() { # [no-cred]: stub Box serving both the real box-agent and the real helper, provider pi
+  T2="$(mktemp -d "${TMPDIR:-/tmp}/box-gate-test.XXXXXX")"
+  # Fixture HOME: box-agent prepends $HOME/.ascii/bin to PATH, which would
+  # shadow the stub with the real Box CLI; isolate it so `box` is the stub.
+  mkdir -p "$T2/stubbin" "$T2/fakebin" "$T2/boxhome/.pi/agent" "$T2/boxhome" "$T2/home"
+  if [[ "${1:-}" != "no-cred" ]]; then
+    printf '{"provider":"zai","fixture":"no-secret"}\n' > "$T2/boxhome/.pi/agent/auth.json"
+  fi
+  export GATE_T="$T2"
+  cat > "$T2/fakebin/pi" <<'FAKE'
+#!/usr/bin/env bash
+echo "pi $*" >>"$GATE_T/calls.log"
+[[ " $* " == *" -p "* ]] || { echo "pi: missing -p" >&2; exit 1; }
+[[ " $* " == *" --provider zai-api "* ]] || { echo "pi: wrong provider" >&2; exit 1; }
+[[ " $* " == *" --model glm-5.3-flash "* ]] || { echo "pi: wrong model" >&2; exit 1; }
+[[ " $* " == *" --no-extensions "* && " $* " == *" -a "* ]] || { echo "pi: missing --no-extensions/-a" >&2; exit 1; }
+prompt="${@: -1}"
+[[ "$prompt" =~ ([0-9]+)\*([0-9]+) ]] || { echo "pi: no arithmetic in prompt" >&2; exit 1; }
+prod=$((BASH_REMATCH[1] * BASH_REMATCH[2]))
+[[ "$prompt" =~ to\ ([^[:space:]]+/result\.txt) ]] || { echo "pi: no result file in prompt" >&2; exit 1; }
+printf '%s\n' "$prod" >"${BASH_REMATCH[1]}"; printf '%s\n' "$prod"
+FAKE
+  chmod +x "$T2/fakebin/pi"
+  cat > "$T2/stubbin/box" <<'STUB'
+#!/usr/bin/env bash
+T="${GATE_T:?}"
+map() { case "$1" in /home/user/*) printf '%s/%s' "$T/boxhome" "${1#/home/user/}" ;; *) printf '%s' "$1" ;; esac; }
+jout() { python3 -c 'import json,sys; print(json.dumps({"stdout":open(sys.argv[1]).read(),"stderr":open(sys.argv[2]).read(),"exitCode":int(sys.argv[3])}))' "$1" "$2" "$3"; }
+sub="${1:-}"; shift || true
+case "$sub" in
+  new) printf '1' >>"$T/new-count"; echo '{"id":"bx_9gate7x"}' ;;
+  scp) cp "$1" "$(map "${2#*:}")"; printf '%s\n' "${2#*:}" >>"$T/scp.log" ;;
+  stop) printf '%s\n' "$*" >>"$T/stop.log" ;;
+  list) echo '[]' ;;
+  exec)
+    after=0; cmd=(); json=0
+    for a in "$@"; do
+      [[ "$a" == "--json" ]] && json=1
+      if (( after )); then cmd+=("$a"); continue; fi
+      [[ "$a" == "--" ]] && after=1
+    done
+    (( json )) || exit 0
+    case "${cmd[0]:-}" in
+      command) printf '{"stdout":"/home/user/.local/bin/pi","stderr":"","exitCode":0}\n' ;;
+      test) if [[ -s "$(map "${cmd[2]}")" ]]; then printf '{"stdout":"","stderr":"","exitCode":0}\n'; else printf '{"stdout":"","stderr":"","exitCode":1}\n'; fi ;;
+      mktemp) d="$(mktemp -d "$(map "${cmd[2]}")")"; o="$(mktemp)"; printf '%s\n' "$d" >"$o"; e="$(mktemp)"; : >"$e"; jout "$o" "$e" 0 ;;
+      bash)
+        r="$(map "${cmd[1]}")"
+        if [[ "$r" == *box-agent-run.sh ]]; then printf 'runner-executed\n' >>"$T/runner.log"; printf '{"stdout":"simulated agent run","stderr":"","exitCode":0}\n';
+        else env -i HOME="$T/boxhome" PATH="$T/fakebin:/usr/bin:/bin" GATE_T="$T" bash "$r" "${cmd[2]}" >"$T/probe.out" 2>"$T/probe.err"; jout "$T/probe.out" "$T/probe.err" "$?"; fi ;;
+      cat) o="$(mktemp)"; e="$(mktemp)"; cat "$(map "${cmd[1]}")" >"$o" 2>"$e"; rc=$?; jout "$o" "$e" "$rc" ;;
+      rm|mkdir|true|gh|git) printf '{"stdout":"","stderr":"","exitCode":0}\n' ;;
+      *) echo "gate stub box exec: unknown: ${cmd[*]}" >&2; exit 99 ;;
+    esac
+    ;;
+  *) echo "gate stub box: unknown $sub" >&2; exit 99 ;;
+esac
+STUB
+  chmod +x "$T2/stubbin/box"
+}
+
+test_gate_success() {
+  gate_setup
+  out=$( HOME="$T2/home" PATH="$T2/stubbin:$PATH" GATE_T="$T2" BOX_PROBE_BASE="$T2/boxhome" "$DIR/box-agent" pi --repo testowner/testrepo "add a probe note" 2>&1 ); rc=$?
+  ok=1
+  (( rc == 0 )) || ok=0
+  echo "$out" | grep -q "box-provider-readiness: READY box=bx_9gate7x provider=pi" || ok=0
+  echo "$out" | grep -q "box-agent: NO diff" || ok=0
+  grep -q "box-agent-run.sh" "$T2/scp.log" 2>/dev/null || ok=0
+  grep -q "runner-executed" "$T2/runner.log" 2>/dev/null || ok=0
+  [[ "$(cat "$T2/new-count" 2>/dev/null)" == "1" ]] || ok=0
+  grep -q -- "--provider zai-api" "$T2/calls.log" 2>/dev/null || ok=0
+  rm -rf "$T2"
+  if (( ok )); then pass "dispatch gate: ready Box passes the live probe, then the runner ships once"; else fail "dispatch gate: ready Box passes the probe, then runs" "rc=$rc out=$out"; fi
+}
+
+test_gate_bootstrap_failure() {
+  gate_setup no-cred
+  out=$( HOME="$T2/home" PATH="$T2/stubbin:$PATH" GATE_T="$T2" BOX_PROBE_BASE="$T2/boxhome" "$DIR/box-agent" pi --repo testowner/testrepo "add a probe note" 2>&1 ); rc=$?
+  ok=1
+  (( rc == 3 )) || ok=0
+  echo "$out" | grep -q "canonical credential.*missing or empty" || ok=0
+  echo "$out" | grep -q "provider bootstrap" || ok=0
+  [[ ! -e "$T2/scp.log" ]] || ok=0
+  [[ ! -e "$T2/runner.log" ]] || ok=0
+  [[ -s "$T2/stop.log" ]] || ok=0
+  [[ "$(cat "$T2/new-count" 2>/dev/null)" == "1" ]] || ok=0
+  rm -rf "$T2"
+  if (( ok )); then pass "dispatch gate: bootstrap failure exits 3, runner never ships, Box stopped"; else fail "dispatch gate: bootstrap failure exits 3 with no runner" "rc=$rc out=$out"; fi
+}
+
 test_fresh_success
 test_resumed_transient_success
 test_missing_binary
@@ -193,6 +284,8 @@ test_invalid_auth
 test_wrong_write
 test_timeout
 test_wrong_model
+test_gate_success
+test_gate_bootstrap_failure
 
 echo
 echo "pass=$PASS fail=$FAIL"
