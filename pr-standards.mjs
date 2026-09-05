@@ -476,9 +476,32 @@ function proofCommand(text) {
   return lines.some((line) => PROOF_COMMAND_RE.test(line));
 }
 
+// An index-only change has no test-runner vocabulary. The proof is a
+// before/after `git ls-files | grep -c` pair, or a `(none tracked)` /
+// `(none)` guard. Four PRs untracked build artifacts and then padded the
+// section with "clean" because those lines did not count as a result
+// (usegeoaeo#71, popcornteam#1205, beeloud#164, pooriaarab.com#225).
+// Output lines are results; the command that printed them is not.
+// `echo '(none tracked)'` on a command line is not evidence.
+const PROOF_NONE_GUARD_RE = /^\(\s*none(?:\s+tracked)?\s*\)$/i;
+const PROOF_COUNT_LINE_RE = /^\d+$/;
+
+function proofOutputLines(text) {
+  return String(text)
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line && !PROOF_COMMAND_RE.test(line));
+}
+
+function hasIndexStateResult(text) {
+  const lines = proofOutputLines(text);
+  if (lines.some((line) => PROOF_NONE_GUARD_RE.test(line))) return true;
+  return lines.filter((line) => PROOF_COUNT_LINE_RE.test(line)).length >= 2;
+}
+
 function proofResult(text) {
   if (PROOF_NONZERO_RE.test(text)) return false;
-  return PROOF_RESULT_RE.test(text);
+  return PROOF_RESULT_RE.test(text) || hasIndexStateResult(text);
 }
 
 function hasCommandAndResult(text) {
@@ -945,11 +968,11 @@ export function validateBody(body, issueNumber, config = DEFAULT_CONFIG) {
     let expected = 'a command and its result, such as: bun test -> 214 passed';
     let fix = 'Run a check and record the command and result under ## How I verified.';
     if (verified && !refused && command && !result) {
-      expected = 'a result from that command, such as: 13 passed or Found 0 warnings';
-      fix = 'Record what the command printed. A command with no result is not evidence.';
+      expected = 'Found a command but no result. Record 13 passed, Found 0 warnings, a git ls-files before/after count, or (none tracked)';
+      fix = 'Found a command but no result. Record what the command printed.';
     } else if (verified && !refused && !command && result) {
-      expected = 'a command that produced that result, such as: bash tests/x.sh';
-      fix = 'Name the command you ran. A result with no command is not evidence.';
+      expected = 'Found a result but no command. Name the command you ran, such as: bash tests/x.sh';
+      fix = 'Found a result but no command. Name the command you ran.';
     }
     failures.push(fail(
       '## How I verified',

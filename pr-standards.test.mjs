@@ -1803,11 +1803,70 @@ test('bash is a command, and real tool output is a result', () => {
   assert.ok(commandOnly, 'a command with no result still fails');
   assert.match(commandOnly.expected, /result/i);
   assert.doesNotMatch(commandOnly.expected, /a command and its result/i);
+  assert.match(commandOnly.expected, /Found a command but no result/);
+  assert.match(commandOnly.fix, /Found a command but no result/);
 
   const resultOnly = finding('Results: 13 passed, 0 failed');
   assert.ok(resultOnly, 'a result with no command still fails');
   assert.match(resultOnly.expected, /command/i);
   assert.doesNotMatch(resultOnly.expected, /a command and its result/i);
+  assert.match(resultOnly.expected, /Found a result but no command/);
+  assert.match(resultOnly.fix, /Found a result but no command/);
+});
+
+test('an index-only change is proved by a git ls-files delta, not by a suite', () => {
+  // PROOF_RESULT_RE knew test-runner words and nothing about the git index.
+  // Four PRs untracked build artifacts with a real, checkable ls-files
+  // before/after, then failed this rule and padded the section with "clean"
+  // (usegeoaeo#71, popcornteam#1205, beeloud#164, pooriaarab.com#225).
+  const body = (verified) => [
+    '## What', 'One sentence.',
+    '## Why', 'Because of the reason.',
+    '## How I verified', verified,
+    'Assisted-by: agent:model',
+  ].join('\n\n');
+  const fails = (text) => validateBody(body(text), 142, config)
+    .failures.some((f) => f.check === '## How I verified');
+  const finding = (text) => validateBody(body(text), 142, config)
+    .failures.find((f) => f.check === '## How I verified');
+
+  const indexDelta = [
+    "$ git ls-files | grep -c ''",
+    '337',
+    '$ git rm --cached apps/website/tsconfig.tsbuildinfo',
+    "$ git ls-files | grep -c ''",
+    '336',
+    "$ git ls-files | grep tsbuildinfo || echo '(none tracked)'",
+    '(none tracked)',
+  ].join('\n');
+  assert.equal(fails(indexDelta), false, 'a git ls-files before/after is a result');
+
+  const noneGuard = [
+    "$ git ls-files | grep tsbuildinfo || echo '(none tracked)'",
+    '(none tracked)',
+  ].join('\n');
+  assert.equal(fails(noneGuard), false, '(none tracked) is a result');
+  assert.equal(
+    fails("$ git ls-files | grep leftover || echo '(none)'\n(none)"),
+    false,
+    '(none) is a result',
+  );
+
+  // A command that only mentions the guard in its argv is not evidence.
+  // The output line has to be there.
+  const commandOnly = finding('$ git rm --cached apps/website/tsconfig.tsbuildinfo');
+  assert.ok(commandOnly, 'a command with no result of any kind is still rejected');
+  assert.match(commandOnly.expected, /Found a command but no result/);
+  assert.match(commandOnly.fix, /Found a command but no result/);
+
+  // The nonzero veto still wins, even next to a real index delta. A lazy
+  // match-everything result regex, or an index path that skips the veto,
+  // would let this through.
+  assert.equal(
+    fails(`${indexDelta}\n2 failed`),
+    true,
+    '2 failed still vetoes, even beside an index delta',
+  );
 });
 
 test('a nonzero failed count is not masked by "passed" in the same result', () => {
