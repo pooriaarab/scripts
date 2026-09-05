@@ -1,0 +1,201 @@
+#!/usr/bin/env bash
+# worker-dispatch-validate — check a worker dispatch manifest against live
+# repository facts BEFORE any Box, branch, or worker mutation.
+#
+# Usage:
+#   worker-dispatch-validate --manifest <file> [--checkout <dir>]
+#
+# Manifest (JSON). All fields required unless noted:
+#   repository   "owner/name" of the target repo
+#   issue        issue number the worker implements
+#   branch       proposed branch, "<prefix>-<issue>-<slug>"
+#   title        proposed PR title, "[PREFIX-<issue>] Subject"
+#   closing_ref  exactly one closing reference, e.g. "Closes #976"
+#   base_ref     expected base branch, e.g. "main"
+#   base_sha     pinned 40-hex base commit the checkout must match
+#   coordinator  identity that owns this dispatch
+#   cli          worker CLI (claude|codex|gemini|pi|kimi|cursor|devin|muse)
+#   model        worker model for that CLI
+#   box          existing Box id (resume) or proposed Box name
+#   resume       true when resuming recorded ownership (optional, default false)
+#
+# Exit: 0 valid (receipt recorded); 1 validation failure; 2 usage/env error.
+# Only success writes state (the receipt). A failure changes nothing: no Box,
+# branch, or worker command is ever invoked from this path.
+#
+# Dependencies are injectable for tests: GH_CLI (default gh), GIT_CLI
+# (default git), WORKER_DISPATCH_STATE (default XDG state dir).
+set -uo pipefail
+
+GH="${GH_CLI:-gh}"
+GIT="${GIT_CLI:-git}"
+STATE="${WORKER_DISPATCH_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/worker-dispatch}"
+
+die() { echo "worker-dispatch-validate: $*" >&2; exit "${2:-1}"; }
+usage_error() { echo "worker-dispatch-validate: $*" >&2; exit 2; }
+
+MANIFEST=""; CHECKOUT=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --manifest) [ $# -ge 2 ] || usage_error "--manifest needs a value"; MANIFEST="$2"; shift 2 ;;
+    --checkout) [ $# -ge 2 ] || usage_error "--checkout needs a value"; CHECKOUT="$2"; shift 2 ;;
+    -h|--help) sed -n '2,30p' "$0"; exit 0 ;;
+    *) usage_error "unknown flag: $1" ;;
+  esac
+done
+[ -n "$MANIFEST" ] || usage_error "--manifest is required"
+[ -f "$MANIFEST" ] || usage_error "not a file: $MANIFEST"
+command -v python3 >/dev/null 2>&1 || usage_error "python3 is required"
+command -v "$GH" >/dev/null 2>&1 || usage_error "GitHub CLI not found: $GH"
+
+# Load manifest fields into shell vars. Fails loudly on invalid JSON or a
+# missing/empty required field — never with a default that could pass.
+eval "$(python3 - "$MANIFEST" <<'PY'
+import json,sys
+required = ["repository","issue","branch","title","closing_ref","base_ref",
+            "base_sha","coordinator","cli","model","box"]
+try:
+    m = json.load(open(sys.argv[1]))
+except Exception as e:
+    print("echo 'invalid manifest JSON: %s' >&2; exit 2" % str(e).replace("'","'\"'\"'"), end="")
+    sys.exit(0)
+if not isinstance(m, dict):
+    print("echo 'manifest must be a JSON object' >&2; exit 2", end="")
+    sys.exit(0)
+missing = [k for k in required if k not in m or m[k] is None or str(m[k]).strip() == ""]
+if missing:
+    print("echo 'manifest missing required field(s): %s' >&2; exit 1" % " ".join(missing), end="")
+    sys.exit(0)
+def sh(k, v):
+    v = str(v).replace("'", "'\"'\"'")
+    print("M_%s='%s'" % (k.upper(), v), end=";")
+for k in required:
+    sh(k, m[k])
+resume = str(m.get("resume", False)).lower() in ("1","true","yes")
+print("M_RESUME='%s'" % ("true" if resume else "false"), end=";")
+PY
+)" || exit "$?"
+# The python block above prints `exit N` for manifest-level failures.
+# shellcheck disable=SC2154
+[ -n "${M_REPOSITORY:-}" ] || exit "$?"
+
+fail() { echo "worker-dispatch-validate: FAIL: $*" >&2; exit 1; }
+
+case "$M_REPOSITORY" in
+  *[^A-Za-z0-9_.\/-]*|*//*|/*|*/) fail "invalid repository '$M_REPOSITORY' (want owner/name)" ;;
+esac
+case "$M_REPOSITORY" in */*) : ;; *) fail "invalid repository '$M_REPOSITORY' (want owner/name)" ;; esac
+case "$M_ISSUE" in ''|*[!0-9]*) fail "invalid issue '$M_ISSUE' (want a number)" ;; esac
+case "$M_BASE_SHA" in ????????*) : ;; *) fail "invalid base_sha (want a 40-char commit SHA)" ;; esac
+case "$M_BASE_SHA" in *[^0-9a-f]*|?????????????????????????????????????????*)
+  fail "invalid base_sha (want 40 lowercase hex chars)" ;;
+esac
+case "$M_CLI" in claude|codex|gemini|pi|kimi|cursor|devin|muse) : ;;
+  *) fail "unknown worker cli '$M_CLI'" ;;
+esac
+case "$M_MODEL" in ""|*[!A-Za-z0-9_./-]*|.*|*/|*//*)
+  fail "invalid model '$M_MODEL'" ;;
+esac
+
+# --- Repository configuration: the prefix every branch/title check reads. ---
+CONFIG_JSON=""; CONFIG_SHA=""
+if [ -n "$CHECKOUT" ]; then
+  [ -d "$CHECKOUT" ] || usage_error "not a directory: $CHECKOUT"
+  CONFIG_FILE="$CHECKOUT/.github/pr-standards.json"
+  [ -f "$CONFIG_FILE" ] || fail "missing repository configuration: $CONFIG_FILE"
+  CONFIG_JSON="$(cat "$CONFIG_FILE")" || fail "cannot read $CONFIG_FILE"
+  CONFIG_SHA="local-checkout"
+else
+  API_ERR="$(mktemp)"; API_OUT="$(mktemp)"
+  # shellcheck disable=SC2064
+  trap "rm -f '$API_ERR' '$API_OUT'" EXIT
+  if ! "$GH" api "repos/$M_REPOSITORY/contents/.github/pr-standards.json" \
+      --jq '{sha: .sha, content: .content}' >"$API_OUT" 2>"$API_ERR"; then
+    fail "cannot fetch repository configuration for $M_REPOSITORY: $(head -c 300 "$API_ERR")"
+  fi
+  CONFIG_SHA="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("sha",""))' "$API_OUT")"
+  CONFIG_JSON="$(python3 -c 'import json,sys,base64; print(base64.b64decode(json.load(open(sys.argv[1]))["content"]).decode())' "$API_OUT")" \
+    || fail "cannot decode repository configuration for $M_REPOSITORY"
+fi
+PREFIX="$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("prefix",""))' <<<"$CONFIG_JSON" 2>/dev/null)"
+case "$PREFIX" in ??|???|????) : ;; *) PREFIX="" ;; esac
+case "$PREFIX" in *[^a-z]*) PREFIX="" ;; esac
+[ -n "$PREFIX" ] || fail "missing or invalid prefix in $M_REPOSITORY .github/pr-standards.json"
+UPPER="$(printf '%s' "$PREFIX" | tr '[:lower:]' '[:upper:]')"
+
+# --- Branch, title, closing reference: all bound to prefix + issue. ---
+case "$M_BRANCH" in "$PREFIX"-"$M_ISSUE"-*)
+  slug="${M_BRANCH#"$PREFIX"-"$M_ISSUE"-}"
+  case "$slug" in ""|*[!a-z0-9-]*|-*|*-|*--*) fail "branch '$M_BRANCH' has an invalid slug (want $PREFIX-$M_ISSUE-<slug>)" ;; esac
+  ;;
+  *) fail "branch '$M_BRANCH' must match $PREFIX-$M_ISSUE-<slug>" ;;
+esac
+subject="${M_TITLE#"[$UPPER-$M_ISSUE] "}"
+[ "$subject" != "$M_TITLE" ] || fail "title must start with '[$UPPER-$M_ISSUE] '"
+((${#subject} >= 10 && ${#subject} <= 50)) || fail "title subject is ${#subject} chars (want 10-50)"
+
+CLOSING_CHECK="$(python3 - "$M_CLOSING_REF" "$M_ISSUE" "$M_REPOSITORY" <<'PY'
+import re,sys
+body, want, repo = sys.argv[1], int(sys.argv[2]), sys.argv[3].lower()
+refs = [(m.group(1), int(m.group(2)))
+        for m in re.finditer(r"\b(?:closes?|fix(?:es|ed)?|resolves?)\s*:?\s*(?:([\w.-]+\/[\w.-]+))?#([0-9]+)\b", body, re.I)]
+if len(refs) != 1:
+    print("want exactly one closing reference to #%d, found %d" % (want, len(refs))); sys.exit(1)
+rrepo, rnum = refs[0]
+if rnum != want:
+    print("closing reference #%d does not match issue #%d" % (rnum, want)); sys.exit(1)
+if rrepo and rrepo.lower() != repo:
+    print("closing reference targets %s, not %s" % (rrepo, repo)); sys.exit(1)
+PY
+)" || fail "closing_ref invalid: $CLOSING_CHECK"
+
+# --- Live issue state and base SHA: read-only API facts, no fallback. ---
+ISSUE_STATE="$("$GH" api "repos/$M_REPOSITORY/issues/$M_ISSUE" --jq '.state' 2>&1)" \
+  || fail "cannot read issue $M_REPOSITORY#$M_ISSUE: $ISSUE_STATE"
+[ "$ISSUE_STATE" = "open" ] || fail "issue $M_REPOSITORY#$M_ISSUE is '$ISSUE_STATE', not open"
+
+LIVE_SHA="$("$GH" api "repos/$M_REPOSITORY/commits/$M_BASE_REF" --jq '.sha' 2>&1)" \
+  || fail "cannot read base ref $M_BASE_REF: $LIVE_SHA"
+[ "$LIVE_SHA" = "$M_BASE_SHA" ] || fail "base_sha $M_BASE_SHA differs from live $M_BASE_REF ($LIVE_SHA)"
+
+if [ -n "$CHECKOUT" ]; then
+  ORIGIN="$("$GIT" -C "$CHECKOUT" remote get-url origin 2>/dev/null || true)"
+  CHECK_REPO="$(printf '%s' "$ORIGIN" | sed -E 's#(git@github.com:|https://github.com/)##; s#\.git$##')"
+  [ "$(printf '%s' "$CHECK_REPO" | tr '[:upper:]' '[:lower:]')" = "$(printf '%s' "$M_REPOSITORY" | tr '[:upper:]' '[:lower:]')" ] \
+    || fail "checkout origin '$CHECK_REPO' does not match manifest repository '$M_REPOSITORY'"
+  HEAD_SHA="$("$GIT" -C "$CHECKOUT" rev-parse HEAD 2>&1)" || fail "cannot read checkout HEAD: $HEAD_SHA"
+  [ "$HEAD_SHA" = "$M_BASE_SHA" ] || fail "checkout HEAD $HEAD_SHA differs from declared base_sha $M_BASE_SHA"
+fi
+
+# --- Ownership: a conflicting active record stops dispatch. A declared resume
+# --- must match the recorded coordinator, Box, and worker CLI exactly.
+RECORD="$STATE/$(printf '%s' "$M_REPOSITORY" | tr '/' '_')-$M_ISSUE.json"
+if [ -f "$RECORD" ]; then
+  MISMATCH="$(python3 - "$RECORD" "$M_COORDINATOR" "$M_BOX" "$M_CLI" "$M_RESUME" <<'PY'
+import json,sys
+rec = json.load(open(sys.argv[1]))
+want = {"coordinator": sys.argv[2], "box": sys.argv[3], "cli": sys.argv[4]}
+resume = sys.argv[5] == "true"
+if not resume:
+    print("active dispatch by '%s' (branch %s); declare resume:true with matching Box/worker to resume" % (rec.get("coordinator","?"), rec.get("branch","?"))); sys.exit(1)
+bad = [k for k in want if rec.get(k) != want[k]]
+if bad:
+    print("resume identity mismatch on: %s" % ", ".join(bad)); sys.exit(1)
+PY
+)" || fail "conflicting ownership for $M_REPOSITORY#$M_ISSUE: $MISMATCH"
+fi
+
+# --- Success: the only state this command ever writes. ---
+mkdir -p "$STATE"
+python3 - "$RECORD" "$M_REPOSITORY" "$M_ISSUE" "$M_BRANCH" "$PREFIX" "$CONFIG_SHA" \
+  "$M_BASE_REF" "$M_BASE_SHA" "$M_COORDINATOR" "$M_CLI" "$M_MODEL" "$M_BOX" <<'PY'
+import json,sys,datetime
+_, path, repo, issue, branch, prefix, csha, bref, bsha, coord, cli, model, box = sys.argv
+json.dump({"repository": repo, "issue": int(issue), "branch": branch,
+           "prefix": prefix, "config_sha": csha, "base_ref": bref,
+           "base_sha": bsha, "coordinator": coord, "cli": cli,
+           "model": model, "box": box,
+           "validated_at": datetime.datetime.now(datetime.timezone.utc).isoformat()},
+          open(path, "w"), indent=2)
+PY
+echo "worker-dispatch-validate: $M_REPOSITORY#$M_ISSUE manifest valid; receipt $RECORD"
