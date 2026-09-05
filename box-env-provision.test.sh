@@ -1,9 +1,7 @@
 #!/usr/bin/env bash
-# Tests for box-env-provision agent-credential handling. Offline: stub `box`
-# and `gh`, throwaway `git init` fixture, --dry-run performs no mutation.
-# Contract: --with-agents with a missing manifest fails loudly instead of
-# silently provisioning zero agent files.
-# Override: BOX_ENV_PROVISION_UNDER_TEST=/tmp/mutant bash box-env-provision.test.sh
+# Tests for box-env-provision agent credentials. Offline: stub `box`/`gh`,
+# throwaway repo, --dry-run. Contract: --with-agents with a missing manifest
+# fails loudly instead of silently provisioning zero agent files.
 set -uo pipefail
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -73,6 +71,5 @@ rc=$?
   && pass "plain provisioning ignores the manifest" \
   || fail "plain provisioning ignores the manifest" "rc=$rc err: $(cat "$T/err3")"
 
-echo "---"
 echo "pass=$PASS fail=$FAIL"
 [ "$FAIL" = "0" ]

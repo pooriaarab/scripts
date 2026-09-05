@@ -2,7 +2,6 @@
 # Tests for box-work startup retry, explicit cwd, credential export, agent
 # dispatch, and failure propagation. Offline: stub BOX_CLI, fake agent CLIs,
 # generated runner executes locally. No Box is created; no secrets anywhere.
-# Override under test: BOX_WORK_UNDER_TEST=/tmp/mutant bash box-work.test.sh
 set -uo pipefail
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -57,8 +56,16 @@ case "$sub" in
       exit 0
     fi
     b64="${cmd[${#cmd[@]}-1]}"
-    HOME="$T/home" PATH="/usr/bin:/bin" \
-      bash "$T/captured-runner.sh" "$b64" >"$T/runner.out" 2>"$T/runner.err"
+    if [[ -f "$T/allow-env" ]]; then
+      HOME="$T/home" PATH="/usr/bin:/bin" \
+        bash "$T/captured-runner.sh" "$b64" >"$T/runner.out" 2>"$T/runner.err"
+    else
+      # Remote boundary: the runner carries only its files, never caller env.
+      # BOX_WORK_TEST_T is harness plumbing for the fake recorders, not
+      # product transport: no product variable crosses here.
+      env -i HOME="$T/home" PATH="/usr/bin:/bin" BOX_WORK_TEST_T="$T" \
+        bash "$T/captured-runner.sh" "$b64" >"$T/runner.out" 2>"$T/runner.err"
+    fi
     rc=$?
     python3 - "$T/runner.out" "$T/runner.err" "$rc" <<'PY'
 import json,sys
@@ -89,7 +96,6 @@ setup() {
   printf 'bx_test123\n' > "$T/xdg/box-work/fakerepo.id"
   printf '0' > "$T/probe_fails"
   : > "$T/exec.log"
-  # Fake roster value; never a real secret. Cursor's key lives in cursor.env.
   printf 'GEMINI_API_KEY=test-fixture-no-secret\n' > "$FAKEHOME/.agents/agent-clis.env"
   export BOX_WORK_TEST_T="$T"
   write_stub
@@ -113,19 +119,15 @@ FAKE
   write_fake devin <<'FAKE'
 #!/usr/bin/env bash
 echo "devin $*" >>"$BOX_WORK_TEST_T/calls.log"
-if [[ "${BOX_WORK_DEVIN_AUTH:-personal}" == "personal" ]]; then
-  if [[ -n "${DEVIN_API_KEY+set}" || -n "${DEVIN_TOKEN+set}" || -n "${WINDSURF_API_KEY+set}" ]]; then
-    echo "devin: API env leaked into personal route" >&2; exit 1
-  fi
-else
-  [[ -n "${DEVIN_API_KEY:-}" ]] || { echo "devin: api route without key" >&2; exit 1; }
+if [[ -n "${DEVIN_API_KEY+set}" || -n "${DEVIN_TOKEN+set}" || -n "${WINDSURF_API_KEY+set}" ]]; then
+  echo "devin: API env leaked into personal route" >&2; exit 1
 fi
-for f in --model --respect-workspace-trust --permission-mode -p; do
+for f in --model --respect-workspace-trust --permission-mode --prompt-file -p; do
   [[ " $* " == *" $f "* ]] || { echo "devin: missing $f" >&2; exit 1; }
 done
 pf=""; prev=""
 for a in "$@"; do [[ "$prev" == "--prompt-file" ]] && pf="$a"; prev="$a"; done
-[[ -n "$pf" ]] || { echo "devin: missing --prompt-file" >&2; exit 1; }
+[[ -n "$pf" ]] || { echo "devin: missing --prompt-file value" >&2; exit 1; }
 cat "$pf"
 FAKE
   write_fake gemini <<'FAKE'
@@ -180,6 +182,9 @@ done
 grep -qF "seventeen times twenty three" "$T/bw.out" \
   && pass "multi-word brief arrives intact" \
   || fail "multi-word brief arrives intact" "$(cat "$T/bw.out")"
+grep -qF -- '--cwd /home/user/fakerepo' "$T/exec.log" \
+  && pass "dispatch exec uses explicit repository cwd" \
+  || fail "dispatch exec uses explicit repository cwd" "$(cat "$T/exec.log")"
 
 run_agent muse "say the word banana bread loudly"
 rc="$(cat "$T/bw.rc")"
@@ -192,6 +197,8 @@ grep -qF -- "--workspace /home/user/fakerepo" "$T/calls.log" \
   && pass "muse runs in the explicit repository path" \
   || fail "muse runs in the explicit repository path" "$(cat "$T/calls.log")"
 
+# allow-env lets local vars reach the runner, so the scrub is proven real.
+touch "$T/allow-env"
 DEVIN_API_KEY=should-be-scrubbed DEVIN_TOKEN=should-be-scrubbed WINDSURF_API_KEY=should-be-scrubbed \
   run_agent devin "report the number after six"
 rc="$(cat "$T/bw.rc")"
@@ -200,26 +207,17 @@ rc="$(cat "$T/bw.rc")"
 grep -q "the number after six" "$T/bw.out" \
   && pass "devin personal route scrubs API env and runs" \
   || fail "devin personal route scrubs API env and runs" "$(cat "$T/bw.out") $(cat "$T/bw.err")"
-# Prefix assignments on a function call persist: scrub them so later cases
-# start from a clean environment.
+# Prefix assignments persist on function calls; scrub for later cases.
 unset DEVIN_API_KEY DEVIN_TOKEN WINDSURF_API_KEY
 
-BOX_WORK_DEVIN_AUTH=bogus run_agent devin "anything"
-[ "$(cat "$T/bw.rc")" != "0" ] \
-  && pass "unknown devin auth route fails loudly" \
-  || fail "unknown devin auth route fails loudly" "rc=0 unexpectedly"
-grep -q "BOX_WORK_DEVIN_AUTH" "$T/bw.err" \
-  && pass "unknown devin auth route names the knob" \
-  || fail "unknown devin auth route names the knob" "$(cat "$T/bw.err")"
-
-BOX_WORK_DEVIN_AUTH=api run_agent devin "anything"
-[ "$(cat "$T/bw.rc")" != "0" ] \
-  && pass "devin api route without key fails loudly" \
-  || fail "devin api route without key fails loudly" "rc=0 unexpectedly"
-grep -q "devin.env" "$T/bw.err" \
-  && pass "devin api failure names the credential file" \
-  || fail "devin api failure names the credential file" "$(cat "$T/bw.err")"
-unset BOX_WORK_DEVIN_AUTH
+# An unproven API file must never shadow the personal route: it is not sourced.
+printf 'DEVIN_API_KEY=file-value-never-sourced\n' > "$FAKEHOME/.agents/devin.env"
+DEVIN_API_KEY=should-be-scrubbed run_agent devin "second devin probe"
+[ "$(cat "$T/bw.rc")" = "0" ] \
+  && pass "devin ignores unproven api file and scrubs env" \
+  || fail "devin ignores unproven api file and scrubs env" "rc=$(cat "$T/bw.rc") err: $(cat "$T/bw.err")"
+rm -f "$T/allow-env" "$FAKEHOME/.agents/devin.env"
+unset DEVIN_API_KEY
 
 run_agent gemini "name a green fruit"
 rc="$(cat "$T/bw.rc")"
@@ -244,11 +242,29 @@ before_cursors=$(grep -c "cursor-agent" "$T/calls.log" 2>/dev/null || true)
   && pass "missing cursor key never invokes the CLI" \
   || fail "missing cursor key never invokes the CLI" "cursor-agent lines: $before_cursors"
 
+# Shadowing case: ambient key present, authoritative file absent.
+touch "$T/allow-env"
+CURSOR_API_KEY=shadow-ambient-value run_agent cursor "anything"
+[ "$(cat "$T/bw.rc")" != "0" ] \
+  && pass "ambient cursor key without file fails" \
+  || fail "ambient cursor key without file fails" "rc=0 unexpectedly"
+grep -q "refusing an ambient" "$T/bw.err" \
+  && pass "ambient refusal names the cause" \
+  || fail "ambient refusal names the cause" "$(cat "$T/bw.err")"
+[ "$(grep -c "cursor-agent" "$T/calls.log" 2>/dev/null || true)" = "1" ] \
+  && pass "ambient cursor key never invokes the CLI" \
+  || fail "ambient cursor key never invokes the CLI" "$(cat "$T/calls.log")"
+rm -f "$T/allow-env"
+unset CURSOR_API_KEY
+
 printf 'CURSOR_API_KEY=test-fixture-no-secret\n' > "$FAKEHOME/.agents/cursor.env"
+# allow-env: the exit override is harness control the clean env would strip.
+touch "$T/allow-env"
 FAKE_AGENT_EXIT=3 run_agent cursor "anything"
 [ "$(cat "$T/bw.rc")" = "3" ] \
   && pass "agent failure exit code propagates" \
   || fail "agent failure exit code propagates" "rc=$(cat "$T/bw.rc") want 3"
+rm -f "$T/allow-env"
 unset FAKE_AGENT_EXIT
 
 printf '999' > "$T/probe_fails"
@@ -266,6 +282,5 @@ grep -q "never answered within" "$T/bw.err" \
   && pass "readiness wait is bounded (${elapsed}s)" \
   || fail "readiness wait is bounded (${elapsed}s)" "took too long"
 
-echo "---"
 echo "pass=$PASS fail=$FAIL"
 [ "$FAIL" = "0" ]

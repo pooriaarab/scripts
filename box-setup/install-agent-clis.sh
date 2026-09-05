@@ -142,20 +142,20 @@ log "devin"
 # credentials file is required and API keys alone do not authenticate.
 # env -u DEVIN_API_KEY -u DEVIN_TOKEN -u WINDSURF_API_KEY devin --model swe-1.7 --respect-workspace-trust false --permission-mode dangerous -p "PROMPT"
 # (--prompt-file FILE -p also works.)
-if [ -x "$BIN/devin" ]; then
+if "$BIN/devin" --version >/dev/null 2>&1; then
   note "devin already present ($("$BIN/devin" --version 2>&1 | head -1))"
   mark devin "present"
 else
   # The official installer verifies its artifact checksum and installs the
-  # binary, then can exit nonzero from its interactive setup step. Judge by
-  # the binary on disk, not by that exit code.
+  # binary, then can exit nonzero from its interactive setup step. Judge by a
+  # successful version run, not by that exit code or mere executability.
   curl -fsSL https://cli.devin.ai/install.sh | bash >/dev/null 2>&1
   installer_rc=$?
-  if [ -x "$BIN/devin" ]; then
+  if "$BIN/devin" --version >/dev/null 2>&1; then
     mark devin "installed"
-    (( installer_rc )) && note "devin installer exited $installer_rc after installing the binary (interactive setup); binary validated"
+    (( installer_rc )) && note "devin installer exited $installer_rc after installing the binary (interactive setup); version run validated"
   else
-    mark devin "FAILED (cli.devin.ai/install.sh exit $installer_rc, no binary at $BIN/devin)"
+    mark devin "FAILED (cli.devin.ai/install.sh exit $installer_rc, no working binary at $BIN/devin)"
   fi
 fi
 
@@ -197,10 +197,9 @@ fi
 # endpoint. The key is read at call time from pi's own auth store, so no secret
 # lands in this file.
 #
-# Also cap openrouter's deepseek/deepseek-v3.2 output. pi's bundled catalog
-# declares maxTokens=163840 for that model while OpenRouter reports
-# max_completion_tokens=65536, and an unconstrained request asked for 153497
-# output tokens and failed. The override below pins maxTokens=8192.
+# Cap openrouter deepseek/deepseek-v3.2 at maxTokens=8192: pi's bundled catalog
+# declares 163840 while OpenRouter reports max_completion_tokens=65536, and an
+# unconstrained request asked for 153497 output tokens and failed.
 log "pi provider overrides"
 mkdir -p "$HOME/.pi/agent"
 if [ ! -s "$HOME/.pi/agent/models.json" ]; then

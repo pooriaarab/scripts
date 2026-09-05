@@ -174,11 +174,8 @@ fi
 # already has the committed tree from GitHub; only local edits are missing.
 #
 # A Box can emit `ready` before its first exec succeeds (HTTP 409
-# box_starting), so retry transient startup against the RECORDED id with a
-# bounded deadline. This never creates a replacement: the create path above
-# runs only when no id is recorded, and a recorded-but-unusable id dies loudly
-# instead of falling through to it. An explicit --cwd keeps the probe off the
-# default working directory, which environment pruning can remove.
+# box_starting): retry the RECORDED id with a bounded deadline, never creating
+# a replacement, from explicit --cwd (pruning can remove the default cwd).
 ready=0
 ready_deadline="${BOX_WORK_READY_SECS:-300}"
 ready_start="$(date +%s)"
@@ -208,18 +205,14 @@ case "$MODE" in
     # that silently bills the wrong subscription.
     cat > "$runner" <<RUNNER
 #!/usr/bin/env bash
-# One canonical dispatch path: every agent below runs headless through its
-# verified non-interactive flags. Requested auth routes are explicit and
-# failures are loud -- no silent fallback to another provider or credential.
+# One canonical dispatch path: every agent runs headless through verified
+# flags, with explicit auth and loud failures -- no silent fallback.
 export PATH="\$HOME/.local/bin:\$HOME/.kimi-code/bin:\$HOME/.npm-global/bin:\$PATH"
-# Authoritative provider files, exported not just sourced. cursor.env carries
-# the Cursor API route; agent-clis.env carries the shared roster values.
-# devin.env is deliberately NOT sourced here: the verified Devin route is the
-# personal login, which works with API env vars unset, so importing the API
-# route by default would shadow it.
+# Shared roster values, exported not just sourced. devin.env is never sourced
+# (personal login needs API vars unset); cursor.env is required and sourced by
+# its own branch, never trusted from ambient env.
 set -a
 [ -f "\$HOME/.agents/agent-clis.env" ] && . "\$HOME/.agents/agent-clis.env"
-[ -f "\$HOME/.agents/cursor.env" ] && . "\$HOME/.agents/cursor.env"
 set +a
 cd "/home/user/$NAME" || exit 1
 # The brief arrives base64-encoded. `box exec` joins argv into a shell command
@@ -240,34 +233,28 @@ case "$AGENT" in
     rm -f "\$brief_file"
     exit \$rc ;;
   cursor)
+    # Authoritative file required; ambient keys never authenticate.
+    cursor_env="\$HOME/.agents/cursor.env"
+    if [ ! -s "\$cursor_env" ]; then
+      echo "box-work: cursor needs \$HOME/.agents/cursor.env (missing or empty); refusing an ambient CURSOR_API_KEY." >&2
+      exit 1
+    fi
+    unset CURSOR_API_KEY
+    set -a; . "\$cursor_env"; set +a
     if [ -z "\${CURSOR_API_KEY:-}" ]; then
-      echo "box-work: cursor needs CURSOR_API_KEY in \$HOME/.agents/cursor.env (missing or empty); refusing to run unauthenticated." >&2
+      echo "box-work: cursor needs CURSOR_API_KEY exported by \$HOME/.agents/cursor.env (missing or empty)." >&2
       exit 1
     fi
     cursor-agent -p --trust --force --model composer-2.5 --output-format json "\$1" ;;
   devin)
-    # Explicit auth route, default personal. The personal login works with API
-    # env vars unset; the api route keeps them and surfaces service errors
-    # without falling back to another route.
-    case "\${BOX_WORK_DEVIN_AUTH:-personal}" in
-      personal)
-        brief_file="\$(mktemp)"
-        printf '%s' "\$1" > "\$brief_file"
-        env -u DEVIN_API_KEY -u DEVIN_TOKEN -u WINDSURF_API_KEY devin --model swe-1.7 --respect-workspace-trust false --permission-mode dangerous --prompt-file "\$brief_file" -p
-        rc=\$?
-        rm -f "\$brief_file"
-        exit \$rc ;;
-      api)
-        [ -f "\$HOME/.agents/devin.env" ] && { set -a; . "\$HOME/.agents/devin.env"; set +a; }
-        if [ -z "\${DEVIN_API_KEY:-}" ]; then
-          echo "box-work: devin api route needs DEVIN_API_KEY in \$HOME/.agents/devin.env (missing or empty)." >&2
-          exit 1
-        fi
-        devin --model swe-1.7 --respect-workspace-trust false --permission-mode dangerous -p "\$1" ;;
-      *)
-        echo "box-work: unsupported BOX_WORK_DEVIN_AUTH='\${BOX_WORK_DEVIN_AUTH:-personal}' (want personal|api)." >&2
-        exit 2 ;;
-    esac ;;
+    # Proven personal login only: API vars are scrubbed (current CLI ignores
+    # them), no unproven API route is offered, no fallback.
+    brief_file="\$(mktemp)"
+    printf '%s' "\$1" > "\$brief_file"
+    env -u DEVIN_API_KEY -u DEVIN_TOKEN -u WINDSURF_API_KEY devin --model swe-1.7 --respect-workspace-trust false --permission-mode dangerous --prompt-file "\$brief_file" -p
+    rc=\$?
+    rm -f "\$brief_file"
+    exit \$rc ;;
   kimi)   kimi -m moonshot-ai/kimi-k3 -p "\$1" ;;
   codex)  codex exec "\$1" ;;
   gemini)
@@ -283,7 +270,7 @@ RUNNER
     "$BOX" scp "$runner" "$ID:/home/user/box-work-run.sh" >/dev/null 2>&1
     rm -f "$runner"
     b64brief="$(printf '%s' "$BRIEF" | base64 | tr -d '\n')"
-    "$BOX" exec "$ID" --timeout 580 --json -- bash /home/user/box-work-run.sh "$b64brief" \
+    "$BOX" exec --cwd "/home/user/$NAME" "$ID" --timeout 580 --json -- bash /home/user/box-work-run.sh "$b64brief" \
       | python3 -c 'import sys,json
 d=json.load(sys.stdin)
 o=(d.get("stdout") or "").rstrip()
