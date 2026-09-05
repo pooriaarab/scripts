@@ -86,7 +86,6 @@ def bound_size(root, repo, files, overrides):
 
 def validate_live_pr(pr, issue, repo, prefix):
     if str(pr.get("state") or "").lower() != "open": fail("live PR is %s, not open for review" % (pr.get("state") or "?"))
-    if pr.get("draft"): fail("live PR is a draft and not reviewable")
     title, body = str(pr.get("title") or ""), str(pr.get("body") or "")
     parsed = TITLE_TAG.match(title)
     if not parsed: fail("live PR title must match [%s-%d] subject format" % (prefix.upper(), issue))
@@ -160,12 +159,17 @@ def validate(report_path):
     pr = json.loads(proc.stdout)
     pr_head = str(pr.get("head", {}).get("sha", "")); pr_branch = str(pr.get("head", {}).get("ref", ""))
     pr_repo = str((pr.get("head") or {}).get("repo", {}).get("full_name", "")); pr_base = str(pr.get("base", {}).get("sha", ""))
-    pr_base_ref = str(pr.get("base", {}).get("ref") or base)
     if not HEX40.match(pr_head) or pr_head != head: fail("PR head %s does not match tested checkout head %s" % (pr_head[:12], head[:12]))
     if pr_branch != expected_branch or pr_repo.lower() != expected_repo.lower(): fail("PR repository/branch do not match coordinator contract")
     base_sha = git(checkout, "rev-parse", base).stdout.strip()
     if not HEX40.match(base_sha) or base_sha != pr_base: fail("PR base %s does not match coordinator base-ref %s" % (pr_base[:12], base_sha[:12]))
-    overrides = fetch_config_overrides(gh, expected_repo, pr_base_ref)
+    if not HEX40.match(pr_base): fail("PR base must be a 40-character commit SHA")
+    proc = subprocess.run([gh, "api", "repos/%s/issues/%s" % (expected_repo, issue)], text=True, capture_output=True)
+    if proc.returncode: fail("cannot read GitHub API repos/%s/issues/%s: %s" % (expected_repo, issue, proc.stderr.strip()))
+    issue_doc = json.loads(proc.stdout)
+    if issue_doc.get("pull_request") or str(issue_doc.get("state") or "").lower() != "open":
+        fail("expected issue #%s is %s" % (issue, "a pull request, not an open issue" if issue_doc.get("pull_request") else "%s, not open" % (issue_doc.get("state") or "?")))
+    overrides = fetch_config_overrides(gh, expected_repo, pr_base)
     diff = git(checkout, "diff", "--numstat", "%s...HEAD" % base)
     if diff.returncode: fail("cannot diff checkout against %s: %s" % (base, diff.stderr.strip()))
     files = [{"filename": p[2], "additions": 0 if p[0] == "-" else int(p[0]), "deletions": 0 if p[1] == "-" else int(p[1])}

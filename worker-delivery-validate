@@ -1,9 +1,5 @@
 #!/usr/bin/env bash
 # worker-delivery-validate — reject unsupported worker completion claims.
-# Usage: worker-delivery-validate --report FILE --checkout DIR --pull N --expected-repository REPO
-#   --expected-branch BRANCH --expected-issue N --expected-outcome TEXT [--base-ref REF]
-#   --bound-verify-command CMD --bound-verify-exit N --bound-verify-head SHA
-#   [--bound-setup-command CMD --bound-setup-exit N --bound-setup-head SHA]
 set -uo pipefail
 ROOT="${PR_STANDARDS_ROOT:-$(cd "$(dirname "$0")" && pwd)}"
 GIT="${GIT_CLI:-git}"
