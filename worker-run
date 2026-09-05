@@ -36,12 +36,17 @@
 #   5  the worker changed something but delivery evidence failed
 set -uo pipefail
 
-DIR=""; VERIFY=""; DELIVERY_REPORT=""; CMD=()
+DIR=""; VERIFY=""; DELIVERY_REPORT=""; PULL=""; EXPECTED_ISSUE=""; EXPECTED_OUTCOME=""
+BASE_REF="main"; CMD=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --dir)    [ $# -ge 2 ] || { echo "worker-run: --dir needs a value" >&2; exit 4; }; DIR="$2"; shift 2 ;;
     --verify) [ $# -ge 2 ] || { echo "worker-run: --verify needs a command" >&2; exit 4; }; VERIFY="$2"; shift 2 ;;
     --delivery-report) [ $# -ge 2 ] || { echo "worker-run: --delivery-report needs a path" >&2; exit 4; }; DELIVERY_REPORT="$2"; shift 2 ;;
+    --pull) [ $# -ge 2 ] || { echo "worker-run: --pull needs a value" >&2; exit 4; }; PULL="$2"; shift 2 ;;
+    --expected-issue) [ $# -ge 2 ] || { echo "worker-run: --expected-issue needs a value" >&2; exit 4; }; EXPECTED_ISSUE="$2"; shift 2 ;;
+    --expected-outcome) [ $# -ge 2 ] || { echo "worker-run: --expected-outcome needs a value" >&2; exit 4; }; EXPECTED_OUTCOME="$2"; shift 2 ;;
+    --base-ref) [ $# -ge 2 ] || { echo "worker-run: --base-ref needs a value" >&2; exit 4; }; BASE_REF="$2"; shift 2 ;;
     -h|--help) sed -n '2,32p' "$0"; exit 0 ;;
     --)       shift; CMD=("$@"); break ;;
     *)        echo "worker-run: unknown flag: $1" >&2; exit 4 ;;
@@ -136,9 +141,23 @@ if [ "$worker_status" -ne 0 ]; then
 fi
 
 if [ -n "$DELIVERY_REPORT" ]; then
+  [ -n "$PULL" ] || { echo "worker-run: --pull is required with --delivery-report" >&2; exit 4; }
+  [ -n "$EXPECTED_ISSUE" ] || { echo "worker-run: --expected-issue is required with --delivery-report" >&2; exit 4; }
+  [ -n "$EXPECTED_OUTCOME" ] || { echo "worker-run: --expected-outcome is required with --delivery-report" >&2; exit 4; }
+  [ -n "$VERIFY" ] || { echo "worker-run: --verify is required with --delivery-report" >&2; exit 4; }
   VALIDATOR="$(cd "$(dirname "$0")" && pwd)/worker-delivery-validate"
   echo "worker-run: validating delivery report: $DELIVERY_REPORT"
-  if ! "$VALIDATOR" --report "$DELIVERY_REPORT" --checkout "$DIR"; then
+  VALIDATOR_ARGS=(
+    --report "$DELIVERY_REPORT"
+    --checkout "$DIR"
+    --pull "$PULL"
+    --expected-issue "$EXPECTED_ISSUE"
+    --expected-outcome "$EXPECTED_OUTCOME"
+    --base-ref "$BASE_REF"
+    --bound-verify-command "$VERIFY"
+    --bound-verify-exit 0
+  )
+  if ! "$VALIDATOR" "${VALIDATOR_ARGS[@]}"; then
     echo "worker-run: delivery evidence failed." >&2
     exit 5
   fi

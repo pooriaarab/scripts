@@ -1,103 +1,37 @@
 #!/usr/bin/env bash
 # worker-delivery-validate — reject unsupported worker completion claims.
-# Usage: worker-delivery-validate --report FILE --checkout DIR [--base-ref REF] [--pull N]
-# Report: JSON schema 1 (repository, issue, branch, head, tested_head, outcome,
-# closing_ref, implementation_status, verification_commands, setup_commands,
-# unresolved_failures, claimed_counts, assisted_by; optional ci, merge_attribution).
-# Exit 0 valid; 1 failure; 2 usage. Tests: GH_CLI, GIT_CLI, PR_STANDARDS_ROOT.
+# Usage: worker-delivery-validate --report FILE --checkout DIR --pull N
+#   --expected-issue N --expected-outcome TEXT [--base-ref REF]
+#   [--bound-verify-command CMD] [--bound-verify-exit N]
 set -uo pipefail
-GH="${GH_CLI:-gh}"; GIT="${GIT_CLI:-git}"
 ROOT="${PR_STANDARDS_ROOT:-$(cd "$(dirname "$0")" && pwd)}"
-die(){ echo "worker-delivery-validate: FAIL: $*" >&2; exit 1; }
+GIT="${GIT_CLI:-git}"
 usage(){ echo "worker-delivery-validate: $*" >&2; exit 2; }
 REPORT=""; CHECKOUT=""; BASE_REF="main"; PULL=""
+EXPECTED_ISSUE=""; EXPECTED_OUTCOME=""
+BOUND_VERIFY_CMD=""; BOUND_VERIFY_EXIT=""
 while [ $# -gt 0 ]; do case "$1" in
   --report) [ $# -ge 2 ] || usage "--report needs a value"; REPORT="$2"; shift 2 ;;
   --checkout) [ $# -ge 2 ] || usage "--checkout needs a value"; CHECKOUT="$2"; shift 2 ;;
   --base-ref) [ $# -ge 2 ] || usage "--base-ref needs a value"; BASE_REF="$2"; shift 2 ;;
   --pull) [ $# -ge 2 ] || usage "--pull needs a value"; PULL="$2"; shift 2 ;;
-  -h|--help) sed -n '2,8p' "$0"; exit 0 ;;
+  --expected-issue) [ $# -ge 2 ] || usage "--expected-issue needs a value"; EXPECTED_ISSUE="$2"; shift 2 ;;
+  --expected-outcome) [ $# -ge 2 ] || usage "--expected-outcome needs a value"; EXPECTED_OUTCOME="$2"; shift 2 ;;
+  --bound-verify-command) [ $# -ge 2 ] || usage "--bound-verify-command needs a value"; BOUND_VERIFY_CMD="$2"; shift 2 ;;
+  --bound-verify-exit) [ $# -ge 2 ] || usage "--bound-verify-exit needs a value"; BOUND_VERIFY_EXIT="$2"; shift 2 ;;
+  -h|--help) sed -n '2,6p' "$0"; exit 0 ;;
   *) usage "unknown flag: $1" ;;
 esac; done
 [ -n "$REPORT" ] && [ -f "$REPORT" ] || usage "--report is required"
 [ -n "$CHECKOUT" ] && [ -d "$CHECKOUT" ] || usage "--checkout is required"
+[ -n "$PULL" ] || usage "--pull is required"
+[ -n "$EXPECTED_ISSUE" ] || usage "--expected-issue is required"
+[ -n "$EXPECTED_OUTCOME" ] || usage "--expected-outcome is required"
 command -v python3 >/dev/null || usage "python3 is required"
-command -v node >/dev/null || usage "node is required"
 "$GIT" -C "$CHECKOUT" rev-parse HEAD >/dev/null 2>&1 || usage "checkout has no commits"
-[ -f "$ROOT/pr-standards.mjs" ] || usage "missing pr-standards.mjs"
-CHECKOUT_HEAD="$("$GIT" -C "$CHECKOUT" rev-parse HEAD)"
-CHECKOUT_BRANCH="$("$GIT" -C "$CHECKOUT" symbolic-ref --short HEAD 2>/dev/null || true)"
-ORIGIN="$("$GIT" -C "$CHECKOUT" remote get-url origin 2>/dev/null || true)"
-CHECKOUT_REPO="$(printf '%s' "$ORIGIN" | sed -E 's#(git@github.com:|https://github.com/)##; s#\.git$##')"
-export REPORT CHECKOUT CHECKOUT_HEAD CHECKOUT_BRANCH CHECKOUT_REPO BASE_REF PULL ROOT
-python3 - "$REPORT" <<'PY' || exit $?
-import json, os, re, subprocess, sys
-fail=lambda m:(print("worker-delivery-validate: FAIL: %s"%m,file=sys.stderr) or sys.exit(1))
-p=sys.argv[1]; checkout=os.environ["CHECKOUT"]; head=os.environ["CHECKOUT_HEAD"]
-branch=os.environ["CHECKOUT_BRANCH"]; origin=os.environ["CHECKOUT_REPO"]
-base=os.environ["BASE_REF"]; pull=os.environ.get("PULL","").strip(); root=os.environ["ROOT"]
-try: doc=json.load(open(p))
-except Exception as e: fail("invalid report JSON: %s"%e)
-req=["repository","issue","branch","head","tested_head","outcome","closing_ref",
-     "implementation_status","verification_commands","setup_commands",
-     "unresolved_failures","claimed_counts","assisted_by"]
-if doc.get("schema")!=1 or [k for k in req if k not in doc]: fail("report schema/fields invalid")
-hex40=re.compile(r"^[0-9a-f]{40}$"); close=re.compile(r"(?i)\b(?:closes?|fix(?:es|ed)?|resolves?)\s*:?\s*(?:([\w.-]+/[\w.-]+))?#([0-9]+)\b")
-assist=re.compile(r"^[^\s:,]+:[^\s,]+$"); issue=doc["issue"]; repo=str(doc["repository"])
-if not isinstance(issue,int) or issue<1: fail("issue must be a positive integer")
-for f in ("head","tested_head"):
-    if not hex40.match(str(doc[f])): fail("%s must be 40 lowercase hex"%f)
-if repo.lower()!=origin.lower(): fail("report repository '%s' does not match checkout origin '%s'"%(repo,origin))
-if branch and branch!=doc["branch"]: fail("report branch '%s' does not match checkout branch '%s'"%(doc["branch"],branch))
-if head!=doc["head"]: fail("report head %s does not match checkout HEAD %s"%(doc["head"],head))
-if doc["tested_head"]!=doc["head"] or doc["tested_head"]!=head: fail("stale tested_head %s"%doc["tested_head"])
-refs=close.findall(str(doc["closing_ref"]))
-if len(refs)!=1 or int(refs[0][1])!=issue: fail("closing_ref must close issue #%s"%issue)
-if refs[0][0] and refs[0][0].lower()!=repo.lower(): fail("closing_ref targets wrong repo")
-st=str(doc["implementation_status"])
-if st=="plan": fail("plan-only delivery is not implementation")
-if st!="complete" or not str(doc["outcome"]).strip(): fail("outcome/implementation_status invalid")
-ver=doc["verification_commands"]
-if not isinstance(ver,list) or not ver or any(not isinstance(i,dict) or not str(i.get("command","")).strip() or i.get("exit")!=0 for i in ver):
-    fail("complete delivery requires verification_commands with exit 0")
-if doc["unresolved_failures"]: fail("unresolved failures remain: %s"%"; ".join(map(str,doc["unresolved_failures"])))
-setup=doc["setup_commands"]; locks=("package-lock.json","bun.lockb","pnpm-lock.yaml","yarn.lock","Cargo.lock")
-has_lock=any(os.path.isfile(os.path.join(checkout,n)) for n in locks)
-if has_lock and not any(isinstance(s,dict) and s.get("exit")==0 and str(s.get("command","")).strip() for s in (setup or [])):
-    fail("missing setup evidence for committed lockfiles")
-claimed=doc["claimed_counts"]
-if not isinstance(claimed,dict) or any(k not in claimed or not isinstance(claimed[k],int) or claimed[k]<0 for k in ("lines","files")):
-    fail("claimed_counts invalid")
-if not isinstance(doc["assisted_by"],list) or not doc["assisted_by"] or any(not assist.match(str(x)) for x in doc["assisted_by"]):
-    fail("assisted_by must list agent:model entries")
-if doc.get("merge_signed_off_by"): fail("merge_signed_off_by must not be set; root signoff cannot be inferred")
-if doc.get("merge_attribution") not in (None,"","unknown"): fail("merge_attribution must be omitted or 'unknown'")
-diff=subprocess.run(["git","-C",checkout,"diff","--numstat","%s...HEAD"%base],text=True,capture_output=True)
-if diff.returncode: fail("cannot diff checkout against %s: %s"%(base,diff.stderr.strip()))
-files=[]
-for line in diff.stdout.splitlines():
-    a,d,n=line.split("\t"); files.append({"filename":n,"additions":int(a),"deletions":int(d)}) if len(line.split("\t"))==3 and a!="-" else None
-count=subprocess.run(["node","--input-type=module","-e",
-    "import {summarizeFiles,DEFAULT_CONFIG} from './pr-standards.mjs';"
-    "console.log(JSON.stringify(summarizeFiles(JSON.parse(process.argv[1]),DEFAULT_CONFIG)));",json.dumps(files)],
-    cwd=root,text=True,capture_output=True)
-if count.returncode: fail("cannot compute counted size: %s"%count.stderr.strip())
-actual=json.loads(count.stdout)
-if claimed["lines"]!=actual["countedLines"] or claimed["files"]!=actual["countedFiles"]:
-    fail("claimed %d/%d counted lines/files but checkout has %d/%d"%(claimed["lines"],claimed["files"],actual["countedLines"],actual["countedFiles"]))
-if actual["countedLines"]>500 or actual["countedFiles"]>40: fail("checkout exceeds 500 lines or 40 files")
-ci=doc.get("ci")
-if ci is not None:
-    if not isinstance(ci,dict) or not hex40.match(str(ci.get("head",""))) or ci["head"]!=head: fail("ci.head must match checkout HEAD")
-    if not pull: fail("--pull is required when report includes ci")
-    proc=subprocess.run([os.environ.get("GH_CLI","gh"),"pr","checks",pull,"--repo",repo],text=True,capture_output=True)
-    if proc.returncode not in (0,1): fail("cannot read PR checks: %s"%proc.stderr.strip())
-    live={line.split("\t",2)[0]:line.split("\t",2)[1] for line in proc.stdout.splitlines() if "\t" in line}
-    if not live: fail("no PR checks returned for %s#%s"%(repo,pull))
-    ok={"pass":("pass","success"),"fail":("fail","failure"),"pending":("pending","in_progress"),"skipped":("skipping","skipped")}
-    for item in ci.get("checks") or []:
-        name,bucket=str(item.get("name","")),str(item.get("bucket",""))
-        if bucket not in ok or name not in live: fail("ci check %r invalid or missing on PR"%name)
-        if live[name] not in ok[bucket]: fail("false-green ci: %r reported as %s but latest check is %s"%(name,bucket,live[name]))
-print("worker-delivery-validate: %s#%s delivery evidence valid at %s"%(repo,issue,head[:12]))
-PY
+[ -f "$ROOT/worker-delivery-validate.py" ] || usage "missing worker-delivery-validate.py"
+export CHECKOUT CHECKOUT_HEAD="$("$GIT" -C "$CHECKOUT" rev-parse HEAD)"
+export CHECKOUT_BRANCH="$("$GIT" -C "$CHECKOUT" symbolic-ref --short HEAD 2>/dev/null || true)"
+export CHECKOUT_REPO="$(printf '%s' "$("$GIT" -C "$CHECKOUT" remote get-url origin 2>/dev/null || true)" | sed -E 's#(git@github.com:|https://github.com/)##; s#\.git$##')"
+export BASE_REF PULL ROOT EXPECTED_ISSUE EXPECTED_OUTCOME BOUND_VERIFY_CMD BOUND_VERIFY_EXIT GH_CLI="${GH_CLI:-gh}"
+exec python3 "$ROOT/worker-delivery-validate.py" "$REPORT"
