@@ -53,6 +53,8 @@ Not part of the diagnosis order above.
 | `install-pr-hooks` | Installs the `pr-standards` pre-push hook into local pooriaarab checkouts that have adopted `.github/pr-standards.json`. Dry-run by default; `--apply` writes, `--uninstall --apply` removes. See [pr-standards.md](pr-standards.md). |
 | `fleet-digest` | One message a day that needs a person: owner-only label requests, failing default-branch CI, stale PRs and green PRs that wait for a human. Prints `Nothing needs you.` when empty. |
 | `fleet-ci-census` | Per repo and workflow: run count, p50/p95 wall time, total minutes, failure and cancellation rates. JSON by default; `--markdown` ranks by total minutes. A run count at the page cap is a floor, not a total. See [fleet-ci-census.md](fleet-ci-census.md). |
+| `append-point-scan` | Flag shared append points from repo contents alone: freshness gates, enumerated scripts, ordinal registries, committed junk. Answers what WILL conflict once a repo gets busy. `./append-point-scan <dir-or-owner/repo>`. |
+| `merge-hotspots` | Rank files by share of recent commits and mark derived vs source. Churn is not contention: a busy file only serializes merges when several PRs touch it. `./merge-hotspots <dir-or-owner/repo>`. |
 
 ## Tests
 
@@ -70,6 +72,8 @@ python3 build-repo-prefixes.test.py
 python3 install-pr-hooks.test.py
 ./adopt-branch-pattern.test.sh
 ./pr-standards-rollout-labels.test.sh
+./append-point-scan.test.sh
+./merge-hotspots.test.sh
 ```
 
 ## spec-audit
