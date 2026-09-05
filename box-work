@@ -201,6 +201,17 @@ case "$MODE" in
   agent)
     [[ -n "$AGENT" && -n "$BRIEF" ]] || die "--agent needs a CLI name and a brief"
     runner="$(mktemp)"
+    # Bake the caller's heartbeat knobs into the runner as safe double-quoted
+    # literals: a raw value containing `$`, a backtick, `"` or `\` must never
+    # resurface as executable syntax when the uploaded script is parsed a
+    # second time, on the Box.
+    hb_dq_escape() {
+      local s="$1"
+      s="${s//\\/\\\\}"; s="${s//\"/\\\"}"; s="${s//\$/\\\$}"; s="${s//\`/\\\`}"
+      printf '%s' "$s"
+    }
+    HB_FILE_ESC="$(hb_dq_escape "${BOX_WORK_HEARTBEAT_FILE:-/home/user/.box-reap-heartbeat}")"
+    HB_SECS_ESC="$(hb_dq_escape "${BOX_WORK_HEARTBEAT_SECS-30}")"
     # Never a bare `claude`: ascii injects its own CLAUDE_CODE_OAUTH_TOKEN and
     # that silently bills the wrong subscription.
     cat > "$runner" <<RUNNER
@@ -220,8 +231,8 @@ cd "/home/user/$NAME" || exit 1
 # the agent runs; the EXIT trap stops updates when the job ends, so a dead
 # job's file goes stale and keeps no exemption. The helper also exits when
 # its parent is gone, so even an uncatchable kill leaves no orphan.
-HEARTBEAT_FILE="${BOX_WORK_HEARTBEAT_FILE:-/home/user/.box-reap-heartbeat}"
-HEARTBEAT_SECS="${BOX_WORK_HEARTBEAT_SECS-30}"
+HEARTBEAT_FILE="$HB_FILE_ESC"
+HEARTBEAT_SECS="$HB_SECS_ESC"
 case "\$HEARTBEAT_SECS" in ''|*[!0-9]*|0)
   echo "box-work-run: invalid BOX_WORK_HEARTBEAT_SECS \"\$HEARTBEAT_SECS\": positive integer seconds required" >&2
   exit 2 ;;
