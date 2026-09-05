@@ -32,9 +32,9 @@ scan() {
   rc=$?
 }
 
-# FRESHNESS-GATE positive: content-rabbit shape. Root package.json `ci`
-# calls a :check script that has a :generate sibling. format:check is a
-# prettier linter in the same manifest and must stay quiet.
+# FRESHNESS-GATE positive: ci calls a :check that has a :generate sibling.
+# format:check is a prettier linter in the same manifest and must stay quiet.
+# The finding names the PR path so the reader knows which edge to cut.
 d=$(mkrepo)
 cat > "$d/package.json" <<'JSON'
 {"scripts": {
@@ -46,7 +46,7 @@ cat > "$d/package.json" <<'JSON'
 JSON
 commit_all "$d" init
 scan "$d"
-if [ "$rc" -eq 0 ] && echo "$out" | grep -q "FRESHNESS-GATE" && echo "$out" | grep -q "next-surface:check" && ! echo "$out" | grep -q "format:check"; then
+if [ "$rc" -eq 0 ] && echo "$out" | grep -q "FRESHNESS-GATE" && echo "$out" | grep -q "ci -> next-surface:check" && ! echo "$out" | grep -q "format:check"; then
   ok "FRESHNESS-GATE fires on --check with a sibling generator"
 else
   fail_msg "FRESHNESS-GATE positive — exit $rc output: $out"
@@ -65,6 +65,67 @@ elif echo "$out" | grep -q "FRESHNESS-GATE"; then
   fail_msg "format:check must not flag — output: $out"
 else
   ok "format:check without a generate sibling does not flag"
+fi
+
+# FRESHNESS-GATE positive: ci reaches a :check through an intermediate
+# script. npm/pnpm/bun run edges all count. qa -> ci is a cycle.
+d=$(mkrepo)
+cat > "$d/package.json" <<'JSON'
+{"scripts": {
+  "ci": "npm run qa",
+  "qa": "pnpm run next-surface:check && bun run ci",
+  "next-surface:check": "node scripts/check.mjs --check --manifest s.json",
+  "next-surface:generate": "node scripts/generate.mjs"
+}}
+JSON
+commit_all "$d" init
+scan "$d"
+if [ "$rc" -eq 0 ] && echo "$out" | grep -q "FRESHNESS-GATE" && echo "$out" | grep -q "ci -> qa -> next-surface:check"; then
+  ok "FRESHNESS-GATE names the transitive PR path"
+else
+  fail_msg "FRESHNESS-GATE transitive — exit $rc output: $out"
+fi
+
+# FRESHNESS-GATE negative: content-rabbit shape. :check exists with a
+# :generate sibling, but ci never reaches it (main-only round-trip).
+d=$(mkrepo)
+cat > "$d/package.json" <<'JSON'
+{"scripts": {
+  "ci": "bun run next-surface:test && turbo run lint typecheck test build",
+  "next-surface:test": "bun test scripts/next-surface-inventory",
+  "next-surface:check": "node scripts/check.mjs --check --manifest s.json",
+  "next-surface:generate": "node scripts/generate.mjs",
+  "tanstack-shells:check": "node scripts/shells.mjs --check",
+  "tanstack-shells:generate": "node scripts/shells.mjs",
+  "format:check": "prettier --check ."
+}}
+JSON
+commit_all "$d" init
+scan "$d"
+if [ "$rc" -ne 0 ]; then
+  fail_msg "unreachable :check — scan did not run (exit $rc): $out"
+elif echo "$out" | grep -q "FRESHNESS-GATE"; then
+  fail_msg "unreachable :check must not flag — output: $out"
+else
+  ok "unreachable :check with a generate sibling does not flag"
+fi
+
+# Candidate :check, no ci, no pull_request workflow. Do not go quiet.
+d=$(mkrepo)
+cat > "$d/package.json" <<'JSON'
+{"scripts": {
+  "next-surface:check": "node scripts/check.mjs --check --manifest s.json",
+  "next-surface:generate": "node scripts/generate.mjs"
+}}
+JSON
+commit_all "$d" init
+scan "$d"
+if [ "$rc" -ne 0 ]; then
+  fail_msg "no entrypoint — scan did not run (exit $rc): $out"
+elif echo "$out" | grep -q "no PR entrypoint"; then
+  ok "missing PR entrypoint is reported, not silent"
+else
+  fail_msg "missing PR entrypoint must be reported — output: $out"
 fi
 
 # ENUMERATED-SCRIPT positive: one script value over 400 chars.
