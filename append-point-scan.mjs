@@ -52,6 +52,76 @@ function stem(name) {
   return i === -1 ? name : name.slice(0, i);
 }
 
+// bun/npm/pnpm run <script>. Strip quotes; skip flags like --silent.
+function scriptEdges(value) {
+  if (typeof value !== 'string') return [];
+  const names = [];
+  for (const m of value.matchAll(/\b(?:bun|npm|pnpm)\s+run\s+([^\s&|;]+)/g)) {
+    const n = m[1].replace(/^['"]+|['"]+$/g, '');
+    if (n && !n.startsWith('-')) names.push(n);
+  }
+  return names;
+}
+
+function isPullRequestWorkflow(text) {
+  const cut = text.search(/^jobs\s*:/m);
+  const head = cut === -1 ? text : text.slice(0, cut);
+  return /\bpull_request\b/.test(head);
+}
+
+// Prefer the ci script. If the repo has none, take bun/npm/pnpm run
+// names from pull_request workflows. found is false when both miss.
+function prEntrypoints(repo, ref, files, rootScripts) {
+  if (typeof rootScripts.ci === 'string') {
+    return { names: ['ci'], found: true };
+  }
+  const names = [];
+  const seen = new Set();
+  for (const f of files) {
+    if (!/^\.github\/workflows\/[^/]+\.ya?ml$/.test(f)) continue;
+    const text = git(repo, 'show', `${ref}:${f}`);
+    if (!isPullRequestWorkflow(text)) continue;
+    for (const n of scriptEdges(text)) {
+      if (seen.has(n)) continue;
+      seen.add(n);
+      names.push(n);
+    }
+  }
+  return { names, found: names.length > 0 };
+}
+
+// BFS. parent.has(name) is the visited set, so a cycle cannot re-queue.
+function reachableFrom(scripts, entrypoints) {
+  const parent = new Map();
+  const queue = [];
+  for (const e of entrypoints) {
+    if (typeof scripts[e] !== 'string' || parent.has(e)) continue;
+    parent.set(e, null);
+    queue.push(e);
+  }
+  while (queue.length > 0) {
+    const cur = queue.shift();
+    for (const nxt of scriptEdges(scripts[cur])) {
+      if (typeof scripts[nxt] !== 'string' || parent.has(nxt)) continue;
+      parent.set(nxt, cur);
+      queue.push(nxt);
+    }
+  }
+  return parent;
+}
+
+function pathFrom(parent, name) {
+  const parts = [name];
+  const seen = new Set([name]);
+  let cur = parent.get(name);
+  while (cur != null && !seen.has(cur)) {
+    seen.add(cur);
+    parts.unshift(cur);
+    cur = parent.get(cur);
+  }
+  return parts.join(' -> ');
+}
+
 export function scanRepo(repo) {
   const ref = resolveRef(repo);
   const files = git(repo, 'ls-tree', '-r', '--name-only', ref).split('\n').filter(Boolean);
@@ -68,20 +138,40 @@ export function scanRepo(repo) {
   }
 
   // A --check is a freshness gate only when the same package declares a
-  // sibling that generates what is checked. format:check (prettier) has no
-  // format:generate sibling, so it is a linter, not a gate.
+  // sibling that generates what is checked AND a PR-path script reaches
+  // it. format:check (prettier) has no format:generate sibling, so it is
+  // a linter, not a gate. A main-only round-trip --check is not a PR gate.
+  const rootScripts = pjs.length > 0 ? readScripts(repo, ref, pjs[0]) : {};
+  const { names: entrypoints, found: foundEntrypoint } = prEntrypoints(repo, ref, files, rootScripts);
+  const unclassified = [];
   for (const pj of pjs) {
     const scripts = readScripts(repo, ref, pj);
     const names = Object.keys(scripts);
+    const parent = reachableFrom(scripts, entrypoints);
     for (const [k, v] of Object.entries(scripts)) {
       if (typeof v !== 'string' || !CHECK_RE.test(v)) continue;
       const s = stem(k);
       const siblings = names.filter((n) => n !== k && stem(n) === s && GEN_RE.test(n));
       const inline = v.match(INLINE_GEN_RE);
-      if (siblings.length > 0 || (inline && s !== 'format')) {
-        hits.push({ kind: 'FRESHNESS-GATE', where: `${pj} :: ${k}`, detail: `paired generator: ${siblings.length > 0 ? siblings.join(', ') : inline[1]}` });
+      if (!(siblings.length > 0 || (inline && s !== 'format'))) continue;
+      if (!foundEntrypoint) {
+        unclassified.push(`${pj} :: ${k}`);
+        continue;
       }
+      if (!parent.has(k)) continue;
+      hits.push({
+        kind: 'FRESHNESS-GATE',
+        where: `${pj} :: ${pathFrom(parent, k)}`,
+        detail: `paired generator: ${siblings.length > 0 ? siblings.join(', ') : inline[1]}`,
+      });
     }
+  }
+  if (unclassified.length > 0) {
+    hits.push({
+      kind: 'FRESHNESS-GATE',
+      where: 'no PR entrypoint',
+      detail: `no ci script and no pull_request workflow run; left unchecked: ${unclassified.join(', ')}`,
+    });
   }
 
   const ord = files.filter((f) => f.endsWith('_journal.json') || f.includes('migrations/meta'));
