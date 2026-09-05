@@ -33,13 +33,24 @@
 #   2  the worker exited 0 and changed nothing
 #   3  the worker changed something and --verify failed
 #   4  usage or environment error
+#   5  the worker changed something but delivery evidence failed
 set -uo pipefail
 
-DIR=""; VERIFY=""; CMD=()
+DIR=""; VERIFY=""; SETUP=""; DELIVERY_REPORT=""; PULL=""
+EXPECTED_REPOSITORY=""; EXPECTED_BRANCH=""; EXPECTED_ISSUE=""; EXPECTED_OUTCOME=""
+BASE_REF="main"; CMD=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --dir)    [ $# -ge 2 ] || { echo "worker-run: --dir needs a value" >&2; exit 4; }; DIR="$2"; shift 2 ;;
     --verify) [ $# -ge 2 ] || { echo "worker-run: --verify needs a command" >&2; exit 4; }; VERIFY="$2"; shift 2 ;;
+    --setup) [ $# -ge 2 ] || { echo "worker-run: --setup needs a command" >&2; exit 4; }; SETUP="$2"; shift 2 ;;
+    --delivery-report) [ $# -ge 2 ] || { echo "worker-run: --delivery-report needs a path" >&2; exit 4; }; DELIVERY_REPORT="$2"; shift 2 ;;
+    --pull) [ $# -ge 2 ] || { echo "worker-run: --pull needs a value" >&2; exit 4; }; PULL="$2"; shift 2 ;;
+    --expected-repository) [ $# -ge 2 ] || { echo "worker-run: --expected-repository needs a value" >&2; exit 4; }; EXPECTED_REPOSITORY="$2"; shift 2 ;;
+    --expected-branch) [ $# -ge 2 ] || { echo "worker-run: --expected-branch needs a value" >&2; exit 4; }; EXPECTED_BRANCH="$2"; shift 2 ;;
+    --expected-issue) [ $# -ge 2 ] || { echo "worker-run: --expected-issue needs a value" >&2; exit 4; }; EXPECTED_ISSUE="$2"; shift 2 ;;
+    --expected-outcome) [ $# -ge 2 ] || { echo "worker-run: --expected-outcome needs a value" >&2; exit 4; }; EXPECTED_OUTCOME="$2"; shift 2 ;;
+    --base-ref) [ $# -ge 2 ] || { echo "worker-run: --base-ref needs a value" >&2; exit 4; }; BASE_REF="$2"; shift 2 ;;
     -h|--help) sed -n '2,32p' "$0"; exit 0 ;;
     --)       shift; CMD=("$@"); break ;;
     *)        echo "worker-run: unknown flag: $1" >&2; exit 4 ;;
@@ -113,12 +124,37 @@ fi
 echo "worker-run: the worktree changed."
 receipt
 
+BOUND_SETUP_CMD=""; BOUND_SETUP_EXIT=""; BOUND_SETUP_HEAD=""
+BOUND_VERIFY_CMD=""; BOUND_VERIFY_EXIT=""; BOUND_VERIFY_HEAD=""
+if [ -n "$SETUP" ]; then
+  BOUND_SETUP_HEAD=$(git -C "$DIR" rev-parse HEAD)
+  BOUND_SETUP_CMD="$SETUP"
+  echo "worker-run: setup with: $SETUP"
+  if ( cd "$DIR" && eval "$SETUP" ); then
+    BOUND_SETUP_EXIT=0
+    echo "worker-run: setup passed."
+  else
+    setup_status=$?
+    BOUND_SETUP_EXIT=$setup_status
+    if [ "$worker_status" -ne 0 ]; then
+      echo "worker-run: the command changed files but exited $worker_status (setup also failed, exit $setup_status)." >&2
+      exit 1
+    fi
+    echo "worker-run: the worker changed files but setup failed (exit $setup_status)." >&2
+    exit 3
+  fi
+fi
+
 if [ -n "$VERIFY" ]; then
+  BOUND_VERIFY_HEAD=$(git -C "$DIR" rev-parse HEAD)
+  BOUND_VERIFY_CMD="$VERIFY"
   echo "worker-run: verifying with: $VERIFY"
   if ( cd "$DIR" && eval "$VERIFY" ); then
+    BOUND_VERIFY_EXIT=0
     echo "worker-run: verify passed."
   else
     verify_status=$?
+    BOUND_VERIFY_EXIT=$verify_status
     if [ "$worker_status" -ne 0 ]; then
       echo "worker-run: the command changed files but exited $worker_status (verify also failed, exit $verify_status)." >&2
       exit 1
@@ -131,5 +167,19 @@ fi
 if [ "$worker_status" -ne 0 ]; then
   echo "worker-run: the command changed files but exited $worker_status." >&2
   exit 1
+fi
+
+if [ -n "$DELIVERY_REPORT" ]; then
+  if [ -z "$PULL" ] || [ -z "$EXPECTED_REPOSITORY" ] || [ -z "$EXPECTED_BRANCH" ] || [ -z "$EXPECTED_ISSUE" ] || [ -z "$EXPECTED_OUTCOME" ] || [ -z "$VERIFY" ] || [ -z "$BOUND_VERIFY_CMD" ]; then
+    echo "worker-run: --pull, --expected-repository, --expected-branch, --expected-issue, --expected-outcome, and --verify are required with --delivery-report" >&2
+    exit 4
+  fi
+  VALIDATOR="$(cd "$(dirname "$0")" && pwd)/worker-delivery-validate"
+  echo "worker-run: validating delivery report: $DELIVERY_REPORT"
+  set -- "$VALIDATOR" --report "$DELIVERY_REPORT" --checkout "$DIR" --pull "$PULL" --expected-repository "$EXPECTED_REPOSITORY" \
+    --expected-branch "$EXPECTED_BRANCH" --expected-issue "$EXPECTED_ISSUE" --expected-outcome "$EXPECTED_OUTCOME" --base-ref "$BASE_REF" \
+    --bound-verify-command "$BOUND_VERIFY_CMD" --bound-verify-exit "$BOUND_VERIFY_EXIT" --bound-verify-head "$BOUND_VERIFY_HEAD"
+  [ -n "$BOUND_SETUP_CMD" ] && set -- "$@" --bound-setup-command "$BOUND_SETUP_CMD" --bound-setup-exit "$BOUND_SETUP_EXIT" --bound-setup-head "$BOUND_SETUP_HEAD"
+  "$@" || { echo "worker-run: delivery evidence failed." >&2; exit 5; }
 fi
 exit 0
