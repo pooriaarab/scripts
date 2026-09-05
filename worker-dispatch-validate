@@ -101,9 +101,11 @@ esac
 CONFIG_JSON=""; CONFIG_SHA=""
 if [ -n "$CHECKOUT" ]; then
   [ -d "$CHECKOUT" ] || usage_error "not a directory: $CHECKOUT"
-  CONFIG_FILE="$CHECKOUT/.github/pr-standards.json"
-  [ -f "$CONFIG_FILE" ] || fail "missing repository configuration: $CONFIG_FILE"
-  CONFIG_JSON="$(cat "$CONFIG_FILE")" || fail "cannot read $CONFIG_FILE"
+  # Read from the pinned HEAD commit, not the worktree file: an uncommitted
+  # edit to .github/pr-standards.json must never supply a false prefix while
+  # HEAD still matches the pinned base_sha checked below.
+  CONFIG_JSON="$("$GIT" -C "$CHECKOUT" show HEAD:.github/pr-standards.json 2>/dev/null)" \
+    || fail "missing repository configuration at HEAD: .github/pr-standards.json"
   CONFIG_SHA="local-checkout"
 else
   API_ERR="$(mktemp)"; API_OUT="$(mktemp)"
@@ -171,11 +173,11 @@ fi
 # --- must match the recorded coordinator, Box, and worker CLI exactly.
 RECORD="$STATE/$(printf '%s' "$M_REPOSITORY" | tr '/' '_')-$M_ISSUE.json"
 if [ -f "$RECORD" ]; then
-  MISMATCH="$(python3 - "$RECORD" "$M_COORDINATOR" "$M_BOX" "$M_CLI" "$M_RESUME" <<'PY'
+  MISMATCH="$(python3 - "$RECORD" "$M_COORDINATOR" "$M_BOX" "$M_CLI" "$M_MODEL" "$M_RESUME" <<'PY'
 import json,sys
 rec = json.load(open(sys.argv[1]))
-want = {"coordinator": sys.argv[2], "box": sys.argv[3], "cli": sys.argv[4]}
-resume = sys.argv[5] == "true"
+want = {"coordinator": sys.argv[2], "box": sys.argv[3], "cli": sys.argv[4], "model": sys.argv[5]}
+resume = sys.argv[6] == "true"
 if not resume:
     print("active dispatch by '%s' (branch %s); declare resume:true with matching Box/worker to resume" % (rec.get("coordinator","?"), rec.get("branch","?"))); sys.exit(1)
 bad = [k for k in want if rec.get(k) != want[k]]
@@ -185,8 +187,10 @@ PY
 )" || fail "conflicting ownership for $M_REPOSITORY#$M_ISSUE: $MISMATCH"
 fi
 
-# --- Success: the only state this command ever writes. ---
-mkdir -p "$STATE"
+# --- Success: the only state this command ever writes. A write that fails
+# --- here must fail validation too -- reporting success without a receipt
+# --- would let a concurrent dispatch never see this one's ownership.
+mkdir -p "$STATE" || fail "cannot create state directory $STATE"
 python3 - "$RECORD" "$M_REPOSITORY" "$M_ISSUE" "$M_BRANCH" "$PREFIX" "$CONFIG_SHA" \
   "$M_BASE_REF" "$M_BASE_SHA" "$M_COORDINATOR" "$M_CLI" "$M_MODEL" "$M_BOX" <<'PY'
 import json,sys,datetime
@@ -198,4 +202,5 @@ json.dump({"repository": repo, "issue": int(issue), "branch": branch,
            "validated_at": datetime.datetime.now(datetime.timezone.utc).isoformat()},
           open(path, "w"), indent=2)
 PY
+[ $? -eq 0 ] || fail "cannot write dispatch receipt $RECORD"
 echo "worker-dispatch-validate: $M_REPOSITORY#$M_ISSUE manifest valid; receipt $RECORD"
