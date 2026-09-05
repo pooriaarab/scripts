@@ -317,6 +317,8 @@ test('matches the supported exclusion glob forms', () => {
   assert.equal(matchesGlob('images/logo.png', '**/*.{svg,png}'), true);
   assert.equal(matchesGlob('src/logo.gif', '**/*.{svg,png}'), false);
   assert.equal(matchesGlob('src/a/b.js', 'src/*.js'), false);
+  assert.equal(matchesGlob('scraper-output.log', '**/*.log'), true);
+  assert.equal(matchesGlob('apps/website/scraper-output.log', '**/*.log'), true);
 });
 
 test('counts changed lines after exclusions and reports raw totals', () => {
