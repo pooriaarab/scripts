@@ -258,9 +258,16 @@ case "$AGENT" in
   kimi)   kimi -m moonshot-ai/kimi-k3 -p "\$1" ;;
   codex)  codex exec "\$1" ;;
   gemini)
-    [ -f "\$HOME/.gemini-personal/.gemini/.env" ] && { set -a; . "\$HOME/.gemini-personal/.gemini/.env"; set +a; }
+    # Canonical personal profile required; ambient/shared keys never qualify.
+    gemini_env="\$HOME/.gemini-personal/.gemini/.env"
+    if [ ! -s "\$gemini_env" ]; then
+      echo "box-work: gemini needs \$HOME/.gemini-personal/.gemini/.env (missing or empty); refusing an ambient GEMINI_API_KEY." >&2
+      exit 1
+    fi
+    unset GEMINI_API_KEY
+    set -a; . "\$gemini_env"; set +a
     if [ -z "\${GEMINI_API_KEY:-}" ]; then
-      echo "box-work: gemini needs GEMINI_API_KEY in \$HOME/.agents/agent-clis.env or \$HOME/.gemini-personal/.gemini/.env (missing or empty)." >&2
+      echo "box-work: gemini needs GEMINI_API_KEY exported by \$HOME/.gemini-personal/.gemini/.env (missing or empty)." >&2
       exit 1
     fi
     env -u GOOGLE_GENAI_USE_VERTEXAI -u GOOGLE_APPLICATION_CREDENTIALS -u GOOGLE_CLOUD_PROJECT -u GOOGLE_CLOUD_LOCATION GEMINI_CLI_HOME="\$HOME/.gemini-personal" GEMINI_API_KEY="\$GEMINI_API_KEY" GEMINI_CLI_TRUST_WORKSPACE=true gemini --skip-trust --yolo -m gemini-3.8-flash -p "\$1" ;;

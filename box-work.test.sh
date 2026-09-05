@@ -97,6 +97,8 @@ setup() {
   printf '0' > "$T/probe_fails"
   : > "$T/exec.log"
   printf 'GEMINI_API_KEY=test-fixture-no-secret\n' > "$FAKEHOME/.agents/agent-clis.env"
+  GEMINI_ENV="$FAKEHOME/.gemini-personal/.gemini/.env"
+  mkdir -p "${GEMINI_ENV%/*}" && printf 'GEMINI_API_KEY=test-fixture-no-secret\n' > "$GEMINI_ENV"
   export BOX_WORK_TEST_T="$T"
   write_stub
   write_fake cursor-agent <<'FAKE'
@@ -153,15 +155,21 @@ run_agent() { # <agent> <brief>
   printf '%s' "$?" >"$T/bw.rc"
 }
 
-# --- cases ---
-
+ok_rc() {
+  [ "$(cat "$T/bw.rc")" = "0" ] && pass "$1" || fail "$1" "rc=$(cat "$T/bw.rc") err: $(cat "$T/bw.err")"
+}
+expect_fail() {
+  [ "$(cat "$T/bw.rc")" != "0" ] && pass "$1" || fail "$1" "rc=0 unexpectedly"
+  grep -q "$3" "$T/bw.err" && pass "$2" || fail "$2" "$(cat "$T/bw.err")"
+}
+expect_cli_count() {
+  [ "$(grep -c "$1" "$T/calls.log" 2>/dev/null || true)" = "$2" ] && pass "$3" || fail "$3" "$(cat "$T/calls.log")"
+}
 setup
 printf 'CURSOR_API_KEY=test-fixture-no-secret\n' > "$FAKEHOME/.agents/cursor.env"
 printf '2' > "$T/probe_fails"
 run_agent cursor "compute seventeen times twenty three"
-rc="$(cat "$T/bw.rc")"
-[ "$rc" = "0" ] || fail "transient startup retried to success" "rc=$rc err: $(cat "$T/bw.err")"
-[ "$rc" = "0" ] && pass "transient startup retried to success"
+ok_rc "transient startup retried to success"
 grep -qF -- '--cwd /home/user' "$T/exec.log" \
   && pass "readiness probes from explicit --cwd /home/user" \
   || fail "readiness probes from explicit --cwd /home/user" "$(cat "$T/exec.log")"
@@ -185,80 +193,58 @@ grep -qF "seventeen times twenty three" "$T/bw.out" \
 grep -qF -- '--cwd /home/user/fakerepo' "$T/exec.log" \
   && pass "dispatch exec uses explicit repository cwd" \
   || fail "dispatch exec uses explicit repository cwd" "$(cat "$T/exec.log")"
-
 run_agent muse "say the word banana bread loudly"
-rc="$(cat "$T/bw.rc")"
-[ "$rc" = "0" ] || fail "muse headless dispatch succeeds" "rc=$rc err: $(cat "$T/bw.err")"
-[ "$rc" = "0" ] && pass "muse headless dispatch succeeds"
+ok_rc "muse headless dispatch succeeds"
 grep -q "banana bread loudly" "$T/bw.out" \
   && pass "muse receives full brief via prompt file" \
   || fail "muse receives full brief via prompt file" "$(cat "$T/bw.out")"
 grep -qF -- "--workspace /home/user/fakerepo" "$T/calls.log" \
   && pass "muse runs in the explicit repository path" \
   || fail "muse runs in the explicit repository path" "$(cat "$T/calls.log")"
-
-# allow-env lets local vars reach the runner, so the scrub is proven real.
 touch "$T/allow-env"
 DEVIN_API_KEY=should-be-scrubbed DEVIN_TOKEN=should-be-scrubbed WINDSURF_API_KEY=should-be-scrubbed \
   run_agent devin "report the number after six"
-rc="$(cat "$T/bw.rc")"
-[ "$rc" = "0" ] || fail "devin personal route succeeds" "rc=$rc err: $(cat "$T/bw.err")"
-[ "$rc" = "0" ] && pass "devin personal route succeeds"
+ok_rc "devin personal route succeeds"
 grep -q "the number after six" "$T/bw.out" \
   && pass "devin personal route scrubs API env and runs" \
   || fail "devin personal route scrubs API env and runs" "$(cat "$T/bw.out") $(cat "$T/bw.err")"
 # Prefix assignments persist on function calls; scrub for later cases.
 unset DEVIN_API_KEY DEVIN_TOKEN WINDSURF_API_KEY
-
-# An unproven API file must never shadow the personal route: it is not sourced.
 printf 'DEVIN_API_KEY=file-value-never-sourced\n' > "$FAKEHOME/.agents/devin.env"
 DEVIN_API_KEY=should-be-scrubbed run_agent devin "second devin probe"
-[ "$(cat "$T/bw.rc")" = "0" ] \
-  && pass "devin ignores unproven api file and scrubs env" \
-  || fail "devin ignores unproven api file and scrubs env" "rc=$(cat "$T/bw.rc") err: $(cat "$T/bw.err")"
+ok_rc "devin ignores unproven api file and scrubs env"
 rm -f "$T/allow-env" "$FAKEHOME/.agents/devin.env"
 unset DEVIN_API_KEY
-
 run_agent gemini "name a green fruit"
-rc="$(cat "$T/bw.rc")"
-[ "$rc" = "0" ] || fail "gemini dispatched with personal env" "rc=$rc err: $(cat "$T/bw.err")"
-[ "$rc" = "0" ] && pass "gemini dispatched with personal env"
+ok_rc "gemini dispatched with personal env"
 for flag in "--skip-trust" "--yolo" "-m gemini-3.8-flash"; do
   grep -qF -- "$flag" "$T/calls.log" \
     && pass "gemini headless flag: $flag" \
     || fail "gemini headless flag: $flag" "$(cat "$T/calls.log")"
 done
-
+rm -f "$GEMINI_ENV"
+touch "$T/allow-env"
+GEMINI_API_KEY=shadow-ambient-value run_agent gemini "anything"
+expect_fail "ambient gemini key without file fails" "ambient gemini refusal names the cause" "refusing an ambient"
+expect_cli_count "gemini " "1" "ambient gemini key never invokes the CLI"
+printf 'OTHER_VAR=not-the-key\n' > "$GEMINI_ENV"
+GEMINI_API_KEY=shadow-ambient-value run_agent gemini "anything"
+expect_fail "gemini file without key fails" "missing gemini value names the file" "exported by"
+expect_cli_count "gemini " "1" "keyless gemini file never invokes the CLI"
+rm -f "$T/allow-env"
+unset GEMINI_API_KEY
 rm -f "$FAKEHOME/.agents/cursor.env"
 run_agent cursor "anything"
-[ "$(cat "$T/bw.rc")" != "0" ] \
-  && pass "missing cursor key fails loudly" \
-  || fail "missing cursor key fails loudly" "rc=0 unexpectedly"
-grep -q "cursor.env" "$T/bw.err" \
-  && pass "missing cursor key names the credential file" \
-  || fail "missing cursor key names the credential file" "$(cat "$T/bw.err")"
-before_cursors=$(grep -c "cursor-agent" "$T/calls.log" 2>/dev/null || true)
-[ "$before_cursors" = "1" ] \
-  && pass "missing cursor key never invokes the CLI" \
-  || fail "missing cursor key never invokes the CLI" "cursor-agent lines: $before_cursors"
+expect_fail "missing cursor key fails loudly" "missing cursor key names the credential file" "cursor.env"
+expect_cli_count "cursor-agent" "1" "missing cursor key never invokes the CLI"
 
-# Shadowing case: ambient key present, authoritative file absent.
 touch "$T/allow-env"
 CURSOR_API_KEY=shadow-ambient-value run_agent cursor "anything"
-[ "$(cat "$T/bw.rc")" != "0" ] \
-  && pass "ambient cursor key without file fails" \
-  || fail "ambient cursor key without file fails" "rc=0 unexpectedly"
-grep -q "refusing an ambient" "$T/bw.err" \
-  && pass "ambient refusal names the cause" \
-  || fail "ambient refusal names the cause" "$(cat "$T/bw.err")"
-[ "$(grep -c "cursor-agent" "$T/calls.log" 2>/dev/null || true)" = "1" ] \
-  && pass "ambient cursor key never invokes the CLI" \
-  || fail "ambient cursor key never invokes the CLI" "$(cat "$T/calls.log")"
+expect_fail "ambient cursor key without file fails" "ambient refusal names the cause" "refusing an ambient"
+expect_cli_count "cursor-agent" "1" "ambient cursor key never invokes the CLI"
 rm -f "$T/allow-env"
 unset CURSOR_API_KEY
-
 printf 'CURSOR_API_KEY=test-fixture-no-secret\n' > "$FAKEHOME/.agents/cursor.env"
-# allow-env: the exit override is harness control the clean env would strip.
 touch "$T/allow-env"
 FAKE_AGENT_EXIT=3 run_agent cursor "anything"
 [ "$(cat "$T/bw.rc")" = "3" ] \
@@ -266,18 +252,12 @@ FAKE_AGENT_EXIT=3 run_agent cursor "anything"
   || fail "agent failure exit code propagates" "rc=$(cat "$T/bw.rc") want 3"
 rm -f "$T/allow-env"
 unset FAKE_AGENT_EXIT
-
 printf '999' > "$T/probe_fails"
 SEC_START="$SECONDS"
 BOX_WORK_READY_SECS=6 run_agent cursor "anything"
 unset BOX_WORK_READY_SECS
 elapsed=$((SECONDS - SEC_START))
-[ "$(cat "$T/bw.rc")" != "0" ] \
-  && pass "unready Box fails instead of hanging" \
-  || fail "unready Box fails instead of hanging" "rc=0 unexpectedly"
-grep -q "never answered within" "$T/bw.err" \
-  && pass "unready Box names the bounded deadline" \
-  || fail "unready Box names the bounded deadline" "$(cat "$T/bw.err")"
+expect_fail "unready Box fails instead of hanging" "unready Box names the bounded deadline" "never answered within"
 [ "$elapsed" -lt 25 ] \
   && pass "readiness wait is bounded (${elapsed}s)" \
   || fail "readiness wait is bounded (${elapsed}s)" "took too long"
