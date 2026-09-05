@@ -83,6 +83,9 @@ reports = {"valid": doc(), "stale": doc(tested_head="a"*40), "prhead": doc(), "f
            "forged": doc(setup_commands=[{"command": "echo 'npm ci'", "exit": 0}]),
            "forgedchain": doc(setup_commands=[{"command": "true && echo npm ci", "exit": 0}]),
            "forgedwrap": doc(setup_commands=[{"command": "bash -c 'echo npm ci'", "exit": 0}]),
+           "skipsemi": doc(setup_commands=[{"command": "false && npm ci; true", "exit": 0}]),
+           "skipor": doc(setup_commands=[{"command": "false || npm ci", "exit": 0}]),
+           "multiinstall": doc(setup_commands=[{"command": "npm ci && cd backend && npm ci", "exit": 0}]),
            "bun": doc(setup_commands=[{"command": "npm ci", "exit": 0}]), "stalesetup": doc(), "staleverify": doc(),
            "fixes": doc(closing_ref="Fixes #321"), "closeword": doc(closing_ref="Close #321"), "verify": doc(),
            "defect": doc(unresolved_failures=["tests still fail locally"]), "big": doc(claimed_counts={"lines": 999, "files": 99}),
@@ -117,7 +120,10 @@ cases = [
     ("missing setup evidence is rejected", "setup", (), 1, "bound setup"),
     ("forged quoted setup is rejected", "forged", (), 1, "does not install"),
     ("forged setup chained after a real command is rejected", "forgedchain", (), 1, "does not satisfy"),
-    ("forged setup wrapped in a shell -c is rejected", "forgedwrap", (), 1, "does not install"),
+    ("forged setup wrapped in a shell -c is rejected", "forgedwrap", (), 1, "unsupported compound shell"),
+    ("semicolon setup that skips install is rejected", "skipsemi", (), 1, "unsupported compound shell"),
+    ("or-chained setup that skips install is rejected", "skipor", (), 1, "unsupported compound shell"),
+    ("multi-workspace && install chain is accepted", "multiinstall", (), 0, "delivery evidence valid"),
     ("absent bun.lock install is rejected", "bun", (), 1, "bound setup"),
     ("nested lockfile at any depth is detected", "nestedlock", (), 1, "bound setup"),
     ("binary files are counted toward the size cap", "binary", (), 1, "claimed"),
@@ -181,9 +187,13 @@ def run_case(name, extra=(), after=None):
         subprocess.run(["git", "-C", checkout, "commit", "-qm", "bun"], check=True); args = bound_args(sync_report("bun", subprocess.check_output(["git", "-C", checkout, "rev-parse", "HEAD"], text=True).strip()))
     if name == "nestedlock": case_head = commit_extra("nestedlock", "backend/yarn.lock", "# yarn lockfile\n", "nested lock"); args = bound_args(case_head)
     if name == "binary": case_head = commit_extra("binary", "asset.bin", b"\x00\x01binary", "binary asset", mode="wb"); args = bound_args(case_head)
-    if name in ("forged", "forgedchain", "forgedwrap"):
-        forged_cmd = {"forged": "echo 'npm ci'", "forgedchain": "true && echo npm ci", "forgedwrap": "bash -c 'echo npm ci'"}[name]
+    if name in ("forged", "forgedchain", "forgedwrap", "skipsemi", "skipor"):
+        forged_cmd = {"forged": "echo 'npm ci'", "forgedchain": "true && echo npm ci", "forgedwrap": "bash -c 'echo npm ci'",
+                      "skipsemi": "false && npm ci; true", "skipor": "false || npm ci"}[name]
         args = bound_args(head, forged_cmd)
+    if name == "multiinstall":
+        case_head = commit_extra("multiinstall", "backend/package-lock.json", "{}\n", "backend lock")
+        args = bound_args(case_head, "npm ci && cd backend && npm ci")
     write_ci(pr_head=over.get("pr_head", case_head), pr_branch=over.get("pr_branch", branch), checks=over.get("checks"), page2=over.get("page2"),
              title=over.get("title", PR_TITLE), body=over.get("body", PR_BODY), state=over.get("state", "open"), draft=over.get("draft", False))
     if name == "norepo":
@@ -200,7 +210,7 @@ try:
     for label, name, extra, want, needle in cases:
         after = None
         if name == "dirty": open(dirty_path, "w").write("x"); after = lambda: os.path.exists(dirty_path) and os.remove(dirty_path)
-        if name in ("bun", "nestedlock", "binary"): after = lambda: subprocess.run(["git", "-C", checkout, "reset", "--hard", head], check=True)
+        if name in ("bun", "nestedlock", "binary", "multiinstall"): after = lambda: subprocess.run(["git", "-C", checkout, "reset", "--hard", head], check=True)
         rc, out = run_case(name, extra, after=after)
         if rc == want and needle.lower() in out.lower(): print("ok -", label); passed += 1
         else: print("FAIL -", label); print(" ", "rc=%s out=%s" % (rc, out.strip())); failed += 1
