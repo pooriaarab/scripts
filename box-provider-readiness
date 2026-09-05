@@ -165,27 +165,38 @@ if [ -r "/proc/$ROOT/cmdline" ]; then
 else
   echo "reap: cannot verify ownership of pid $ROOT (no /proc); refusing"; exit 2
 fi
-PIDS="$ROOT"; QUEUE="$ROOT"
-while [ -n "$QUEUE" ]; do
-  NEXT=""
-  for p in $QUEUE; do
-    for c in $(ps -o pid= --ppid "$p" 2>/dev/null); do
-      case " $PIDS " in *" $c "*) ;; *) PIDS="$PIDS $c"; NEXT="$NEXT $c" ;; esac
+PIDS="$ROOT"
+# Re-run the discovery scan on every round, not once upfront: a child that
+# forks after an earlier scan (or after a TERM that it caught and is still
+# unwinding from) must still be found and signalled before the tree is ever
+# declared dead.
+discover() {
+  QUEUE="$PIDS"
+  while [ -n "$QUEUE" ]; do
+    NEXT=""
+    for p in $QUEUE; do
+      for c in $(ps -o pid= --ppid "$p" 2>/dev/null); do
+        case " $PIDS " in *" $c "*) ;; *) PIDS="$PIDS $c"; NEXT="$NEXT $c" ;; esac
+      done
     done
+    QUEUE="$NEXT"
   done
-  QUEUE="$NEXT"
-done
+}
+discover
 kill -TERM $PIDS 2>/dev/null || true
 for _ in $(seq 1 15); do
+  discover
+  kill -TERM $PIDS 2>/dev/null || true
   ALIVE=""
   for p in $PIDS; do kill -0 "$p" 2>/dev/null && ALIVE="$ALIVE $p"; done
   [ -z "$ALIVE" ] && { echo "reaped:$PIDS"; exit 0; }
   sleep 1
 done
-kill -KILL $ALIVE 2>/dev/null || true
+discover
+kill -KILL $PIDS 2>/dev/null || true
 sleep 2
 STILL=""
-for p in $ALIVE; do kill -0 "$p" 2>/dev/null && STILL="$STILL $p"; done
+for p in $PIDS; do kill -0 "$p" 2>/dev/null && STILL="$STILL $p"; done
 [ -z "$STILL" ] && { echo "reaped-after-kill:$PIDS"; exit 0; }
 echo "reap: survivors:$STILL" >&2; exit 1
 REAPER
