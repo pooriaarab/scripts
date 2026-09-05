@@ -1034,12 +1034,44 @@ export function matchesGlob(filename, pattern) {
   return expandBraces(String(pattern)).some((expanded) => globRegExp(expanded).test(normalizedFilename));
 }
 
+// A line removed from one file and added verbatim to another is a RELOCATION,
+// not authored work. Counting it on both sides made a pure move cost twice its
+// size, so a move could fail the cap while adding nothing -- and no
+// decomposition of it could pass, because every section cost double. See
+// pooriaarab/scripts#299: an 8-section move measured 6,981 counted lines while
+// its authored content was 25.
+//
+// The discount is granted only by proving the move: byte equality across the
+// whole diff. Change five lines inside a thousand-line move and those five
+// still count. That is also the only review question a relocation has -- did
+// anything get lost -- so the exemption and the proof are one computation.
+export function countMovedLines(files) {
+  const removed = new Map();
+  const added = new Map();
+  const bump = (map, key) => map.set(key, (map.get(key) || 0) + 1);
+  for (const file of files) {
+    // GitHub omits `patch` for very large or binary files. Without it we cannot
+    // prove a move, so we do not discount one. A checker that silently
+    // discounts what it could not read is worse than one that never discounts.
+    if (typeof file.patch !== 'string') return { moved: 0, complete: false };
+    for (const line of file.patch.split('\n')) {
+      if (line.startsWith('+++') || line.startsWith('---')) continue;
+      if (line.startsWith('+')) bump(added, line.slice(1));
+      else if (line.startsWith('-')) bump(removed, line.slice(1));
+    }
+  }
+  let moved = 0;
+  for (const [line, count] of removed) moved += Math.min(count, added.get(line) || 0);
+  return { moved, complete: true };
+}
+
 export function summarizeFiles(files, config = DEFAULT_CONFIG) {
   let rawLines = 0;
   let countedLines = 0;
   let excludedLines = 0;
   let countedFiles = 0;
   let excludedFiles = 0;
+  const countedForMove = [];
   const topLevelDirs = new Set();
   for (const file of files) {
     const additions = Number(file.additions) || 0;
@@ -1054,13 +1086,19 @@ export function summarizeFiles(files, config = DEFAULT_CONFIG) {
     }
     countedLines += lines;
     countedFiles += 1;
+    countedForMove.push(file);
     // Only real directories count. Treating a root file as a directory named
     // '.' made README.md plus three directories look like four.
     if (filename.includes('/')) topLevelDirs.add(filename.split('/')[0]);
   }
+  const { moved: movedLines, complete: moveProven } = countMovedLines(countedForMove);
+  // Both sides of a move were counted above, so remove both.
+  const authoredLines = moveProven ? countedLines - 2 * movedLines : countedLines;
   return {
     rawLines,
-    countedLines,
+    countedLines: Math.max(authoredLines, 0),
+    grossCountedLines: countedLines,
+    movedLines: moveProven ? movedLines : 0,
     excludedLines,
     rawFiles: files.length,
     countedFiles,
@@ -1332,13 +1370,66 @@ export function validateCommits(commits, config, truncated = false) {
   return { ok: failures.length === 0, failures };
 }
 
-async function fetchPullFiles(repo, number) {
+async function fetchPullFiles(repo, number, pull) {
   const files = [];
   for (let page = 1; ; page += 1) {
     const pageFiles = await apiRequest(`pulls/${number}/files?per_page=100&page=${page}`, repo);
     if (!Array.isArray(pageFiles)) throw new ApiError(`GitHub returned an invalid file list for pull request ${number}`);
     files.push(...pageFiles);
-    if (pageFiles.length < 100) return files;
+    if (pageFiles.length < 100) break;
+  }
+  await backfillMissingPatches(files, repo, pull);
+  return files;
+}
+
+// GitHub omits `patch` for a file whose diff is large -- which is exactly the
+// file a relocation empties. On pooriaarab/agents-private#170 the one file
+// carrying all 3,479 deletions had no patch, so a move could never be proven
+// on the change that most needed it.
+//
+// For those files, ask for the two blobs and derive the changed lines as a
+// multiset difference. That needs no diff algorithm: what left the file is
+// base minus head, what arrived is head minus base, which is precisely what
+// the move check consumes.
+async function backfillMissingPatches(files, repo, pull) {
+  const baseSha = pull?.base?.sha;
+  const headSha = pull?.head?.sha;
+  if (!baseSha || !headSha) return;
+  for (const file of files) {
+    if (typeof file.patch === 'string' || file.status === 'removed' || file.status === 'added') continue;
+    const base = await fetchBlobLines(repo, file.previous_filename || file.filename, baseSha);
+    const head = await fetchBlobLines(repo, file.filename, headSha);
+    if (!base || !head) continue;
+    const minus = multisetDifference(base, head).map((line) => `-${line}`);
+    const plus = multisetDifference(head, base).map((line) => `+${line}`);
+    file.patch = [...minus, ...plus].join('\n');
+    file.patchDerived = true;
+  }
+}
+
+export function multisetDifference(left, right) {
+  const counts = new Map();
+  for (const line of right) counts.set(line, (counts.get(line) || 0) + 1);
+  const out = [];
+  for (const line of left) {
+    const seen = counts.get(line) || 0;
+    if (seen > 0) counts.set(line, seen - 1);
+    else out.push(line);
+  }
+  return out;
+}
+
+async function fetchBlobLines(repo, path, ref) {
+  try {
+    const meta = await apiRequest(`contents/${path.split('/').map(encodeURIComponent).join('/')}?ref=${ref}`, repo);
+    if (!meta || meta.encoding !== 'base64' || typeof meta.content !== 'string') return null;
+    const text = Buffer.from(meta.content, 'base64').toString('utf8');
+    // A binary file round-trips through the replacement character; refusing it
+    // keeps the move check honest rather than matching garbage against garbage.
+    if (text.includes('\u0000')) return null;
+    return text.split('\n');
+  } catch {
+    return null;
   }
 }
 
@@ -1481,9 +1572,11 @@ function outputHuman(result) {
   for (const item of result.failures || []) lines.push(`FAIL  ${item.check}\n${humanFailure(item)}`);
   for (const item of result.warnings || []) lines.push(`WARN  ${item.check}\n${humanFailure(item)}`);
   if (result.size) {
-    const excluded = result.size.excludedLines
-      ? ` (${formatNumber(result.size.rawLines)} raw; ${formatNumber(result.size.excludedLines)} excluded as generated)`
-      : ` (${formatNumber(result.size.rawLines)} raw)`;
+    // Show every number. A discount nobody can see is one nobody can dispute.
+    const parts = [`${formatNumber(result.size.rawLines)} raw`];
+    if (result.size.excludedLines) parts.push(`${formatNumber(result.size.excludedLines)} excluded as generated`);
+    if (result.size.movedLines) parts.push(`${formatNumber(result.size.movedLines)} moved verbatim`);
+    const excluded = ` (${parts.join('; ')})`;
     lines.push(`SIZE  ${formatNumber(result.size.countedLines)} counted lines${excluded}; ${result.size.countedFiles} counted files`);
   }
   if (lines.length === 0) return;
@@ -1867,7 +1960,7 @@ async function runPr(options) {
   // the actual diff. There is no proof override label -- see checkProof.
   const [commits, files] = await Promise.all([
     fetchPullCommits(options.repo, number),
-    fetchPullFiles(options.repo, number),
+    fetchPullFiles(options.repo, number, pull),
   ]);
   const commitsTruncated = typeof pull.commits === 'number' && commits.length < pull.commits;
   const commitResult = validateCommits(commits, config, commitsTruncated);

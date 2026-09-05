@@ -22,6 +22,7 @@ import {
   loadConfig,
   matchesGlob,
   summarizeFiles,
+  multisetDifference,
   validateBody,
   validateBranchName,
   validateTitle,
@@ -294,6 +295,10 @@ test('counts changed lines after exclusions and reports raw totals', () => {
   assert.deepEqual(summary, {
     rawLines: 1110,
     countedLines: 300,
+    grossCountedLines: 300,
+    // No patch text on these fixtures, so no move can be proven and nothing is
+    // discounted. That is the intended direction: prove it or pay for it.
+    movedLines: 0,
     excludedLines: 810,
     rawFiles: 3,
     countedFiles: 1,
@@ -1971,4 +1976,79 @@ test('proof: the body reader keeps what renders around a comment', () => {
   // A fence opened inside a blockquote ends with the quote container, so a
   // hatch written after the quote is visible rather than swallowed.
   assert.equal(failed(checkProof(body('> ```', '> example', hatch), uiFiles, config)), false);
+});
+
+test('a line moved verbatim between files counts zero', () => {
+  // The relocation that surfaced this: text leaves one file and arrives
+  // unchanged in another, so the PR authored nothing and used to be billed for
+  // it twice. See pooriaarab/scripts#299.
+  const body = ['alpha one', 'beta two', 'gamma three'];
+  const summary = summarizeFiles([
+    { filename: 'src/big.md', additions: 0, deletions: 3, patch: body.map((l) => `-${l}`).join('\n') },
+    { filename: 'src/refs/part.md', additions: 3, deletions: 0, patch: body.map((l) => `+${l}`).join('\n') },
+  ], config);
+  assert.equal(summary.movedLines, 3);
+  assert.equal(summary.grossCountedLines, 6);
+  assert.equal(summary.countedLines, 0);
+});
+
+test('a line changed during a move still counts', () => {
+  // The anti-gaming property. Byte equality is the whole test, so editing while
+  // moving is billed for the edit.
+  const summary = summarizeFiles([
+    { filename: 'src/big.md', additions: 0, deletions: 3, patch: '-alpha one\n-beta two\n-gamma three' },
+    { filename: 'src/refs/part.md', additions: 3, deletions: 0, patch: '+alpha one\n+beta TWO\n+gamma three' },
+  ], config);
+  assert.equal(summary.movedLines, 2);
+  assert.equal(summary.countedLines, 6 - 4);
+});
+
+test('a plain addition is not discounted', () => {
+  const summary = summarizeFiles([
+    { filename: 'src/new.md', additions: 3, deletions: 0, patch: '+alpha one\n+beta two\n+gamma three' },
+  ], config);
+  assert.equal(summary.movedLines, 0);
+  assert.equal(summary.countedLines, 3);
+});
+
+test('a rewrite of the same size is not discounted', () => {
+  const summary = summarizeFiles([
+    { filename: 'src/a.md', additions: 3, deletions: 3, patch: '-old one\n-old two\n-old three\n+new one\n+new two\n+new three' },
+  ], config);
+  assert.equal(summary.movedLines, 0);
+  assert.equal(summary.countedLines, 6);
+});
+
+test('a missing patch blocks the discount rather than granting it', () => {
+  // GitHub omits `patch` for very large or binary files. Without it the move
+  // cannot be proven, so it is not discounted. Silently discounting what the
+  // checker could not read would be the worse failure.
+  const summary = summarizeFiles([
+    { filename: 'src/big.md', additions: 0, deletions: 3, patch: '-alpha one\n-beta two\n-gamma three' },
+    { filename: 'src/huge.md', additions: 3, deletions: 0 },
+  ], config);
+  assert.equal(summary.movedLines, 0);
+  assert.equal(summary.countedLines, 6);
+});
+
+test('an excluded file cannot fund a discount', () => {
+  // Generated output is not counted, so it must not cancel counted lines
+  // either -- otherwise deleting a lockfile line would pay for a source line.
+  const summary = summarizeFiles([
+    { filename: 'dist/app.js', additions: 0, deletions: 3, patch: '-alpha one\n-beta two\n-gamma three' },
+    { filename: 'src/app.js', additions: 3, deletions: 0, patch: '+alpha one\n+beta two\n+gamma three' },
+  ], config);
+  assert.equal(summary.movedLines, 0);
+  assert.equal(summary.countedLines, 3);
+});
+
+test('multiset difference keeps duplicates that the other side lacks', () => {
+  // The blob fallback derives a patch from this alone, with no diff algorithm:
+  // what left a file is base minus head, what arrived is head minus base.
+  // Duplicates have to survive, or a file that legitimately repeats a line
+  // would look like it lost one.
+  assert.deepEqual(multisetDifference(['a', 'b', 'a', 'c'], ['a', 'c']), ['b', 'a']);
+  assert.deepEqual(multisetDifference(['a'], ['a', 'a']), []);
+  assert.deepEqual(multisetDifference([], ['a']), []);
+  assert.deepEqual(multisetDifference(['x', 'x'], []), ['x', 'x']);
 });
