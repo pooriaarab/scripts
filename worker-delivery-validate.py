@@ -4,63 +4,84 @@ from datetime import datetime
 
 fail = lambda msg: (print("worker-delivery-validate: FAIL: %s" % msg, file=sys.stderr) or sys.exit(1))
 HEX40 = re.compile(r"^[0-9a-f]{40}$")
-CLOSE = re.compile(r"(?i)\b(?:closes?|fix(?:es|ed)?|resolves?)\s*:?\s*(?:([\w.-]+/[\w.-]+))?#([0-9]+)\b")
+CLOSE = re.compile(r"(?i)\bcloses?\s*:?\s*(?:([\w.-]+/[\w.-]+))?#([0-9]+)\b")
 ASSIST = re.compile(r"^[^\s:,]+:[^\s,]+$")
 LOCKS = ("package-lock.json", "bun.lock", "bun.lockb", "pnpm-lock.yaml", "yarn.lock", "Cargo.lock")
 LOCK_INSTALL = {k: re.compile(v, re.I) for k, v in {
-    "package-lock.json": r"\b(npm ci|npm install)\b", "bun.lock": r"\bbun install\b", "bun.lockb": r"\bbun install\b",
-    "pnpm-lock.yaml": r"\bpnpm install\b", "yarn.lock": r"\byarn install\b", "Cargo.lock": r"\bcargo fetch\b"}.items()}
+    "package-lock.json": r"\bnpm ci\b", "bun.lock": r"\bbun install\b.*--frozen-lockfile",
+    "bun.lockb": r"\bbun install\b.*--frozen-lockfile", "pnpm-lock.yaml": r"\bpnpm install\b.*--frozen-lockfile",
+    "yarn.lock": r"\byarn install\b.*--frozen-lockfile", "Cargo.lock": r"\bcargo fetch\b"}.items()}
 BUCKET_OK = {"pass": {"success", "pass"}, "fail": {"failure", "fail", "cancelled", "timed_out", "action_required"},
              "pending": {"pending", "in_progress", "queued"}, "skipped": {"skipped", "skipping", "neutral"}}
 REQ = ("repository", "issue", "branch", "head", "tested_head", "outcome", "closing_ref", "implementation_status",
        "verification_commands", "setup_commands", "unresolved_failures", "claimed_counts", "assisted_by", "ci")
 
-def git(checkout, *args):
-    return subprocess.run(["git", "-C", checkout, *args], text=True, capture_output=True)
+def git(c, *a): return subprocess.run(["git", "-C", c, *a], text=True, capture_output=True)
 
-def gh_api(gh, path):
-    proc = subprocess.run([gh, "api", path], text=True, capture_output=True)
-    if proc.returncode: fail("cannot read GitHub API %s: %s" % (path, proc.stderr.strip()))
-    return json.loads(proc.stdout)
+def gh_items(gh, path, key):
+    out, page, total = [], 1, None
+    while True:
+        sep = "&" if "?" in path else "?"
+        proc = subprocess.run([gh, "api", "%s%sper_page=100&page=%d" % (path, sep, page)], text=True, capture_output=True)
+        if proc.returncode: fail("cannot read GitHub API %s: %s" % (path, proc.stderr.strip()))
+        doc = json.loads(proc.stdout)
+        if total is None and isinstance(doc, dict): total = doc.get("total_count")
+        batch = doc.get(key, []) if key else (doc if isinstance(doc, list) else [])
+        out.extend(batch)
+        if (total is not None and len(out) >= total) or (total is None and len(batch) < 100): break
+        page += 1
+    return out
+
+def bound_head(label, value, head):
+    if not HEX40.match(value) or value != head: fail("bound %s head %s does not match checkout HEAD %s" % (label, value[:12] or "?", head[:12]))
 
 def validate(report_path):
-    checkout, head, branch, origin = os.environ["CHECKOUT"], os.environ["CHECKOUT_HEAD"], os.environ["CHECKOUT_BRANCH"], os.environ["CHECKOUT_REPO"]
+    checkout, head = os.environ["CHECKOUT"], os.environ["CHECKOUT_HEAD"]
+    checkout_branch, checkout_repo = os.environ["CHECKOUT_BRANCH"], os.environ["CHECKOUT_REPO"]
     base, pull, root, gh = os.environ["BASE_REF"], os.environ["PULL"].strip(), os.environ["ROOT"], os.environ.get("GH_CLI", "gh")
+    expected_repo, expected_branch = os.environ["EXPECTED_REPOSITORY"].strip(), os.environ["EXPECTED_BRANCH"].strip()
     expected_issue, expected_outcome = int(os.environ["EXPECTED_ISSUE"]), os.environ["EXPECTED_OUTCOME"]
-    bound_cmd, bound_exit = os.environ.get("BOUND_VERIFY_CMD", "").strip(), os.environ.get("BOUND_VERIFY_EXIT", "").strip()
+    bound_verify_cmd = os.environ.get("BOUND_VERIFY_CMD", "").strip()
+    bound_verify_exit, bound_verify_head = os.environ.get("BOUND_VERIFY_EXIT", "").strip(), os.environ.get("BOUND_VERIFY_HEAD", "").strip()
+    bound_setup_cmd = os.environ.get("BOUND_SETUP_CMD", "").strip()
+    bound_setup_exit, bound_setup_head = os.environ.get("BOUND_SETUP_EXIT", "").strip(), os.environ.get("BOUND_SETUP_HEAD", "").strip()
+    if not expected_repo or not expected_branch: fail("expected repository and branch are required")
+    if not bound_verify_cmd or bound_verify_exit != "0": fail("bound verify command is required and must exit 0")
+    bound_head("verify", bound_verify_head, head)
     try: doc = json.load(open(report_path, encoding="utf-8"))
     except Exception as exc: fail("invalid report JSON: %s" % exc)
     if doc.get("schema") != 1 or [k for k in REQ if k not in doc]: fail("report schema/fields invalid")
-    issue, repo = doc["issue"], str(doc["repository"])
-    if not isinstance(issue, int) or issue < 1: fail("issue must be a positive integer")
-    if issue != expected_issue: fail("report issue #%s does not match coordinator expected issue #%s" % (issue, expected_issue))
+    issue, repo, branch = doc["issue"], str(doc["repository"]), str(doc["branch"])
+    if not isinstance(issue, int) or issue < 1 or issue != expected_issue: fail("report issue #%s does not match coordinator expected issue #%s" % (issue, expected_issue))
     if str(doc["outcome"]).strip() != expected_outcome.strip(): fail("report outcome does not match coordinator expected outcome")
+    if repo.lower() != expected_repo.lower() or branch != expected_branch: fail("report repository/branch do not match coordinator contract")
+    if checkout_repo.lower() != expected_repo.lower() or checkout_branch != expected_branch: fail("checkout repository/branch do not match coordinator contract")
     for field in ("head", "tested_head"):
         if not HEX40.match(str(doc[field])): fail("%s must be 40 lowercase hex" % field)
-    if repo.lower() != origin.lower(): fail("report repository '%s' does not match checkout origin '%s'" % (repo, origin))
-    if branch and branch != doc["branch"]: fail("report branch '%s' does not match checkout branch '%s'" % (doc["branch"], branch))
-    if head != doc["head"]: fail("report head %s does not match checkout HEAD %s" % (doc["head"], head))
-    if doc["tested_head"] != doc["head"] or doc["tested_head"] != head: fail("stale tested_head %s" % doc["tested_head"])
+    if head != doc["head"] or doc["tested_head"] != head: fail("stale tested_head %s" % doc["tested_head"])
     dirty = git(checkout, "status", "--porcelain")
     if dirty.returncode: fail("cannot read checkout status: %s" % dirty.stderr.strip())
     if dirty.stdout.strip(): fail("checkout has uncommitted or untracked changes outside review scope")
     refs = CLOSE.findall(str(doc["closing_ref"]))
-    if len(refs) != 1 or int(refs[0][1]) != issue: fail("closing_ref must close issue #%s" % issue)
+    if len(refs) != 1 or int(refs[0][1]) != issue: fail("closing_ref must contain exactly one Closes for issue #%s" % issue)
     if refs[0][0] and refs[0][0].lower() != repo.lower(): fail("closing_ref targets wrong repo")
     if str(doc["implementation_status"]) == "plan": fail("plan-only delivery is not implementation")
     if doc["implementation_status"] != "complete" or not str(doc["outcome"]).strip(): fail("outcome/implementation_status invalid")
     ver = doc["verification_commands"]
     if not isinstance(ver, list) or not ver or any(not isinstance(i, dict) or not str(i.get("command", "")).strip() or i.get("exit") != 0 for i in ver):
         fail("complete delivery requires verification_commands with exit 0")
-    if bound_cmd:
-        if bound_exit != "0": fail("bound verify command exited %s" % (bound_exit or "?"))
-        if not any(str(i.get("command", "")).strip() == bound_cmd and i.get("exit") == 0 for i in ver):
-            fail("report verification_commands do not match bound verify execution")
+    if not any(str(i.get("command", "")).strip() == bound_verify_cmd and i.get("exit") == 0 for i in ver):
+        fail("report verification_commands do not match bound verify execution")
     if doc["unresolved_failures"]: fail("unresolved failures remain: %s" % "; ".join(map(str, doc["unresolved_failures"])))
-    tracked = set(git(checkout, "ls-files").stdout.splitlines())
-    setup_cmds = [str(i.get("command", "")) for i in (doc.get("setup_commands") or []) if isinstance(i, dict) and i.get("exit") == 0]
-    missing = [name for name in LOCKS if name in tracked and not any(LOCK_INSTALL[name].search(cmd) for cmd in setup_cmds)]
-    if missing: fail("missing dependency install evidence for committed lockfiles: %s" % ", ".join(missing))
+    locks = [name for name in LOCKS if name in set(git(checkout, "ls-files").stdout.splitlines())]
+    if locks:
+        if not bound_setup_cmd or bound_setup_exit != "0": fail("bound setup command is required when lockfiles are committed")
+        bound_head("setup", bound_setup_head, head)
+        bad = [name for name in locks if not LOCK_INSTALL[name].search(bound_setup_cmd)]
+        if bad: fail("bound setup does not satisfy committed lockfiles: %s" % ", ".join(bad))
+        setup = doc.get("setup_commands") or []
+        if not any(str(i.get("command", "")).strip() == bound_setup_cmd and i.get("exit") == 0 for i in setup if isinstance(i, dict)):
+            fail("report setup_commands do not match bound setup execution")
     claimed = doc["claimed_counts"]
     if not isinstance(claimed, dict) or any(k not in claimed or not isinstance(claimed[k], int) or claimed[k] < 0 for k in ("lines", "files")):
         fail("claimed_counts invalid")
@@ -84,9 +105,15 @@ def validate(report_path):
     if not isinstance(ci, dict) or not HEX40.match(str(ci.get("head", ""))) or ci["head"] != head: fail("ci.head must match checkout HEAD")
     report_checks = ci.get("checks")
     if not isinstance(report_checks, list) or not report_checks: fail("ci.checks must list every verified check")
-    pr_head = str(gh_api(gh, "repos/%s/pulls/%s" % (repo, pull)).get("head", {}).get("sha", ""))
-    if not HEX40.match(pr_head): fail("cannot read PR head for %s#%s" % (repo, pull))
-    if pr_head != head: fail("PR head %s does not match tested checkout head %s" % (pr_head[:12], head[:12]))
+    proc = subprocess.run([gh, "api", "repos/%s/pulls/%s" % (expected_repo, pull)], text=True, capture_output=True)
+    if proc.returncode: fail("cannot read GitHub API repos/%s/pulls/%s: %s" % (expected_repo, pull, proc.stderr.strip()))
+    pr = json.loads(proc.stdout)
+    pr_head = str(pr.get("head", {}).get("sha", "")); pr_branch = str(pr.get("head", {}).get("ref", ""))
+    pr_repo = str((pr.get("head") or {}).get("repo", {}).get("full_name", "")); pr_base = str(pr.get("base", {}).get("sha", ""))
+    if not HEX40.match(pr_head) or pr_head != head: fail("PR head %s does not match tested checkout head %s" % (pr_head[:12], head[:12]))
+    if pr_branch != expected_branch or pr_repo.lower() != expected_repo.lower(): fail("PR repository/branch do not match coordinator contract")
+    base_sha = git(checkout, "rev-parse", base).stdout.strip()
+    if not HEX40.match(base_sha) or base_sha != pr_base: fail("PR base %s does not match coordinator base-ref %s" % (pr_base[:12], base_sha[:12]))
     live = {}
     def keep(key, when, bucket, source):
         cur = live.get(key)
@@ -95,24 +122,22 @@ def validate(report_path):
         if not value: return datetime.min
         try: return datetime.fromisoformat(value.replace("Z", "+00:00"))
         except ValueError: return datetime.min
-    for item in gh_api(gh, "repos/%s/commits/%s/check-runs" % (repo, pr_head)).get("check_runs") or []:
+    for item in gh_items(gh, "repos/%s/commits/%s/check-runs" % (expected_repo, pr_head), "check_runs"):
         name = str(item.get("name", "")).strip()
         if not name: continue
         status, conclusion = str(item.get("status", "")).lower(), str(item.get("conclusion") or "").lower()
         bucket = "pending" if status in BUCKET_OK["pending"] else "skipped" if conclusion in BUCKET_OK["skipped"] else "pass" if conclusion in BUCKET_OK["pass"] else "fail" if conclusion in BUCKET_OK["fail"] or conclusion else "pending"
         keep("%s:%s" % ((item.get("app") or {}).get("id", "0"), name), when(item.get("started_at")), bucket, name)
-    for item in gh_api(gh, "repos/%s/commits/%s/status" % (repo, pr_head)).get("statuses") or []:
+    for item in gh_items(gh, "repos/%s/commits/%s/statuses" % (expected_repo, pr_head), None):
         context = str(item.get("context", "")).strip()
         if not context: continue
         state = str(item.get("state", "")).lower()
         bucket = "pass" if state in BUCKET_OK["pass"] else "skipped" if state in BUCKET_OK["skipped"] else "pending" if state in BUCKET_OK["pending"] else "fail"
         keep("status:%s" % context, when(item.get("updated_at")), bucket, context)
     if not live: fail("no CI checks returned for PR head %s" % pr_head[:12])
-    report_by_name = {}
-    for item in report_checks:
-        name, bucket = str(item.get("name", "")).strip(), str(item.get("bucket", "")).strip()
-        if bucket not in BUCKET_OK or not name: fail("ci check %r has invalid bucket" % name)
-        report_by_name[name] = bucket
+    report_by_name = {str(i.get("name", "")).strip(): str(i.get("bucket", "")).strip() for i in report_checks if str(i.get("name", "")).strip()}
+    for name, bucket in report_by_name.items():
+        if bucket not in BUCKET_OK: fail("ci check %r has invalid bucket" % name)
     for meta in live.values():
         name, live_bucket = meta["source"], meta["bucket"]
         if live_bucket in ("fail", "pending"): fail("live CI not acceptable: %r is %s" % (name, live_bucket))
@@ -122,6 +147,6 @@ def validate(report_path):
         if reported not in BUCKET_OK["pass"]: fail("false-green ci: %r reported as %s but latest check is %s" % (name, reported, live_bucket))
     for name in report_by_name:
         if not any(meta["source"] == name for meta in live.values()): fail("ci check %r is not present on PR head" % name)
-    print("worker-delivery-validate: %s#%s delivery evidence valid at %s" % (repo, issue, head[:12]))
+    print("worker-delivery-validate: %s#%s delivery evidence valid at %s" % (expected_repo, issue, head[:12]))
 
 if __name__ == "__main__": validate(sys.argv[1])
