@@ -196,8 +196,7 @@ done
 # Replaces the earlier API-tempfile trap; chained here so both still run at exit.
 # shellcheck disable=SC2064
 trap "rm -f '$API_ERR' '$API_OUT'; rmdir '$LOCKDIR' 2>/dev/null" EXIT
-# First claim hard-links a temp receipt into place: a lost race keeps the
-# winner, and a failed write never leaves a truncated receipt behind.
+# First claim hard-links a temp receipt in: losers keep the winner; failures leave nothing behind.
 CLAIM_MSG="$(python3 - "$RECORD" "$M_REPOSITORY" "$M_ISSUE" "$M_BRANCH" "$PREFIX" \
   "$CONFIG_SHA" "$M_BASE_REF" "$M_BASE_SHA" "$M_COORDINATOR" "$M_CLI" "$M_MODEL" \
   "$M_BOX" "$M_RESUME" 2>&1 <<'PY'
@@ -227,8 +226,7 @@ if rec is None:
         print(conflict(json.load(open(path))) or "conflicting active ownership"); sys.exit(1)
     except Exception as e:
         print("cannot write dispatch receipt: %s" % e); sys.exit(2)
-    finally:
-        os.unlink(tmp)
+    finally: os.unlink(tmp)
 else:
     msg = conflict(rec)
     if msg:
