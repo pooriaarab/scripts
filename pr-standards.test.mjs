@@ -153,7 +153,7 @@ test('an unreadable registry falls through to derivation', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'prs-badregistry-'));
   try {
     const here = path.dirname(fileURLToPath(import.meta.url));
-    for (const f of ['pr-standards', 'pr-standards.mjs']) {
+    for (const f of ['pr-standards', 'pr-standards.mjs', 'assisted-by.mjs']) {
       fs.copyFileSync(path.join(here, f), path.join(dir, f));
     }
     fs.chmodSync(path.join(dir, 'pr-standards'), 0o755);
@@ -306,6 +306,27 @@ test('one Assisted-by trailer per line, and the failure names the line it found'
     bodyWithTrailer('Assisted-by: muse:meta-code,claude-personal-1:claude-opus-5'), 142, config,
   );
   assert.equal(commaListNoSpace.ok, false);
+});
+
+test('Assisted-by rejects a slash in the agent field, backticks, and internal whitespace', () => {
+  const bodyWithTrailer = (trailer) =>
+    validBody.replace('Assisted-by: claude-personal:claude-opus-5', trailer);
+  const assistedBy = (r) => r.failures.find((f) => f.check === 'Assisted-by line');
+
+  const repoPath = validateBody(
+    bodyWithTrailer('Assisted-by: pooriaarab/scripts:pr-standards-rollout'), 142, config,
+  );
+  assert.equal(repoPath.ok, false);
+  assert.match(assistedBy(repoPath).got, /pooriaarab\/scripts:pr-standards-rollout/);
+
+  const backtick = validateBody(bodyWithTrailer('Assisted-by: `:`'), 142, config);
+  assert.equal(backtick.ok, false);
+  assert.match(assistedBy(backtick).got, /`/);
+
+  const spacedModel = validateBody(
+    bodyWithTrailer('Assisted-by: cursor:composer 2.5'), 142, config,
+  );
+  assert.equal(spacedModel.ok, false);
 });
 
 test('matches the supported exclusion glob forms', () => {

@@ -51,6 +51,14 @@
       ]
     }
   },
+  "assistedByAliases": {
+    "claude-personal-1:swe-1.7": [
+      "claude-personal-1:swe-1-7"
+    ],
+    "cursor:composer-2.5": [
+      "cursor:composer"
+    ]
+  },
   "unavailable": {
     "gemini-personal": {
       "reason": "every key on this machine resolves to GCP project 62772308511, which returns Lightning dunning decision is deny. Billing, not configuration.",

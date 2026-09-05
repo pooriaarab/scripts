@@ -87,6 +87,10 @@ read_template() {
 PR_CONFIG_TPL=$(read_template pr-standards.json) || exit 1
 PR_TEMPLATE_MD=$(read_template pull_request_template.md) || exit 1
 WORKFLOW_YML=$(read_template pr-standards.yml) || exit 1
+# The trailer names the agent that produced the change, so it cannot be a
+# constant: whichever agent invokes this rollout should own its PRs. Set
+# ASSISTED_BY to that agent; the default is only a fallback.
+ASSISTED_BY=${ASSISTED_BY:-}
 AGENTS_BLOCK_TPL=$(read_template agents-block.md) || exit 1
 # An optional template is read only when its flag asked for it. Reading them all
 # would fail the whole run on a template a caller never wanted.
@@ -755,7 +759,7 @@ $PRECHECK_OUT
 The remaining rules -- the body's shape, the size caps, the commit trailers --
 are judged by the same checker when it runs on this PR.
 
-Assisted-by: pooriaarab/scripts:pr-standards-rollout" </dev/null; then
+Assisted-by: ${ASSISTED_BY:-cursor:composer-2.5}" </dev/null; then
     echo "DONE  $repo  (#$ISSUE_NUM -> $BRANCH -> PR)"
     # An assignment, not (( done_c++ )). Post-increment returns the value
     # before incrementing, so on the first success it returns 0, the group
