@@ -257,7 +257,7 @@ HEARTBEAT_START="\$(ps -o lstart= -p \$HEARTBEAT_PPID 2>/dev/null)"
 # check ends the helper on zombies; the start-time check ends it when the
 # parent PID has been reused by an unrelated process.
 ( exec bash -c '
-  _hp_pid="\$1"; _hp_start="\$2"; _hp_secs="\$3"; _hp_file="\$4"
+  _hp_pid="\$1"; _hp_start="\$2"; _hp_secs="\$3"; _hp_file="\$4"; warned=0
   _hp_alive() {
     local _st _now
     if command -v ps >/dev/null 2>&1; then
@@ -271,14 +271,32 @@ HEARTBEAT_START="\$(ps -o lstart= -p \$HEARTBEAT_PPID 2>/dev/null)"
     fi
     kill -0 "\$_hp_pid" 2>/dev/null
   }
-  while _hp_alive; do sleep "\$_hp_secs"; touch "\$_hp_file" 2>/dev/null || true; done
+  while _hp_alive; do
+    sleep "\$_hp_secs"
+    if touch "\$_hp_file" 2>/dev/null; then
+      warned=0
+    elif [ "\$warned" = 0 ]; then
+      echo "box-work-run: warning: heartbeat touch failing for \$_hp_file; idle-reaper exemption may be inactive" >&2
+      warned=1
+    fi
+  done
 ' box-work-heartbeat-loop "\$HEARTBEAT_PPID" "\$HEARTBEAT_START" "\$HEARTBEAT_SECS" "\$HEARTBEAT_FILE" ) &
 HEARTBEAT_PID=\$!
 stop_heartbeat() { kill "\$HEARTBEAT_PID" 2>/dev/null || true; wait "\$HEARTBEAT_PID" 2>/dev/null || true; }
-kill_tree() { # TERM a process subtree, children before parents
-  local _kt_c
-  for _kt_c in \$(ps -o pid= --ppid "\$1" 2>/dev/null); do kill_tree "\$_kt_c"; done
-  kill -TERM "\$1" 2>/dev/null || true
+kill_tree() { # list a process subtree's pids, deepest descendants first
+  local _kt_p="\$1" _kt_c
+  for _kt_c in \$(ps -o pid= --ppid "\$_kt_p" 2>/dev/null); do kill_tree "\$_kt_c"; done
+  echo "\$_kt_p"
+}
+reap_tree() { # TERM the whole subtree, then SIGKILL any survivor after a grace
+              # period -- a descendant that ignores or blocks SIGTERM must not
+              # outlive the job.
+  local _rt_pids _rt_p
+  _rt_pids="\$(kill_tree "\$1")"
+  for _rt_p in \$_rt_pids; do kill -TERM "\$_rt_p" 2>/dev/null || true; done
+  sleep 1
+  for _rt_p in \$_rt_pids; do kill -0 "\$_rt_p" 2>/dev/null && kill -KILL "\$_rt_p" 2>/dev/null; done
+  true
 }
 trap stop_heartbeat EXIT
 # The brief arrives base64-encoded. `box exec` joins argv into a shell command
@@ -346,8 +364,12 @@ esac
 }
 run_worker "\$1" &
 AGENT_PID=\$!
-trap 'kill_tree "\$AGENT_PID"; stop_heartbeat; trap - EXIT INT TERM; kill -INT \$\$' INT
-trap 'kill_tree "\$AGENT_PID"; stop_heartbeat; trap - EXIT INT TERM; kill -TERM \$\$' TERM
+trap 'reap_tree "\$AGENT_PID"; stop_heartbeat; trap - EXIT INT TERM HUP; kill -INT \$\$' INT
+trap 'reap_tree "\$AGENT_PID"; stop_heartbeat; trap - EXIT INT TERM HUP; kill -TERM \$\$' TERM
+# HUP has no trap of its own by default, so an unhandled HUP would only run
+# the bare EXIT trap above (stop_heartbeat) and leave the agent subtree
+# orphaned; mirror the INT/TERM handling so HUP tears down the whole job too.
+trap 'reap_tree "\$AGENT_PID"; stop_heartbeat; trap - EXIT INT TERM HUP; kill -HUP \$\$' HUP
 # Short poll, not a bare `wait`: bash defers a trapped SIGINT until a waited-for
 # child exits, so a bare wait would stall a PID-only interrupt for the whole
 # agent lifetime. The 0.5s sleep bounds trap latency; `wait` still reaps the
