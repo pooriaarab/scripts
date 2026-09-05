@@ -58,8 +58,9 @@ npm_install() { # <bin-name> <package>
 }
 
 log "gemini-cli"
-# gemini — needs --skip-trust or it errors "not running in a trusted directory"
-# GEMINI_API_KEY=<ai-studio-key> gemini --skip-trust -m gemini-3.8-flash -p "PROMPT"
+# gemini — needs --skip-trust or it errors "not running in a trusted directory".
+# Source the personal .env, scrub Vertex vars, pin GEMINI_CLI_HOME and trust.
+# GEMINI_CLI_HOME=~/.gemini-personal GEMINI_CLI_TRUST_WORKSPACE=true gemini --skip-trust --yolo -m gemini-3.8-flash -p "PROMPT"
 npm_install gemini "@google/gemini-cli"
 
 log "pi coding agent"
@@ -99,8 +100,9 @@ fi
 # The launcher is a small bash script; it downloads the real binary on first run
 # and needs ~/.config/muse/auth.json to authenticate that download.
 log "muse code"
-# muse — defaults to --approval-mode on-request, so headless it waits forever then SIGTERMs with ZERO edits
-# muse exec --workspace <path> --trust-workspace --approval-mode never "PROMPT"
+# muse — headless runs must pass --yolo, or the run can wait on an approval
+# prompt with zero edits while the call still reports success.
+# muse exec --yolo --json --model muse-spark-1.3-contributor --workspace <path> --prompt-file FILE
 if [ -x "$BIN/muse" ]; then
   note "muse launcher already present"
   mark muse "present"
@@ -117,9 +119,10 @@ fi
 
 # ----------------------------------------------------------- cursor-agent ----
 log "cursor-agent"
-# cursor-agent — needs --trust; and the API key must be EXPORTED, not just sourced
-# set -a; source ~/.agents/agent-clis.env; set +a
-# cursor-agent -p --trust --model composer-2.5 "PROMPT"     # or cursor-grok-4.6-high-fast
+# cursor-agent — needs --trust; and the API key must be EXPORTED, not just
+# sourced. The authoritative key lives in ~/.agents/cursor.env.
+# set -a; source ~/.agents/cursor.env; set +a
+# cursor-agent -p --trust --force --model composer-2.5 --output-format json "PROMPT"
 if [ -x "$BIN/cursor-agent" ]; then
   note "cursor-agent already present ($("$BIN/cursor-agent" --version 2>&1 | head -1))"
   mark cursor-agent "present"
@@ -134,17 +137,25 @@ fi
 
 # ------------------------------------------------------------------ devin ----
 log "devin"
-# devin  — refuses an untrusted workspace headless; needs both flags to write
-# devin -p --respect-workspace-trust false --permission-mode dangerous --model <m> -- "PROMPT"
-if [ -x "$BIN/devin" ]; then
+# devin — refuses an untrusted workspace headless; needs both flags to write.
+# The verified route is the personal login with API env vars unset; the
+# credentials file is required and API keys alone do not authenticate.
+# env -u DEVIN_API_KEY -u DEVIN_TOKEN -u WINDSURF_API_KEY devin --model swe-1.7 --respect-workspace-trust false --permission-mode dangerous -p "PROMPT"
+# (--prompt-file FILE -p also works.)
+if "$BIN/devin" --version >/dev/null 2>&1; then
   note "devin already present ($("$BIN/devin" --version 2>&1 | head -1))"
   mark devin "present"
 else
+  # The official installer verifies its artifact checksum and installs the
+  # binary, then can exit nonzero from its interactive setup step. Judge by a
+  # successful version run, not by that exit code or mere executability.
   curl -fsSL https://cli.devin.ai/install.sh | bash >/dev/null 2>&1
-  if [ -x "$BIN/devin" ]; then
+  installer_rc=$?
+  if "$BIN/devin" --version >/dev/null 2>&1; then
     mark devin "installed"
+    (( installer_rc )) && note "devin installer exited $installer_rc after installing the binary (interactive setup); version run validated"
   else
-    mark devin "FAILED (cli.devin.ai/install.sh)"
+    mark devin "FAILED (cli.devin.ai/install.sh exit $installer_rc, no working binary at $BIN/devin)"
   fi
 fi
 
@@ -185,6 +196,10 @@ fi
 # `zai-api` override reuses the same stored key against the pay-as-you-go
 # endpoint. The key is read at call time from pi's own auth store, so no secret
 # lands in this file.
+#
+# Cap openrouter deepseek/deepseek-v3.2 at maxTokens=8192: pi's bundled catalog
+# declares 163840 while OpenRouter reports max_completion_tokens=65536, and an
+# unconstrained request asked for 153497 output tokens and failed.
 log "pi provider overrides"
 mkdir -p "$HOME/.pi/agent"
 if [ ! -s "$HOME/.pi/agent/models.json" ]; then
@@ -200,13 +215,32 @@ if [ ! -s "$HOME/.pi/agent/models.json" ]; then
         { "id": "glm-5.3", "name": "GLM 5.3 (API)", "contextWindow": 204800, "maxTokens": 16384, "reasoning": true, "input": ["text"] },
         { "id": "glm-5.2", "name": "GLM 5.2 (API)", "contextWindow": 204800, "maxTokens": 16384, "reasoning": true, "input": ["text"] }
       ]
+    },
+    "openrouter": {
+      "modelOverrides": {
+        "deepseek/deepseek-v3.2": { "maxTokens": 8192 }
+      }
     }
   }
 }
 JSON
   note "wrote ~/.pi/agent/models.json"
 else
-  note "~/.pi/agent/models.json already present, left alone"
+  # Upgrade path: merge ONLY the deepseek cap into an existing config.
+  # Malformed configs (or conflicting shapes) fail loud and are left alone;
+  # everything else in the file is preserved byte-for-byte in effect.
+  if ! have python3; then
+    mark pi-models-upgrade "FAILED (no python3)"; PI_UPGRADE_FAILED=1
+  elif ! python3 - "$HOME/.pi/agent/models.json" <<'PY' 2>>"$STATUS_FILE"; then
+import json,os,sys
+p=sys.argv[1]
+try:
+ d=json.load(open(p));mo=os.stat(p).st_mode;e=d.setdefault("providers",{}).setdefault("openrouter",{}).setdefault("modelOverrides",{}).setdefault("deepseek/deepseek-v3.2",{})
+ assert isinstance(e,dict);e["maxTokens"]=8192;t=p+".tmp";json.dump(d,open(t,"w"),indent=2);os.chmod(t,mo&0o7777);os.replace(t,p);print("merged maxTokens=8192")
+except Exception as ex: sys.exit(f"merge refused: {ex}")
+PY
+    mark pi-models-upgrade "FAILED (left alone)"; PI_UPGRADE_FAILED=1
+  fi
 fi
 
 # --------------------------------------------------------------- wrappers ----
@@ -323,3 +357,4 @@ done
 cat "$STATUS_FILE"
 echo
 echo "agent-cli roster setup complete"
+[ -n "${PI_UPGRADE_FAILED:-}" ] && exit 1 || exit 0
