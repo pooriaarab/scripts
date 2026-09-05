@@ -17,8 +17,11 @@
 # as provider bootstrap failures, never as source defects.
 #
 # Canonical paths mirror box-setup/install-agent-clis.sh; invocation forms
-# mirror the box-work on-Box runner. No `box env set*` here: credentials
-# arrive through the existing environment provisioning, box-credentials stays
+# mirror the box-work on-Box runner. Two deliberate probe-only deltas: the
+# muse probe omits box-work's --json (JSONL would break the exact-digit
+# reply check; plain digits are the contract) and runs with the unique probe
+# directory as its workspace. No `box env set*` here: credentials arrive
+# through the existing environment provisioning, box-credentials stays
 # false, and nothing here snapshots a secret.
 #
 # Usage:
@@ -113,7 +116,7 @@ PROBE_MUSE="brief_file=\"\$(mktemp)\"; printf '%s' \"\$P\" > \"\$brief_file\"; m
 case "$PROVIDER" in
   muse) CMD="$PROBE_MUSE" ;;
   pi) CMD="PI_WORKER=1 pi -p --no-extensions --provider zai-api --model glm-5.3-flash -a --tools read,grep,find,ls,edit,write,bash \"\$P\"" ;;
-  gemini) CMD="unset GEMINI_API_KEY; set -a; . \"\$HOME/.gemini-personal/.gemini/.env\"; set +a; [ -n \"\${GEMINI_API_KEY:-}\" ] || exit 1; env -u GOOGLE_GENAI_USE_VERTEXAI -u GOOGLE_APPLICATION_CREDENTIALS -u GOOGLE_CLOUD_PROJECT -u GOOGLE_CLOUD_LOCATION GEMINI_CLI_HOME=\"\$HOME/.gemini-personal\" GEMINI_API_KEY=\"\$GEMINI_API_KEY\" gemini --skip-trust --yolo -m gemini-3.8-flash -p \"\$P\"" ;;
+  gemini) CMD="unset GEMINI_API_KEY; set -a; . \"\$HOME/.gemini-personal/.gemini/.env\"; set +a; [ -n \"\${GEMINI_API_KEY:-}\" ] || exit 1; env -u GOOGLE_GENAI_USE_VERTEXAI -u GOOGLE_APPLICATION_CREDENTIALS -u GOOGLE_CLOUD_PROJECT -u GOOGLE_CLOUD_LOCATION GEMINI_CLI_HOME=\"\$HOME/.gemini-personal\" GEMINI_API_KEY=\"\$GEMINI_API_KEY\" GEMINI_CLI_TRUST_WORKSPACE=true gemini --skip-trust --yolo -m gemini-3.8-flash -p \"\$P\"" ;;
   cursor) CMD="unset CURSOR_API_KEY; set -a; . \"\$HOME/.agents/cursor.env\"; set +a; [ -n \"\${CURSOR_API_KEY:-}\" ] || exit 1; cursor-agent -p --trust --force --model composer-2.5 --output-format json \"\$P\"" ;;
   devin) CMD="brief_file=\"\$(mktemp)\"; printf '%s' \"\$P\" > \"\$brief_file\"; env -u DEVIN_API_KEY -u DEVIN_TOKEN -u WINDSURF_API_KEY devin --model swe-1.7 --respect-workspace-trust false --permission-mode dangerous --prompt-file \"\$brief_file\" -p; rc=\$?; rm -f \"\$brief_file\"; exit \$rc" ;;
   kimi) CMD="kimi -m moonshot-ai/kimi-k3 -p \"\$P\"" ;;
