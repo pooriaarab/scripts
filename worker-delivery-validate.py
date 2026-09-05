@@ -29,23 +29,16 @@ BOUND_SIZE = ("import {DEFAULT_CONFIG,validateConfig,summarizeFiles,checkSize,de
 def git(c, *a): return subprocess.run(["git", "-C", c, *a], text=True, capture_output=True)
 
 def segment_installs(segment):
-    segment = segment.strip()
-    if FORGE_CMD.match(segment): return False
-    wrapped = SHELL_WRAP.match(segment)
-    if wrapped: return segment_installs(wrapped.group(2))
-    return True
+    return not FORGE_CMD.match(segment.strip())
 
 def parse_bounded_setup_steps(cmd):
     cmd = cmd.strip()
     if not cmd: return None, "bound setup command is empty"
-    if COMPOUND_SHELL.search(cmd):
-        return None, "bound setup command %r uses unsupported compound shell; use &&-chained steps only" % cmd
+    bad = "bound setup %r uses unsupported shell; use && only" % cmd
+    if COMPOUND_SHELL.search(cmd) or SHELL_WRAP.match(cmd): return None, bad
     steps = [part.strip() for part in re.split(r"\s*&&\s*", cmd)]
-    if any(not step for step in steps):
-        return None, "bound setup command %r has an empty && step" % cmd
-    for step in steps:
-        if SHELL_WRAP.match(step):
-            return None, "bound setup command %r uses unsupported compound shell; use &&-chained steps only" % cmd
+    if any(not step for step in steps): return None, "bound setup command %r has an empty && step" % cmd
+    if any(SHELL_WRAP.match(step) for step in steps): return None, bad
     return steps, None
 
 def gh_items(gh, path, key):
