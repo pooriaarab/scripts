@@ -215,6 +215,22 @@ set -a
 [ -f "\$HOME/.agents/agent-clis.env" ] && . "\$HOME/.agents/agent-clis.env"
 set +a
 cd "/home/user/$NAME" || exit 1
+# Job-scoped liveness: box-reap never reaps on state alone, and a worker
+# waiting on a provider looks idle by CPU. Touch the in-Box heartbeat while
+# the agent runs; the EXIT trap stops updates when the job ends, so a dead
+# job's file goes stale and keeps no exemption. The helper also exits when
+# its parent is gone, so even an uncatchable kill leaves no orphan.
+HEARTBEAT_FILE="${BOX_WORK_HEARTBEAT_FILE:-/home/user/.box-reap-heartbeat}"
+HEARTBEAT_SECS="${BOX_WORK_HEARTBEAT_SECS:-30}"
+case "\$HEARTBEAT_SECS" in ''|*[!0-9]*|0) HEARTBEAT_SECS=30 ;; esac
+touch "\$HEARTBEAT_FILE" 2>/dev/null || true
+HEARTBEAT_PPID=\$$
+( while kill -0 "\$HEARTBEAT_PPID" 2>/dev/null; do sleep "\$HEARTBEAT_SECS"; touch "\$HEARTBEAT_FILE" 2>/dev/null || true; done ) &
+HEARTBEAT_PID=\$!
+stop_heartbeat() { kill "\$HEARTBEAT_PID" 2>/dev/null || true; wait "\$HEARTBEAT_PID" 2>/dev/null || true; }
+trap stop_heartbeat EXIT
+trap 'stop_heartbeat; trap - EXIT INT TERM; kill -INT \$\$' INT
+trap 'stop_heartbeat; trap - EXIT INT TERM; kill -TERM \$\$' TERM
 # The brief arrives base64-encoded. `box exec` joins argv into a shell command
 # string, so a multi-word brief passed raw is split across argv and the agent
 # receives only its first word -- it then asks a clarifying question and does
