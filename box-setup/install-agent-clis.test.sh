@@ -18,6 +18,7 @@ export PATH="$T/fakebin:$PATH"
 cat > "$H/.pi/agent/models.json" <<'JSON'
 {"providers": {"zai-api": {"models": [{"id": "glm-5.3-flash"}]}, "openrouter": {"models": [{"id": "keep-me"}], "modelOverrides": {"other/m": {"maxTokens": 1}}}}}
 JSON
+chmod 600 "$H/.pi/agent/models.json"
 HOME="$H" bash "$DIR/install-agent-clis.sh" >"$T/out" 2>&1; rc=$?
 [ "$rc" = "0" ] && pass "upgrade run succeeds" || fail "upgrade run succeeds" "$(tail -3 "$T/out")"
 python3 - "$H/.pi/agent/models.json" <<'PY' && pass "existing config gains only the cap" || fail "existing config gains only the cap" "traceback above"
@@ -28,12 +29,13 @@ assert p["zai-api"]["models"][0]["id"]=="glm-5.3-flash", "zai lost"
 assert o["models"]==[{"id":"keep-me"}], "models lost"
 assert o["modelOverrides"]["other/m"]=={"maxTokens":1}, "sibling lost"
 PY
+[ "$(stat -c %a "$H/.pi/agent/models.json")" = "600" ] && pass "mode preserved" || fail "mode preserved" "mode changed"
 HOME="$H" bash "$DIR/install-agent-clis.sh" >"$T/out2" 2>&1; rc=$?
 [ "$rc" = "0" ] && pass "rerun is a clean no-op" || fail "rerun is a clean no-op" "$(tail -3 "$T/out2")"
 if grep -q 'pi-models-upgrade.*FAILED' "$H/.agents/install-status.txt"; then fail "no upgrade failure marked" "$(cat "$H/.agents/install-status.txt")"; else pass "no upgrade failure marked"; fi
 printf '{oops' > "$H/.pi/agent/models.json"; sha="$(cksum < "$H/.pi/agent/models.json")"
 HOME="$H" bash "$DIR/install-agent-clis.sh" >"$T/out3" 2>&1; rc=$?
-[ "$rc" = "0" ] && pass "malformed run still exits 0" || fail "malformed run still exits 0" "$(tail -3 "$T/out3")"
+[ "$rc" != "0" ] && pass "malformed run exits nonzero" || fail "malformed run exits nonzero" "rc=0 unexpectedly"
 if grep -q 'pi-models-upgrade.*FAILED' "$H/.agents/install-status.txt"; then pass "malformed config fails clearly"; else fail "malformed config fails clearly" "$(cat "$H/.agents/install-status.txt")"; fi
 [ "$(cksum < "$H/.pi/agent/models.json")" = "$sha" ] && pass "malformed config left untouched" || fail "malformed config left untouched" "file changed"
 echo "pass=$PASS fail=$FAIL"

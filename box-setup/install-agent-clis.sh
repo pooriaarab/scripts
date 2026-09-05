@@ -230,16 +230,16 @@ else
   # Malformed configs (or conflicting shapes) fail loud and are left alone;
   # everything else in the file is preserved byte-for-byte in effect.
   if ! have python3; then
-    mark pi-models-upgrade "SKIPPED (no python3)"
+    mark pi-models-upgrade "FAILED (no python3)"; PI_UPGRADE_FAILED=1
   elif ! python3 - "$HOME/.pi/agent/models.json" <<'PY' 2>>"$STATUS_FILE"; then
 import json,os,sys
 p=sys.argv[1]
 try:
- d=json.load(open(p));e=d.setdefault("providers",{}).setdefault("openrouter",{}).setdefault("modelOverrides",{}).setdefault("deepseek/deepseek-v3.2",{})
- assert isinstance(e,dict);e["maxTokens"]=8192;t=p+".tmp";json.dump(d,open(t,"w"),indent=2);os.replace(t,p);print("merged maxTokens=8192")
+ d=json.load(open(p));mo=os.stat(p).st_mode;e=d.setdefault("providers",{}).setdefault("openrouter",{}).setdefault("modelOverrides",{}).setdefault("deepseek/deepseek-v3.2",{})
+ assert isinstance(e,dict);e["maxTokens"]=8192;t=p+".tmp";json.dump(d,open(t,"w"),indent=2);os.chmod(t,mo&0o7777);os.replace(t,p);print("merged maxTokens=8192")
 except Exception as ex: sys.exit(f"merge refused: {ex}")
 PY
-    mark pi-models-upgrade "FAILED (left alone)"
+    mark pi-models-upgrade "FAILED (left alone)"; PI_UPGRADE_FAILED=1
   fi
 fi
 
@@ -357,3 +357,4 @@ done
 cat "$STATUS_FILE"
 echo
 echo "agent-cli roster setup complete"
+[ -n "${PI_UPGRADE_FAILED:-}" ] && exit 1 || exit 0
