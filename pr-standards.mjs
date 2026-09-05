@@ -492,25 +492,48 @@ function proofCommand(text) {
 // And a delta is only real when the two counts differ: two identical
 // `git ls-files | grep -c ''` runs prove nothing changed, so counting
 // them as "before/after" evidence would let a no-op pass.
+//
+// The two counts must also come from the *same* probe. Pairing any two
+// ls-files-flavored commands that happen to produce different numbers
+// (`git ls-files | grep -c '.ts'` -> 300, then a separate `grep -c '.md'`
+// -> 42) would read as a before/after delta even though nothing about the
+// index changed between them -- those are two unrelated snapshots, not a
+// before and an after of the same measurement. Counts are grouped by their
+// normalized command text, and only a differing pair within the same group
+// counts as a delta.
 const PROOF_NONE_GUARD_RE = /^\(\s*none(?:\s+tracked)?\s*\)$/i;
 const PROOF_COUNT_LINE_RE = /^\d+$/;
 const LS_FILES_COMMAND_RE = /\bgit\s+ls-files\b/i;
 
+function normalizeLsFilesCommand(line) {
+  return line.replace(/^[$>`]\s*/, '').replace(/\s+/g, ' ').trim();
+}
+
 function hasIndexStateResult(text) {
   const lines = String(text).split('\n').map((line) => line.trim()).filter(Boolean);
   let expectOutput = false;
-  const counts = [];
+  let pendingCommand = null;
+  const countsByCommand = new Map();
   for (const line of lines) {
     if (PROOF_COMMAND_RE.test(line)) {
       expectOutput = LS_FILES_COMMAND_RE.test(line);
+      pendingCommand = expectOutput ? normalizeLsFilesCommand(line) : null;
       continue;
     }
     if (!expectOutput) continue;
     expectOutput = false;
     if (PROOF_NONE_GUARD_RE.test(line)) return true;
-    if (PROOF_COUNT_LINE_RE.test(line)) counts.push(Number(line));
+    if (PROOF_COUNT_LINE_RE.test(line)) {
+      const counts = countsByCommand.get(pendingCommand) ?? [];
+      counts.push(Number(line));
+      countsByCommand.set(pendingCommand, counts);
+    }
+    pendingCommand = null;
   }
-  return counts.length >= 2 && new Set(counts).size > 1;
+  for (const counts of countsByCommand.values()) {
+    if (counts.length >= 2 && new Set(counts).size > 1) return true;
+  }
+  return false;
 }
 
 function proofResult(text) {

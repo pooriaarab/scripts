@@ -1940,6 +1940,43 @@ test('an index-delta needs the counts to actually differ, and immediate adjacenc
   );
 });
 
+test('an index-delta pair must come from the same ls-files probe', () => {
+  // Two different probes -- one counting .ts files, one counting .md files
+  // -- naturally produce different numbers with no index change at all.
+  // Pairing any two ls-files-flavored outputs that differ would let that
+  // read as a before/after delta.
+  const body = (verified) => [
+    '## What', 'One sentence.',
+    '## Why', 'Because of the reason.',
+    '## How I verified', verified,
+    'Assisted-by: agent:model',
+  ].join('\n\n');
+  const fails = (text) => validateBody(body(text), 142, config)
+    .failures.some((f) => f.check === '## How I verified');
+
+  assert.equal(
+    fails([
+      "$ git ls-files | grep -c '.ts'",
+      '300',
+      "$ git ls-files | grep -c '.md'",
+      '42',
+    ].join('\n')),
+    true,
+    'two different probes with different counts are not a before/after delta',
+  );
+
+  assert.equal(
+    fails([
+      "$ git ls-files | grep -c ''",
+      '337',
+      "$ git ls-files | grep -c ''",
+      '336',
+    ].join('\n')),
+    false,
+    'the same probe run twice with differing counts is still a valid delta',
+  );
+});
+
 test('a nonzero failed count is not masked by "passed" in the same result', () => {
   // "12 passed, 2 failed" matches `pass(?:ed)?` on its own, the same way
   // "Found 7 warnings and 0 errors" matched a clean "0 errors" until the
