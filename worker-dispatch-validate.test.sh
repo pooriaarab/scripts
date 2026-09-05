@@ -36,7 +36,8 @@ case "$endpoint" in
     printf '{"sha":"cfgsha-test","content":"%s"}\n' "$content" ;;
   repos/*/issues/*)
     case "$failmode" in issue|all) echo "API 500 exploded" >&2; exit 1;; esac
-    state="$(cat "$T/issue-state")"; [ "$jqexpr" = .state ] && printf '%s\n' "$state" || printf '{"state":"%s"}\n' "$state" ;;
+    state="$(cat "$T/issue-state")"; extra=""; [ -f "$T/issue-is-pr" ] && extra=',"pull_request":{"url":"x"}'
+    printf '{"state":"%s"%s}\n' "$state" "$extra" ;;
   repos/*/commits/*)
     case "$failmode" in base|all) echo "API 500 exploded" >&2; exit 1;; esac
     sha="$(cat "$T/live-sha")"; [ "$jqexpr" = .sha ] && printf '%s\n' "$sha" || printf '{"sha":"%s"}\n' "$sha" ;;
@@ -82,6 +83,7 @@ for o in over:
     k, v = o.split("=",1)
     if v == "@DROP@": m.pop(k,None)
     elif v.startswith("@JSON:"): m[k]=json.loads(v[len("@JSON:"):])
+    elif v.startswith("@STR:"): m[k]=v[len("@STR:"):]
     elif k == "issue": m[k]=int(v)
     elif k == "resume": m[k]=(v=="true")
     else: m[k]=v
@@ -89,71 +91,77 @@ json.dump(m, open(out,"w"))
 PY
 }
 
-reset() { rm -f "$T"/state/*.json "$T"/state/.receipt-*.tmp "$T/sentinel" "$T/box-called" "$T/gh.log" "$T/boxcalls.log"; rm -rf "$T"/state/*.lock; : > "$T/gh.log"; rm -f "$T/no-config"; printf 'none' > "$T/apifail"; printf 'open' > "$T/issue-state"; printf 'pop' > "$T/config-prefix"; }
+reset() { rm -f "$T"/state/*.json "$T"/state/.receipt-*.tmp "$T/sentinel" "$T/box-called" "$T/gh.log" "$T/boxcalls.log"; rm -rf "$T"/state/*.lock; : > "$T/gh.log"; rm -f "$T/no-config" "$T/issue-is-pr"; printf 'none' > "$T/apifail"; printf 'open' > "$T/issue-state"; printf 'pop' > "$T/config-prefix"; }
 
-# The sentinel stands in for the Box/branch/worker mutation: it runs only
-# when validation passes, so its absence proves rejection came first.
+# The sentinel stands in for Box/branch/worker mutation: its absence proves rejection came first.
 attempt() { # <manifest> [extra validator args...]
   local m="$1"; shift
   out="$("$SCRIPT" --manifest "$m" "$@" 2>&1)"; rc=$?
   (( rc == 0 )) && touch "$T/sentinel"
 }
 
-reset; mkmanifest "$T/valid.json"
-attempt "$T/valid.json" --checkout "$T/checkout"
+# Valid checkout manifest: passes, reaches the sentinel, records pinned SHAs.
+reset; mkmanifest "$T/valid.json"; attempt "$T/valid.json" --checkout "$T/checkout"
 BLOB="$(git -C "$T/checkout" rev-parse HEAD:.github/pr-standards.json)"
-checkout_ok=0
-(( rc == 0 )) && [ -f "$T/sentinel" ] \
-  && grep -q "\"base_sha\": \"$(cat "$T/live-sha")\"" "$T"/state/*.json \
-  && grep -q "\"config_sha\": \"$BLOB\"" "$T"/state/*.json \
-  && ! grep -q "local-checkout" "$T"/state/*.json && checkout_ok=1
-rm -f "$T/sentinel"
-mkmanifest "$T/valid-api.json" resume="true"
-attempt "$T/valid-api.json"
-api_ok=0
-(( rc == 0 )) && [ -f "$T/sentinel" ] \
-  && grep -q '"config_sha": "cfgsha-test"' "$T"/state/*.json && api_ok=1
-if (( checkout_ok == 1 && api_ok == 1 )); then pass "valid manifest passes, reaches the sentinel, records pinned config/base SHAs"; else fail "valid manifest passes, reaches the sentinel, records pinned config/base SHAs" "rc=$rc out=$out checkout_ok=$checkout_ok api_ok=$api_ok"; fi
+if (( rc == 0 )) && [ -f "$T/sentinel" ] && grep -q "\"base_sha\": \"$(cat "$T/live-sha")\"" "$T"/state/*.json \
+  && grep -q "\"config_sha\": \"$BLOB\"" "$T"/state/*.json && ! grep -q "local-checkout" "$T"/state/*.json; then
+  pass "valid manifest passes, reaches the sentinel, records pinned config/base SHAs"
+else
+  fail "valid manifest passes, reaches the sentinel, records pinned config/base SHAs" "rc=$rc out=$out"
+fi
 # One runner for every single-shot and ownership case:
-# name|setup|overrides (; separated)|mode|want (fail|pass)|grep.
-# setup: closed | noconfig | apifail=X | seed-owned | keep | drift | empty.
-# mode: checkout | api. Ownership rows reuse the seeded record (keep).
+# name|setup|overrides (; separated)|mode|want|grep|extra validator args.
+# setup: closed | ispr | noconfig | apifail=X | prefix=X | seed-owned | keep | drift | empty.
+# mode: checkout | api. want: pass (grep scans the receipt) | fail | failclean (fail, no receipt).
+# Ownership rows reuse the seeded record (keep).
 run_case() {
-  local name setup overrides mode want grepwant
-  IFS='|' read -r name setup overrides mode want grepwant <<< "$1"
+  local name setup overrides mode want grepwant extra
+  IFS='|' read -r name setup overrides mode want grepwant extra <<< "$1"
   if [ "$setup" != keep ]; then reset; fi
   case "$setup" in
     closed) printf 'closed' > "$T/issue-state" ;;
+    ispr) touch "$T/issue-is-pr" ;;
     noconfig) touch "$T/no-config" ;;
     apifail=*) printf '%s' "${setup#apifail=}" > "$T/apifail" ;;
     prefix=*) printf '%s' "${setup#prefix=}" > "$T/config-prefix" ;;
     seed-owned) mkmanifest "$T/owned.json"; attempt "$T/owned.json" --checkout "$T/checkout" ;;
     drift)
-      first="$(cat "$T/live-sha")"
       git -C "$T/checkout" rev-parse HEAD > "$T/orig-sha"
-      echo more > "$T/checkout/file.txt"
-      git -C "$T/checkout" commit -qam second
-      printf '%s' "$first" > "$T/live-sha" ;;
+      echo more > "$T/checkout/file.txt"; git -C "$T/checkout" commit -qam second
+      printf '%s' "$(cat "$T/orig-sha")" > "$T/live-sha" ;;
   esac
   rm -f "$T/sentinel"
   local args=() o OV
   IFS=';' read -ra OV <<< "$overrides"
   for o in "${OV[@]}"; do [ -n "$o" ] && args+=("$o"); done
   if ((${#args[@]})); then mkmanifest "$T/case.json" "${args[@]}"; else mkmanifest "$T/case.json"; fi
-  if [ "$mode" = checkout ]; then attempt "$T/case.json" --checkout "$T/checkout"; else attempt "$T/case.json"; fi
+  # shellcheck disable=SC2086
+  if [ "$mode" = checkout ]; then attempt "$T/case.json" --checkout "$T/checkout" $extra; else attempt "$T/case.json" $extra; fi
   local good=0
   if [ "$want" = pass ]; then
-    (( rc == 0 )) && [ -f "$T/sentinel" ] && good=1
+    (( rc == 0 )) && [ -f "$T/sentinel" ] && { [ -z "$grepwant" ] || grep -rq "$grepwant" "$T/state"; } && good=1
+  elif [ "$want" = failclean ]; then
+    (( rc != 0 )) && [ ! -f "$T/sentinel" ] && [ -z "$(ls "$T"/state/*.json 2>/dev/null)" ] \
+      && { [ -z "$grepwant" ] || echo "$out" | grep -q "$grepwant"; } && good=1
   elif (( rc != 0 )) && [ ! -f "$T/sentinel" ] && { [ -z "$grepwant" ] || echo "$out" | grep -q "$grepwant"; }; then
     good=1
   fi
   if (( good == 1 )); then pass "$name"; else fail "$name" "rc=$rc out=$out"; fi
 }
 while IFS= read -r row; do [ -n "$row" ] && run_case "$row"; done <<'CASES'
+valid api manifest passes and records the API config SHA|||api|pass|cfgsha-test|
 wrong prefix branch fails before the sentinel||branch=pc-976-fix-the-widget;title=[PC-976] Fix the widget output|checkout|fail|
+leading-zero issue string is rejected before any use||issue=@STR:0976|checkout|fail|canonical|
+zero issue number is rejected||issue=@JSON:0|checkout|fail|positive|
 closed issue fails before the sentinel|closed||checkout|fail|not open
+open pull request is not the required issue|ispr||checkout|fail|pull request|
 title bound to another issue fails before the sentinel||title=[POP-977] Fix the widget output|checkout|fail|
+Fixes reference does not satisfy the closing requirement||closing_ref=Fixes #976|checkout|fail|closing_ref|
+Resolves reference does not satisfy the closing requirement||closing_ref=Resolves #976|checkout|fail|closing_ref|
+lowercase closes reference is accepted||closing_ref=closes #976|checkout|pass||
+colon Closes reference is accepted||closing_ref=Closes: #976|checkout|pass||
 two closing references fail before the sentinel||closing_ref=Closes #976 and Fixes #977|checkout|fail|
+two Closes references fail before the sentinel||closing_ref=Closes #976 and Closes #977|checkout|fail|
 stale base_sha fails before the sentinel||base_sha=0000000000000000000000000000000000000000|checkout|fail|differ
 short base_sha is rejected||base_sha=abcdef12|checkout|fail|base_sha
 long base_sha is rejected||base_sha=abcdef0123456789abcdef0123456789abcdef012|checkout|fail|base_sha
@@ -168,33 +176,30 @@ missing repository configuration fails before the sentinel|noconfig||api|fail|co
 present but invalid prefix fails before the sentinel|prefix=POP123||api|fail|invalid prefix
 API failure fails before the sentinel with no fallback|apifail=all||api|fail|
 conflicting ownership is rejected|seed-owned|coordinator=coord-b;branch=pop-976-other-attempt;box=bx_other999|checkout|fail|conflict
+canonical string issue shares ownership with int issue|seed-owned|coordinator=coord-b;branch=pop-976-other-attempt;box=bx_other999;issue=@STR:976|checkout|fail|conflict
 explicit matching resume passes|keep|resume=true|checkout|pass|
+agent mismatch writes no receipt|||checkout|failclean|does not match|--agent pi
+matching agent passes and records a receipt|||checkout|pass|"cli": "muse"|--agent muse
 resume with a conflicting Box identity is rejected|keep|resume=true;box=bx_someone_else|checkout|fail|mismatch on: box
 resume with a conflicting branch is rejected|keep|resume=true;branch=pop-976-someone-elses-work|checkout|fail|branch
 checkout drift from the declared base fails before the sentinel|drift||checkout|fail|checkout HEAD
 CASES
-git -C "$T/checkout" reset -q --hard "$(cat "$T/orig-sha")"
-git -C "$T/checkout" rev-parse HEAD | tr -d '\n' > "$T/live-sha"
-# Caller-declared --agent is checked before any state is written: a mismatch
-# dies with no receipt; a match passes and records one.
-reset; mkmanifest "$T/agent-bad.json"
-out="$("$SCRIPT" --manifest "$T/agent-bad.json" --checkout "$T/checkout" --agent pi 2>&1)"; rc=$?
-if (( rc != 0 )) && [ -z "$(ls "$T"/state/*.json 2>/dev/null)" ] && echo "$out" | grep -q "does not match"; then
-  pass "cli mismatch writes no receipt"
+git -C "$T/checkout" reset -q --hard "$(cat "$T/orig-sha")"; git -C "$T/checkout" rev-parse HEAD | tr -d '\n' > "$T/live-sha"
+# Sequential canonical equivalence: int 976 then string "976" share one receipt.
+reset; mkmanifest "$T/seq.json"; attempt "$T/seq.json" --checkout "$T/checkout"
+mkmanifest "$T/seq-str.json" issue=@STR:976 coordinator=coord-b branch=pop-976-other-attempt box=bx_other999
+attempt "$T/seq-str.json" --checkout "$T/checkout"; nrc="$(ls "$T"/state/*.json 2>/dev/null | wc -l)"
+if (( rc != 0 )) && [ "$nrc" = 1 ] && echo "$out" | grep -q conflict; then
+  pass "canonical-equivalent sequential attempt shares one receipt"
 else
-  fail "cli mismatch writes no receipt" "rc=$rc out=$out"
-fi
-reset; mkmanifest "$T/agent-ok.json"
-attempt "$T/agent-ok.json" --checkout "$T/checkout" --agent muse
-if (( rc == 0 )) && [ -f "$T/sentinel" ] && [ -n "$(ls "$T"/state/*.json 2>/dev/null)" ]; then
-  pass "matching agent passes and records a receipt"
-else
-  fail "matching agent passes and records a receipt" "rc=$rc out=$out"
+  fail "canonical-equivalent sequential attempt shares one receipt" "rc=$rc receipts=$nrc out=$out"
 fi
 # Concurrent dispatch: exactly one winner, one receipt, winner preserved.
 reset
 for i in 1 2 3 4 5 6 7 8; do
-  mkmanifest "$T/race-$i.json" coordinator="coord-race-$i" branch="pop-976-race-attempt-$i" box="bx_race_$i"
+  # Alternate int/string issue forms: canonical-equivalent racers share one receipt.
+  (( i % 2 == 0 )) && iform="issue=@STR:976" || iform="issue=976"
+  mkmanifest "$T/race-$i.json" coordinator="coord-race-$i" branch="pop-976-race-attempt-$i" box="bx_race_$i" "$iform"
   ("$SCRIPT" --manifest "$T/race-$i.json" --checkout "$T/checkout" >"$T/race-out-$i" 2>&1; echo "$?" >"$T/race-rc-$i") &
 done
 wait

@@ -10,18 +10,15 @@
 #   issue        issue number the worker implements
 #   branch       proposed branch, "<prefix>-<issue>-<slug>"
 #   title        proposed PR title, "[PREFIX-<issue>] Subject"
-#   closing_ref  exactly one closing reference, e.g. "Closes #976"
+#   closing_ref  exactly one "Closes #N" reference (Fixes/Resolves never satisfy)
 #   base_ref     expected base branch, e.g. "main"
 #   base_sha     pinned 40-hex base commit the checkout must match
 #   coordinator  identity that owns this dispatch
-#   cli          worker CLI (claude|codex|gemini|pi|kimi|cursor|devin|muse)
-#   model        worker model for that CLI
-#   box          existing Box id (resume) or proposed Box name
-#   resume       true when resuming recorded ownership (optional, default false)
+#   cli/model    worker CLI and its model (claude|codex|gemini|pi|kimi|cursor|devin|muse)
+#   box/resume   existing Box id or proposed name; resume:true resumes ownership (default false)
 #
 # Exit: 0 valid (receipt recorded); 1 validation failure; 2 usage/env error.
-# Only success writes state (the receipt). A failure changes nothing: no Box,
-# branch, or worker command is ever invoked from this path.
+# Only success writes state; failures change nothing and invoke nothing.
 #
 # Dependencies are injectable for tests: GH_CLI (default gh), GIT_CLI
 # (default git), WORKER_DISPATCH_STATE (default XDG state dir).
@@ -76,14 +73,11 @@ if bad:
     print("echo 'manifest field(s) must be strings: %s' >&2; exit 1" % " ".join(bad), end="")
     sys.exit(0)
 iss = m["issue"]
-if isinstance(iss, bool):
-    print("echo 'manifest field issue must be an issue number' >&2; exit 1", end="")
+if isinstance(iss, bool) or (isinstance(iss, int) and iss <= 0) or not isinstance(iss, (int, str)):
+    print("echo 'manifest field issue must be a positive issue number' >&2; exit 1", end="")
     sys.exit(0)
-elif isinstance(iss, int):
+if isinstance(iss, int):
     m["issue"] = str(iss)
-elif not isinstance(iss, str):
-    print("echo 'manifest field issue must be an issue number' >&2; exit 1", end="")
-    sys.exit(0)
 res = m.get("resume", False)
 if not isinstance(res, bool):
     print("echo 'manifest field resume must be a boolean' >&2; exit 1", end="")
@@ -105,7 +99,9 @@ case "$M_REPOSITORY" in
   *[^A-Za-z0-9_.\/-]*|*//*|/*|*/) fail "invalid repository '$M_REPOSITORY' (want owner/name)" ;;
 esac
 case "$M_REPOSITORY" in */*) : ;; *) fail "invalid repository '$M_REPOSITORY' (want owner/name)" ;; esac
-case "$M_ISSUE" in ''|*[!0-9]*) fail "invalid issue '$M_ISSUE' (want a number)" ;; esac
+# Canonical positive integer, no leading zeros: "0976" dies here, before the
+# branch, title, API, and receipt uses below that all read M_ISSUE.
+case "$M_ISSUE" in ''|*[!0-9]*|0*) fail "invalid issue '$M_ISSUE' (want canonical positive integer, no leading zeros)" ;; esac
 case "$M_BASE_SHA" in
   ????????????????????????????????????????)
     case "$M_BASE_SHA" in *[^0-9a-f]*) fail "invalid base_sha (want 40 lowercase hex chars)" ;; esac ;;
@@ -114,9 +110,7 @@ esac
 case "$M_CLI" in claude|codex|gemini|pi|kimi|cursor|devin|muse) : ;;
   *) fail "unknown worker cli '$M_CLI'" ;;
 esac
-# Checked before any state is written: a caller-declared --agent that doesn't
-# match the manifest's cli must never leave a receipt behind for a dispatch
-# that the caller is about to abort.
+# A caller --agent mismatch dies before any state is written, leaving no receipt.
 [ -z "$AGENT_CLI" ] || [ "$AGENT_CLI" = "$M_CLI" ] \
   || fail "manifest declares cli '$M_CLI'; --agent '$AGENT_CLI' does not match"
 case "$M_MODEL" in ""|*[!A-Za-z0-9_./-]*|.*|*/|*//*)
@@ -127,9 +121,8 @@ esac
 CONFIG_JSON=""; CONFIG_SHA=""; API_ERR=""; API_OUT=""
 if [ -n "$CHECKOUT" ]; then
   [ -d "$CHECKOUT" ] || usage_error "not a directory: $CHECKOUT"
-  # Snapshot HEAD once: content, blob SHA, and the base check below all read
-  # from this one immutable commit, so a concurrent checkout cannot mix
-  # config from one commit with a base check against another.
+  # Snapshot HEAD once: config, blob SHA, and base check all read this one
+  # commit, so a concurrent checkout cannot mix commits.
   PINNED_HEAD="$("$GIT" -C "$CHECKOUT" rev-parse HEAD 2>&1)" || fail "cannot read checkout HEAD: $PINNED_HEAD"
   CONFIG_JSON="$("$GIT" -C "$CHECKOUT" show "$PINNED_HEAD:.github/pr-standards.json" 2>/dev/null)" \
     || fail "missing repository configuration at $PINNED_HEAD: .github/pr-standards.json"
@@ -139,8 +132,7 @@ else
   API_ERR="$(mktemp)"; API_OUT="$(mktemp)"
   # shellcheck disable=SC2064
   trap "rm -f '$API_ERR' '$API_OUT'" EXIT
-  # Pinned to base_sha (already validated as 40 lowercase hex), not the
-  # default branch: a base_ref other than default must read its own config.
+  # Pinned to base_sha, not the default branch: any base_ref reads its own config.
   if ! "$GH" api "repos/$M_REPOSITORY/contents/.github/pr-standards.json?ref=$M_BASE_SHA" \
       --jq '{sha: .sha, content: .content}' >"$API_OUT" 2>"$API_ERR"; then
     fail "cannot fetch repository configuration for $M_REPOSITORY: $(head -c 300 "$API_ERR")"
@@ -169,11 +161,13 @@ subject="${M_TITLE#"[$UPPER-$M_ISSUE] "}"
 CLOSING_CHECK="$(python3 - "$M_CLOSING_REF" "$M_ISSUE" "$M_REPOSITORY" <<'PY'
 import re,sys
 body, want, repo = sys.argv[1], int(sys.argv[2]), sys.argv[3].lower()
-refs = [(m.group(1), int(m.group(2)))
-        for m in re.finditer(r"\b(?:closes?|fix(?:es|ed)?|resolves?)\s*:?\s*(?:([\w.-]+\/[\w.-]+))?#([0-9]+)\b", body, re.I)]
+refs = [(m.group(1), m.group(2), int(m.group(3)))
+        for m in re.finditer(r"\b(close|closes|closed|fix|fixes|fixed|resolve|resolves|resolved)\s*:?\s*(?:([\w.-]+\/[\w.-]+))?#([0-9]+)\b", body, re.I)]
 if len(refs) != 1:
     print("want exactly one closing reference to #%d, found %d" % (want, len(refs))); sys.exit(1)
-rrepo, rnum = refs[0]
+kw, rrepo, rnum = refs[0]
+if kw.lower() not in ("close", "closes", "closed"):
+    print("'%s #%d' does not satisfy the closing requirement; use 'Closes #%d'" % (kw, rnum, want)); sys.exit(1)
 if rnum != want:
     print("closing reference #%d does not match issue #%d" % (rnum, want)); sys.exit(1)
 if rrepo and rrepo.lower() != repo:
@@ -182,9 +176,20 @@ PY
 )" || fail "closing_ref invalid: $CLOSING_CHECK"
 
 # --- Live issue state and base SHA: read-only API facts, no fallback. ---
-ISSUE_STATE="$("$GH" api "repos/$M_REPOSITORY/issues/$M_ISSUE" --jq '.state' 2>&1)" \
-  || fail "cannot read issue $M_REPOSITORY#$M_ISSUE: $ISSUE_STATE"
-[ "$ISSUE_STATE" = "open" ] || fail "issue $M_REPOSITORY#$M_ISSUE is '$ISSUE_STATE', not open"
+# The /issues endpoint also returns pull requests, so read the actual object:
+# a pull_request key means an open PR, never the required issue.
+ISSUE_JSON="$("$GH" api "repos/$M_REPOSITORY/issues/$M_ISSUE" 2>&1)" \
+  || fail "cannot read issue $M_REPOSITORY#$M_ISSUE: $ISSUE_JSON"
+ISSUE_STATE="$(python3 - "$ISSUE_JSON" <<'PY'
+import json,sys
+try: obj = json.loads(sys.argv[1])
+except Exception: print("not a readable issue object"); sys.exit(1)
+if "pull_request" in obj: print("is a pull request, not an issue"); sys.exit(1)
+st = obj.get("state", "")
+if st != "open": print("is '%s', not open" % st); sys.exit(1)
+print("open")
+PY
+)" || fail "issue $M_REPOSITORY#$M_ISSUE $ISSUE_STATE"
 
 LIVE_SHA="$("$GH" api "repos/$M_REPOSITORY/commits/$M_BASE_REF" --jq '.sha' 2>&1)" \
   || fail "cannot read base ref $M_BASE_REF: $LIVE_SHA"
@@ -199,12 +204,10 @@ if [ -n "$CHECKOUT" ]; then
 fi
 
 # --- Ownership: one atomic claim under a portable mkdir lock (flock(1) is
-# --- Linux-only; this tool also runs from macOS). The check and the write are
-# --- a single step inside the writer below, so concurrent validations can
-# --- never both observe no receipt and both write. Keys are lowercased:
-# --- GitHub repo names are case-insensitive, so Owner/Repo and owner/repo
-# --- share one record and one lock. A resume must match the recorded
-# --- coordinator, Box, branch, and worker CLI/model exactly.
+# --- Linux-only; macOS needs mkdir). Check and write are a single step, so
+# --- concurrent validations never both win. Keys are lowercased (GitHub repo
+# --- names are case-insensitive). A resume must match coordinator, Box,
+# --- branch, and CLI/model exactly.
 mkdir -p "$STATE" || fail "cannot create state directory $STATE"
 REPO_KEY="$(printf '%s' "$M_REPOSITORY" | tr '[:upper:]' '[:lower:]' | tr '/' '_')"
 RECORD="$STATE/$REPO_KEY-$M_ISSUE.json"
