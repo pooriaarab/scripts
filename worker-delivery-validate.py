@@ -13,8 +13,8 @@ LOCK_INSTALL = {k: re.compile(v, re.I) for k, v in {
     "package-lock.json": r"\bnpm ci\b", "bun.lock": r"\bbun install\b.*--frozen-lockfile",
     "bun.lockb": r"\bbun install\b.*--frozen-lockfile", "pnpm-lock.yaml": r"\bpnpm install\b.*--frozen-lockfile",
     "yarn.lock": r"\byarn install\b.*--frozen-lockfile", "Cargo.lock": r"\bcargo fetch\b"}.items()}
-FORGE_CMD = re.compile(r"(?i)^\s*(?:echo|printf|print)\b")
-SEGMENT_SPLIT = re.compile(r"&&|\|\||;|\|")
+FORGE_CMD = re.compile(r"(?i)^\s*(?:\\|(?:command|builtin)\s+)*(?:echo|printf|print)\b")
+SEGMENT_SPLIT = re.compile(r"(&&|\|\||;|\|)")
 BUCKET_OK = {"pass": {"success", "pass"}, "fail": {"failure", "fail", "cancelled", "timed_out", "action_required"},
              "pending": {"pending", "in_progress", "queued"}, "skipped": {"skipped", "skipping"}}
 REQ = ("repository", "issue", "branch", "head", "tested_head", "outcome", "closing_ref", "implementation_status",
@@ -27,6 +27,15 @@ BOUND_SIZE = ("import {DEFAULT_CONFIG,validateConfig,summarizeFiles,checkSize,de
 
 def git(c, *a): return subprocess.run(["git", "-C", c, *a], text=True, capture_output=True)
 
+def guaranteed_segments(cmd):
+    guaranteed, segments = True, []
+    for tok in SEGMENT_SPLIT.split(cmd):
+        if tok == "||": guaranteed = False; continue
+        if tok in ("&&", ";", "|"): guaranteed = True; continue
+        if guaranteed and not FORGE_CMD.match(tok.strip()): segments.append(tok)
+        guaranteed = True
+    return segments
+
 def gh_items(gh, path, key):
     out, page, total = [], 1, None
     while True:
@@ -37,7 +46,7 @@ def gh_items(gh, path, key):
         if total is None and isinstance(doc, dict): total = doc.get("total_count")
         batch = doc.get(key, []) if key else (doc if isinstance(doc, list) else [])
         out.extend(batch)
-        if (total is not None and len(out) >= total) or (total is None and len(batch) < 100): break
+        if not batch or (total is not None and len(out) >= total) or (total is None and len(batch) < 100): break
         page += 1
     return out
 
@@ -126,12 +135,13 @@ def validate(report_path):
         fail("complete delivery requires verification_commands with exit 0")
     if not any(str(i.get("command", "")).strip() == bound_verify_cmd and i.get("exit") == 0 for i in ver):
         fail("report verification_commands do not match bound verify execution")
+    if not isinstance(doc["unresolved_failures"], list): fail("unresolved_failures must be a list")
     if doc["unresolved_failures"]: fail("unresolved failures remain: %s" % "; ".join(map(str, doc["unresolved_failures"])))
     locks = [name for name in LOCKS if name in {p.rsplit("/", 1)[-1] for p in git(checkout, "ls-files").stdout.splitlines()}]
     if locks:
         if not bound_setup_cmd or bound_setup_exit != "0": fail("bound setup command is required when lockfiles are committed")
         bound_head("setup", bound_setup_head, head)
-        segments = [s for s in SEGMENT_SPLIT.split(bound_setup_cmd) if not FORGE_CMD.match(s.strip())]
+        segments = guaranteed_segments(bound_setup_cmd)
         if not segments: fail("bound setup command %r does not install; it only prints text" % bound_setup_cmd)
         bad = [name for name in locks if not any(LOCK_INSTALL[name].search(seg) for seg in segments)]
         if bad: fail("bound setup does not satisfy committed lockfiles: %s" % ", ".join(bad))
