@@ -61,8 +61,15 @@ node -e 'const [a,b] = process.versions.node.split(".").map(Number);
 # deliberately low rate limit is silently reset to the default 5. It also
 # overwrites baseUrl with whatever we just tested, which would leave a localhost
 # URL staged after a local run. Snapshot and restore.
-cp scout.json scout.json.gate-bak
-trap 'mv -f scout.json.gate-bak scout.json 2>/dev/null || true' EXIT
+#
+# The backup name carries a mktemp suffix, not a fixed name: two runs in the
+# same working directory would otherwise share `scout.json.gate-bak` and one
+# could overwrite or delete the other's snapshot. Restoration failure is
+# reported, not swallowed, so a broken restore is visible in the log instead
+# of leaving scout.json silently rewritten.
+BACKUP="$(mktemp ./scout.json.gate-bak.XXXXXX)"
+cp scout.json "$BACKUP"
+trap 'mv -f "$BACKUP" scout.json || echo "warning: failed to restore scout.json from $BACKUP" >&2' EXIT
 
 headers=()
 if [ -n "${CF_ACCESS_CLIENT_ID:-}" ] && [ -n "${CF_ACCESS_CLIENT_SECRET:-}" ]; then
@@ -107,9 +114,9 @@ scout init --base-url "$BASE_URL"
 # budget so the shell side can cap --max-requests at it: passing --max-requests
 # 300 while scout.json asked for a lower budget would overrun the very API
 # this is meant to protect.
-BACKED_UP_BUDGET=$(node -e '
+BACKED_UP_BUDGET=$(BACKUP_FILE="$BACKUP" node -e '
   const fs = require("fs");
-  const backup = JSON.parse(fs.readFileSync("scout.json.gate-bak", "utf8"));
+  const backup = JSON.parse(fs.readFileSync(process.env.BACKUP_FILE, "utf8"));
   const policy = backup.policy || {};
   const cfg = JSON.parse(fs.readFileSync("scout.json", "utf8"));
   cfg.policy = cfg.policy || {};
