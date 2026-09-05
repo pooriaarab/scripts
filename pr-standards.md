@@ -103,6 +103,10 @@ Four things, all required:
   A comma-separated list on one line fails the check. The checker names the line
   it finds, so the failure is not a false "missing".
 
+  Both fields must be non-empty tokens with no internal whitespace, no backticks,
+  and no comma. The agent field must not contain a slash — `owner/repo:thing` is
+  a repository path, not a fleet member.
+
 #### Proof of work
 
 `## How I verified` must also carry proof that the change worked, not just the

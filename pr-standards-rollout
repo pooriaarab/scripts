@@ -87,6 +87,15 @@ read_template() {
 PR_CONFIG_TPL=$(read_template pr-standards.json) || exit 1
 PR_TEMPLATE_MD=$(read_template pull_request_template.md) || exit 1
 WORKFLOW_YML=$(read_template pr-standards.yml) || exit 1
+# The trailer names the agent that produced the change, so it cannot be a
+# constant: whichever agent invokes this rollout should own its PRs. A
+# constant fallback here would misattribute every PR this rollout opens to
+# whatever agent happened to be hardcoded -- the exact bug SC-329 removes --
+# so refuse to guess instead. Gated on --apply: a dry run never opens a PR,
+# so it has no attribution to guess and must not require this either.
+if [ "$DRY" -eq 0 ]; then
+  : "${ASSISTED_BY:?ASSISTED_BY must be set to the agent:model running this rollout, e.g. ASSISTED_BY=claude-code:sonnet-5}"
+fi
 AGENTS_BLOCK_TPL=$(read_template agents-block.md) || exit 1
 # An optional template is read only when its flag asked for it. Reading them all
 # would fail the whole run on a template a caller never wanted.
@@ -755,7 +764,7 @@ $PRECHECK_OUT
 The remaining rules -- the body's shape, the size caps, the commit trailers --
 are judged by the same checker when it runs on this PR.
 
-Assisted-by: pooriaarab/scripts:pr-standards-rollout" </dev/null; then
+Assisted-by: $ASSISTED_BY" </dev/null; then
     echo "DONE  $repo  (#$ISSUE_NUM -> $BRANCH -> PR)"
     # An assignment, not (( done_c++ )). Post-increment returns the value
     # before incrementing, so on the first success it returns 0, the group

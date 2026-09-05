@@ -313,7 +313,8 @@ fi
 
 # Compute defect rates and render output.
 REPOS_STR="${REPOS[*]}"
-python3 - "$tmp" "$SINCE" "$WINDOW_DAYS" "$JSON" "$REPOS_STR" <<'PY'
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+python3 - "$tmp" "$SINCE" "$WINDOW_DAYS" "$JSON" "$REPOS_STR" "$SCRIPT_DIR" <<'PY'
 import json, os, sys, re, datetime
 from collections import defaultdict
 
@@ -323,6 +324,7 @@ window_days = int(sys.argv[3])
 as_json = sys.argv[4] == "1"
 repos_str = sys.argv[5]
 repos = repos_str.split() if repos_str.strip() else []
+script_dir = sys.argv[6]
 
 with open(os.path.join(tmp, "all_prs.json")) as f:
     prs = json.load(f)
@@ -332,17 +334,58 @@ with open(os.path.join(tmp, "commits.json")) as f:
 def parse_iso(s):
     return datetime.datetime.fromisoformat(s.replace("Z", "+00:00"))
 
+def load_assisted_by_aliases():
+    routing_path = os.path.join(script_dir, "agent-routing.json")
+    try:
+        with open(routing_path) as f:
+            raw = json.load(f)
+    except FileNotFoundError:
+        return {}
+    except Exception as e:
+        # A present-but-broken routing file silently re-fragments the agent
+        # table with no visible sign the merge regressed, so say why on stderr
+        # instead of returning {} without a trace.
+        print(f"warning: {routing_path} unreadable, alias merging disabled: {e}", file=sys.stderr)
+        return {}
+    canonical_to_aliases = raw.get("assistedByAliases") or {}
+    alias_to_canonical = {}
+    for canonical, aliases in canonical_to_aliases.items():
+        for alias in aliases:
+            alias_to_canonical[alias] = canonical
+    return alias_to_canonical
+
 def parse_agent(body):
     if not body:
         return "unattributed"
-    m = re.search(r'Assisted-by:\s*(\S+)', body)
-    if m:
-        val = m.group(1).strip()
-        # Trim trailing punctuation that is not part of the agent name.
-        val = val.rstrip('.,;)]')
-        if val:
-            return val
+    # Mirror assisted-by.mjs's parseAssistedByLabel: a strict match on any
+    # line outranks a loose match on the first line, so a malformed line
+    # ahead of a well-formed one does not shadow the well-formed one.
+    lines = [line for line in body.split("\n") if re.match(r"^\s*assisted-by:", line, re.I)]
+    for line in lines:
+        m = re.match(r"^\s*Assisted-by:\s*([^\s:,/`]+):([^\s:,`]+)\s*$", line, re.I)
+        if m:
+            return f"{m.group(1)}:{m.group(2)}"
+    if lines:
+        loose = re.match(r"^\s*Assisted-by:\s*(\S+)", lines[0], re.I)
+        if loose:
+            val = loose.group(1).strip().rstrip(".,;)]")
+            if val:
+                return val
     return "unattributed"
+
+def normalize_agent(label, alias_to_canonical):
+    if label == "unattributed":
+        return label, []
+    canonical = alias_to_canonical.get(label, label)
+    merged_from = [label] if canonical != label else []
+    return canonical, merged_from
+
+def format_agent_label(canonical, merged_from):
+    if not merged_from:
+        return canonical
+    return f"{canonical} (merged {', '.join(merged_from)})"
+
+alias_to_canonical = load_assisted_by_aliases()
 
 def closing_issue_numbers(body, repo):
     # Extract issue numbers from GitHub closing keywords.
@@ -365,7 +408,11 @@ def closing_issue_numbers(body, repo):
 
 # Enrich PRs with agent and linked issues.
 for pr in prs:
-    pr["agent"] = parse_agent(pr.get("body") or "")
+    raw_agent = parse_agent(pr.get("body") or "")
+    canonical, merged_from = normalize_agent(raw_agent, alias_to_canonical)
+    pr["agent"] = canonical
+    pr["agentRaw"] = raw_agent
+    pr["agentMergedFrom"] = merged_from
     pr["linkedIssues"] = closing_issue_numbers(pr.get("body") or "", pr["repo"])
     pr["mergedAt_dt"] = parse_iso(pr["mergedAt"])
 
@@ -490,7 +537,16 @@ for agent, plist in by_agent.items():
     rate = (defects / merged * 100) if merged else 0.0
     # Sort defect PRs for display.
     defect_nums = sorted(defect_prs_by_agent[agent])
-    rows.append({"agent": agent, "merged": merged, "defects": defects, "rate": rate, "defect_prs": defect_nums})
+    merged_from = sorted({alias for pr in plist for alias in pr.get("agentMergedFrom") or []})
+    rows.append({
+        "agent": agent,
+        "agent_label": format_agent_label(agent, merged_from),
+        "merged_from": merged_from,
+        "merged": merged,
+        "defects": defects,
+        "rate": rate,
+        "defect_prs": defect_nums,
+    })
 
 # Sort worst rate first, then most defects, then agent name.
 rows.sort(key=lambda r: (-r["rate"], -r["defects"], r["agent"]))
@@ -525,12 +581,12 @@ else:
     # Header
     # An agent name is agent:model, and a real one runs past 38 characters. A
     # fixed column pushed every later column out of line on the first real run.
-    width = max([28] + [len(r["agent"]) for r in rows])
+    width = max([28] + [len(r["agent_label"]) for r in rows])
     print(f"{'AGENT':<{width}} {'MERGED':>6} {'DEFECTS':>7} {'RATE':>7}  DEFECT PRS")
     print(f"{'-' * width} {'-' * 6:>6} {'-' * 7:>7} {'-' * 7:>7}  ----------")
     for r in rows:
         prs_str = " ".join(fmt_defect_pr(repo, n) for repo, n in r["defect_prs"]) if r["defect_prs"] else "-"
-        print(f"{r['agent']:<{width}} {r['merged']:>6} {r['defects']:>7} {r['rate']:>6.1f}%  {prs_str}")
+        print(f"{r['agent_label']:<{width}} {r['merged']:>6} {r['defects']:>7} {r['rate']:>6.1f}%  {prs_str}")
     total_prs_str = " ".join(fmt_defect_pr(repo, n) for repo, n in sorted(all_defect_prs)) if all_defect_prs else "-"
     print(f"{'TOTAL':<{width}} {total_merged:>6} {total_defects_sum:>7} {total_rate:>6.1f}%  {total_prs_str}")
 PY
