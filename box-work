@@ -122,16 +122,14 @@ fi
 # an invalid dispatch never reaches reuse, start, sync, or exec below.
 if [[ -n "$MANIFEST" && "$MODE" != stop ]]; then
   VALIDATE="${WORKER_DISPATCH_VALIDATE:-$(cd "$(dirname "$0")" && pwd)/worker-dispatch-validate}"
-  "$VALIDATE" --manifest "$MANIFEST" --checkout "$REPO_DIR" \
-    || die "dispatch manifest invalid; refusing to touch a Box"
+  VALIDATE_ARGS=(--manifest "$MANIFEST" --checkout "$REPO_DIR")
   # The manifest's declared cli is the identity the receipt records; a run
   # under a different --agent would dispatch as one worker while the
-  # ownership record says another, so the two must match exactly.
-  if [[ "$MODE" == agent ]]; then
-    M_CLI="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("cli",""))' "$MANIFEST" 2>/dev/null)"
-    [[ "$M_CLI" == "$AGENT" ]] \
-      || die "dispatch manifest declares cli '$M_CLI'; --agent '$AGENT' does not match"
-  fi
+  # ownership record says another. Pass it into the validator itself so a
+  # mismatch is rejected before any receipt is written, not after.
+  [[ "$MODE" == agent ]] && VALIDATE_ARGS+=(--agent "$AGENT")
+  "$VALIDATE" "${VALIDATE_ARGS[@]}" \
+    || die "dispatch manifest invalid; refusing to touch a Box"
 fi
 
 # Reuse a live Box before starting another. Starts are capped at 50/hour, and a
