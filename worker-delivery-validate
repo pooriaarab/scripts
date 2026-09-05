@@ -32,8 +32,10 @@ while [ $# -gt 0 ]; do case "$1" in
 esac; done
 [ -n "$REPORT" ] && [ -f "$REPORT" ] || usage "--report is required"
 [ -n "$CHECKOUT" ] && [ -d "$CHECKOUT" ] || usage "--checkout is required"
-[ -n "$PULL$EXPECTED_REPOSITORY$EXPECTED_BRANCH$EXPECTED_ISSUE$EXPECTED_OUTCOME$BOUND_VERIFY_CMD$BOUND_VERIFY_EXIT$BOUND_VERIFY_HEAD" ] \
-  || usage "--pull, --expected-repository, --expected-branch, --expected-issue, --expected-outcome, and bound verify fields are required"
+for req in PULL:--pull EXPECTED_REPOSITORY:--expected-repository EXPECTED_BRANCH:--expected-branch EXPECTED_ISSUE:--expected-issue \
+  EXPECTED_OUTCOME:--expected-outcome BOUND_VERIFY_CMD:--bound-verify-command BOUND_VERIFY_EXIT:--bound-verify-exit BOUND_VERIFY_HEAD:--bound-verify-head; do
+  var="${req%%:*}"; flag="${req#*:}"; eval "v=\$$var"; [ -n "$v" ] || usage "$flag is required"
+done
 command -v python3 >/dev/null || usage "python3 is required"
 "$GIT" -C "$CHECKOUT" rev-parse HEAD >/dev/null 2>&1 || usage "checkout has no commits"
 [ -f "$ROOT/worker-delivery-validate.py" ] || usage "missing worker-delivery-validate.py"

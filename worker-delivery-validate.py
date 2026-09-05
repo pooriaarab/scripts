@@ -12,7 +12,7 @@ LOCK_INSTALL = {k: re.compile(v, re.I) for k, v in {
     "bun.lockb": r"\bbun install\b.*--frozen-lockfile", "pnpm-lock.yaml": r"\bpnpm install\b.*--frozen-lockfile",
     "yarn.lock": r"\byarn install\b.*--frozen-lockfile", "Cargo.lock": r"\bcargo fetch\b"}.items()}
 BUCKET_OK = {"pass": {"success", "pass"}, "fail": {"failure", "fail", "cancelled", "timed_out", "action_required"},
-             "pending": {"pending", "in_progress", "queued"}, "skipped": {"skipped", "skipping", "neutral"}}
+             "pending": {"pending", "in_progress", "queued"}, "skipped": {"skipped", "skipping"}}
 REQ = ("repository", "issue", "branch", "head", "tested_head", "outcome", "closing_ref", "implementation_status",
        "verification_commands", "setup_commands", "unresolved_failures", "claimed_counts", "assisted_by", "ci")
 
@@ -114,34 +114,53 @@ def validate(report_path):
     if pr_branch != expected_branch or pr_repo.lower() != expected_repo.lower(): fail("PR repository/branch do not match coordinator contract")
     base_sha = git(checkout, "rev-parse", base).stdout.strip()
     if not HEX40.match(base_sha) or base_sha != pr_base: fail("PR base %s does not match coordinator base-ref %s" % (pr_base[:12], base_sha[:12]))
-    live = {}
-    def keep(key, when, bucket, source):
-        cur = live.get(key)
-        if not cur or when >= cur["when"]: live[key] = {"bucket": bucket, "source": source, "when": when}
+    live = {}; seq = [0]
     def when(value):
         if not value: return datetime.min
         try: return datetime.fromisoformat(value.replace("Z", "+00:00"))
         except ValueError: return datetime.min
+    def rank(item):
+        seq[0] += 1
+        rid = int(item.get("id") or 0)
+        ts = when(item.get("started_at") or item.get("updated_at") or item.get("completed_at"))
+        return (rid, ts.timestamp() if ts != datetime.min else 0, seq[0])
+    def keep(key, r, bucket, source):
+        cur = live.get(key)
+        if not cur or r >= cur["rank"]: live[key] = {"bucket": bucket, "source": source, "rank": r}
     for item in gh_items(gh, "repos/%s/commits/%s/check-runs" % (expected_repo, pr_head), "check_runs"):
         name = str(item.get("name", "")).strip()
         if not name: continue
         status, conclusion = str(item.get("status", "")).lower(), str(item.get("conclusion") or "").lower()
-        bucket = "pending" if status in BUCKET_OK["pending"] else "skipped" if conclusion in BUCKET_OK["skipped"] else "pass" if conclusion in BUCKET_OK["pass"] else "fail" if conclusion in BUCKET_OK["fail"] or conclusion else "pending"
-        keep("%s:%s" % ((item.get("app") or {}).get("id", "0"), name), when(item.get("started_at")), bucket, name)
+        bucket = "pending" if status in BUCKET_OK["pending"] else "neutral" if conclusion == "neutral" else "skipped" if conclusion in BUCKET_OK["skipped"] else "pass" if conclusion in BUCKET_OK["pass"] else "fail" if conclusion in BUCKET_OK["fail"] or conclusion else "pending"
+        keep("%s:%s" % ((item.get("app") or {}).get("id", "0"), name), rank(item), bucket, name)
     for item in gh_items(gh, "repos/%s/commits/%s/statuses" % (expected_repo, pr_head), None):
         context = str(item.get("context", "")).strip()
         if not context: continue
         state = str(item.get("state", "")).lower()
         bucket = "pass" if state in BUCKET_OK["pass"] else "skipped" if state in BUCKET_OK["skipped"] else "pending" if state in BUCKET_OK["pending"] else "fail"
-        keep("status:%s" % context, when(item.get("updated_at")), bucket, context)
+        keep("status:%s" % context, rank(item), bucket, context)
     if not live: fail("no CI checks returned for PR head %s" % pr_head[:12])
+    skip_policy = {}
+    for entry in ci.get("expected_skipped") or []:
+        if not isinstance(entry, dict): fail("ci.expected_skipped entries must be objects")
+        n, r = str(entry.get("name", "")).strip(), str(entry.get("reason", "")).strip()
+        if not n or not r: fail("ci.expected_skipped requires name and reason")
+        skip_policy[n] = r
     report_by_name = {str(i.get("name", "")).strip(): str(i.get("bucket", "")).strip() for i in report_checks if str(i.get("name", "")).strip()}
     for name, bucket in report_by_name.items():
         if bucket not in BUCKET_OK: fail("ci check %r has invalid bucket" % name)
+    live_by_name = {m["source"]: m["bucket"] for m in live.values()}
+    for name in skip_policy:
+        live_bucket = live_by_name.get(name)
+        if live_bucket == "neutral": fail("ci.expected_skipped cannot approve neutral check %r" % name)
+        if live_bucket != "skipped": fail("ci.expected_skipped %r is not a live skipped check" % name)
     for meta in live.values():
         name, live_bucket = meta["source"], meta["bucket"]
+        if live_bucket == "neutral": fail("live CI not acceptable: %r is neutral" % name)
         if live_bucket in ("fail", "pending"): fail("live CI not acceptable: %r is %s" % (name, live_bucket))
-        if live_bucket == "skipped": continue
+        if live_bucket == "skipped":
+            if name not in skip_policy: fail("skipped CI check %r requires ci.expected_skipped policy with reason" % name)
+            continue
         reported = report_by_name.get(name)
         if reported is None: fail("report omitted live CI check %r" % name)
         if reported not in BUCKET_OK["pass"]: fail("false-green ci: %r reported as %s but latest check is %s" % (name, reported, live_bucket))
