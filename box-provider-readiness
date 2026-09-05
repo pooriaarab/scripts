@@ -69,6 +69,9 @@ for _v in "$READY_SECS" "$TIMEOUT"; do
   case "$_v" in ''|*[!0-9]*) echo "box-provider-readiness: --ready-secs/--timeout need positive integers (got '$_v')" >&2; exit 2 ;; esac
   [ -n "${_v//0/}" ] || { echo "box-provider-readiness: --ready-secs/--timeout must be above zero (got '$_v')" >&2; exit 2; }
   [ "$_v" -le 1800 ] || { echo "box-provider-readiness: --ready-secs/--timeout exceed the 1800s bound (got '$_v')" >&2; exit 2; }; done; unset _v
+# Force base-10: a leading-zero value (e.g. "08") is a valid positive integer
+# here but an invalid octal literal in `(( ))` arithmetic below.
+READY_SECS=$((10#$READY_SECS)); TIMEOUT=$((10#$TIMEOUT))
 [ -z "$REPO" ] || case "$REPO" in */*) : ;; *) echo "box-provider-readiness: --repo wants owner/name (got '$REPO')" >&2; exit 2 ;; esac
 command -v python3 >/dev/null 2>&1 || { echo "box-provider-readiness: python3 is required" >&2; exit 2; }
 
