@@ -35,6 +35,25 @@ const config = {
   minBodyChars: 120,
 };
 
+test('a quoted Closes reference is a mention, not a reference', () => {
+  // A body that explains a reference it was corrected away from has to name it
+  // to explain it. Counting that mention failed the body for three references
+  // when it had one, so explaining the rule broke the rule.
+  const body = [
+    'Closes #138',
+    '',
+    'This originally claimed `Closes #84`. The scope lens caught that it does not.',
+    '',
+    '```text',
+    'Closes #99',
+    '```',
+  ].join('\n');
+  assert.deepEqual(countClosingReferences(body).map((r) => r.number), [138]);
+  // A real reference still counts, and an HTML-commented one still does not.
+  assert.deepEqual(countClosingReferences('Closes #7').map((r) => r.number), [7]);
+  assert.deepEqual(countClosingReferences('<!-- Closes #7 -->').map((r) => r.number), []);
+});
+
 test('validates branch names and exempts protected branches', () => {
   assert.equal(validateBranchName('cr-142-fix-onboarding', config).ok, true);
   assert.equal(validateBranchName('cr-142-fix-onboarding-drop-off', config).ok, true);
