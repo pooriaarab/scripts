@@ -30,7 +30,6 @@ set -uo pipefail
 GH="${GH_CLI:-gh}"
 GIT="${GIT_CLI:-git}"
 STATE="${WORKER_DISPATCH_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/worker-dispatch}"
-
 die() { echo "worker-dispatch-validate: $*" >&2; exit "${2:-1}"; }
 usage_error() { echo "worker-dispatch-validate: $*" >&2; exit 2; }
 
@@ -79,7 +78,6 @@ PY
 # The python block above prints `exit N` for manifest-level failures.
 # shellcheck disable=SC2154
 [ -n "${M_REPOSITORY:-}" ] || exit "$?"
-
 fail() { echo "worker-dispatch-validate: FAIL: $*" >&2; exit 1; }
 
 case "$M_REPOSITORY" in
@@ -87,9 +85,10 @@ case "$M_REPOSITORY" in
 esac
 case "$M_REPOSITORY" in */*) : ;; *) fail "invalid repository '$M_REPOSITORY' (want owner/name)" ;; esac
 case "$M_ISSUE" in ''|*[!0-9]*) fail "invalid issue '$M_ISSUE' (want a number)" ;; esac
-case "$M_BASE_SHA" in ????????*) : ;; *) fail "invalid base_sha (want a 40-char commit SHA)" ;; esac
-case "$M_BASE_SHA" in *[^0-9a-f]*|?????????????????????????????????????????*)
-  fail "invalid base_sha (want 40 lowercase hex chars)" ;;
+case "$M_BASE_SHA" in
+  ????????????????????????????????????????)
+    case "$M_BASE_SHA" in *[^0-9a-f]*) fail "invalid base_sha (want 40 lowercase hex chars)" ;; esac ;;
+  *) fail "invalid base_sha (want 40 lowercase hex chars)" ;;
 esac
 case "$M_CLI" in claude|codex|gemini|pi|kimi|cursor|devin|muse) : ;;
   *) fail "unknown worker cli '$M_CLI'" ;;
@@ -112,7 +111,8 @@ if [ -n "$CHECKOUT" ]; then
   # HEAD still matches the pinned base_sha checked below.
   CONFIG_JSON="$("$GIT" -C "$CHECKOUT" show HEAD:.github/pr-standards.json 2>/dev/null)" \
     || fail "missing repository configuration at HEAD: .github/pr-standards.json"
-  CONFIG_SHA="local-checkout"
+  CONFIG_SHA="$("$GIT" -C "$CHECKOUT" rev-parse HEAD:.github/pr-standards.json 2>/dev/null)" \
+    || fail "cannot read pinned config blob at HEAD: .github/pr-standards.json"
 else
   API_ERR="$(mktemp)"; API_OUT="$(mktemp)"
   # shellcheck disable=SC2064
@@ -177,15 +177,16 @@ if [ -n "$CHECKOUT" ]; then
   [ "$HEAD_SHA" = "$M_BASE_SHA" ] || fail "checkout HEAD $HEAD_SHA differs from declared base_sha $M_BASE_SHA"
 fi
 
-# --- Ownership: a conflicting active record stops dispatch. A declared resume
-# --- must match the recorded coordinator, Box, and worker CLI exactly. Locked
-# --- end to end via a portable mkdir lock (flock(1) is Linux-only and this
-# --- tool also runs from macOS): without it, two concurrent validations for
-# --- the same repo and issue could both see no receipt, both pass, and both
-# --- write -- dispatching conflicting workers under a check meant to prevent
-# --- exactly that.
+# --- Ownership: one atomic claim under a portable mkdir lock (flock(1) is
+# --- Linux-only; this tool also runs from macOS). The check and the write are
+# --- a single step inside the writer below, so concurrent validations can
+# --- never both observe no receipt and both write. Keys are lowercased:
+# --- GitHub repo names are case-insensitive, so Owner/Repo and owner/repo
+# --- share one record and one lock. A resume must match the recorded
+# --- coordinator, Box, branch, and worker CLI/model exactly.
 mkdir -p "$STATE" || fail "cannot create state directory $STATE"
-RECORD="$STATE/$(printf '%s' "$M_REPOSITORY" | tr '/' '_')-$M_ISSUE.json"
+REPO_KEY="$(printf '%s' "$M_REPOSITORY" | tr '[:upper:]' '[:lower:]' | tr '/' '_')"
+RECORD="$STATE/$REPO_KEY-$M_ISSUE.json"
 LOCKDIR="$RECORD.lock"
 LOCK_DEADLINE=$(( $(date +%s) + 10 ))
 until mkdir "$LOCKDIR" 2>/dev/null; do
@@ -195,34 +196,54 @@ done
 # Replaces the earlier API-tempfile trap; chained here so both still run at exit.
 # shellcheck disable=SC2064
 trap "rm -f '$API_ERR' '$API_OUT'; rmdir '$LOCKDIR' 2>/dev/null" EXIT
-if [ -f "$RECORD" ]; then
-  MISMATCH="$(python3 - "$RECORD" "$M_COORDINATOR" "$M_BOX" "$M_CLI" "$M_MODEL" "$M_RESUME" <<'PY'
-import json,sys
-rec = json.load(open(sys.argv[1]))
-want = {"coordinator": sys.argv[2], "box": sys.argv[3], "cli": sys.argv[4], "model": sys.argv[5]}
-resume = sys.argv[6] == "true"
-if not resume:
-    print("active dispatch by '%s' (branch %s); declare resume:true with matching Box/worker to resume" % (rec.get("coordinator","?"), rec.get("branch","?"))); sys.exit(1)
-bad = [k for k in want if rec.get(k) != want[k]]
-if bad:
-    print("resume identity mismatch on: %s" % ", ".join(bad)); sys.exit(1)
+# First claim uses O_EXCL (a lost race keeps the winner and reports a
+# conflict, never a stale overwrite); a matching resume replaces atomically.
+CLAIM_MSG="$(python3 - "$RECORD" "$M_REPOSITORY" "$M_ISSUE" "$M_BRANCH" "$PREFIX" \
+  "$CONFIG_SHA" "$M_BASE_REF" "$M_BASE_SHA" "$M_COORDINATOR" "$M_CLI" "$M_MODEL" \
+  "$M_BOX" "$M_RESUME" 2>&1 <<'PY'
+import datetime,json,os,sys,tempfile
+_, path, repo, issue, branch, prefix, csha, bref, bsha, coord, cli, model, box, resume = sys.argv
+want = {"coordinator": coord, "box": box, "cli": cli, "model": model, "branch": branch}
+doc = {"repository": repo, "issue": int(issue), "branch": branch, "prefix": prefix,
+       "config_sha": csha, "base_ref": bref, "base_sha": bsha, "coordinator": coord,
+       "cli": cli, "model": model, "box": box,
+       "validated_at": datetime.datetime.now(datetime.timezone.utc).isoformat()}
+def conflict(rec):
+    if resume != "true":
+        return "active dispatch by '%s' (branch %s); declare resume:true to resume" % (rec.get("coordinator", "?"), rec.get("branch", "?"))
+    bad = [k for k in want if rec.get(k) != want[k]]
+    return ("resume identity mismatch on: %s" % ", ".join(bad)) if bad else ""
+try:
+    rec = json.load(open(path))
+except FileNotFoundError:
+    rec = None
+except Exception as e:
+    print("cannot read dispatch receipt: %s" % e); sys.exit(2)
+if rec is None:
+    try:
+        with open(path, "x") as f: json.dump(doc, f, indent=2)
+    except FileExistsError:
+        rec = json.load(open(path))
+        print(conflict(rec) or "conflicting active ownership"); sys.exit(1)
+    except Exception as e:
+        print("cannot write dispatch receipt: %s" % e); sys.exit(2)
+else:
+    msg = conflict(rec)
+    if msg:
+        print(msg); sys.exit(1)
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path) or ".", prefix=".receipt-", suffix=".tmp")
+    try:
+        json.dump(doc, os.fdopen(fd, "w"), indent=2)
+        os.replace(tmp, path)
+    except Exception as e:
+        try: os.unlink(tmp)
+        except OSError: pass
+        print("cannot write dispatch receipt: %s" % e); sys.exit(2)
 PY
-)" || fail "conflicting ownership for $M_REPOSITORY#$M_ISSUE: $MISMATCH"
-fi
-
-# --- Success: the only state this command ever writes. A write that fails
-# --- here must fail validation too -- reporting success without a receipt
-# --- would let a concurrent dispatch never see this one's ownership.
-python3 - "$RECORD" "$M_REPOSITORY" "$M_ISSUE" "$M_BRANCH" "$PREFIX" "$CONFIG_SHA" \
-  "$M_BASE_REF" "$M_BASE_SHA" "$M_COORDINATOR" "$M_CLI" "$M_MODEL" "$M_BOX" <<'PY'
-import json,sys,datetime
-_, path, repo, issue, branch, prefix, csha, bref, bsha, coord, cli, model, box = sys.argv
-json.dump({"repository": repo, "issue": int(issue), "branch": branch,
-           "prefix": prefix, "config_sha": csha, "base_ref": bref,
-           "base_sha": bsha, "coordinator": coord, "cli": cli,
-           "model": model, "box": box,
-           "validated_at": datetime.datetime.now(datetime.timezone.utc).isoformat()},
-          open(path, "w"), indent=2)
-PY
-[ $? -eq 0 ] || fail "cannot write dispatch receipt $RECORD"
+)"
+case "$?" in
+  0) : ;;
+  1) fail "conflicting ownership for $M_REPOSITORY#$M_ISSUE: $CLAIM_MSG" ;;
+  *) fail "cannot write dispatch receipt $RECORD: $CLAIM_MSG" ;;
+esac
 echo "worker-dispatch-validate: $M_REPOSITORY#$M_ISSUE manifest valid; receipt $RECORD"
