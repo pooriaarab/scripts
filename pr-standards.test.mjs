@@ -35,6 +35,26 @@ const config = {
   minBodyChars: 120,
 };
 
+test('a PR untracking a tsbuildinfo counts zero lines', () => {
+  // Same deadlock the *.log entry fixed: untracking a build cache counted its
+  // whole body against the cap, and `git rm --cached` cannot be split into
+  // smaller commits. pooriaarab/usegeoaeo#71 passed only because a tsbuildinfo
+  // is minified onto a single line; a pretty-printed one would have failed.
+  const summary = summarizeFiles([
+    { filename: 'packages/app/tsconfig.tsbuildinfo', additions: 0, deletions: 1295 },
+  ], config);
+  assert.equal(summary.countedLines, 0);
+  assert.equal(summary.countedFiles, 0);
+  assert.equal(summary.excludedFiles, 1);
+  // Negative control: a source file of the same size still counts, so the glob
+  // exempts build output rather than widening the exclusion to the whole repo.
+  const source = summarizeFiles([
+    { filename: 'src/app.ts', additions: 0, deletions: 1295 },
+  ], config);
+  assert.equal(source.countedLines, 1295);
+  assert.equal(source.countedFiles, 1);
+});
+
 test('box counts as a command, like docker already did', () => {
   // Boxes are the sanctioned way to run heavy work, so evidence produced on one
   // is the normal case. Without `box` in the list, a body whose whole
