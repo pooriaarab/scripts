@@ -172,9 +172,21 @@ fi
 
 # Wait for the Box to answer, then push whatever is uncommitted here. The Box
 # already has the committed tree from GitHub; only local edits are missing.
+#
+# A Box can emit `ready` before its first exec succeeds (HTTP 409
+# box_starting), so retry transient startup against the RECORDED id with a
+# bounded deadline. This never creates a replacement: the create path above
+# runs only when no id is recorded, and a recorded-but-unusable id dies loudly
+# instead of falling through to it. An explicit --cwd keeps the probe off the
+# default working directory, which environment pruning can remove.
 ready=0
-for _ in $(seq 1 60); do "$BOX" exec "$ID" -- true >/dev/null 2>&1 && { ready=1; break; }; done
-(( ready )) || die "Box $ID never answered. It may still be starting; retry, or 'box info $ID'."
+ready_deadline="${BOX_WORK_READY_SECS:-300}"
+ready_start="$(date +%s)"
+while (( $(date +%s) - ready_start < ready_deadline )); do
+  if "$BOX" exec --cwd /home/user "$ID" -- true >/dev/null 2>&1; then ready=1; break; fi
+  sleep 5
+done
+(( ready )) || die "Box $ID never answered within ${ready_deadline}s. It may still be starting; retry, or 'box info $ID'."
 
 ATTACH="$HOME/Documents/Personal/scripts/box-fast-attach"
 [[ -x "$ATTACH" ]] || ATTACH="$HOME/.local/bin/box-fast-attach"
@@ -196,8 +208,19 @@ case "$MODE" in
     # that silently bills the wrong subscription.
     cat > "$runner" <<RUNNER
 #!/usr/bin/env bash
+# One canonical dispatch path: every agent below runs headless through its
+# verified non-interactive flags. Requested auth routes are explicit and
+# failures are loud -- no silent fallback to another provider or credential.
 export PATH="\$HOME/.local/bin:\$HOME/.kimi-code/bin:\$HOME/.npm-global/bin:\$PATH"
-set -a; [ -f "\$HOME/.agents/agent-clis.env" ] && . "\$HOME/.agents/agent-clis.env"; set +a
+# Authoritative provider files, exported not just sourced. cursor.env carries
+# the Cursor API route; agent-clis.env carries the shared roster values.
+# devin.env is deliberately NOT sourced here: the verified Devin route is the
+# personal login, which works with API env vars unset, so importing the API
+# route by default would shadow it.
+set -a
+[ -f "\$HOME/.agents/agent-clis.env" ] && . "\$HOME/.agents/agent-clis.env"
+[ -f "\$HOME/.agents/cursor.env" ] && . "\$HOME/.agents/cursor.env"
+set +a
 cd "/home/user/$NAME" || exit 1
 # The brief arrives base64-encoded. `box exec` joins argv into a shell command
 # string, so a multi-word brief passed raw is split across argv and the agent
@@ -207,10 +230,53 @@ BRIEF="\$(printf %s "\$1" | base64 -d)"
 set -- "\$BRIEF"
 case "$AGENT" in
   pi)     PI_WORKER=1 pi -p --no-extensions --provider zai-api --model glm-5.3-flash -a --tools read,grep,find,ls,edit,write,bash "\$1" ;;
-  muse)   muse exec --workspace "/home/user/$NAME" "\$1" ;;
+  muse)
+    # Headless: without --yolo the run can wait on an approval prompt and do
+    # nothing while the call still reports success.
+    brief_file="\$(mktemp)"
+    printf '%s' "\$1" > "\$brief_file"
+    muse exec --yolo --json --model muse-spark-1.3-contributor --workspace "/home/user/$NAME" --prompt-file "\$brief_file"
+    rc=\$?
+    rm -f "\$brief_file"
+    exit \$rc ;;
+  cursor)
+    if [ -z "\${CURSOR_API_KEY:-}" ]; then
+      echo "box-work: cursor needs CURSOR_API_KEY in \$HOME/.agents/cursor.env (missing or empty); refusing to run unauthenticated." >&2
+      exit 1
+    fi
+    cursor-agent -p --trust --force --model composer-2.5 --output-format json "\$1" ;;
+  devin)
+    # Explicit auth route, default personal. The personal login works with API
+    # env vars unset; the api route keeps them and surfaces service errors
+    # without falling back to another route.
+    case "\${BOX_WORK_DEVIN_AUTH:-personal}" in
+      personal)
+        brief_file="\$(mktemp)"
+        printf '%s' "\$1" > "\$brief_file"
+        env -u DEVIN_API_KEY -u DEVIN_TOKEN -u WINDSURF_API_KEY devin --model swe-1.7 --respect-workspace-trust false --permission-mode dangerous --prompt-file "\$brief_file" -p
+        rc=\$?
+        rm -f "\$brief_file"
+        exit \$rc ;;
+      api)
+        [ -f "\$HOME/.agents/devin.env" ] && { set -a; . "\$HOME/.agents/devin.env"; set +a; }
+        if [ -z "\${DEVIN_API_KEY:-}" ]; then
+          echo "box-work: devin api route needs DEVIN_API_KEY in \$HOME/.agents/devin.env (missing or empty)." >&2
+          exit 1
+        fi
+        devin --model swe-1.7 --respect-workspace-trust false --permission-mode dangerous -p "\$1" ;;
+      *)
+        echo "box-work: unsupported BOX_WORK_DEVIN_AUTH='\${BOX_WORK_DEVIN_AUTH:-personal}' (want personal|api)." >&2
+        exit 2 ;;
+    esac ;;
   kimi)   kimi -m moonshot-ai/kimi-k3 -p "\$1" ;;
   codex)  codex exec "\$1" ;;
-  gemini) gemini -p "\$1" ;;
+  gemini)
+    [ -f "\$HOME/.gemini-personal/.gemini/.env" ] && { set -a; . "\$HOME/.gemini-personal/.gemini/.env"; set +a; }
+    if [ -z "\${GEMINI_API_KEY:-}" ]; then
+      echo "box-work: gemini needs GEMINI_API_KEY in \$HOME/.agents/agent-clis.env or \$HOME/.gemini-personal/.gemini/.env (missing or empty)." >&2
+      exit 1
+    fi
+    env -u GOOGLE_GENAI_USE_VERTEXAI -u GOOGLE_APPLICATION_CREDENTIALS -u GOOGLE_CLOUD_PROJECT -u GOOGLE_CLOUD_LOCATION GEMINI_CLI_HOME="\$HOME/.gemini-personal" GEMINI_API_KEY="\$GEMINI_API_KEY" GEMINI_CLI_TRUST_WORKSPACE=true gemini --skip-trust --yolo -m gemini-3.8-flash -p "\$1" ;;
   *) echo "unsupported agent: $AGENT" >&2; exit 2 ;;
 esac
 RUNNER

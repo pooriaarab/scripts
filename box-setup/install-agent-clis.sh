@@ -58,8 +58,9 @@ npm_install() { # <bin-name> <package>
 }
 
 log "gemini-cli"
-# gemini — needs --skip-trust or it errors "not running in a trusted directory"
-# GEMINI_API_KEY=<ai-studio-key> gemini --skip-trust -m gemini-3.8-flash -p "PROMPT"
+# gemini — needs --skip-trust or it errors "not running in a trusted directory".
+# Source the personal .env, scrub Vertex vars, pin GEMINI_CLI_HOME and trust.
+# GEMINI_CLI_HOME=~/.gemini-personal GEMINI_CLI_TRUST_WORKSPACE=true gemini --skip-trust --yolo -m gemini-3.8-flash -p "PROMPT"
 npm_install gemini "@google/gemini-cli"
 
 log "pi coding agent"
@@ -99,8 +100,9 @@ fi
 # The launcher is a small bash script; it downloads the real binary on first run
 # and needs ~/.config/muse/auth.json to authenticate that download.
 log "muse code"
-# muse — defaults to --approval-mode on-request, so headless it waits forever then SIGTERMs with ZERO edits
-# muse exec --workspace <path> --trust-workspace --approval-mode never "PROMPT"
+# muse — headless runs must pass --yolo, or the run can wait on an approval
+# prompt with zero edits while the call still reports success.
+# muse exec --yolo --json --model muse-spark-1.3-contributor --workspace <path> --prompt-file FILE
 if [ -x "$BIN/muse" ]; then
   note "muse launcher already present"
   mark muse "present"
@@ -117,9 +119,10 @@ fi
 
 # ----------------------------------------------------------- cursor-agent ----
 log "cursor-agent"
-# cursor-agent — needs --trust; and the API key must be EXPORTED, not just sourced
-# set -a; source ~/.agents/agent-clis.env; set +a
-# cursor-agent -p --trust --model composer-2.5 "PROMPT"     # or cursor-grok-4.6-high-fast
+# cursor-agent — needs --trust; and the API key must be EXPORTED, not just
+# sourced. The authoritative key lives in ~/.agents/cursor.env.
+# set -a; source ~/.agents/cursor.env; set +a
+# cursor-agent -p --trust --force --model composer-2.5 --output-format json "PROMPT"
 if [ -x "$BIN/cursor-agent" ]; then
   note "cursor-agent already present ($("$BIN/cursor-agent" --version 2>&1 | head -1))"
   mark cursor-agent "present"
@@ -134,17 +137,25 @@ fi
 
 # ------------------------------------------------------------------ devin ----
 log "devin"
-# devin  — refuses an untrusted workspace headless; needs both flags to write
-# devin -p --respect-workspace-trust false --permission-mode dangerous --model <m> -- "PROMPT"
+# devin — refuses an untrusted workspace headless; needs both flags to write.
+# The verified route is the personal login with API env vars unset; the
+# credentials file is required and API keys alone do not authenticate.
+# env -u DEVIN_API_KEY -u DEVIN_TOKEN -u WINDSURF_API_KEY devin --model swe-1.7 --respect-workspace-trust false --permission-mode dangerous -p "PROMPT"
+# (--prompt-file FILE -p also works.)
 if [ -x "$BIN/devin" ]; then
   note "devin already present ($("$BIN/devin" --version 2>&1 | head -1))"
   mark devin "present"
 else
+  # The official installer verifies its artifact checksum and installs the
+  # binary, then can exit nonzero from its interactive setup step. Judge by
+  # the binary on disk, not by that exit code.
   curl -fsSL https://cli.devin.ai/install.sh | bash >/dev/null 2>&1
+  installer_rc=$?
   if [ -x "$BIN/devin" ]; then
     mark devin "installed"
+    (( installer_rc )) && note "devin installer exited $installer_rc after installing the binary (interactive setup); binary validated"
   else
-    mark devin "FAILED (cli.devin.ai/install.sh)"
+    mark devin "FAILED (cli.devin.ai/install.sh exit $installer_rc, no binary at $BIN/devin)"
   fi
 fi
 

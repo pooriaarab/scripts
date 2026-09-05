@@ -191,6 +191,14 @@ fi
 
 if (( VERIFY )); then verify_all; exit $?; fi
 
+# Requested agent provisioning without its credential manifest must fail
+# loudly. Falling through would silently provision zero agent files and leave
+# the Box unable to run delegated work while reporting success.
+if (( WITH_AGENTS )) && [[ ! -f "$AGENT_CRED_MANIFEST" ]]; then
+  echo "box-env-provision: --with-agents needs $AGENT_CRED_MANIFEST (absent); refusing to provision without agent credentials." >&2
+  exit 1
+fi
+
 (( ${#TARGETS[@]} )) || { echo "nothing to do; pass repo dirs or --all" >&2; exit 2; }
 
 seen=""
