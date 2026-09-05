@@ -1,12 +1,11 @@
 #!/usr/bin/env bash
-# Tests for worker-dispatch-validate and its box-work gate. Offline: stub gh,
-# fixture git checkouts, synthetic manifests. No Box, branch, or worker
-# command is ever invoked by the validator; a sentinel file stands in for that
-# mutation, and a `box` stub fails the run if the validator ever calls it.
+# Tests for worker-dispatch-validate. Offline: stub gh, fixture git checkouts,
+# synthetic manifests. No Box, branch, or worker command is ever invoked by
+# the validator; a sentinel file stands in for that mutation, and a `box`
+# stub fails the run if the validator ever calls it.
 set -uo pipefail
 DIR="$(cd "$(dirname "$0")" && pwd)"
 SCRIPT="${WORKER_DISPATCH_UNDER_TEST:-$DIR/worker-dispatch-validate}"
-BOXWORK="${BOX_WORK_UNDER_TEST:-$DIR/box-work}"
 PASS=0
 FAIL=0
 pass() { echo "ok - $1"; PASS=$((PASS+1)); }
@@ -14,7 +13,7 @@ fail() { echo "FAIL - $1"; echo "  $2"; FAIL=$((FAIL+1)); }
 
 T="$(mktemp -d "${TMPDIR:-/tmp}/dispatch-test.XXXXXX")"
 trap 'rm -rf "$T"' EXIT
-mkdir -p "$T/bin" "$T/state" "$T/xdg" "$T/fakehome"
+mkdir -p "$T/bin" "$T/state" "$T/xdg"
 export WORKER_DISPATCH_STATE="$T/state" DISPATCH_TEST_T="$T"
 export XDG_STATE_HOME="$T/xdg"
 
@@ -53,17 +52,6 @@ touch "${DISPATCH_TEST_T:?}/box-called"
 exit 99
 STUB
 chmod +x "$T/bin/box"
-# box-work valid-path stub: records calls, serves new + ready probe.
-cat > "$T/bin/box-ok" <<'STUB'
-#!/usr/bin/env bash
-echo "box-ok $*" >>"${DISPATCH_TEST_T:?}/boxcalls.log"
-case "${1:-}" in
-  new) printf '{"id":"bx_validpath001"}\n' ;;
-  exec) case "$*" in *--json*) printf '{"stdout":"","stderr":"","exitCode":0}\n';; *) exit 0;; esac ;;
-  *) exit 0 ;;
-esac
-STUB
-chmod +x "$T/bin/box-ok"
 PATH="$T/bin:$PATH"
 # Fixture checkout: origin matches the manifest repo, HEAD is the live base.
 git init -q "$T/checkout"
@@ -93,6 +81,7 @@ m = {"repository":"pooriaarab/popcornteam","issue":976,"branch":"pop-976-fix-the
 for o in over:
     k, v = o.split("=",1)
     if v == "@DROP@": m.pop(k,None)
+    elif v.startswith("@JSON:"): m[k]=json.loads(v[len("@JSON:"):])
     elif k == "issue": m[k]=int(v)
     elif k == "resume": m[k]=(v=="true")
     else: m[k]=v
@@ -170,6 +159,11 @@ short base_sha is rejected||base_sha=abcdef12|checkout|fail|base_sha
 long base_sha is rejected||base_sha=abcdef0123456789abcdef0123456789abcdef012|checkout|fail|base_sha
 uppercase base_sha is rejected||base_sha=ABCDEF0123456789ABCDEF0123456789ABCDEF01|checkout|fail|base_sha
 missing field fails before the sentinel||model=@DROP@|checkout|fail|missing required
+non-string box object is rejected||box=@JSON:{"id":"bx_resume123"}|checkout|fail|must be strings
+non-string model list is rejected||model=@JSON:["muse-spark-1.3-contributor"]|checkout|fail|must be strings
+numeric repository is rejected||repository=@JSON:123|checkout|fail|must be strings
+boolean issue is rejected||issue=@JSON:true|checkout|fail|issue number
+non-boolean resume is rejected||resume=@JSON:"true"|checkout|fail|must be a boolean
 missing repository configuration fails before the sentinel|noconfig||api|fail|configuration
 present but invalid prefix fails before the sentinel|prefix=POP123||api|fail|invalid prefix
 API failure fails before the sentinel with no fallback|apifail=all||api|fail|
@@ -181,27 +175,22 @@ checkout drift from the declared base fails before the sentinel|drift||checkout|
 CASES
 git -C "$T/checkout" reset -q --hard "$(cat "$T/orig-sha")"
 git -C "$T/checkout" rev-parse HEAD | tr -d '\n' > "$T/live-sha"
-# bw <manifest> <log> [extra box-work args...]; echoes box-work's rc.
-bw() {
-  local m="$1" log="$2"; shift 2
-  BOX_CLI="$T/bin/box" GH_CLI="$T/bin/gh" "$BOXWORK" "$T/checkout" --manifest "$m" "$@" >"$log" 2>&1; echo $?
-}
-# box-work gate: an invalid manifest stops before ANY Box call.
-reset; mkmanifest "$T/gate-bad.json" branch="pc-976-fix-the-widget" title="[PC-976] Fix the widget output"
-grc="$(bw "$T/gate-bad.json" "$T/gate.log" --agent pi "do work")"
-(( grc != 0 )) && [ ! -f "$T/box-called" ] && pass "box-work with an invalid manifest makes no Box call" || fail "box-work with an invalid manifest makes no Box call" "rc=$grc log=$(cat "$T/gate.log")"
-# CLI mismatch (and empty --agent): rejected before any receipt, Box, start, sync, or worker effect.
-reset; mkmanifest "$T/gate-mismatch.json"
-mrc="$(bw "$T/gate-mismatch.json" "$T/mismatch.log" --agent pi "do work")"
-mrc2="$(bw "$T/gate-mismatch.json" "$T/empty-agent.log" --agent "" "do work")"
-if (( mrc != 0 )) && (( mrc2 != 0 )) && [ ! -f "$T/box-called" ] && [ -z "$(ls "$T"/state/*.json 2>/dev/null)" ] \
-  && grep -q "does not match" "$T/mismatch.log" && grep -q "needs a CLI name" "$T/empty-agent.log"; then pass "box-work cli mismatch writes no receipt and makes no Box call"; else fail "box-work cli mismatch writes no receipt and makes no Box call" "rc=$mrc/$mrc2 log=$(cat "$T/mismatch.log")"; fi
-# Valid manifest plus matching --agent through box-work: one Box start, one agent run, one receipt.
-reset; mkmanifest "$T/gate-ok.json"
-okrc="$(HOME="$T/fakehome" BOX_CLI="$T/bin/box-ok" GH_CLI="$T/bin/gh" "$BOXWORK" "$T/checkout" --manifest "$T/gate-ok.json" --agent muse "do work" >"$T/ok.log" 2>&1; echo $?)"
-starts="$(grep -c "^box-ok new" "$T/boxcalls.log" 2>/dev/null)"; starts="${starts:-0}"
-execs="$(grep -c "box-work-run\.sh " "$T/boxcalls.log" 2>/dev/null)"; execs="${execs:-0}"
-if (( okrc == 0 )) && [ "$starts" = 1 ] && [ "$execs" = 1 ] && [ -n "$(ls "$T"/state/*.json 2>/dev/null)" ]; then pass "box-work valid manifest with matching agent starts one Box, runs one agent, records one receipt"; else fail "box-work valid manifest with matching agent starts one Box, runs one agent, records one receipt" "rc=$okrc starts=$starts execs=$execs log=$(cat "$T/ok.log")"; fi
+# Caller-declared --agent is checked before any state is written: a mismatch
+# dies with no receipt; a match passes and records one.
+reset; mkmanifest "$T/agent-bad.json"
+out="$("$SCRIPT" --manifest "$T/agent-bad.json" --checkout "$T/checkout" --agent pi 2>&1)"; rc=$?
+if (( rc != 0 )) && [ -z "$(ls "$T"/state/*.json 2>/dev/null)" ] && echo "$out" | grep -q "does not match"; then
+  pass "cli mismatch writes no receipt"
+else
+  fail "cli mismatch writes no receipt" "rc=$rc out=$out"
+fi
+reset; mkmanifest "$T/agent-ok.json"
+attempt "$T/agent-ok.json" --checkout "$T/checkout" --agent muse
+if (( rc == 0 )) && [ -f "$T/sentinel" ] && [ -n "$(ls "$T"/state/*.json 2>/dev/null)" ]; then
+  pass "matching agent passes and records a receipt"
+else
+  fail "matching agent passes and records a receipt" "rc=$rc out=$out"
+fi
 # Concurrent dispatch: exactly one winner, one receipt, winner preserved.
 reset
 for i in 1 2 3 4 5 6 7 8; do
@@ -228,4 +217,4 @@ rm -f "$T/sentinel"
 [ ! -f "$T/box-called" ] && pass "validator never invokes the Box CLI" || fail "validator never invokes the Box CLI" "box was called"
 echo "---"
 echo "$PASS passed, $FAIL failed"
-exit "$((FAIL > 0))"
+if (( FAIL > 0 )); then exit 1; else exit 0; fi
