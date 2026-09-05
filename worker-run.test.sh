@@ -322,15 +322,89 @@ test_ignored_files_are_not_work() {
 test_delivery_report_failure_is_exit_5() {
   local fix rep
   fix=$(new_repo)
+  git -C "$fix" remote add origin https://github.com/pooriaarab/scripts.git 2>/dev/null || true
   rep="$fix/bad-report.json"
   cat > "$rep" <<'JSON'
-{"schema":1,"repository":"pooriaarab/scripts","issue":311,"branch":"x","head":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","tested_head":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","outcome":"x","closing_ref":"Closes #311","implementation_status":"complete","verification_commands":[{"command":"true","exit":0}],"setup_commands":[],"unresolved_failures":[],"claimed_counts":{"lines":0,"files":0},"assisted_by":["a:b"]}
+{"schema":1,"repository":"pooriaarab/scripts","issue":311,"branch":"x","head":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","tested_head":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","outcome":"Add worker-delivery-validate gate","closing_ref":"Closes #311","implementation_status":"complete","verification_commands":[{"command":"true","exit":0}],"setup_commands":[],"unresolved_failures":[],"claimed_counts":{"lines":0,"files":0},"assisted_by":["a:b"],"ci":{"head":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","checks":[{"name":"tests","bucket":"pass"}]}}
 JSON
-  run_worker "$fix" --delivery-report "$rep" -- bash -c 'echo edited > tracked.txt'
+  run_worker "$fix" \
+    --pull 313 \
+    --expected-issue 311 \
+    --expected-outcome "Add worker-delivery-validate gate" \
+    --verify 'true' \
+    --delivery-report "$rep" \
+    -- bash -c 'echo edited > tracked.txt'
   if (( rc == 5 )) && echo "$out" | grep -qi "delivery evidence failed"; then
     pass "a bad delivery report after real work exits 5"
   else
     fail "a bad delivery report after real work exits 5" "rc=$rc out=$out"
+  fi
+}
+
+# Case 11b. Delivery validation requires coordinator identity and PR binding.
+test_delivery_report_missing_pull_is_exit_4() {
+  local fix rep
+  fix=$(new_repo)
+  rep="$fix/report.json"
+  echo '{}' > "$rep"
+  run_worker "$fix" \
+    --expected-issue 311 \
+    --expected-outcome "x" \
+    --verify 'true' \
+    --delivery-report "$rep" \
+    -- bash -c 'echo edited > tracked.txt'
+  if (( rc == 4 )) && echo "$out" | grep -q -- "--pull is required"; then
+    pass "delivery validation without --pull is a usage error, exit 4"
+  else
+    fail "delivery validation without --pull is a usage error, exit 4" "rc=$rc out=$out"
+  fi
+}
+
+# Writes stub CI payloads for worker-run delivery integration tests.
+delivery_write_ci() {
+  local t="$1" pr_head="$2"
+  printf '{"head":{"sha":"%s"}}\n' "$pr_head" > "$t/pr.json"
+  cat > "$t/check-runs.json" <<'JSON'
+{"check_runs":[{"name":"tests","status":"completed","conclusion":"success","started_at":"2026-01-01T00:00:00Z","app":{"id":1}}]}
+JSON
+  echo '{"statuses":[]}' > "$t/status.json"
+}
+
+# Case 11c. Bound verify + matching report pass through worker-run end-to-end.
+test_delivery_report_success_is_exit_0() {
+  local fix rep ghdir verify_cmd finalize head
+  fix=$(new_repo); ghdir="$(newtd)"; TMPDIRS+=("$ghdir")
+  finalize="$(newtd)/finalize.py"; TMPDIRS+=("$(dirname "$finalize")")
+  git -C "$fix" remote add origin https://github.com/pooriaarab/scripts.git 2>/dev/null || true
+  git -C "$fix" checkout -qb scr-311-worker-run
+  echo work >> "$fix/tracked.txt" && git -C "$fix" add tracked.txt && git -C "$fix" commit -qm work
+  echo '{}' > "$fix/package-lock.json" && git -C "$fix" add package-lock.json && git -C "$fix" commit -qm lock
+  head="$(git -C "$fix" rev-parse HEAD)"
+  delivery_write_ci "$ghdir" "$head"
+  mkdir -p "$ghdir/bin" && printf '%s\n' '#!/usr/bin/env bash' '[ "${1:-}" = api ] || exit 9' \
+    'case "${2:-}" in repos/*/pulls/*) cat "'"$ghdir"'/pr.json" ;; repos/*/commits/*/check-runs) cat "'"$ghdir"'/check-runs.json" ;; repos/*/commits/*/status) cat "'"$ghdir"'/status.json" ;; *) exit 9 ;; esac' > "$ghdir/bin/gh"
+  chmod +x "$ghdir/bin/gh"
+  rep="$ghdir/report.json"; verify_cmd='test "$(cat tracked.txt)" = edited'
+  cat > "$finalize" <<'PY'
+import json, subprocess, sys
+rep, pr_json, root = sys.argv[1:4]
+head = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+base = subprocess.check_output(["git", "rev-parse", "HEAD~2"], text=True).strip()
+files = [{"filename": p[2], "additions": int(p[0]), "deletions": int(p[1])} for p in (line.split("\t") for line in subprocess.check_output(["git", "diff", "--numstat", f"{base}...HEAD"], text=True).splitlines()) if len(p) == 3 and p[0] != "-"]
+node = "import {summarizeFiles,DEFAULT_CONFIG} from './pr-standards.mjs';console.log(JSON.stringify(summarizeFiles(JSON.parse(process.argv[1]),DEFAULT_CONFIG)));"
+actual = json.loads(subprocess.check_output(["node", "--input-type=module", "-e", node, json.dumps(files)], cwd=root, text=True))
+doc = {"schema": 1, "repository": "pooriaarab/scripts", "issue": 311, "branch": "scr-311-worker-run", "head": head, "tested_head": head, "outcome": "Add worker-delivery-validate gate", "closing_ref": "Closes #311", "implementation_status": "complete", "setup_commands": [{"command": "npm ci", "exit": 0}], "verification_commands": [{"command": sys.argv[4], "exit": 0}], "unresolved_failures": [], "claimed_counts": {"lines": actual["countedLines"], "files": actual["countedFiles"]}, "assisted_by": ["cursor:composer-2.5"], "merge_attribution": "unknown", "ci": {"head": head, "checks": [{"name": "tests", "bucket": "pass"}]}}
+json.dump(doc, open(rep, "w", encoding="utf-8")); json.dump({"head": {"sha": head}}, open(pr_json, "w", encoding="utf-8"))
+PY
+  out=$( cd "$fix" && PATH="$ghdir/bin:$PATH" GH_CLI="$ghdir/bin/gh" PR_STANDARDS_ROOT="$DIR" \
+    "$SCRIPT" --dir "$fix" --pull 313 --expected-issue 311 --expected-outcome "Add worker-delivery-validate gate" \
+    --base-ref HEAD~2 --verify "$verify_cmd" --delivery-report "$rep" \
+    -- bash -c 'echo edited > tracked.txt && git add tracked.txt && git commit -qm edited && python3 "$1" "$2" "$3" "$4" "$5"' _ "$finalize" "$rep" "$ghdir/pr.json" "$DIR" "$verify_cmd" 2>&1 )
+  rc=$?
+  if (( rc == 0 )) && echo "$out" | grep -q "delivery evidence valid"; then
+    pass "a matching delivery report after real work exits 0"
+  else
+    fail "a matching delivery report after real work exits 0" "rc=$rc out=$out"
   fi
 }
 
@@ -361,6 +435,8 @@ test_usage_not_a_git_checkout_is_exit_4
 test_usage_no_commits_is_exit_4
 test_ignored_files_are_not_work
 test_delivery_report_failure_is_exit_5
+test_delivery_report_missing_pull_is_exit_4
+test_delivery_report_success_is_exit_0
 test_help
 
 echo ""
