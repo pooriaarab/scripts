@@ -300,10 +300,10 @@ CODE="$(printf '%s' "$RAW" | python3 -c 'import sys,json; print(json.load(sys.st
 # Canonical reply per provider: cursor answers one --output-format json
 # object holding the digits in `result`; every other provider answers
 # digits only. Anything else is rejected here, never scavenged.
-REPLY="$(python3 - "$PROVIDER" "$RAW" <<'PY'
+REPLY="$(printf '%s' "$RAW" | python3 -c '
 import json, re, sys
 provider = sys.argv[1]
-text = json.loads(sys.argv[2]).get("stdout", "").strip()
+text = json.loads(sys.stdin.read()).get("stdout", "").strip()
 if provider == "cursor":
     try:
         body = json.loads(text)
@@ -320,8 +320,7 @@ if not re.fullmatch(r"[0-9]+", text):
     sys.exit(provider + " reply is not canonical (want digits-only" +
              (" in the JSON result field" if provider == "cursor" else "") + ")")
 print(text)
-PY
-)" || fail "provider '$PROVIDER' probe reply rejected on box $BOXID (want digits-only, or cursor JSON with a digits-only result)"
+' "$PROVIDER")" || fail "provider '$PROVIDER' probe reply rejected on box $BOXID (want digits-only, or cursor JSON with a digits-only result)"
 [ "$REPLY" = "$EXPECTED" ] || { printf '%s\n' "$ERR" | scrub | tail -5 >&2; fail "provider '$PROVIDER' replied '$(printf '%s' "$REPLY" | scrub | head -c 200)', expected '$EXPECTED'"; }
 GOT="$(exec_json 20 cat "$RESULT" 2>/dev/null | python3 -c 'import sys,json; print(json.load(sys.stdin).get("stdout","").strip())' 2>/dev/null)" || GOT=""
 [ "$GOT" = "$EXPECTED" ] || fail "provider '$PROVIDER' wrote '$GOT' to the probe file, expected '$EXPECTED'"
