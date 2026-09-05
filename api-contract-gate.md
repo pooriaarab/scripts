@@ -130,13 +130,13 @@ at request time and redacts it from output, so the secret stays out of the
 process table and out of logs.
 
 ```sh
-scout sweep --header 'Authorization: Bearer $API_TOKEN'
+scout init --base-url "$BASE_URL" --header 'Authorization: Bearer $API_TOKEN'
 ```
 
 Behind Cloudflare Access, use a service token as two headers:
 
 ```sh
-scout sweep \
+scout init --base-url "$BASE_URL" \
   --header 'CF-Access-Client-Id: $CF_ACCESS_CLIENT_ID' \
   --header 'CF-Access-Client-Secret: $CF_ACCESS_CLIENT_SECRET'
 ```

@@ -92,15 +92,25 @@ fi
 # to send them to a plaintext, non-local target -- scout attaches whatever
 # header we hand it to whatever host is in BASE_URL, with no scheme check of
 # its own.
+#
+# This must parse the URL rather than glob-match the string. A glob anchored
+# only on the prefix (`http://localhost*`) is satisfied by both
+# `http://localhost.evil.example` (suffix match) and `http://localhost@evil.example`
+# (the text before `@` is userinfo, not host) -- either sends the credential
+# to an attacker-controlled remote host over plaintext. Node's URL parser
+# resolves userinfo and hostname correctly; it is already a hard requirement.
 if [ ${#headers[@]} -gt 0 ]; then
-  case "$BASE_URL" in
-    https://*|http://localhost*|http://127.0.0.1*|http://\[::1\]*) ;;
-    *)
-      echo "Refusing to send credentials to a non-HTTPS, non-local base URL: ${BASE_URL}" >&2
-      echo "Use https://, or drop API_TOKEN/CF_ACCESS_CLIENT_* for a plain HTTP target." >&2
-      exit 2
-      ;;
-  esac
+  if ! node -e '
+    let u;
+    try { u = new URL(process.argv[1]); } catch { process.exit(1); }
+    if (u.protocol === "https:") process.exit(0);
+    if (u.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(u.hostname)) process.exit(0);
+    process.exit(1);
+  ' "$BASE_URL"; then
+    echo "Refusing to send credentials to a non-HTTPS, non-local base URL: ${BASE_URL}" >&2
+    echo "Use https://, or drop API_TOKEN/CF_ACCESS_CLIENT_* for a plain HTTP target." >&2
+    exit 2
+  fi
 fi
 
 echo "Scout gate against ${BASE_URL}"
