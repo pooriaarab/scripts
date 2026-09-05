@@ -37,6 +37,13 @@ assert_stale() { # <file> <label>: mtime must not advance over ~2.5s
   local f="$1" lbl="$2" a b; a="$(mtime "$f")"; sleep 2.5; b="$(mtime "$f")"
   [ "$b" = "$a" ] && pass "$lbl" || fail "$lbl" "mtime $a -> $b"
 }
+fmtime() { python3 -c 'import os,sys; print(os.stat(sys.argv[1]).st_mtime)' "$1"; }
+expect_rc() { [ "$1" = "$2" ] && pass "$3" || fail "$3" "rc=$1 want $2: $(cat "$4")"; }
+expect_grep() { grep -q "$1" "$2" && pass "$3" || fail "$3" "$(cat "$4")"; }
+expect_grepE() { grep -qE "$1" "$2" && pass "$3" || fail "$3" "$(cat "$4")"; }
+expect_grepF() { grep -qF "$1" "$2" && pass "$3" || fail "$3" "$(cat "$4")"; }
+expect_absent() { ! grep -qF "$1" "$2" && pass "$3" || fail "$3" "$1 still present"; }
+assert_sentinel() { kill -0 "$SENTINEL_PID" 2>/dev/null && pass "$1" || fail "$1" "sentinel $SENTINEL_PID dead"; }
 # Print every descendant PID of $1, one per line.
 descendants() {
   local c
@@ -174,12 +181,8 @@ sleep 1.5; m1="$(mtime "$T/hb")"; sleep 1.5; m2="$(mtime "$T/hb")"
   && pass "waiting worker receives periodic heartbeats" \
   || fail "waiting worker receives periodic heartbeats" "m1=$m1 m2=$m2"
 wait "$bgpid"
-[ "$(cat "$T/bw.rc")" = "0" ] \
-  && pass "waiting worker exits 0" \
-  || fail "waiting worker exits 0" "rc=$(cat "$T/bw.rc") err: $(cat "$T/bw.err")"
-grep -q "seventeen times twenty three" "$T/bw.out" \
-  && pass "multi-word brief arrives intact" \
-  || fail "multi-word brief arrives intact" "$(cat "$T/bw.out")"
+expect_rc "$(cat "$T/bw.rc")" 0 "waiting worker exits 0" "$T/bw.err"
+expect_grep "seventeen times twenty three" "$T/bw.out" "multi-word brief arrives intact" "$T/bw.out"
 
 # 2. Normal exit stops the helper: no orphans, heartbeat goes stale.
 assert_no_helper "normal exit leaves no helper"
@@ -187,9 +190,7 @@ assert_stale "$T/hb" "heartbeat goes stale after exit"
 
 # 3. Failure preserves the worker status and still cleans up.
 FAKE_AGENT_MODE=fail3 run_agent pi "anything"
-[ "$(cat "$T/bw.rc")" = "3" ] \
-  && pass "agent failure exit code propagates" \
-  || fail "agent failure exit code propagates" "rc=$(cat "$T/bw.rc") want 3"
+expect_rc "$(cat "$T/bw.rc")" 3 "agent failure exit code propagates" "$T/bw.err"
 assert_no_helper "failure leaves no helper"
 assert_stale "$T/hb" "heartbeat goes stale after failure"
 
@@ -215,25 +216,15 @@ wait "$bgpid"; trc=$?
 # shellcheck disable=SC2086
 assert_all_dead "termination kills every worker descendant" $tree4
 assert_no_helper "termination leaves no helper"
-kill -0 "$SENTINEL_PID" 2>/dev/null \
-  && pass "sentinel survives scoped termination" \
-  || fail "sentinel survives scoped termination" "sentinel $SENTINEL_PID dead"
+assert_sentinel "sentinel survives scoped termination"
 assert_stale "$T/hb-term" "heartbeat goes stale after termination"
 unset FAKE_AGENT_MODE BOX_WORK_HEARTBEAT_SECS BOX_WORK_HEARTBEAT_FILE
 
 # 5. The generated runner targets the recorded Box with the repo cwd baked in.
-grep -q "bx_test123" "$T/exec.log" \
-  && pass "dispatch targets the recorded Box id" \
-  || fail "dispatch targets the recorded Box id" "$(cat "$T/exec.log")"
-grep -q "bash /home/user/box-work-run.sh" "$T/exec.log" \
-  && pass "dispatch runs the uploaded runner script" \
-  || fail "dispatch runs the uploaded runner script" "$(cat "$T/exec.log")"
-grep -qF "cd \"\$HOME/$REPONAME\"" "$T/captured-runner.sh" \
-  && pass "runner keeps the explicit repository cwd" \
-  || fail "runner keeps the explicit repository cwd" "cd line missing"
-grep -qF "HEARTBEAT_SECS=\"1\"" "$T/captured-runner.sh" \
-  && pass "heartbeat interval is baked into the runner" \
-  || fail "heartbeat interval is baked into the runner" "interval not baked"
+expect_grep "bx_test123" "$T/exec.log" "dispatch targets the recorded Box id" "$T/exec.log"
+expect_grep "bash /home/user/box-work-run.sh" "$T/exec.log" "dispatch runs the uploaded runner script" "$T/exec.log"
+expect_grepF "cd \"\$HOME/$REPONAME\"" "$T/captured-runner.sh" "runner keeps the explicit repository cwd" "$T/captured-runner.sh"
+expect_grepF 'HEARTBEAT_SECS="1"' "$T/captured-runner.sh" "heartbeat interval is baked into the runner" "$T/captured-runner.sh"
 
 # 6. Even an uncatchable kill stops the heartbeat: the helper exits on its own
 # once its parent is gone. (A PID-only SIGKILL can still strand the worker
@@ -252,9 +243,7 @@ assert_stale "$T/hb-term" "heartbeat goes stale after SIGKILL"
 # Reap the stranded SIGKILL subtree (no shell traps SIGKILL); fixture-scoped patterns only.
 pkill -f "$T/captured-runner.sh" 2>/dev/null || true
 pkill -f "hb-fake-sleep-$T" 2>/dev/null || true
-kill -0 "$SENTINEL_PID" 2>/dev/null \
-  && pass "sentinel survives SIGKILL cleanup" \
-  || fail "sentinel survives SIGKILL cleanup" "sentinel $SENTINEL_PID dead"
+assert_sentinel "sentinel survives SIGKILL cleanup"
 
 # 7. Foreground SIGINT answers promptly with 130 (`timeout` foreground harness;
 # `--preserve-status` keeps the runner status instead of masking it as 124).
@@ -269,9 +258,7 @@ watcherpid=$!
 FAKE_AGENT_MODE=wait30 HOME="$FAKEBOX" PATH="$FAKEBOX/.local/bin:$PATH" \
   timeout --preserve-status -s INT 4 bash "$T/captured-runner.sh" "$b64" >"$T/int.out" 2>"$T/int.err"
 irc=$?
-[ "$irc" = "130" ] \
-  && pass "foreground SIGINT reports 130" \
-  || fail "foreground SIGINT reports 130" "rc=$irc"
+expect_rc "$irc" 130 "foreground SIGINT reports 130" "$T/int.err"
 # Wait only for the watcher (waiting bare would hang on the live sentinel).
 wait "$watcherpid" 2>/dev/null || true
 # Non-empty snapshot required: an empty tree would let descendant checks pass vacuously.
@@ -293,9 +280,7 @@ termtree="$(descendants "$rpid" | tr '\n' ' ')"
   || fail "TERM tree snapshot is non-empty" "no descendants of $rpid"
 kill -TERM "$rpid" 2>/dev/null || true
 wait "$rpid" 2>/dev/null; trc2=$?
-[ "$trc2" = "143" ] \
-  && pass "SIGTERM to the runner reports 143" \
-  || fail "SIGTERM to the runner reports 143" "rc=$trc2"
+expect_rc "$trc2" 143 "SIGTERM to the runner reports 143" "$T/term.err"
 # shellcheck disable=SC2086
 assert_all_dead "SIGTERM kills every worker descendant" $termtree
 assert_no_helper "SIGTERM leaves no helper"
@@ -303,12 +288,8 @@ assert_no_helper "SIGTERM leaves no helper"
 # 8. Invalid intervals fail clearly (30 is omitted-default only, never fallback).
 for bad in bogus 0 00 000 ""; do
   gen_dispatch "BOX_WORK_HEARTBEAT_SECS=$bad" "BOX_WORK_HEARTBEAT_FILE=$T/hb-bad" -- pi "anything"
-  [ "$(cat "$T/gen.rc")" = "2" ] \
-    && pass "invalid interval '$bad' exits 2" \
-    || fail "invalid interval '$bad' exits 2" "rc=$(cat "$T/gen.rc") out: $(cat "$T/gen.out")"
-  grep -q "invalid BOX_WORK_HEARTBEAT_SECS" "$T/gen.err" \
-    && pass "invalid interval '$bad' names the variable" \
-    || fail "invalid interval '$bad' names the variable" "$(cat "$T/gen.err")"
+  expect_rc "$(cat "$T/gen.rc")" 2 "invalid interval '$bad' exits 2" "$T/gen.err"
+  expect_grep "invalid BOX_WORK_HEARTBEAT_SECS" "$T/gen.err" "invalid interval '$bad' names the variable" "$T/gen.err"
 done
 
 # 9. An omitted interval keeps 30 as the default through the generated runner.
@@ -317,12 +298,8 @@ HOME="$FAKEHOME" XDG_STATE_HOME="$T/xdg" BOX_CLI="$T/stubbin/box" \
   env -u BOX_WORK_HEARTBEAT_SECS \
   bash "$SCRIPT" "$REPO" --agent pi "anything" >"$T/gen.out" 2>"$T/gen.err"
 genrc=$?
-[ "$genrc" = "0" ] \
-  && pass "omitted interval dispatches cleanly" \
-  || fail "omitted interval dispatches cleanly" "rc=$genrc err: $(cat "$T/gen.err")"
-grep -qF 'HEARTBEAT_SECS="30"' "$T/captured-runner.sh" \
-  && pass "omitted interval bakes the 30s default" \
-  || fail "omitted interval bakes the 30s default" "default not baked"
+expect_rc "$genrc" 0 "omitted interval dispatches cleanly" "$T/gen.err"
+expect_grepF 'HEARTBEAT_SECS="30"' "$T/captured-runner.sh" "omitted interval bakes the 30s default" "$T/captured-runner.sh"
 
 # 10. An unwritable heartbeat file warns loudly but does not fail the job.
 HOME="$FAKEHOME" XDG_STATE_HOME="$T/xdg" BOX_CLI="$T/stubbin/box" \
@@ -330,35 +307,66 @@ HOME="$FAKEHOME" XDG_STATE_HOME="$T/xdg" BOX_CLI="$T/stubbin/box" \
   FAKE_AGENT_MODE=ok \
   bash "$SCRIPT" "$REPO" --agent pi "anything" >"$T/bw.out" 2>"$T/bw.err"
 rc9=$?
-[ "$rc9" = "0" ] \
-  && pass "unwritable heartbeat still runs the job" \
-  || fail "unwritable heartbeat still runs the job" "rc=$rc9 err: $(cat "$T/bw.err")"
-grep -q "idle-reaper exemption inactive" "$T/bw.err" \
-  && pass "unwritable heartbeat warns on stderr" \
-  || fail "unwritable heartbeat warns on stderr" "$(cat "$T/bw.err")"
+expect_rc "$rc9" 0 "unwritable heartbeat still runs the job" "$T/bw.err"
+expect_grep "idle-reaper exemption inactive" "$T/bw.err" "unwritable heartbeat warns on stderr" "$T/bw.err"
 
 # 11. Canonical identity: no kill-0 fallback; ps + parent start required.
-! grep -q 'kill -0 "$_hp_pid"' "$T/captured-runner.sh" \
-  && pass "no kill-0 fallback for parent identity" \
-  || fail "no kill-0 fallback for parent identity" "fallback still present"
-! grep -q '\[ -n "$_hp_start" \]' "$T/captured-runner.sh" \
-  && pass "start-time check is unconditional" \
-  || fail "start-time check is unconditional" "conditional guard still present"
+expect_absent 'kill -0 "$_hp_pid"' "$T/captured-runner.sh" "no kill-0 fallback for parent identity"
+expect_absent '[ -n "$_hp_start" ]' "$T/captured-runner.sh" "start-time check is unconditional"
 mkdir -p "$T/fakeps" "$T/emptybin"
 printf '#!/usr/bin/env bash\nexit 1\n' >"$T/fakeps/ps"; chmod +x "$T/fakeps/ps"
 b64="$(printf '%s' "identity probe" | base64 | tr -d '\n')"
 HOME="$FAKEBOX" PATH="$T/fakeps:/usr/bin:/bin" bash "$T/captured-runner.sh" "$b64" >"$T/ps-bad.out" 2>"$T/ps-bad.err"; rc=$?
-[ "$rc" = "2" ] && pass "broken ps exits 2" || fail "broken ps exits 2" "rc=$rc"
-grep -qE "ps|start time" "$T/ps-bad.err" && pass "broken ps names the cause" || fail "broken ps names the cause" "$(cat "$T/ps-bad.err")"
+expect_rc "$rc" 2 "broken ps exits 2" "$T/ps-bad.err"
+expect_grepE "ps|start time" "$T/ps-bad.err" "broken ps names the cause" "$T/ps-bad.err"
 HOME="$FAKEBOX" PATH="$T/emptybin" "$BASH" "$T/captured-runner.sh" "$b64" >"$T/ps-abs.out" 2>"$T/ps-abs.err"; rc=$?
-[ "$rc" = "2" ] && pass "absent ps exits 2" || fail "absent ps exits 2" "rc=$rc"
-grep -qE "ps|start time" "$T/ps-abs.err" && pass "absent ps names the cause" || fail "absent ps names the cause" "$(cat "$T/ps-abs.err")"
+expect_rc "$rc" 2 "absent ps exits 2" "$T/ps-abs.err"
+expect_grepE "ps|start time" "$T/ps-abs.err" "absent ps names the cause" "$T/ps-abs.err"
 assert_no_helper "ps failure launches no helper"
 
+# 12. Post-sleep recheck: a parent that exits mid-sleep buys no fresh
+# exemption; any post-mortem touch advances mtime within 2.5s below.
+gen_dispatch "BOX_WORK_HEARTBEAT_SECS=1" "BOX_WORK_HEARTBEAT_FILE=$T/hb-post" -- pi "anything"
+b64="$(printf '%s' "post-sleep probe" | base64 | tr -d '\n')"
+FAKE_AGENT_MODE=wait30 HOME="$FAKEBOX" PATH="$FAKEBOX/.local/bin:$PATH" \
+  bash "$T/captured-runner.sh" "$b64" >"$T/post.out" 2>"$T/post.err" &
+rpid=$!
+sleep 2
+kill -KILL "$rpid" 2>/dev/null || true
+wait "$rpid" 2>/dev/null || true
+m_post="$(fmtime "$T/hb-post")"
+sleep 2.5
+[ "$(fmtime "$T/hb-post")" = "$m_post" ] \
+  && pass "no heartbeat after parent exits mid-sleep" \
+  || fail "no heartbeat after parent exits mid-sleep" "mtime advanced post-mortem"
+assert_no_helper "post-sleep exit leaves no helper"
+pkill -f "$T/captured-runner.sh" 2>/dev/null || true
+pkill -f "hb-fake-sleep-$T" 2>/dev/null || true
+
+# 13. reap_tree records identity and revalidates before delayed SIGKILL.
+# Shipped functions run verbatim with stub ps/kill/sleep; TERM flips the
+# fake start time (simulating PID reuse), sparing only the recycled PID.
+sed -n '/^kill_tree()/,/^}/p;/^reap_tree()/,/^}/p' "$T/captured-runner.sh" >"$T/reap.funcs"
+expect_grep "_rt_want" "$T/reap.funcs" "reap_tree records descendant identity" "$T/reap.funcs"
+expect_absent 'kill -0 "$_rt_p"' "$T/reap.funcs" "reap_tree has no kill-0 identity check"
+( FAKE_START="START-A"; KILLS=""; SCEN="reuse"
+  sleep() { :; }
+  kill() { case "$1" in -TERM) [ "$SCEN" = reuse ] && { FAKE_START="START-B"; SCEN="done"; };; -KILL) KILLS="$KILLS$2 ";; esac; return 0; }
+  ps() { case "$*" in *--ppid\ 99999*) printf '424242\n';; *--ppid*) :;; *stat=*) printf 'S\n';; *lstart=*) printf '%s\n' "$FAKE_START";; *) command ps "$@";; esac; }
+  . "$T/reap.funcs"
+  reap_tree 99999 >/dev/null 2>&1
+  case "$KILLS" in *424242*) echo "REUSE-424242-KILLED:$KILLS";; *) echo "REUSE-424242-SPARED";; esac
+  case "$KILLS" in *99999*) echo "REUSE-ROOT-KILLED";; *) echo "REUSE-ROOT-SPARED:$KILLS";; esac
+  SCEN="same"; KILLS=""; FAKE_START="START-A"
+  reap_tree 99999 >/dev/null 2>&1
+  case "$KILLS" in *424242*) echo "SAME-KILLED";; *) echo "SAME-SPARED:$KILLS";; esac
+) >"$T/reap.probe" 2>&1
+expect_grep "REUSE-424242-SPARED" "$T/reap.probe" "recycled PID is spared SIGKILL" "$T/reap.probe"
+expect_grep "REUSE-ROOT-KILLED" "$T/reap.probe" "genuine survivor still gets SIGKILL" "$T/reap.probe"
+expect_grep "SAME-KILLED" "$T/reap.probe" "matched survivor still gets SIGKILL" "$T/reap.probe"
+
 # Final scoping proof: the unrelated sentinel survived the whole suite.
-kill -0 "$SENTINEL_PID" 2>/dev/null \
-  && pass "sentinel survives the full suite" \
-  || fail "sentinel survives the full suite" "sentinel $SENTINEL_PID dead"
+assert_sentinel "sentinel survives the full suite"
 
 echo "pass=$PASS fail=$FAIL"
 [ "$FAIL" = "0" ]
