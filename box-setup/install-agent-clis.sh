@@ -196,6 +196,11 @@ fi
 # `zai-api` override reuses the same stored key against the pay-as-you-go
 # endpoint. The key is read at call time from pi's own auth store, so no secret
 # lands in this file.
+#
+# Also cap openrouter's deepseek/deepseek-v3.2 output. pi's bundled catalog
+# declares maxTokens=163840 for that model while OpenRouter reports
+# max_completion_tokens=65536, and an unconstrained request asked for 153497
+# output tokens and failed. The override below pins maxTokens=8192.
 log "pi provider overrides"
 mkdir -p "$HOME/.pi/agent"
 if [ ! -s "$HOME/.pi/agent/models.json" ]; then
@@ -211,6 +216,11 @@ if [ ! -s "$HOME/.pi/agent/models.json" ]; then
         { "id": "glm-5.3", "name": "GLM 5.3 (API)", "contextWindow": 204800, "maxTokens": 16384, "reasoning": true, "input": ["text"] },
         { "id": "glm-5.2", "name": "GLM 5.2 (API)", "contextWindow": 204800, "maxTokens": 16384, "reasoning": true, "input": ["text"] }
       ]
+    },
+    "openrouter": {
+      "modelOverrides": {
+        "deepseek/deepseek-v3.2": { "maxTokens": 8192 }
+      }
     }
   }
 }

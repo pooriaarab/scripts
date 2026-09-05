@@ -239,8 +239,7 @@ run_agent cursor "anything"
 grep -q "cursor.env" "$T/bw.err" \
   && pass "missing cursor key names the credential file" \
   || fail "missing cursor key names the credential file" "$(cat "$T/bw.err")"
-before_cursors=0
-if [ -f "$T/calls.log" ]; then before_cursors=$(grep -c "cursor-agent" "$T/calls.log" || true); fi
+before_cursors=$(grep -c "cursor-agent" "$T/calls.log" 2>/dev/null || true)
 [ "$before_cursors" = "1" ] \
   && pass "missing cursor key never invokes the CLI" \
   || fail "missing cursor key never invokes the CLI" "cursor-agent lines: $before_cursors"
