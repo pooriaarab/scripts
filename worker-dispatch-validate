@@ -54,6 +54,7 @@ eval "$(python3 - "$MANIFEST" <<'PY'
 import json,sys
 required = ["repository","issue","branch","title","closing_ref","base_ref",
             "base_sha","coordinator","cli","model","box"]
+strfields = [k for k in required if k != "issue"]
 try:
     m = json.load(open(sys.argv[1]))
 except Exception as e:
@@ -62,17 +63,37 @@ except Exception as e:
 if not isinstance(m, dict):
     print("echo 'manifest must be a JSON object' >&2; exit 2", end="")
     sys.exit(0)
-missing = [k for k in required if k not in m or m[k] is None or str(m[k]).strip() == ""]
+missing = [k for k in required
+           if k not in m or m[k] is None
+           or (isinstance(m[k], str) and m[k].strip() == "")]
 if missing:
     print("echo 'manifest missing required field(s): %s' >&2; exit 1" % " ".join(missing), end="")
     sys.exit(0)
+# Identity fields must be actual strings with their own shapes: a number,
+# object, or boolean must never stringify into a passing value.
+bad = [k for k in strfields if not isinstance(m[k], str)]
+if bad:
+    print("echo 'manifest field(s) must be strings: %s' >&2; exit 1" % " ".join(bad), end="")
+    sys.exit(0)
+iss = m["issue"]
+if isinstance(iss, bool):
+    print("echo 'manifest field issue must be an issue number' >&2; exit 1", end="")
+    sys.exit(0)
+elif isinstance(iss, int):
+    m["issue"] = str(iss)
+elif not isinstance(iss, str):
+    print("echo 'manifest field issue must be an issue number' >&2; exit 1", end="")
+    sys.exit(0)
+res = m.get("resume", False)
+if not isinstance(res, bool):
+    print("echo 'manifest field resume must be a boolean' >&2; exit 1", end="")
+    sys.exit(0)
 def sh(k, v):
-    v = str(v).replace("'", "'\"'\"'")
+    v = v.replace("'", "'\"'\"'")
     print("M_%s='%s'" % (k.upper(), v), end=";")
 for k in required:
     sh(k, m[k])
-resume = str(m.get("resume", False)).lower() in ("1","true","yes")
-print("M_RESUME='%s'" % ("true" if resume else "false"), end=";")
+print("M_RESUME='%s'" % ("true" if res else "false"), end=";")
 PY
 )" || exit "$?"
 # The python block above prints `exit N` for manifest-level failures.
