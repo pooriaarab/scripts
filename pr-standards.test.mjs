@@ -1901,6 +1901,45 @@ test('the index-delta result must actually follow a git ls-files command', () =>
   );
 });
 
+test('an index-delta needs the counts to actually differ, and immediate adjacency', () => {
+  // Two real `git ls-files` invocations that both print 337 prove nothing
+  // changed -- counting them as a before/after pair would let a no-op PR
+  // pass by running the same command twice.
+  const body = (verified) => [
+    '## What', 'One sentence.',
+    '## Why', 'Because of the reason.',
+    '## How I verified', verified,
+    'Assisted-by: agent:model',
+  ].join('\n\n');
+  const fails = (text) => validateBody(body(text), 142, config)
+    .failures.some((f) => f.check === '## How I verified');
+
+  assert.equal(
+    fails([
+      "$ git ls-files | grep -c ''",
+      '337',
+      "$ git ls-files | grep -c ''",
+      '337',
+    ].join('\n')),
+    true,
+    'two identical git ls-files counts are not a delta',
+  );
+
+  // The count only counts when it is the line right after the command --
+  // a prose note in between must not keep the latch open for a later,
+  // unrelated pair of digit lines.
+  assert.equal(
+    fails([
+      '$ git ls-files',
+      'looks fine, nothing unusual here',
+      '12',
+      '12',
+    ].join('\n')),
+    true,
+    'digit lines separated from the ls-files command by prose are not its output',
+  );
+});
+
 test('a nonzero failed count is not masked by "passed" in the same result', () => {
   // "12 passed, 2 failed" matches `pass(?:ed)?` on its own, the same way
   // "Found 7 warnings and 0 errors" matched a clean "0 errors" until the

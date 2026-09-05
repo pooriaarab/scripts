@@ -485,29 +485,32 @@ function proofCommand(text) {
 // `echo '(none tracked)'` on a command line is not evidence.
 //
 // Both the count and the guard only mean something as the output of a
-// `git ls-files` invocation. A bare "1" / "2" pair, or a standalone
-// "(none)", can follow any command in the section — `npm audit` printing
-// vulnerability counts, or a scanner printing "(none)" for unrelated
-// reasons — so the line only counts when the nearest preceding command
-// line actually ran `git ls-files`.
+// `git ls-files` invocation, and only as the line immediately after it —
+// not just anywhere later in the section. Without that adjacency, a prose
+// note between the command and an unrelated pair of digit lines (e.g. a
+// benchmark count printed further down) would still read as a delta.
+// And a delta is only real when the two counts differ: two identical
+// `git ls-files | grep -c ''` runs prove nothing changed, so counting
+// them as "before/after" evidence would let a no-op pass.
 const PROOF_NONE_GUARD_RE = /^\(\s*none(?:\s+tracked)?\s*\)$/i;
 const PROOF_COUNT_LINE_RE = /^\d+$/;
 const LS_FILES_COMMAND_RE = /\bgit\s+ls-files\b/i;
 
 function hasIndexStateResult(text) {
   const lines = String(text).split('\n').map((line) => line.trim()).filter(Boolean);
-  let followsLsFiles = false;
-  let counts = 0;
+  let expectOutput = false;
+  const counts = [];
   for (const line of lines) {
     if (PROOF_COMMAND_RE.test(line)) {
-      followsLsFiles = LS_FILES_COMMAND_RE.test(line);
+      expectOutput = LS_FILES_COMMAND_RE.test(line);
       continue;
     }
-    if (!followsLsFiles) continue;
+    if (!expectOutput) continue;
+    expectOutput = false;
     if (PROOF_NONE_GUARD_RE.test(line)) return true;
-    if (PROOF_COUNT_LINE_RE.test(line)) counts += 1;
+    if (PROOF_COUNT_LINE_RE.test(line)) counts.push(Number(line));
   }
-  return counts >= 2;
+  return counts.length >= 2 && new Set(counts).size > 1;
 }
 
 function proofResult(text) {
