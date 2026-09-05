@@ -59,6 +59,7 @@ cat > "$T/bin/box-ok" <<'STUB'
 echo "box-ok $*" >>"${DISPATCH_TEST_T:?}/boxcalls.log"
 case "${1:-}" in
   new) printf '{"id":"bx_validpath001"}\n' ;;
+  exec) case "$*" in *--json*) printf '{"stdout":"","stderr":"","exitCode":0}\n';; *) exit 0;; esac ;;
   *) exit 0 ;;
 esac
 STUB
@@ -195,11 +196,12 @@ mrc="$(bw "$T/gate-mismatch.json" "$T/mismatch.log" --agent pi "do work")"
 mrc2="$(bw "$T/gate-mismatch.json" "$T/empty-agent.log" --agent "" "do work")"
 if (( mrc != 0 )) && (( mrc2 != 0 )) && [ ! -f "$T/box-called" ] && [ -z "$(ls "$T"/state/*.json 2>/dev/null)" ] \
   && grep -q "does not match" "$T/mismatch.log" && grep -q "needs a CLI name" "$T/empty-agent.log"; then pass "box-work cli mismatch writes no receipt and makes no Box call"; else fail "box-work cli mismatch writes no receipt and makes no Box call" "rc=$mrc/$mrc2 log=$(cat "$T/mismatch.log")"; fi
-# Valid manifest through box-work: exactly one Box start and one receipt.
+# Valid manifest plus matching --agent through box-work: one Box start, one agent run, one receipt.
 reset; mkmanifest "$T/gate-ok.json"
-okrc="$(HOME="$T/fakehome" BOX_CLI="$T/bin/box-ok" GH_CLI="$T/bin/gh" "$BOXWORK" "$T/checkout" --manifest "$T/gate-ok.json" >"$T/ok.log" 2>&1; echo $?)"
+okrc="$(HOME="$T/fakehome" BOX_CLI="$T/bin/box-ok" GH_CLI="$T/bin/gh" "$BOXWORK" "$T/checkout" --manifest "$T/gate-ok.json" --agent muse "do work" >"$T/ok.log" 2>&1; echo $?)"
 starts="$(grep -c "^box-ok new" "$T/boxcalls.log" 2>/dev/null)"; starts="${starts:-0}"
-if (( okrc == 0 )) && [ "$starts" = 1 ] && [ -n "$(ls "$T"/state/*.json 2>/dev/null)" ]; then pass "box-work with a valid manifest starts exactly one Box and records one receipt"; else fail "box-work with a valid manifest starts exactly one Box and records one receipt" "rc=$okrc starts=$starts log=$(cat "$T/ok.log")"; fi
+execs="$(grep -c "box-work-run\.sh " "$T/boxcalls.log" 2>/dev/null)"; execs="${execs:-0}"
+if (( okrc == 0 )) && [ "$starts" = 1 ] && [ "$execs" = 1 ] && [ -n "$(ls "$T"/state/*.json 2>/dev/null)" ]; then pass "box-work valid manifest with matching agent starts one Box, runs one agent, records one receipt"; else fail "box-work valid manifest with matching agent starts one Box, runs one agent, records one receipt" "rc=$okrc starts=$starts execs=$execs log=$(cat "$T/ok.log")"; fi
 # Concurrent dispatch: exactly one winner, one receipt, winner preserved.
 reset
 for i in 1 2 3 4 5 6 7 8; do
