@@ -85,7 +85,9 @@ Four things, all required:
   surface to click through or screenshot still needs a command and its result;
   add `Proof: n/a — <reason>` alongside it to say why there is nothing further
   to show. The reason is not optional, and the hatch never waives the command
-  and its result — only the extra, visible proof.
+  and its result — only the extra, visible proof. A before/after `git ls-files`
+  count, or a `(none tracked)` guard, is a result for a change whose whole
+  effect is on the git index.
 - Body under 120 characters fails. A description that only restates the diff is
   not a description.
 - The body must contain an `Assisted-by: <agent>:<model>` line. It discloses which

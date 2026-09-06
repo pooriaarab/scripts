@@ -476,9 +476,69 @@ function proofCommand(text) {
   return lines.some((line) => PROOF_COMMAND_RE.test(line));
 }
 
+// An index-only change has no test-runner vocabulary. The proof is a
+// before/after `git ls-files | grep -c` pair, or a `(none tracked)` /
+// `(none)` guard. Four PRs untracked build artifacts and then padded the
+// section with "clean" because those lines did not count as a result
+// (usegeoaeo#71, popcornteam#1205, beeloud#164, pooriaarab.com#225).
+// Output lines are results; the command that printed them is not.
+// `echo '(none tracked)'` on a command line is not evidence.
+//
+// Both the count and the guard only mean something as the output of a
+// `git ls-files` invocation, and only as the line immediately after it —
+// not just anywhere later in the section. Without that adjacency, a prose
+// note between the command and an unrelated pair of digit lines (e.g. a
+// benchmark count printed further down) would still read as a delta.
+// And a delta is only real when the two counts differ: two identical
+// `git ls-files | grep -c ''` runs prove nothing changed, so counting
+// them as "before/after" evidence would let a no-op pass.
+//
+// The two counts must also come from the *same* probe. Pairing any two
+// ls-files-flavored commands that happen to produce different numbers
+// (`git ls-files | grep -c '.ts'` -> 300, then a separate `grep -c '.md'`
+// -> 42) would read as a before/after delta even though nothing about the
+// index changed between them -- those are two unrelated snapshots, not a
+// before and an after of the same measurement. Counts are grouped by their
+// normalized command text, and only a differing pair within the same group
+// counts as a delta.
+const PROOF_NONE_GUARD_RE = /^\(\s*none(?:\s+tracked)?\s*\)$/i;
+const PROOF_COUNT_LINE_RE = /^\d+$/;
+const LS_FILES_COMMAND_RE = /\bgit\s+ls-files\b/i;
+
+function normalizeLsFilesCommand(line) {
+  return line.replace(/^[$>`]\s*/, '').replace(/\s+/g, ' ').trim();
+}
+
+function hasIndexStateResult(text) {
+  const lines = String(text).split('\n').map((line) => line.trim()).filter(Boolean);
+  let expectOutput = false;
+  let pendingCommand = null;
+  const countsByCommand = new Map();
+  for (const line of lines) {
+    if (PROOF_COMMAND_RE.test(line)) {
+      expectOutput = LS_FILES_COMMAND_RE.test(line);
+      pendingCommand = expectOutput ? normalizeLsFilesCommand(line) : null;
+      continue;
+    }
+    if (!expectOutput) continue;
+    expectOutput = false;
+    if (PROOF_NONE_GUARD_RE.test(line)) return true;
+    if (PROOF_COUNT_LINE_RE.test(line)) {
+      const counts = countsByCommand.get(pendingCommand) ?? [];
+      counts.push(Number(line));
+      countsByCommand.set(pendingCommand, counts);
+    }
+    pendingCommand = null;
+  }
+  for (const counts of countsByCommand.values()) {
+    if (counts.length >= 2 && new Set(counts).size > 1) return true;
+  }
+  return false;
+}
+
 function proofResult(text) {
   if (PROOF_NONZERO_RE.test(text)) return false;
-  return PROOF_RESULT_RE.test(text);
+  return PROOF_RESULT_RE.test(text) || hasIndexStateResult(text);
 }
 
 function hasCommandAndResult(text) {
@@ -945,11 +1005,11 @@ export function validateBody(body, issueNumber, config = DEFAULT_CONFIG) {
     let expected = 'a command and its result, such as: bun test -> 214 passed';
     let fix = 'Run a check and record the command and result under ## How I verified.';
     if (verified && !refused && command && !result) {
-      expected = 'a result from that command, such as: 13 passed or Found 0 warnings';
-      fix = 'Record what the command printed. A command with no result is not evidence.';
+      expected = 'Found a command but no result. Record 13 passed, Found 0 warnings, a git ls-files before/after count, or (none tracked)';
+      fix = 'Found a command but no result. Record what the command printed.';
     } else if (verified && !refused && !command && result) {
-      expected = 'a command that produced that result, such as: bash tests/x.sh';
-      fix = 'Name the command you ran. A result with no command is not evidence.';
+      expected = 'Found a result but no command. Name the command you ran, such as: bash tests/x.sh';
+      fix = 'Found a result but no command. Name the command you ran.';
     }
     failures.push(fail(
       '## How I verified',
