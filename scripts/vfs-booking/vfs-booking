@@ -1,0 +1,285 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# VFS Global visa portal browser automation helper.
+#
+# Drives visa.vfsglobal.com using agent-browser CLI attached over CDP to a
+# REAL, already-running Chrome browser. Handles Cloudflare, Turnstile,
+# overlays, and custom combobox dropdowns.
+#
+# WARNING: This script does NOT automate payment. Payment must be completed
+# by hand in a normal, non-automated browser window. Attempting to automate
+# payment leaves bookings stuck in "Payment Processing" and silently orphans
+# them from the dashboard. See README.md.
+
+# Environment variables:
+#   VFS_CHROME_PORT  CDP port (default 9334)
+#   VFS_EMAIL        VFS account email (for login command)
+#   VFS_PASSWORD     VFS account password (for login command)
+#   VFS_CENTRE       Application centre name (for slots/booking)
+#   VFS_CATEGORY     Visa category (for slots/booking)
+#   VFS_SUBCATEGORY  Sub-category (for slots/booking)
+
+set -o pipefail
+
+readonly PORT="${VFS_CHROME_PORT:-9334}"
+readonly TIMEOUT_CLOUDFLARE=60
+readonly TIMEOUT_GENERAL=30
+readonly POLL_INTERVAL=0.5
+
+# Colors for output
+readonly RED=$'\033[0;31m'
+readonly GREEN=$'\033[0;32m'
+readonly YELLOW=$'\033[1;33m'
+readonly NC=$'\033[0m'  # No Color
+
+# Helper: Print error message and exit
+die() {
+  echo "${RED}ERROR: $*${NC}" >&2
+  exit 1
+}
+
+# Helper: Print warning message
+warn() {
+  echo "${YELLOW}WARN: $*${NC}" >&2
+}
+
+# Helper: Print info message
+info() {
+  echo "${GREEN}INFO: $*${NC}" >&2
+}
+
+# Helper: Connect to CDP browser
+connect_browser() {
+  info "Connecting to Chrome on port $PORT..."
+  agent-browser connect "$PORT" || die "Failed to connect to CDP browser"
+}
+
+# Helper: Perform a JS click to bypass overlays and covered elements.
+# Usage: js_click_text "Button Text"
+js_click_text() {
+  local text="$1"
+  local xpath="//button[contains(.,'$text')] | //a[contains(.,'$text')] | //*[contains(.,'$text')]"
+  agent-browser eval "document.evaluate(\"$xpath\",document,null,9,null).singleNodeValue?.click()" || \
+    die "Failed to click on '$text'"
+}
+
+# Helper: Wait for loading overlay to disappear
+wait_for_no_overlay() {
+  info "Waiting for overlays to clear..."
+  local elapsed=0
+  while [ "$elapsed" -lt "$TIMEOUT_GENERAL" ]; do
+    local overlay_count
+    overlay_count=$(agent-browser eval \
+      "document.querySelectorAll('.ngx-overlay.loading-foreground').length" 2>/dev/null || echo "1")
+    if [ "$overlay_count" = "0" ]; then
+      info "Overlay cleared"
+      return 0
+    fi
+    sleep "$POLL_INTERVAL"
+    elapsed=$((elapsed + 1))
+  done
+  warn "Overlay did not clear within ${TIMEOUT_GENERAL}s, continuing anyway"
+}
+
+# Helper: List available options in a dropdown
+# Reads mat-option, [role=option], and .dropdown-item elements
+list_options() {
+  agent-browser eval \
+    "JSON.stringify([...document.querySelectorAll('[role=option],mat-option,li[role=option],.dropdown-item')].map(e=>e.innerText.trim()).filter(Boolean))" || \
+    die "Failed to list dropdown options"
+}
+
+# Helper: Select an option by text in a dropdown
+# Usage: select_option "Option Text"
+select_option() {
+  local text="$1"
+  wait_for_no_overlay
+  info "Selecting option: $text"
+  agent-browser eval \
+    "[...document.querySelectorAll('[role=option],mat-option,li[role=option],.dropdown-item')].find(e=>e.innerText.includes('$text'))?.click()" || \
+    die "Failed to select option '$text'"
+  sleep 0.5
+}
+
+# Helper: Poll until page contains a marker string (for Cloudflare settle)
+# Usage: wait_for_page_settle "Sign In"
+wait_for_page_settle() {
+  local marker="$1"
+  info "Waiting for page to settle (marker: '$marker')..."
+  local elapsed=0
+  while [ "$elapsed" -lt "$TIMEOUT_CLOUDFLARE" ]; do
+    local body_text
+    body_text=$(agent-browser get text body 2>/dev/null || echo "")
+    if echo "$body_text" | grep -q "$marker"; then
+      info "Page settled"
+      return 0
+    fi
+    sleep "$POLL_INTERVAL"
+    elapsed=$((elapsed + 1))
+  done
+  die "Page did not settle after ${TIMEOUT_CLOUDFLARE}s (marker not found: '$marker')"
+}
+
+# Subcommand: check / status
+# Report whether any active application exists on the dashboard
+cmd_check() {
+  connect_browser
+  info "Loading VFS dashboard..."
+  agent-browser goto "https://visa.vfsglobal.com/dashboard" || \
+    die "Failed to load dashboard"
+  wait_for_page_settle "Application"
+
+  local body
+  body=$(agent-browser get text body)
+
+  if echo "$body" | grep -qi "no active application"; then
+    echo "No active applications found"
+    return 0
+  elif echo "$body" | grep -qi "application"; then
+    echo "Active application(s) found"
+    return 0
+  else
+    warn "Could not determine application status"
+    return 1
+  fi
+}
+
+# Subcommand: login
+# Read VFS_EMAIL and VFS_PASSWORD from environment
+cmd_login() {
+  [ -n "${VFS_EMAIL:-}" ] || die "VFS_EMAIL not set"
+  [ -n "${VFS_PASSWORD:-}" ] || die "VFS_PASSWORD not set"
+
+  connect_browser
+  info "Loading VFS login page..."
+  agent-browser goto "https://visa.vfsglobal.com/login" || \
+    die "Failed to load login page"
+
+  # Wait for Cloudflare JS challenge to settle
+  wait_for_page_settle "Sign In"
+  wait_for_no_overlay
+
+  info "Checking for Turnstile widget..."
+  local accessibility_tree
+  accessibility_tree=$(agent-browser accessibility-snapshot 2>/dev/null || echo "")
+  if echo "$accessibility_tree" | grep -q "Success"; then
+    info "Turnstile widget already solved"
+  else
+    info "Waiting for Turnstile to auto-solve..."
+    sleep 3
+  fi
+
+  # Fill in email
+  info "Entering email..."
+  agent-browser get element email || \
+    agent-browser get element 'input[type="email"]' || \
+    die "Could not find email field"
+  agent-browser click 'input[type="email"]'
+  agent-browser type "${VFS_EMAIL}"
+
+  # Fill in password
+  info "Entering password..."
+  agent-browser get element 'input[type="password"]' || \
+    die "Could not find password field"
+  agent-browser click 'input[type="password"]'
+  agent-browser type "${VFS_PASSWORD}"
+
+  # Submit login form with JS click (to bypass overlays)
+  info "Submitting login form..."
+  js_click_text "Sign In"
+
+  # Wait for redirect to dashboard
+  wait_for_page_settle "Application"
+  info "Login successful"
+}
+
+# Subcommand: slots
+# Report slot availability per application centre
+cmd_slots() {
+  [ -n "${VFS_CENTRE:-}" ] || die "VFS_CENTRE not set"
+
+  connect_browser
+  info "Loading VFS booking page..."
+  agent-browser goto "https://visa.vfsglobal.com/book" || \
+    die "Failed to load booking page"
+  wait_for_page_settle "Application Centre"
+
+  # Select Application Centre
+  info "Selecting Application Centre: ${VFS_CENTRE}..."
+  agent-browser click 'mat-select,select,[role="combobox"]' || true
+  sleep 0.5
+  select_option "${VFS_CENTRE}"
+  wait_for_no_overlay
+
+  # If category/subcategory are set, select them too
+  if [ -n "${VFS_CATEGORY:-}" ]; then
+    info "Selecting Category: ${VFS_CATEGORY}..."
+    agent-browser click 'mat-select,select,[role="combobox"]' || true
+    sleep 0.5
+    select_option "${VFS_CATEGORY}"
+    wait_for_no_overlay
+  fi
+
+  if [ -n "${VFS_SUBCATEGORY:-}" ]; then
+    info "Selecting Sub-category: ${VFS_SUBCATEGORY}..."
+    agent-browser click 'mat-select,select,[role="combobox"]' || true
+    sleep 0.5
+    select_option "${VFS_SUBCATEGORY}"
+    wait_for_no_overlay
+  fi
+
+  # Check for availability
+  local body
+  body=$(agent-browser get text body)
+
+  if echo "$body" | grep -qi "Appointments are currently unavailable"; then
+    echo "Appointments unavailable (waitlist only)"
+    return 1
+  elif echo "$body" | grep -qi "available\|appointment"; then
+    echo "Appointments available"
+    return 0
+  else
+    warn "Could not determine availability status"
+    return 1
+  fi
+}
+
+# Main command router
+main() {
+  local cmd="${1:-}"
+
+  case "$cmd" in
+    check|status)
+      cmd_check
+      ;;
+    login)
+      cmd_login
+      ;;
+    slots)
+      cmd_slots
+      ;;
+    "")
+      echo "Usage: vfs-booking <command> [options]"
+      echo ""
+      echo "Commands:"
+      echo "  check|status   Report active applications"
+      echo "  login          Sign in to VFS account"
+      echo "  slots          Check appointment slot availability"
+      echo ""
+      echo "Environment variables:"
+      echo "  VFS_CHROME_PORT      CDP port (default 9334)"
+      echo "  VFS_EMAIL            VFS account email (login only)"
+      echo "  VFS_PASSWORD         VFS account password (login only)"
+      echo "  VFS_CENTRE           Application centre name (slots only)"
+      echo "  VFS_CATEGORY         Visa category (slots only)"
+      echo "  VFS_SUBCATEGORY      Sub-category (slots only)"
+      exit 0
+      ;;
+    *)
+      die "Unknown command: $cmd"
+      ;;
+  esac
+}
+
+main "$@"
