@@ -1663,6 +1663,34 @@ test('the proof escape hatch does not read as a refusal to answer', () => {
   assert.equal(verifiedFails('`node --test` -> 40 passed\n\nProof: n/a — N/A'), true);
 });
 
+test('Operator: n/a is a hatch, not a refusal to answer', () => {
+  // CLAUDE.md requires `Operator: n/a` on a mechanical PR. The refusal guard
+  // matched the n/a inside that labelled line and failed every such PR, with a
+  // message about a missing command that was already there. Widen the hatch,
+  // not the refusal regex: a bare N/A sitting alone is still a refusal.
+  const body = (verified) => [
+    '## What', 'One sentence.',
+    '## Why', 'Because of the reason.',
+    '## How I verified', verified,
+    'Assisted-by: agent:model',
+  ].join('\n\n');
+  const verifiedFails = (text) => validateBody(body(text), 142, config)
+    .failures.some((f) => f.check === '## How I verified');
+  const run = '`node --test` -> 40 passed';
+
+  assert.equal(verifiedFails(`${run}\n\nOperator: n/a`), false);
+  assert.equal(verifiedFails(`${run}\n\nOperator: n/a - no user-visible surface`), false);
+  // Proof still requires a reason. Do not make the reason optional on both
+  // labels, or this becomes a match whose capture is undefined and the n/a
+  // disappears from the guard.
+  assert.equal(verifiedFails(`${run}\n\nProof: n/a`), true);
+  // A bare N/A sitting alone is still a refusal, as is TODO and
+  // "tested locally". These are the guard against a toothless detector.
+  assert.equal(verifiedFails('N/A'), true);
+  assert.equal(verifiedFails(`${run}\n\ntested locally`), true);
+  assert.equal(verifiedFails(`${run}\n\nTODO`), true);
+});
+
 test('a quoted rule name is not a refusal to answer', () => {
   // A body that explains the rule inside the section the rule reads was failed
   // by its own explanation, and the message named nothing. This pull request's
