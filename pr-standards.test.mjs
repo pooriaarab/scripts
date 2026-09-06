@@ -1803,11 +1803,178 @@ test('bash is a command, and real tool output is a result', () => {
   assert.ok(commandOnly, 'a command with no result still fails');
   assert.match(commandOnly.expected, /result/i);
   assert.doesNotMatch(commandOnly.expected, /a command and its result/i);
+  assert.match(commandOnly.expected, /Found a command but no result/);
+  assert.match(commandOnly.fix, /Found a command but no result/);
 
   const resultOnly = finding('Results: 13 passed, 0 failed');
   assert.ok(resultOnly, 'a result with no command still fails');
   assert.match(resultOnly.expected, /command/i);
   assert.doesNotMatch(resultOnly.expected, /a command and its result/i);
+  assert.match(resultOnly.expected, /Found a result but no command/);
+  assert.match(resultOnly.fix, /Found a result but no command/);
+});
+
+test('an index-only change is proved by a git ls-files delta, not by a suite', () => {
+  // PROOF_RESULT_RE knew test-runner words and nothing about the git index.
+  // Four PRs untracked build artifacts with a real, checkable ls-files
+  // before/after, then failed this rule and padded the section with "clean"
+  // (usegeoaeo#71, popcornteam#1205, beeloud#164, pooriaarab.com#225).
+  const body = (verified) => [
+    '## What', 'One sentence.',
+    '## Why', 'Because of the reason.',
+    '## How I verified', verified,
+    'Assisted-by: agent:model',
+  ].join('\n\n');
+  const fails = (text) => validateBody(body(text), 142, config)
+    .failures.some((f) => f.check === '## How I verified');
+  const finding = (text) => validateBody(body(text), 142, config)
+    .failures.find((f) => f.check === '## How I verified');
+
+  const indexDelta = [
+    "$ git ls-files | grep -c ''",
+    '337',
+    '$ git rm --cached apps/website/tsconfig.tsbuildinfo',
+    "$ git ls-files | grep -c ''",
+    '336',
+    "$ git ls-files | grep tsbuildinfo || echo '(none tracked)'",
+    '(none tracked)',
+  ].join('\n');
+  assert.equal(fails(indexDelta), false, 'a git ls-files before/after is a result');
+
+  const noneGuard = [
+    "$ git ls-files | grep tsbuildinfo || echo '(none tracked)'",
+    '(none tracked)',
+  ].join('\n');
+  assert.equal(fails(noneGuard), false, '(none tracked) is a result');
+  assert.equal(
+    fails("$ git ls-files | grep leftover || echo '(none)'\n(none)"),
+    false,
+    '(none) is a result',
+  );
+
+  // A command that only mentions the guard in its argv is not evidence.
+  // The output line has to be there.
+  const commandOnly = finding('$ git rm --cached apps/website/tsconfig.tsbuildinfo');
+  assert.ok(commandOnly, 'a command with no result of any kind is still rejected');
+  assert.match(commandOnly.expected, /Found a command but no result/);
+  assert.match(commandOnly.fix, /Found a command but no result/);
+
+  // The nonzero veto still wins, even next to a real index delta. A lazy
+  // match-everything result regex, or an index path that skips the veto,
+  // would let this through.
+  assert.equal(
+    fails(`${indexDelta}\n2 failed`),
+    true,
+    '2 failed still vetoes, even beside an index delta',
+  );
+});
+
+test('the index-delta result must actually follow a git ls-files command', () => {
+  // The count and the guard only mean something as git ls-files output.
+  // Without anchoring to that command, any two bare digit lines, or any
+  // standalone "(none)", would pass regardless of what produced them --
+  // npm audit printing a vulnerability count, a scanner printing "(none)"
+  // for an unrelated reason, the same unrelated number appearing twice.
+  const body = (verified) => [
+    '## What', 'One sentence.',
+    '## Why', 'Because of the reason.',
+    '## How I verified', verified,
+    'Assisted-by: agent:model',
+  ].join('\n\n');
+  const fails = (text) => validateBody(body(text), 142, config)
+    .failures.some((f) => f.check === '## How I verified');
+
+  assert.equal(
+    fails('$ npm audit\n1\n2'),
+    true,
+    'two bare counts after an unrelated command are not a git ls-files delta',
+  );
+  assert.equal(
+    fails('$ npm audit\n337\n337'),
+    true,
+    'the same number twice after an unrelated command is not a delta either',
+  );
+  assert.equal(
+    fails("$ npm audit\n(none)"),
+    true,
+    '(none) after an unrelated command is not a ls-files guard',
+  );
+});
+
+test('an index-delta needs the counts to actually differ, and immediate adjacency', () => {
+  // Two real `git ls-files` invocations that both print 337 prove nothing
+  // changed -- counting them as a before/after pair would let a no-op PR
+  // pass by running the same command twice.
+  const body = (verified) => [
+    '## What', 'One sentence.',
+    '## Why', 'Because of the reason.',
+    '## How I verified', verified,
+    'Assisted-by: agent:model',
+  ].join('\n\n');
+  const fails = (text) => validateBody(body(text), 142, config)
+    .failures.some((f) => f.check === '## How I verified');
+
+  assert.equal(
+    fails([
+      "$ git ls-files | grep -c ''",
+      '337',
+      "$ git ls-files | grep -c ''",
+      '337',
+    ].join('\n')),
+    true,
+    'two identical git ls-files counts are not a delta',
+  );
+
+  // The count only counts when it is the line right after the command --
+  // a prose note in between must not keep the latch open for a later,
+  // unrelated pair of digit lines.
+  assert.equal(
+    fails([
+      '$ git ls-files',
+      'looks fine, nothing unusual here',
+      '12',
+      '12',
+    ].join('\n')),
+    true,
+    'digit lines separated from the ls-files command by prose are not its output',
+  );
+});
+
+test('an index-delta pair must come from the same ls-files probe', () => {
+  // Two different probes -- one counting .ts files, one counting .md files
+  // -- naturally produce different numbers with no index change at all.
+  // Pairing any two ls-files-flavored outputs that differ would let that
+  // read as a before/after delta.
+  const body = (verified) => [
+    '## What', 'One sentence.',
+    '## Why', 'Because of the reason.',
+    '## How I verified', verified,
+    'Assisted-by: agent:model',
+  ].join('\n\n');
+  const fails = (text) => validateBody(body(text), 142, config)
+    .failures.some((f) => f.check === '## How I verified');
+
+  assert.equal(
+    fails([
+      "$ git ls-files | grep -c '.ts'",
+      '300',
+      "$ git ls-files | grep -c '.md'",
+      '42',
+    ].join('\n')),
+    true,
+    'two different probes with different counts are not a before/after delta',
+  );
+
+  assert.equal(
+    fails([
+      "$ git ls-files | grep -c ''",
+      '337',
+      "$ git ls-files | grep -c ''",
+      '336',
+    ].join('\n')),
+    false,
+    'the same probe run twice with differing counts is still a valid delta',
+  );
 });
 
 test('a nonzero failed count is not masked by "passed" in the same result', () => {
