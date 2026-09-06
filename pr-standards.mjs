@@ -397,12 +397,21 @@ function sentenceCount(text) {
   return String(text).split(/[.!?]+(?=\s|$)/).map((part) => part.trim()).filter(Boolean).length;
 }
 
-// The documented escape hatch, in the one form the checker accepts. It lives in
+// The documented escape hatch, in the forms the checker accepts. It lives in
 // a constant because two rules read it: the body check below must not mistake it
 // for a refusal to answer, and the proof check must honour it. Two copies of
 // this pattern would eventually disagree, and the disagreement would look like
 // a lazy body rather than a drifted regex.
-const PROOF_NA_LINE = /^\s*Proof:\s*n\/a\s*[—–-]\s*(\S.*)\s*$/i;
+//
+// Proof: n/a still requires a reason after the dash — that is the hatch's
+// burden. Operator: n/a may be bare, because CLAUDE.md specifies that form
+// for a mechanical PR with no user-visible surface. Making the reason optional
+// for both labels would let a bare `Proof: n/a` match, turn hatch[1] into
+// undefined, and hide the n/a from the refusal guard.
+//
+// Two capture groups: [1] is the Proof reason, [2] is the optional Operator
+// reason. Call sites must not assume [1] is always a string.
+const PROOF_NA_LINE = /^\s*(?:Proof:\s*n\/a\s*[—–-]\s*(\S.*)|Operator:\s*n\/a(?:\s*[—–-]\s*(\S.*))?)\s*$/i;
 
 // Names, not shape. Two pull requests already failed because a runner they
 // actually used was missing (`python3` in #145, `bunx` in #135), and #113 is
@@ -716,7 +725,9 @@ function verificationSection(body, options) {
 function hasValidProofNa(text) {
   for (const line of String(text || '').split('\n')) {
     const match = PROOF_NA_LINE.exec(line);
-    if (match && match[1].trim().length >= 20) return true;
+    // match[1] is the Proof reason. Operator: n/a leaves it undefined;
+    // calling trim() would throw, and Operator is not this hatch anyway.
+    if (match && match[1] && match[1].trim().length >= 20) return true;
   }
   return false;
 }
@@ -973,11 +984,12 @@ export function validateBody(body, issueNumber, config = DEFAULT_CONFIG) {
   }
   // The N/A guard exists to reject a section that refuses to answer. The
   // documented proof escape hatch, `Proof: n/a — <reason>`, is an answer, and
-  // the docs say to write it in this very section — so the guard failed every
-  // pull request that used the hatch correctly, and blamed lazy verification
-  // rather than naming the line. Swap a valid hatch line for its reason before
-  // the guard runs, rather than dropping the line outright: a reason of just
-  // "TODO" or "N/A" is still a refusal, and the guard must still see it.
+  // so is `Operator: n/a` on a mechanical PR. Swap a valid hatch line for its
+  // reason before the guard runs, rather than dropping the line outright: a
+  // reason of just "TODO" or "N/A" is still a refusal, and the guard must still
+  // see it. A bare Operator: n/a has no reason, so the swap is empty text —
+  // returning hatch[1] would be undefined and join() would drop the line,
+  // hiding an Operator reason of "TODO" captured only in [2].
   // A bare N/A, a TODO, "tested locally", and a `Proof: n/a` with no reason all
   // still fail.
   // Quoted text is not a claim. A body that explains the rule inside the section
@@ -992,7 +1004,11 @@ export function validateBody(body, issueNumber, config = DEFAULT_CONFIG) {
       .replace(/`[^`\n]*`/g, '')
       .split('\n').map((line) => {
         const hatch = PROOF_NA_LINE.exec(line);
-        return hatch ? hatch[1] : line;
+        if (!hatch) return line;
+        // hatch[1] is the Proof reason; hatch[2] is the optional Operator
+        // reason. A bare Operator: n/a leaves both undefined — swap in empty
+        // text so the labelled n/a does not trip the guard.
+        return hatch[1] ?? hatch[2] ?? '';
       }).join('\n');
   const command = Boolean(verified) && proofCommand(verified);
   const result = Boolean(verified) && proofResult(verified);
