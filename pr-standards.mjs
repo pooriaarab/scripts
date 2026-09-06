@@ -1236,6 +1236,14 @@ export function checkSize(summary, config) {
   config ??= DEFAULT_CONFIG;
   const failures = [];
   const warnings = [];
+  if (summary.countedFiles === 0 && summary.countedLines === 0) {
+    failures.push(fail(
+      'empty diff',
+      '0 counted files and 0 counted lines',
+      'at least 1 counted file with at least 1 counted line',
+      'Either the change was absorbed by a rebase of its stack — close the PR, the work is already on main — or the branch was cut but never committed to, and the work still needs doing.',
+    ));
+  }
   if (summary.countedLines > config.maxLines) {
     failures.push(fail(
       'PR size',
