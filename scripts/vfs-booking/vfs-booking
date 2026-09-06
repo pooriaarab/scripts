@@ -64,6 +64,14 @@ js_click_text() {
     die "Failed to click on '$text'"
 }
 
+# Helper: Escape a string for safe embedding in a single-quoted JS string literal.
+js_escape() {
+  local s="$1"
+  s="${s//\\/\\\\}"
+  s="${s//\'/\\\'}"
+  printf '%s' "$s"
+}
+
 # Helper: Wait for loading overlay to disappear
 wait_for_no_overlay() {
   info "Waiting for overlays to clear..."
@@ -71,7 +79,8 @@ wait_for_no_overlay() {
   while [ "$elapsed" -lt "$TIMEOUT_GENERAL" ]; do
     local overlay_count
     overlay_count=$(agent-browser eval \
-      "document.querySelectorAll('.ngx-overlay.loading-foreground').length" 2>/dev/null || echo "1")
+      "document.querySelectorAll('.ngx-overlay.loading-foreground').length") || \
+      die "Lost connection to browser while waiting for overlay to clear"
     if [ "$overlay_count" = "0" ]; then
       info "Overlay cleared"
       return 0
@@ -94,11 +103,15 @@ list_options() {
 # Usage: select_option "Option Text"
 select_option() {
   local text="$1"
+  local escaped
+  escaped=$(js_escape "$text")
   wait_for_no_overlay
   info "Selecting option: $text"
-  agent-browser eval \
-    "[...document.querySelectorAll('[role=option],mat-option,li[role=option],.dropdown-item')].find(e=>e.innerText.includes('$text'))?.click()" || \
+  local found
+  found=$(agent-browser eval \
+    "(()=>{const el=[...document.querySelectorAll('[role=option],mat-option,li[role=option],.dropdown-item')].find(e=>e.innerText.includes('${escaped}'));if(el){el.click();return true;}return false;})()") || \
     die "Failed to select option '$text'"
+  [ "$found" = "true" ] || die "Option '$text' not found in dropdown"
   sleep 0.5
 }
 
@@ -207,7 +220,8 @@ cmd_slots() {
 
   # Select Application Centre
   info "Selecting Application Centre: ${VFS_CENTRE}..."
-  agent-browser click 'mat-select,select,[role="combobox"]' || true
+  agent-browser click 'mat-select,select,[role="combobox"]' || \
+    die "Failed to open Application Centre combobox"
   sleep 0.5
   select_option "${VFS_CENTRE}"
   wait_for_no_overlay
@@ -215,7 +229,8 @@ cmd_slots() {
   # If category/subcategory are set, select them too
   if [ -n "${VFS_CATEGORY:-}" ]; then
     info "Selecting Category: ${VFS_CATEGORY}..."
-    agent-browser click 'mat-select,select,[role="combobox"]' || true
+    agent-browser click 'mat-select,select,[role="combobox"]' || \
+      die "Failed to open Category combobox"
     sleep 0.5
     select_option "${VFS_CATEGORY}"
     wait_for_no_overlay
@@ -223,7 +238,8 @@ cmd_slots() {
 
   if [ -n "${VFS_SUBCATEGORY:-}" ]; then
     info "Selecting Sub-category: ${VFS_SUBCATEGORY}..."
-    agent-browser click 'mat-select,select,[role="combobox"]' || true
+    agent-browser click 'mat-select,select,[role="combobox"]' || \
+      die "Failed to open Sub-category combobox"
     sleep 0.5
     select_option "${VFS_SUBCATEGORY}"
     wait_for_no_overlay
