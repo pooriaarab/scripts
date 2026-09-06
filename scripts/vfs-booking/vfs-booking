@@ -252,7 +252,7 @@ cmd_slots() {
   local body
   body=$(agent-browser get text body)
 
-  if echo "$body" | grep -qi "appointments are currently unavailable\|no appointments? available"; then
+  if echo "$body" | grep -qi "appointments are currently unavailable\|no appointments\? available"; then
     echo "Appointments unavailable (waitlist only)"
     return 1
   elif echo "$body" | grep -qi "appointments\? available"; then
