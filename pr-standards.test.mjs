@@ -1663,7 +1663,7 @@ test('the proof escape hatch does not read as a refusal to answer', () => {
   assert.equal(verifiedFails('`node --test` -> 40 passed\n\nProof: n/a — N/A'), true);
 });
 
-test('Operator: n/a is a hatch, not a refusal to answer', () => {
+test('Operator: n/a with a reason is a hatch, not a refusal to answer', () => {
   // CLAUDE.md requires `Operator: n/a` on a mechanical PR. The refusal guard
   // matched the n/a inside that labelled line and failed every such PR, with a
   // message about a missing command that was already there. Widen the hatch,
@@ -1678,17 +1678,45 @@ test('Operator: n/a is a hatch, not a refusal to answer', () => {
     .failures.some((f) => f.check === '## How I verified');
   const run = '`node --test` -> 40 passed';
 
-  assert.equal(verifiedFails(`${run}\n\nOperator: n/a`), false);
+  // The hatch carries the same burden as Proof: a reason after the dash.
   assert.equal(verifiedFails(`${run}\n\nOperator: n/a - no user-visible surface`), false);
-  // Proof still requires a reason. Do not make the reason optional on both
-  // labels, or this becomes a match whose capture is undefined and the n/a
-  // disappears from the guard.
+  assert.equal(verifiedFails(`${run}\n\nOperator: n/a — no user-visible surface`), false);
+  // A bare Operator: n/a has no reason, so the guard still sees the n/a.
+  assert.equal(verifiedFails(`${run}\n\nOperator: n/a`), true);
+  // An Operator reason that is itself just "TODO" or "N/A" is still a refusal,
+  // the same as on the Proof label.
+  assert.equal(verifiedFails(`${run}\n\nOperator: n/a — TODO`), true);
+  assert.equal(verifiedFails(`${run}\n\nOperator: n/a — N/A`), true);
+  // Proof still requires a reason too.
   assert.equal(verifiedFails(`${run}\n\nProof: n/a`), true);
   // A bare N/A sitting alone is still a refusal, as is TODO and
   // "tested locally". These are the guard against a toothless detector.
   assert.equal(verifiedFails('N/A'), true);
   assert.equal(verifiedFails(`${run}\n\ntested locally`), true);
   assert.equal(verifiedFails(`${run}\n\nTODO`), true);
+});
+
+test('a refusal failure names the refusing text', () => {
+  // #348: command and result were both present and only the refusal fired, yet
+  // the message asked for a command and its result. The message must name the
+  // text that tripped the guard instead.
+  const body = (verified) => [
+    '## What', 'One sentence.',
+    '## Why', 'Because of the reason.',
+    '## How I verified', verified,
+    'Assisted-by: agent:model',
+  ].join('\n\n');
+  const verifiedFailure = (text) => validateBody(body(text), 142, config)
+    .failures.find((f) => f.check === '## How I verified');
+  const run = '`node --test` -> 40 passed';
+
+  assert.match(verifiedFailure(`${run}\n\ntested locally`).expected, /tested locally/);
+  assert.match(verifiedFailure(`${run}\n\nTODO: check the rest`).expected, /TODO/);
+  assert.match(verifiedFailure(`${run}\n\nOperator: n/a`).expected, /n\/a/i);
+  assert.match(verifiedFailure(`${run}\n\nProof: n/a`).expected, /n\/a/i);
+  // No refusal, no command: the message still asks for the command, not a
+  // refusal that never fired.
+  assert.match(verifiedFailure('I checked the change by hand.').expected, /a command and its result/);
 });
 
 test('a quoted rule name is not a refusal to answer', () => {
