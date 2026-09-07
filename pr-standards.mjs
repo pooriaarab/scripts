@@ -785,17 +785,33 @@ export function isUiFile(filename, config = DEFAULT_CONFIG) {
   return !excluded;
 }
 
-export function hasUiDiff(files, config = DEFAULT_CONFIG) {
-  if (!Array.isArray(files) || files.length === 0) return false;
+// Names the UI files rather than just counting them, because the hatch refusal
+// below has to tell an author WHICH file contradicts their "nothing visible
+// changed" claim. A bare "your waiver is refused" sends them back to re-read
+// their own diff; naming the file makes the disagreement checkable in one look.
+export function uiDiffFiles(files, config = DEFAULT_CONFIG) {
+  if (!Array.isArray(files) || files.length === 0) return [];
   // A rename that moves a UI file to a name the globs no longer match (an
   // extension swap, or out of components/**) still ships whatever content
   // change rode along with the rename. The pre-rename name is UI evidence
   // GitHub already gives us on the same file object; checking only the new
   // name would let a rename silently clear the proof requirement.
-  return files.some((file) => {
-    if (typeof file !== 'object' || file === null) return isUiFile(String(file || ''), config);
-    return isUiFile(String(file.filename || ''), config) || isUiFile(String(file.previous_filename || ''), config);
-  });
+  const names = [];
+  for (const file of files) {
+    if (typeof file !== 'object' || file === null) {
+      const name = String(file || '');
+      if (isUiFile(name, config)) names.push(name);
+      continue;
+    }
+    const filename = String(file.filename || '');
+    const previous = String(file.previous_filename || '');
+    if (isUiFile(filename, config) || isUiFile(previous, config)) names.push(filename || previous);
+  }
+  return names;
+}
+
+export function hasUiDiff(files, config = DEFAULT_CONFIG) {
+  return uiDiffFiles(files, config).length > 0;
 }
 
 const PROOF_MEDIA_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'mp4', 'mov', 'webm']);
@@ -877,19 +893,47 @@ export function checkProof(body, files, config = DEFAULT_CONFIG) {
   // OPEN, so a stray ``` above a screenshot does not swallow it and fail a pull
   // request that did nothing wrong. The hatch fails CLOSED, so a `Proof: n/a`
   // inside a fence that never closes grants no waiver.
+  //
+  // The hatch does not survive contact with a UI diff. It waives proof for a
+  // pull request with no visual surface, and whether there IS a visual surface
+  // is the one half of that claim the checker can settle on its own — it is
+  // already computing it. Leaving the two uncrossed made the waiver
+  // unenforceable: `Proof: n/a — no user-visible surface changed by this pull
+  // request` is 51 characters of boilerplate that cleared the requirement on
+  // any diff at all, and it was live on ~14 open imecore pull requests, false
+  // on nearly all of them. A reason the checker can read and disprove is not a
+  // reason the review council should have to adjudicate.
+  //
+  // Only refused when the waiver is actually doing the waiving. A pull request
+  // that posts before/after media AND states a hatch reason has done the work;
+  // failing it for the redundant line would fire the gate on a compliant
+  // author, and a gate that fires on everything is worth as little as one that
+  // fires on nothing.
   const verifiedSection = verificationSection(body, { unmatchedFenceHides: false });
   const hatchSection = verificationSection(body, { unmatchedFenceHides: true });
+  const uiFiles = uiDiffFiles(files || [], config);
   let uiProofFailed = false;
-  if (hasUiDiff(files || [], config) && !hasValidProofNa(hatchSection)) {
+  if (uiFiles.length > 0) {
     const count = countUserAttachments(verifiedSection);
     if (count === 0) {
       uiProofFailed = true;
-      failures.push(fail(
-        'proof of a visible change',
-        'no user-attachments URL in the body',
-        'before and after media, or `Proof: n/a — <reason>`',
-        'Capture the screen before and after, upload both to GitHub user-attachments, and embed them under "How I verified".',
-      ));
+      if (hasValidProofNa(hatchSection)) {
+        const shown = uiFiles.slice(0, 3).join(', ');
+        const rest = uiFiles.length > 3 ? `, and ${uiFiles.length - 3} more` : '';
+        failures.push(fail(
+          'proof of a visible change',
+          `\`Proof: n/a\` claimed, but the diff changes ${uiFiles.length} user-visible file(s): ${shown}${rest}`,
+          'before and after media, because the hatch only covers a diff with no visual surface',
+          'Capture the screen before and after, upload both to GitHub user-attachments, and embed them under "How I verified". If these files genuinely render nothing, the honest fix is a narrower diff, not a waiver the diff contradicts.',
+        ));
+      } else {
+        failures.push(fail(
+          'proof of a visible change',
+          'no user-attachments URL in the body',
+          'before and after media, or `Proof: n/a — <reason>`',
+          'Capture the screen before and after, upload both to GitHub user-attachments, and embed them under "How I verified".',
+        ));
+      }
     } else if (count === 1) {
       warnings.push(fail(
         'proof of a visible change',
