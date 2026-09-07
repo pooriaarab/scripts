@@ -646,10 +646,18 @@ starts a Box that is ready to work and runs the job there.
 ```sh
 box-work <repo>                      # start or reuse; syncs your uncommitted edits
 box-work <repo> --agent pi "brief"   # run one agent on the Box, headless
+box-work <repo> --agent pi "brief" --issue N  # claim pooriaarab/<repo>#N first
 box-work <repo> --ssh                # a shell on the Box
 box-work <repo> --stop               # stop it
 box-work --list / --stop-all
 ```
+
+`--issue` is optional. With it, `box-work` claims the issue with
+`bin/fleet-presence` (from `agents-private`, on the laptop) before the agent
+starts, refuses when another agent holds a live claim, and releases on exit
+through a trap, on success, on failure and on interrupt. Without it the run
+dispatches unguarded and says so. A missing `fleet-presence` binary stops a
+guarded run instead of running it unguarded.
 
 Measured:
 
