@@ -53,6 +53,6 @@ bin/fleet-presence claim pooriaarab/<repo> <N> --goal "..." --branch <branch>
 
 One sticky GitHub comment per agent. Create once, then PATCH. Same-machine
 lock is local. Name harness, model, host, start time, and goal. Do not dump
-transcripts. Full rule: pooriaarab/agents-private `rules/agent-presence.md`.
+transcripts. Full rule: pooriaarab/agents-private `rules/fleet-claim.md`.
 
 <!-- pr-standards:end -->
