@@ -15,6 +15,10 @@
 # Usage
 #   box-work <repo>                    start or reuse a Box, sync local edits, print how to enter
 #   box-work <repo> --agent pi "brief" run one agent headlessly on the Box and print its output
+#   box-work <repo> --agent pi "brief" --issue N
+#                                      claim pooriaarab/<repo>#N before the agent starts,
+#                                      refuse when another agent holds it, release on exit.
+#                                      Without --issue the run is unguarded.
 #   box-work <repo> --ssh              open a shell on the Box
 #   box-work <repo> --stop             stop this repo's Box
 #   box-work --list                    every Box this tool started, and what it costs
@@ -94,15 +98,62 @@ esac
 NAME="$(basename -s .git "$REMOTE")"
 IDFILE="$STATE/$NAME.id"
 
-MODE=start; AGENT=""; BRIEF=""
+MODE=start; AGENT=""; BRIEF=""; ISSUE=""
 while (( $# )); do
   case "$1" in
     --stop) MODE=stop; shift ;;
     --ssh) MODE=ssh; shift ;;
     --agent) MODE=agent; AGENT="${2:-}"; BRIEF="${3:-}"; shift 3 || shift $# ;;
+    --issue)
+      [[ $# -ge 2 && -n "${2:-}" ]] || die "--issue needs a number"
+      ISSUE="$2"; shift 2 ;;  # a missing value stops here, never reads as absent
     *) die "unknown argument: $1" ;;
   esac
 done
+
+# Fleet claim guard (issue #357): the launcher claims before any agent starts.
+# --issue is optional: without it the run dispatches unguarded. With it the
+# claim is held for the whole run and released on exit, on failure and on
+# interrupt. An absent fleet-presence binary stops the run loudly: an
+# unguarded run that looks guarded is worse than no guard.
+CLAIM_ACTIVE=0
+release_claim() {
+  local rc=$?
+  if (( CLAIM_ACTIVE )); then
+    local reason="done"
+    (( rc != 0 )) && reason=failed
+    "$FLEET_BIN" release "pooriaarab/$NAME" "$ISSUE" --reason "$reason" >/dev/null 2>&1 \
+      || echo "box-work: warning: release of the claim on pooriaarab/$NAME#$ISSUE failed" >&2
+    CLAIM_ACTIVE=0
+  fi
+  return "$rc"
+}
+if [[ -n "$ISSUE" ]]; then
+  [[ "$MODE" == agent ]] || die "--issue needs --agent"
+  [[ -n "$AGENT" && -n "$BRIEF" ]] || die "--agent needs a CLI name and a brief"
+  [[ "$ISSUE" =~ ^[1-9][0-9]*$ ]] || die "--issue needs a positive issue number, got '$ISSUE'"
+  if [[ -n "${FLEET_PRESENCE_BIN:-}" ]]; then
+    # An explicit path is a decision, not a hint: it must work, never fall through.
+    [[ -x "${FLEET_PRESENCE_BIN:-}" ]] || die "--issue $ISSUE needs bin/fleet-presence at '$FLEET_PRESENCE_BIN' and it is not executable; refusing to run unguarded"
+    FLEET_BIN="$FLEET_PRESENCE_BIN"
+  elif [[ -x "$HOME/Documents/Personal/agents-private/bin/fleet-presence" ]]; then
+    FLEET_BIN="$HOME/Documents/Personal/agents-private/bin/fleet-presence"
+  elif command -v fleet-presence >/dev/null 2>&1; then
+    FLEET_BIN="$(command -v fleet-presence)"
+  else
+    die "--issue $ISSUE needs bin/fleet-presence (agents-private) and it is absent; refusing to run unguarded"
+  fi
+  claim_out="$("$FLEET_BIN" claim "pooriaarab/$NAME" "$ISSUE" --goal "$BRIEF" 2>&1)" \
+    || die "claim on pooriaarab/$NAME#$ISSUE failed: $claim_out; not starting the agent"
+  echo "[box-work] claimed pooriaarab/$NAME#$ISSUE" >&2
+  CLAIM_ACTIVE=1
+  trap release_claim EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  trap 'exit 129' HUP
+elif [[ "$MODE" == agent ]]; then
+  echo "[box-work] note: no --issue; dispatching without a fleet claim" >&2
+fi
 
 if [[ "$MODE" == stop ]]; then
   [[ -f "$IDFILE" ]] || die "no Box recorded for $NAME"
