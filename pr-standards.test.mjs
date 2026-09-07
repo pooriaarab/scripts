@@ -17,6 +17,7 @@ import {
   validateConfig,
   derivePrefix,
   hasUiDiff,
+  uiDiffFiles,
   isCommittedProofMedia,
   isUiFile,
   loadConfig,
@@ -1225,9 +1226,10 @@ test('proof: a visible change needs before and after attachments', () => {
   assert.equal(failed(checkProof(withUrls(2), uiFiles, config)), false);
   assert.equal(warned(checkProof(withUrls(2), uiFiles, config)), false);
 
-  // A stated reason clears it; "n/a" on its own does not, or the escape hatch
-  // becomes the default and the rule stops meaning anything.
-  assert.equal(failed(checkProof(proofNa, uiFiles, config)), false);
+  // The hatch does not clear a UI diff, however well argued the reason. The
+  // checker can see the visual surface the reason denies, so it settles the
+  // claim itself instead of passing it to the review council.
+  assert.equal(failed(checkProof(proofNa, uiFiles, config)), true);
   assert.equal(failed(checkProof(proofNaShort, uiFiles, config)), true);
 
   // Nothing visible changed, so nothing has to be shown.
@@ -1238,6 +1240,48 @@ test('proof: a visible change needs before and after attachments', () => {
   assert.equal(isUiFile('src/components/Button.test.tsx', config), false);
   assert.equal(hasUiDiff(uiFiles, config), true);
   assert.equal(hasUiDiff([{ filename: 'src/server/api.ts' }], config), false);
+});
+
+test('proof: the n/a hatch is refused on a UI diff and kept on a non-UI one', () => {
+  // The exact boilerplate found on ~14 open imecore pull requests. 51
+  // characters, so it satisfies the 20-character reason rule, and it used to
+  // waive the screenshot requirement on any diff whatsoever.
+  const boilerplate = 'Proof: n/a — no user-visible surface changed by this pull request';
+  const body = `${validBody}\n${boilerplate}`;
+  const uiFiles = [{ filename: 'src/components/Button.tsx', status: 'modified' }];
+  const nonUiFiles = [{ filename: 'src/server/api.ts', status: 'modified' }];
+  const failed = (r) => r.failures.some((f) => f.check === 'proof of a visible change');
+
+  // Refused: the diff changes a component, so the reason is checkably false.
+  assert.equal(failed(checkProof(body, uiFiles, config)), true);
+
+  // Accepted: nothing visible changed, which is the case the hatch exists for.
+  assert.equal(failed(checkProof(body, nonUiFiles, config)), false);
+  assert.equal(checkProof(body, nonUiFiles, config).failures.length, 0);
+
+  // The refusal names the file that contradicts the claim, so the author does
+  // not have to re-read their own diff to find out why the waiver was refused.
+  const refusal = checkProof(body, uiFiles, config).failures
+    .find((f) => f.check === 'proof of a visible change');
+  assert.match(refusal.got, /src\/components\/Button\.tsx/);
+  assert.match(refusal.got, /Proof: n\/a/);
+
+  // A rename out of the UI globs still counts, so the hatch cannot be cleared
+  // by renaming a component to a name the globs no longer match.
+  const renamed = [{ filename: 'src/server/thing.ts', previous_filename: 'src/components/Thing.tsx', status: 'renamed' }];
+  assert.equal(failed(checkProof(body, renamed, config)), true);
+
+  // Doing the work still passes. Before/after media plus a redundant hatch line
+  // is a compliant pull request, and the gate must not fire on it.
+  const withMedia = `${body}\n`
+    + '![before](https://github.com/user-attachments/assets/abc0)\n'
+    + '![after](https://github.com/user-attachments/assets/abc1)';
+  assert.equal(failed(checkProof(withMedia, uiFiles, config)), false);
+
+  // uiDiffFiles reports the names hasUiDiff only counts.
+  assert.deepEqual(uiDiffFiles(uiFiles, config), ['src/components/Button.tsx']);
+  assert.deepEqual(uiDiffFiles(nonUiFiles, config), []);
+  assert.deepEqual(uiDiffFiles(renamed, config), ['src/server/thing.ts']);
 });
 
 test('proof: a bare command claim warns that it lives only in the body', () => {
@@ -1560,15 +1604,23 @@ test('proof: the body reader follows rendered Markdown fences', () => {
     ...lines,
   ].join('\n');
   const hatch = 'Proof: n/a — a checker with no user-visible surface at all';
+  // The hatch no longer clears a UI diff, so its VISIBILITY is read from which
+  // failure fires rather than from whether one fires: the reader saw the line
+  // when the refusal quotes it back. That keeps these body-reader cases on a UI
+  // diff, where the fence and comment rules were originally exercised.
+  const sawHatch = (r) => r.failures.some(
+    (f) => f.check === 'proof of a visible change' && /Proof: n\/a/.test(f.got));
 
   // A closer uses the same character and may be longer than its opener.
   assert.equal(failed(checkProof(body('```', url('aaa'), url('bbb'), '````'), uiFiles, config)), true);
-  assert.equal(failed(checkProof(body('```', 'example', '````', hatch), uiFiles, config)), false);
+  assert.equal(sawHatch(checkProof(body('```', 'example', '````', hatch), uiFiles, config)), true);
   // A different fence character does not close the block.
+  assert.equal(sawHatch(checkProof(body('```', '~~~', hatch), uiFiles, config)), false);
   assert.equal(failed(checkProof(body('```', '~~~', hatch), uiFiles, config)), true);
 
   // The two callers answer an unmatched fence in opposite directions.
   assert.equal(failed(checkProof(body('```', url('aaa'), url('bbb')), uiFiles, config)), false);
+  assert.equal(sawHatch(checkProof(body('```', hatch), uiFiles, config)), false);
   assert.equal(failed(checkProof(body('```', hatch), uiFiles, config)), true);
 
   // Fences opened after list markers and inside blockquotes hide quoted URLs.
@@ -1590,12 +1642,13 @@ test('proof: the body reader follows rendered Markdown fences', () => {
   // A closer's indentation tolerance is always <=3 outside a list item, not
   // <=3 beyond the opener's own indentation -- a 6-space line never closes a
   // 3-space fence, so the hatch below it stays hidden inside it.
+  assert.equal(sawHatch(checkProof(body('   ```', '      ```', hatch), uiFiles, config)), false);
   assert.equal(failed(checkProof(body('   ```', '      ```', hatch), uiFiles, config)), true);
 
   // A backtick fence cannot carry a backtick in its info string; GitHub reads
   // that line as plain text, never an opener, so an unrelated hatch below an
   // info string like this is not swallowed by a fence that was never real.
-  assert.equal(failed(checkProof(body('```` `weird`', hatch), uiFiles, config)), false);
+  assert.equal(sawHatch(checkProof(body('```` `weird`', hatch), uiFiles, config)), true);
 
   // A closer line that is itself quoted does not close a fence that opened
   // outside any blockquote -- GitHub renders "> ```" as literal content
@@ -1603,6 +1656,7 @@ test('proof: the body reader follows rendered Markdown fences', () => {
   // The fence stays unterminated, so both callers answer it as they answer
   // any other unmatched fence.
   assert.equal(failed(checkProof(body('```', url('aaa'), url('bbb'), '> ```'), uiFiles, config)), false);
+  assert.equal(sawHatch(checkProof(body('```', 'some code', '> ```', hatch), uiFiles, config)), false);
   assert.equal(failed(checkProof(body('```', 'some code', '> ```', hatch), uiFiles, config)), true);
 });
 
@@ -2223,7 +2277,12 @@ test('a Proof n/a hatch inside an HTML comment is not an answer', () => {
   const failed = (r) => r.failures.some((f) => f.check === 'proof of a visible change');
   const body = (hatch) => ['## What', 'x', '## Why', 'y', '## How I verified', 'bun test -> pass', hatch].join('\n');
   const reason = 'Proof: n/a — a checker with no user-visible surface at all';
-  assert.equal(failed(checkProof(body(reason), uiFiles, config)), false);
+  const sawHatch = (r) => r.failures.some(
+    (f) => f.check === 'proof of a visible change' && /Proof: n\/a/.test(f.got));
+  // Visible: the refusal quotes the line back. Commented out: the reader never
+  // saw it, so the plain missing-media failure fires instead.
+  assert.equal(sawHatch(checkProof(body(reason), uiFiles, config)), true);
+  assert.equal(sawHatch(checkProof(body(`<!-- ${reason} -->`), uiFiles, config)), false);
   assert.equal(failed(checkProof(body(`<!-- ${reason} -->`), uiFiles, config)), true);
 });
 
@@ -2242,7 +2301,9 @@ test('proof: the body reader keeps what renders around a comment', () => {
 
   // An unterminated comment hides what follows it, not what precedes it on the
   // same line. GitHub still renders the text before the marker.
-  assert.equal(failed(checkProof(body(`${hatch} <!-- leftover`), uiFiles, config)), false);
+  const sawHatch = (r) => r.failures.some(
+    (f) => f.check === 'proof of a visible change' && /Proof: n\/a/.test(f.got));
+  assert.equal(sawHatch(checkProof(body(`${hatch} <!-- leftover`), uiFiles, config)), true);
   assert.equal(failed(checkProof(body(`${url('aaa')} ${url('bbb')} <!--`), uiFiles, config)), false);
 
   // Every comment on a line is resolved, not just the first. Here only `aaa`
@@ -2253,7 +2314,7 @@ test('proof: the body reader keeps what renders around a comment', () => {
 
   // A fence opened inside a blockquote ends with the quote container, so a
   // hatch written after the quote is visible rather than swallowed.
-  assert.equal(failed(checkProof(body('> ```', '> example', hatch), uiFiles, config)), false);
+  assert.equal(sawHatch(checkProof(body('> ```', '> example', hatch), uiFiles, config)), true);
 });
 
 test('a line moved verbatim between files counts zero', () => {

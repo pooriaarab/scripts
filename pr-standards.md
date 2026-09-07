@@ -135,6 +135,14 @@ The checker enforces only what it can cheaply and mechanically:
   `Proof: n/a` line fails; exactly one attachment warns ("a visual change wants
   before and after"); two or more passes. For a diff with no UI files, the
   existing command-and-result rule already stands and no attachments are required.
+- **The `Proof: n/a` hatch does not clear a UI diff.** The hatch says nothing
+  visible changed, and whether anything visible changed is the half of that
+  claim the checker settles on its own. When a changed file matches `uiGlobs`,
+  the hatch is refused and the refusal names the files that contradict it. The
+  hatch keeps working for a diff with no visual surface, which is the case it
+  was written for. It is only refused when it is doing the waiving: a body that
+  carries before and after media as well as a hatch line has done the work and
+  passes.
 - **Committed proof media fails.** A file added by the diff whose extension is
   `png`, `jpg`, `jpeg`, `gif`, `webp`, `mp4`, `mov`, or `webm` and whose path
   matches `screenshot*/**`, `**/screenshots/**`, `proof*/**`, `**/*before*`,
@@ -165,8 +173,10 @@ Escape hatch, when proof truly does not apply:
 
     Proof: n/a — <reason, at least 20 characters>
 
-The checker accepts it; the review council judges whether the reason holds. An
-agent cannot clear its own proof requirement with "not applicable".
+The checker accepts it on a diff with no UI files and refuses it on a diff with
+them; the review council judges the reasons the checker cannot read. An agent
+cannot clear its own proof requirement with "not applicable", and it cannot
+clear a visible change by asserting the change is not visible.
 
 How an agent captures and uploads proof:
 
