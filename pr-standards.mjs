@@ -403,15 +403,18 @@ function sentenceCount(text) {
 // this pattern would eventually disagree, and the disagreement would look like
 // a lazy body rather than a drifted regex.
 //
-// Proof: n/a still requires a reason after the dash — that is the hatch's
-// burden. Operator: n/a may be bare, because CLAUDE.md specifies that form
-// for a mechanical PR with no user-visible surface. Making the reason optional
-// for both labels would let a bare `Proof: n/a` match, turn hatch[1] into
-// undefined, and hide the n/a from the refusal guard.
+// Both labels require a reason after the dash — that is the hatch's burden.
+// A bare `Proof: n/a` or a bare `Operator: n/a` matches nothing here, so the
+// n/a stays visible to the refusal guard and the section still fails (#348).
 //
-// Two capture groups: [1] is the Proof reason, [2] is the optional Operator
-// reason. Call sites must not assume [1] is always a string.
-const PROOF_NA_LINE = /^\s*(?:Proof:\s*n\/a\s*[—–-]\s*(\S.*)|Operator:\s*n\/a(?:\s*[—–-]\s*(\S.*))?)\s*$/i;
+// Two capture groups: [1] is the Proof reason, [2] is the Operator reason.
+// Call sites must not assume [1] is always a string.
+const PROOF_NA_LINE = /^\s*(?:Proof:\s*n\/a\s*[—–-]\s*(\S.*)|Operator:\s*n\/a\s*[—–-]\s*(\S.*))\s*$/i;
+
+// The refusal vocabulary. One copy: validateBody both tests it and quotes the
+// hit in the failure message, and two copies would eventually disagree about
+// which text counts as a refusal.
+const REFUSAL_RE = /\b(?:N\/A|TODO|tested locally)\b/i;
 
 // Names, not shape. Two pull requests already failed because a runner they
 // actually used was missing (`python3` in #145, `bunx` in #135), and #113 is
@@ -725,8 +728,9 @@ function verificationSection(body, options) {
 function hasValidProofNa(text) {
   for (const line of String(text || '').split('\n')) {
     const match = PROOF_NA_LINE.exec(line);
-    // match[1] is the Proof reason. Operator: n/a leaves it undefined;
-    // calling trim() would throw, and Operator is not this hatch anyway.
+    // match[1] is the Proof reason. An Operator line leaves it undefined
+    // (its reason lands in [2]); calling trim() would throw, and Operator
+    // is not this hatch anyway.
     if (match && match[1] && match[1].trim().length >= 20) return true;
   }
   return false;
@@ -983,15 +987,15 @@ export function validateBody(body, issueNumber, config = DEFAULT_CONFIG) {
     failures.push(fail('PR body section', 'missing ## Why', '## Why with the problem and reason for the fix', 'Add a ## Why section.'));
   }
   // The N/A guard exists to reject a section that refuses to answer. The
-  // documented proof escape hatch, `Proof: n/a — <reason>`, is an answer, and
-  // so is `Operator: n/a` on a mechanical PR. Swap a valid hatch line for its
+  // documented escape hatches, `Proof: n/a — <reason>` and
+  // `Operator: n/a — <reason>`, are answers. Swap a valid hatch line for its
   // reason before the guard runs, rather than dropping the line outright: a
   // reason of just "TODO" or "N/A" is still a refusal, and the guard must still
-  // see it. A bare Operator: n/a has no reason, so the swap is empty text —
-  // returning hatch[1] would be undefined and join() would drop the line,
-  // hiding an Operator reason of "TODO" captured only in [2].
-  // A bare N/A, a TODO, "tested locally", and a `Proof: n/a` with no reason all
-  // still fail.
+  // see it. A hatch label with no reason after the dash matches nothing, so a
+  // bare `Proof: n/a` or a bare `Operator: n/a` keeps its n/a visible to the
+  // guard and still fails.
+  // A bare N/A, a TODO, "tested locally", a `Proof: n/a` with no reason, and
+  // an `Operator: n/a` with no reason all still fail.
   // Quoted text is not a claim. A body that explains the rule inside the section
   // the rule reads — "a bare `N/A`, a `TODO`, \"tested locally\"" — was failed by
   // its own explanation, and the message named nothing. Drop fenced blocks and
@@ -1005,14 +1009,13 @@ export function validateBody(body, issueNumber, config = DEFAULT_CONFIG) {
       .split('\n').map((line) => {
         const hatch = PROOF_NA_LINE.exec(line);
         if (!hatch) return line;
-        // hatch[1] is the Proof reason; hatch[2] is the optional Operator
-        // reason. A bare Operator: n/a leaves both undefined — swap in empty
-        // text so the labelled n/a does not trip the guard.
+        // hatch[1] is the Proof reason; hatch[2] is the Operator reason.
+        // A bare label never matches, so at least one group holds text here.
         return hatch[1] ?? hatch[2] ?? '';
       }).join('\n');
   const command = Boolean(verified) && proofCommand(verified);
   const result = Boolean(verified) && proofResult(verified);
-  const refused = claimed !== null && /\b(?:N\/A|TODO|tested locally)\b/i.test(claimed);
+  const refused = claimed !== null && REFUSAL_RE.test(claimed);
   if (!verified || refused || !command || !result) {
     // Name the half that fell short. Both halves used to produce the same
     // message, so a bunx rejection was read as the command half failing when
@@ -1020,10 +1023,18 @@ export function validateBody(body, issueNumber, config = DEFAULT_CONFIG) {
     // was filed against the wrong cause.
     let expected = 'a command and its result, such as: bun test -> 214 passed';
     let fix = 'Run a check and record the command and result under ## How I verified.';
-    if (verified && !refused && command && !result) {
+    if (refused) {
+      // Name the refusing text itself. Command and result can both hold while
+      // the refusal fires, and the generic message then sends the reader to
+      // add evidence that is already there (#348).
+      const hit = REFUSAL_RE.exec(claimed || '');
+      const text = hit ? hit[0] : 'that text';
+      expected = `no refusal text — found "${text}"`;
+      fix = `Remove "${text}" under ## How I verified, or rewrite the line as Proof: n/a — <reason> or Operator: n/a — <reason>.`;
+    } else if (verified && command && !result) {
       expected = 'Found a command but no result. Record 13 passed, Found 0 warnings, a git ls-files before/after count, or (none tracked)';
       fix = 'Found a command but no result. Record what the command printed.';
-    } else if (verified && !refused && !command && result) {
+    } else if (verified && !command && result) {
       expected = 'Found a result but no command. Name the command you ran, such as: bash tests/x.sh';
       fix = 'Found a result but no command. Name the command you ran.';
     }
