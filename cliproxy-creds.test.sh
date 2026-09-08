@@ -25,6 +25,8 @@ J
 cat > "$CLIPROXY_LIVE_DIR/claude-static@example.com.json" <<'J'
 {"type":"claude","email":"static@example.com","access_token":"sk-ant-oat01-CCC"}
 J
+# config.yaml carries the api-keys and routing, so a restore must bring it back too
+echo "api-keys: [DDD]" > "$CLIPROXY_LIVE_DIR/config.yaml"
 
 fail=0
 ok()   { echo "  OK   $1"; }
@@ -42,6 +44,10 @@ grep -q 'sk-ant-ort01-BBB' "$CLIPROXY_ENV_FILE" 2>/dev/null \
 grep -q 'sk-ant-oat01-CCC' "$CLIPROXY_ENV_FILE" 2>/dev/null \
   && bad "a credential with no refresh token leaked into the env file" \
   || ok "credentials without a refresh token stay out of the env file"
+
+[ -f "$CLIPROXY_STORE_DIR/config.yaml" ] \
+  && ok "capture stores config.yaml alongside the credentials" \
+  || bad "capture did not store config.yaml"
 
 # THE REGRESSION THIS FILE EXISTS FOR: an unreachable mirror must not fail capture.
 # Model the real case faithfully. Under TCC the whole ~/Documents subtree is
@@ -72,6 +78,10 @@ rm -rf "$CLIPROXY_LIVE_DIR"; mkdir -p "$CLIPROXY_LIVE_DIR"
 grep -q 'sk-ant-ort01-BBB' "$CLIPROXY_LIVE_DIR/claude-seat@example.com.json" \
   && ok "restored credential keeps its refresh token" \
   || bad "restored credential lost its refresh token"
+
+[ -f "$CLIPROXY_LIVE_DIR/config.yaml" ] \
+  && ok "restore brings config.yaml back to the live directory" \
+  || bad "restore left config.yaml out of the live directory"
 
 ./cliproxy-creds status 2>&1 | grep -q 'seat@example.com' \
   && ok "status lists what is held" || bad "status did not list the credential"

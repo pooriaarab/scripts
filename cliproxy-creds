@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Snapshot and restore every CLIProxyAPI credential.
 #
-#   ./cliproxy-creds.sh capture    copy live credentials -> .secrets/cliproxy-auth/
-#   ./cliproxy-creds.sh restore    copy them back, and re-wire CodexBar
-#   ./cliproxy-creds.sh status     show what is held and how fresh it is
+#   ./cliproxy-creds capture    copy live credentials -> .secrets/cliproxy-auth/
+#   ./cliproxy-creds restore    copy them back, and re-wire CodexBar
+#   ./cliproxy-creds status     show what is held and how fresh it is
 #
 # WHY THIS EXISTS
 # The Claude/Codex/xAI credentials in ~/.cli-proxy-api are OAuth pairs. The access
@@ -81,7 +81,9 @@ PY
   # grant for ~/Documents, so the scheduled run silently skips this and only the
   # interactive run refreshes the mirror. That is why $STORE is the real store.
   if mkdir -p "$MIRROR" 2>/dev/null && cp "$STORE"/*.json "$MIRROR"/ 2>/dev/null; then
+    [ -f "$STORE/config.yaml" ] && cp "$STORE/config.yaml" "$MIRROR/config.yaml"
     chmod 700 "$MIRROR" 2>/dev/null; chmod 600 "$MIRROR"/*.json 2>/dev/null
+    [ -f "$MIRROR/config.yaml" ] && chmod 600 "$MIRROR/config.yaml"
     echo "captured $n credential file(s) -> $STORE (mirrored to .secrets)"
   else
     echo "captured $n credential file(s) -> $STORE (.secrets mirror skipped: no ~/Documents access)"
@@ -95,6 +97,8 @@ restore)
     [ -e "$f" ] || continue
     cp "$f" "$LIVE/$(basename "$f")"; chmod 600 "$LIVE/$(basename "$f")"
   done
+  # config.yaml carries the api-keys and routing, so it must come back too
+  [ -f "$STORE/config.yaml" ] && { cp "$STORE/config.yaml" "$LIVE/config.yaml"; chmod 600 "$LIVE/config.yaml"; }
   echo "restored credentials -> $LIVE"
   # CodexBar rewrites its config on quit, so it must be closed before we touch it
   if [ "${CLIPROXY_SKIP_CODEXBAR:-}" = 1 ]; then RELAUNCH=0
