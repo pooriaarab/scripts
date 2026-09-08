@@ -55,18 +55,23 @@ except OSError:
 head = s.split(header_end)[0] + header_end if header_end in s else s
 blocks = []
 for f in sorted(glob.glob(os.path.join(store, "claude-*.json"))):
-    d = json.load(open(f))
-    if not d.get("refresh_token"):
-        continue
-    email = d.get("email", os.path.basename(f))
-    slot = email.upper().replace("@","_AT_").replace(".","_").replace("+","_PLUS_").replace("-","_")
-    blocks.append(f"""
+    try:
+        d = json.load(open(f))
+        if not d.get("refresh_token"):
+            continue
+        email = d.get("email", os.path.basename(f))
+        slot = email.upper().replace("@","_AT_").replace(".","_").replace("+","_PLUS_").replace("-","_")
+        blocks.append(f"""
 # --- {email} --- snapshot {datetime.datetime.now().isoformat(timespec='seconds')}
 CLAUDE_FULLSCOPE_ACCESS_{slot}={d['access_token']}
 CLAUDE_FULLSCOPE_REFRESH_{slot}={d['refresh_token']}
 CLAUDE_FULLSCOPE_EXPIRES_{slot}={d.get('expired','')}
 CLAUDE_FULLSCOPE_ACCOUNT_UUID_{slot}={d.get('account_uuid','')}
 """)
+    except (json.JSONDecodeError, KeyError) as e:
+        # A malformed credential file must not sink the whole env-file refresh;
+        # the JSON store copy done above is the real backup regardless.
+        print(f"  skipped {os.path.basename(f)} in env file ({type(e).__name__}: malformed credential)")
 # launchd has no TCC grant for ~/Documents, so this write fails on the scheduled
 # run and succeeds on an interactive one. Never let it fail the capture: the JSON
 # store above is the real backup, this file is a human-readable convenience.
@@ -80,7 +85,16 @@ PY
   # Mirror into ~/Documents/Personal/.secrets when permitted. launchd has no TCC
   # grant for ~/Documents, so the scheduled run silently skips this and only the
   # interactive run refreshes the mirror. That is why $STORE is the real store.
-  if mkdir -p "$MIRROR" 2>/dev/null && cp "$STORE"/*.json "$MIRROR"/ 2>/dev/null; then
+  mirror_ok=1
+  if mkdir -p "$MIRROR" 2>/dev/null; then
+    for f in "$STORE"/*.json; do
+      [ -e "$f" ] || continue
+      cp "$f" "$MIRROR/$(basename "$f")" 2>/dev/null || { mirror_ok=0; break; }
+    done
+  else
+    mirror_ok=0
+  fi
+  if [ "$mirror_ok" = 1 ]; then
     [ -f "$STORE/config.yaml" ] && cp "$STORE/config.yaml" "$MIRROR/config.yaml"
     chmod 700 "$MIRROR" 2>/dev/null; chmod 600 "$MIRROR"/*.json 2>/dev/null
     [ -f "$MIRROR/config.yaml" ] && chmod 600 "$MIRROR/config.yaml"
@@ -103,8 +117,10 @@ restore)
   # CodexBar rewrites its config on quit, so it must be closed before we touch it
   if [ "${CLIPROXY_SKIP_CODEXBAR:-}" = 1 ]; then RELAUNCH=0
   elif pgrep -f 'CodexBar.app/Contents/MacOS/CodexBar' >/dev/null; then
-    osascript -e 'quit app "CodexBar"' 2>/dev/null || true; sleep 3
-    pkill -f 'CodexBar.app/Contents/MacOS/CodexBar' 2>/dev/null || true; sleep 2
+    osascript -e 'quit app "CodexBar"' 2>/dev/null || true
+    for _ in $(seq 1 10); do pgrep -f 'CodexBar.app/Contents/MacOS/CodexBar' >/dev/null || break; sleep 0.5; done
+    pkill -f 'CodexBar.app/Contents/MacOS/CodexBar' 2>/dev/null || true
+    for _ in $(seq 1 10); do pgrep -f 'CodexBar.app/Contents/MacOS/CodexBar' >/dev/null || break; sleep 0.5; done
     RELAUNCH=1
   else RELAUNCH=0; fi
   python3 - "$STORE" <<'PY'
@@ -131,7 +147,10 @@ n = 0
 for a in claude.get("tokenAccounts", {}).get("accounts", []):
     for email, d in by_email.items():
         if match(a.get("label",""), email):
-            exp = int(datetime.datetime.fromisoformat(d["expired"]).timestamp())
+            try:
+                exp = int(datetime.datetime.fromisoformat(d["expired"]).timestamp())
+            except (KeyError, ValueError):
+                exp = a.get("expiresAt", 0)
             a.update({"token": d["access_token"], "accessToken": d["access_token"],
                       "refreshToken": d["refresh_token"], "expiresAt": exp,
                       "addedAt": int(time.time())})
