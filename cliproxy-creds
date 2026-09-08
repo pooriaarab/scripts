@@ -96,7 +96,7 @@ PY
   fi
   if [ "$mirror_ok" = 1 ]; then
     [ -f "$STORE/config.yaml" ] && cp "$STORE/config.yaml" "$MIRROR/config.yaml"
-    chmod 700 "$MIRROR" 2>/dev/null; chmod 600 "$MIRROR"/*.json 2>/dev/null
+    chmod 700 "$MIRROR" 2>/dev/null; chmod 600 "$MIRROR"/*.json 2>/dev/null || true
     [ -f "$MIRROR/config.yaml" ] && chmod 600 "$MIRROR/config.yaml"
     echo "captured $n credential file(s) -> $STORE (mirrored to .secrets)"
   else
@@ -137,8 +137,14 @@ if claude is None:
     print("  CodexBar has no claude provider — skipped"); raise SystemExit
 by_email = {}
 for f in glob.glob(os.path.join(store, "claude-*.json")):
-    d = json.load(open(f))
-    if d.get("refresh_token"): by_email[d["email"]] = d
+    try:
+        d = json.load(open(f))
+    except json.JSONDecodeError:
+        # A store copy is a raw cp of a live file that may have been mid-write;
+        # a corrupt copy must not crash the whole CodexBar rewiring pass.
+        continue
+    if d.get("refresh_token") and d.get("email") and d.get("access_token"):
+        by_email[d["email"]] = d
 # CodexBar labels are short; match on the local-part, and treat a +alias as the base
 def match(label, email):
     local = email.split("@")[0].split("+")[0]
@@ -169,7 +175,13 @@ store = sys.argv[1]; now = datetime.datetime.now(datetime.timezone.utc)
 files = sorted(glob.glob(os.path.join(store, "*.json")))
 print(f"  {len(files)} credential(s) in {store}")
 for f in files:
-    d = json.load(open(f))
+    try:
+        d = json.load(open(f))
+    except json.JSONDecodeError:
+        # Same store-copy caveat as restore: a corrupt file must not stop
+        # status from reporting on every other credential that is fine.
+        print(f"   {os.path.basename(f)[:-5]:36} unreadable (corrupt JSON)")
+        continue
     exp = d.get("expired", "")
     age = ""
     try:
