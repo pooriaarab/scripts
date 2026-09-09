@@ -86,5 +86,45 @@ grep -q 'sk-ant-ort01-BBB' "$CLIPROXY_LIVE_DIR/claude-seat@example.com.json" \
 ./cliproxy-creds status 2>&1 | grep -q 'seat@example.com' \
   && ok "status lists what is held" || bad "status did not list the credential"
 
+
+# --- sync-codexbar -------------------------------------------------------
+# CodexBar holds COPIES of the proxy's tokens. The proxy refreshes and Anthropic
+# rotates the refresh token, so those copies die a few hours later and CodexBar
+# cannot recover on its own. These pin the three properties that make re-syncing
+# safe: it repairs drift, it stays quiet when there is none, and it never writes
+# back to the proxy (a stale snapshot must not downgrade a newer credential).
+export CLIPROXY_CODEXBAR_CONFIG="$TMP/codexbar.json"
+mk_codexbar() {
+  cat > "$CLIPROXY_CODEXBAR_CONFIG" <<J
+{"providers":[{"id":"claude","tokenAccounts":{"accounts":[
+  {"label":"seat@","accessToken":"$1","refreshToken":"old-refresh","expiresAt":1}]}}]}
+J
+}
+
+mk_codexbar "sk-ant-oat01-STALE"
+out=$(./cliproxy-creds sync-codexbar 2>&1)
+grep -q 'sk-ant-oat01-AAA' "$CLIPROXY_CODEXBAR_CONFIG" \
+  && ok "sync repairs a drifted seat from the live credential" \
+  || bad "sync left the stale token in place"
+
+grep -q 'sk-ant-ort01-BBB' "$CLIPROXY_CODEXBAR_CONFIG" \
+  && ok "sync carries the matching refresh token" \
+  || bad "sync did not update the refresh token"
+
+# a second run has nothing to do: a menu-bar app must not bounce every hour
+out=$(./cliproxy-creds sync-codexbar 2>&1)
+echo "$out" | grep -q 'already in step' \
+  && ok "sync is a no-op when nothing drifted" \
+  || bad "sync reported work when nothing had drifted: $out"
+
+# the proxy is the source of truth; sync must never write back to it
+before=$(cat "$CLIPROXY_LIVE_DIR/claude-seat@example.com.json")
+printf '%s' '{"providers":[{"id":"claude","tokenAccounts":{"accounts":[{"label":"seat@","accessToken":"x"}]}}]}' \
+  > "$CLIPROXY_CODEXBAR_CONFIG"
+./cliproxy-creds sync-codexbar >/dev/null 2>&1
+[ "$before" = "$(cat "$CLIPROXY_LIVE_DIR/claude-seat@example.com.json")" ] \
+  && ok "sync never writes back to the proxy" \
+  || bad "sync modified a live proxy credential"
+
 [ $fail -eq 0 ] && echo "ALL PASS" || echo "FAILURES"
 exit $fail
