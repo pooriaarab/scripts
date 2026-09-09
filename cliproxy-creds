@@ -191,8 +191,14 @@ sync-codexbar)
 import json, os, sys, glob, datetime
 live = {}
 for f in glob.glob(os.path.join(sys.argv[1], "claude-*.json")):
-    d = json.load(open(f))
-    if d.get("refresh_token"): live[d["email"]] = d
+    try:
+        d = json.load(open(f))
+    except json.JSONDecodeError:
+        # LIVE is where the proxy actively writes; a file caught mid-refresh
+        # must not abort the whole sync (see restore's identical guard).
+        continue
+    if d.get("refresh_token") and d.get("email") and d.get("access_token"):
+        live[d["email"]] = d
 p = os.path.expanduser(sys.argv[2])
 cfg = json.load(open(p))
 claude = next((x for x in cfg["providers"] if x["id"] == "claude"), None)
