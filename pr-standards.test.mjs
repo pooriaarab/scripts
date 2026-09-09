@@ -408,6 +408,40 @@ test('enforces size failures without a label escape', () => {
   assert.equal(result.warnings.length, 1);
 });
 
+test('rejects an empty diff with both likely causes', () => {
+  const summary = summarizeFiles([], config);
+  assert.equal(summary.countedFiles, 0);
+  assert.equal(summary.countedLines, 0);
+
+  const result = checkSize(summary, config);
+  assert.equal(result.failures.length, 1);
+  assert.equal(result.failures[0].check, 'empty diff');
+  assert.match(result.failures[0].got, /0 counted files and 0 counted lines/);
+  assert.match(result.failures[0].fix, /absorbed by a rebase/);
+  assert.match(result.failures[0].fix, /never committed/);
+});
+
+test('rejects a change with only excluded files as an empty diff', () => {
+  const summary = summarizeFiles([
+    { filename: 'bun.lock', additions: 100, deletions: 50 },
+    { filename: 'dist/app.js', additions: 20, deletions: 10 },
+  ], config);
+  assert.equal(summary.countedFiles, 0);
+  assert.equal(summary.countedLines, 0);
+
+  const result = checkSize(summary, config);
+  assert.equal(result.failures.length, 1);
+  assert.equal(result.failures[0].check, 'empty diff');
+});
+
+test('passes a one-line real change', () => {
+  const summary = summarizeFiles([
+    { filename: 'src/app.js', additions: 1, deletions: 0 },
+  ], config);
+
+  assert.deepEqual(checkSize(summary, config), { failures: [], warnings: [] });
+});
+
 test('reports stale branch points at the configured threshold', () => {
   const compare = { behind_by: 11, merge_base_commit: { sha: '1234567890' } };
   const baseChanges = {
@@ -726,7 +760,9 @@ test('config resolution prefers the target repo over the local checkout', async 
       return { ok: true, json: async () => ([{ sha: 'abc1234', commit: { message: 'Fix the thing' } }]) };
     }
     if (url.includes('pulls/12/files')) {
-      return { ok: true, json: async () => ([]) };
+      // A non-empty diff: an empty one now fails the empty-diff check, which
+      // is not what this test exercises.
+      return { ok: true, json: async () => ([{ filename: 'src/app.js', additions: 3, deletions: 1 }]) };
     }
     if (url.includes('/compare/')) {
       return { ok: true, json: async () => ({ behind_by: 0, merge_base_commit: { sha: '1234567' } }) };
@@ -774,7 +810,9 @@ test('compares a fork PR by head sha, not by a head branch name the base repo ma
       return { ok: true, json: async () => ([{ sha: 'abc1234', commit: { message: 'Fix the thing' } }]) };
     }
     if (url.includes('pulls/12/files')) {
-      return { ok: true, json: async () => ([]) };
+      // A non-empty diff: an empty one now fails the empty-diff check, which
+      // is not what this test exercises.
+      return { ok: true, json: async () => ([{ filename: 'src/app.js', additions: 3, deletions: 1 }]) };
     }
     // A fork PR's head sha does not exist as a branch name in the base repo.
     // Only a compare keyed on the sha can succeed here; one keyed on the
