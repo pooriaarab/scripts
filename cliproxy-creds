@@ -1,0 +1,198 @@
+#!/usr/bin/env bash
+# Snapshot and restore every CLIProxyAPI credential.
+#
+#   ./cliproxy-creds capture    copy live credentials -> .secrets/cliproxy-auth/
+#   ./cliproxy-creds restore    copy them back, and re-wire CodexBar
+#   ./cliproxy-creds status     show what is held and how fresh it is
+#
+# WHY THIS EXISTS
+# The Claude/Codex/xAI credentials in ~/.cli-proxy-api are OAuth pairs. The access
+# token lives ~8 hours; the refresh token is the durable half. CLIProxyAPI refreshes
+# on its own, and a refresh ROTATES the refresh token. So any copy you take goes
+# stale the moment the proxy refreshes. A one-off backup is therefore worthless
+# within the hour, which is the whole reason to capture on a schedule instead.
+#
+# Run `capture` often (the LaunchAgent does it hourly). Then `restore` can rebuild
+# the proxy and CodexBar on a new machine, or after a mistake, with no browser login.
+#
+# THE ONE CASE THAT STILL NEEDS A LOGIN: if every copy of a refresh token expires
+# unused — machine off for weeks, or you revoke access at claude.ai — the chain
+# breaks and that seat needs `cliproxyapi -claude-login` again. Nothing can avoid
+# that; it is Anthropic's expiry, not a gap in this script.
+set -euo pipefail
+
+S="${CLIPROXY_SECRETS_DIR:-$HOME/Documents/Personal/.secrets}"
+STORE="${CLIPROXY_STORE_DIR:-$HOME/.local/share/cliproxy-auth}"
+MIRROR="$S/cliproxy-auth"
+LIVE="${CLIPROXY_LIVE_DIR:-$HOME/.cli-proxy-api}"
+ENVF="${CLIPROXY_ENV_FILE:-$S/claude-oauth-fullscope.env}"
+
+usage() { sed -n '2,8p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+[ "$#" -ge 1 ] || usage
+
+case "$1" in
+capture)
+  mkdir -p "$STORE"; chmod 700 "$STORE"
+  n=0
+  for f in "$LIVE"/*.json; do
+    [ -e "$f" ] || continue
+    cp "$f" "$STORE/$(basename "$f")"
+    chmod 600 "$STORE/$(basename "$f")"
+    n=$((n+1))
+  done
+  # config.yaml carries the api-keys and routing, so it is part of a restore
+  [ -f "$LIVE/config.yaml" ] && { cp "$LIVE/config.yaml" "$STORE/config.yaml"; chmod 600 "$STORE/config.yaml"; }
+  python3 - "$STORE" "$ENVF" <<'PY'
+import json, os, sys, glob, datetime, re
+store, envf = sys.argv[1], sys.argv[2]
+header_end = "# Live copy lives in ~/.cli-proxy-api/claude-<email>.json\n"
+try:
+    s = open(envf).read() if os.path.exists(envf) else ""
+except OSError:
+    # PermissionError under TCC, FileNotFoundError when the parent does not exist.
+    # Either way the JSON store above is the real backup, so never fail on this.
+    s = ""
+head = s.split(header_end)[0] + header_end if header_end in s else s
+blocks = []
+for f in sorted(glob.glob(os.path.join(store, "claude-*.json"))):
+    try:
+        d = json.load(open(f))
+        if not d.get("refresh_token"):
+            continue
+        email = d.get("email", os.path.basename(f))
+        slot = email.upper().replace("@","_AT_").replace(".","_").replace("+","_PLUS_").replace("-","_")
+        blocks.append(f"""
+# --- {email} --- snapshot {datetime.datetime.now().isoformat(timespec='seconds')}
+CLAUDE_FULLSCOPE_ACCESS_{slot}={d['access_token']}
+CLAUDE_FULLSCOPE_REFRESH_{slot}={d['refresh_token']}
+CLAUDE_FULLSCOPE_EXPIRES_{slot}={d.get('expired','')}
+CLAUDE_FULLSCOPE_ACCOUNT_UUID_{slot}={d.get('account_uuid','')}
+""")
+    except (json.JSONDecodeError, KeyError) as e:
+        # A malformed credential file must not sink the whole env-file refresh;
+        # the JSON store copy done above is the real backup regardless.
+        print(f"  skipped {os.path.basename(f)} in env file ({type(e).__name__}: malformed credential)")
+# launchd has no TCC grant for ~/Documents, so this write fails on the scheduled
+# run and succeeds on an interactive one. Never let it fail the capture: the JSON
+# store above is the real backup, this file is a human-readable convenience.
+try:
+    open(envf, "w").write(head.rstrip("\n") + "\n" + "".join(blocks))
+    os.chmod(envf, 0o600)
+    print(f"  refreshed {envf} ({len(blocks)} Claude seats)")
+except OSError as e:
+    print(f"  skipped {os.path.basename(envf)} ({type(e).__name__}: no access from this context)")
+PY
+  # Mirror into ~/Documents/Personal/.secrets when permitted. launchd has no TCC
+  # grant for ~/Documents, so the scheduled run silently skips this and only the
+  # interactive run refreshes the mirror. That is why $STORE is the real store.
+  mirror_ok=1
+  if mkdir -p "$MIRROR" 2>/dev/null; then
+    for f in "$STORE"/*.json; do
+      [ -e "$f" ] || continue
+      cp "$f" "$MIRROR/$(basename "$f")" 2>/dev/null || { mirror_ok=0; break; }
+    done
+  else
+    mirror_ok=0
+  fi
+  if [ "$mirror_ok" = 1 ]; then
+    [ -f "$STORE/config.yaml" ] && cp "$STORE/config.yaml" "$MIRROR/config.yaml"
+    chmod 700 "$MIRROR" 2>/dev/null; chmod 600 "$MIRROR"/*.json 2>/dev/null || true
+    [ -f "$MIRROR/config.yaml" ] && chmod 600 "$MIRROR/config.yaml"
+    echo "captured $n credential file(s) -> $STORE (mirrored to .secrets)"
+  else
+    echo "captured $n credential file(s) -> $STORE (.secrets mirror skipped: no ~/Documents access)"
+  fi
+  ;;
+
+restore)
+  [ -d "$STORE" ] || { echo "nothing captured yet — run: $0 capture" >&2; exit 1; }
+  mkdir -p "$LIVE"
+  for f in "$STORE"/*.json; do
+    [ -e "$f" ] || continue
+    cp "$f" "$LIVE/$(basename "$f")"; chmod 600 "$LIVE/$(basename "$f")"
+  done
+  # config.yaml carries the api-keys and routing, so it must come back too
+  [ -f "$STORE/config.yaml" ] && { cp "$STORE/config.yaml" "$LIVE/config.yaml"; chmod 600 "$LIVE/config.yaml"; }
+  echo "restored credentials -> $LIVE"
+  # CodexBar rewrites its config on quit, so it must be closed before we touch it
+  if [ "${CLIPROXY_SKIP_CODEXBAR:-}" = 1 ]; then RELAUNCH=0
+  elif pgrep -f 'CodexBar.app/Contents/MacOS/CodexBar' >/dev/null; then
+    osascript -e 'quit app "CodexBar"' 2>/dev/null || true
+    for _ in $(seq 1 10); do pgrep -f 'CodexBar.app/Contents/MacOS/CodexBar' >/dev/null || break; sleep 0.5; done
+    pkill -f 'CodexBar.app/Contents/MacOS/CodexBar' 2>/dev/null || true
+    for _ in $(seq 1 10); do pgrep -f 'CodexBar.app/Contents/MacOS/CodexBar' >/dev/null || break; sleep 0.5; done
+    RELAUNCH=1
+  else RELAUNCH=0; fi
+  python3 - "$STORE" <<'PY'
+import json, os, sys, glob, time, datetime
+store = sys.argv[1]
+if os.environ.get("CLIPROXY_SKIP_CODEXBAR") == "1":
+    print("  CodexBar wiring skipped"); raise SystemExit
+p = os.path.expanduser("~/.codexbar/config.json")
+if not os.path.exists(p):
+    print("  CodexBar not configured — skipped"); raise SystemExit
+cfg = json.load(open(p))
+claude = next((x for x in cfg["providers"] if x["id"] == "claude"), None)
+if claude is None:
+    print("  CodexBar has no claude provider — skipped"); raise SystemExit
+by_email = {}
+for f in glob.glob(os.path.join(store, "claude-*.json")):
+    try:
+        d = json.load(open(f))
+    except json.JSONDecodeError:
+        # A store copy is a raw cp of a live file that may have been mid-write;
+        # a corrupt copy must not crash the whole CodexBar rewiring pass.
+        continue
+    if d.get("refresh_token") and d.get("email") and d.get("access_token"):
+        by_email[d["email"]] = d
+# CodexBar labels are short; match on the local-part, and treat a +alias as the base
+def match(label, email):
+    local = email.split("@")[0].split("+")[0]
+    return label.rstrip("@").lower() in (local.lower(), email.split("@")[1].split(".")[0].lower())
+n = 0
+for a in claude.get("tokenAccounts", {}).get("accounts", []):
+    for email, d in by_email.items():
+        if match(a.get("label",""), email):
+            try:
+                exp = int(datetime.datetime.fromisoformat(d["expired"]).timestamp())
+            except (KeyError, ValueError):
+                exp = a.get("expiresAt", 0)
+            a.update({"token": d["access_token"], "accessToken": d["access_token"],
+                      "refreshToken": d["refresh_token"], "expiresAt": exp,
+                      "addedAt": int(time.time())})
+            n += 1; break
+json.dump(cfg, open(p, "w"), indent=2, sort_keys=True)
+print(f"  CodexBar: {n} seat(s) refreshed")
+PY
+  [ "$RELAUNCH" = 1 ] && { open -a CodexBar; echo "  CodexBar relaunched"; }
+  ;;
+
+status)
+  [ -d "$STORE" ] || { echo "nothing captured yet"; exit 0; }
+  python3 - "$STORE" <<'PY'
+import json, os, sys, glob, datetime
+store = sys.argv[1]; now = datetime.datetime.now(datetime.timezone.utc)
+files = sorted(glob.glob(os.path.join(store, "*.json")))
+print(f"  {len(files)} credential(s) in {store}")
+for f in files:
+    try:
+        d = json.load(open(f))
+    except json.JSONDecodeError:
+        # Same store-copy caveat as restore: a corrupt file must not stop
+        # status from reporting on every other credential that is fine.
+        print(f"   {os.path.basename(f)[:-5]:36} unreadable (corrupt JSON)")
+        continue
+    exp = d.get("expired", "")
+    age = ""
+    try:
+        e = datetime.datetime.fromisoformat(exp)
+        if e.tzinfo is None: e = e.replace(tzinfo=datetime.timezone.utc)
+        left = (e - now).total_seconds() / 3600
+        age = f"access token {'valid ' + str(round(left,1)) + 'h' if left > 0 else 'EXPIRED (refresh needed)'}"
+    except Exception: age = "no expiry recorded"
+    mt = datetime.datetime.fromtimestamp(os.path.getmtime(f))
+    print(f"   {os.path.basename(f)[:-5]:36} {d.get('type','?'):7} captured {mt:%m-%d %H:%M}  {age}")
+PY
+  ;;
+*) usage ;;
+esac
