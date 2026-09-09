@@ -26,6 +26,9 @@ STORE="${CLIPROXY_STORE_DIR:-$HOME/.local/share/cliproxy-auth}"
 MIRROR="$S/cliproxy-auth"
 LIVE="${CLIPROXY_LIVE_DIR:-$HOME/.cli-proxy-api}"
 ENVF="${CLIPROXY_ENV_FILE:-$S/claude-oauth-fullscope.env}"
+# Overridable so the sync can be exercised against a fixture rather than
+# the real menu-bar app, which a test must never quit or relaunch.
+CODEXBAR_CONFIG="${CLIPROXY_CODEXBAR_CONFIG:-$HOME/.codexbar/config.json}"
 
 usage() { sed -n '2,8p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 [ "$#" -ge 1 ] || usage
@@ -165,6 +168,75 @@ json.dump(cfg, open(p, "w"), indent=2, sort_keys=True)
 print(f"  CodexBar: {n} seat(s) refreshed")
 PY
   [ "$RELAUNCH" = 1 ] && { open -a CodexBar; echo "  CodexBar relaunched"; }
+  ;;
+
+sync-codexbar)
+  # Keep CodexBar's copies in step with the proxy's live tokens.
+  #
+  # WHY THIS EXISTS: the proxy refreshes these accounts and Anthropic ROTATES
+  # the refresh token on every use, so CodexBar's copy is silently invalidated
+  # a few hours later and it cannot recover on its own -- it has no way to
+  # learn the new value. Re-copying on a schedule keeps its access token fresh
+  # enough that it never needs to refresh, so only ONE holder (the proxy) ever
+  # rotates the chain and the two stop fighting.
+  #
+  # Reads LIVE, never the store, and never writes back to the proxy: a stale
+  # store must never be able to downgrade a newer proxy credential.
+  #
+  # Restarts CodexBar only when something actually changed. It re-reads its
+  # config on launch, and a menu-bar app that relaunches every hour for no
+  # reason is its own kind of bug.
+  [ -f "$CODEXBAR_CONFIG" ] || { echo "CodexBar not installed — nothing to do"; exit 0; }
+  changed=$(python3 - "$LIVE" "$CODEXBAR_CONFIG" <<'PY2'
+import json, os, sys, glob, datetime
+live = {}
+for f in glob.glob(os.path.join(sys.argv[1], "claude-*.json")):
+    try:
+        d = json.load(open(f))
+    except json.JSONDecodeError:
+        # LIVE is where the proxy actively writes; a file caught mid-refresh
+        # must not abort the whole sync (see restore's identical guard).
+        continue
+    if d.get("refresh_token") and d.get("email") and d.get("access_token"):
+        live[d["email"]] = d
+p = os.path.expanduser(sys.argv[2])
+cfg = json.load(open(p))
+claude = next((x for x in cfg["providers"] if x["id"] == "claude"), None)
+if claude is None or not live:
+    print("0"); raise SystemExit
+def match(label, email):
+    local = email.split("@")[0].split("+")[0]
+    return label.rstrip("@").lower() in (local.lower(), email.split("@")[1].split(".")[0].lower())
+n = 0
+for a in claude.get("tokenAccounts", {}).get("accounts", []):
+    for email, d in live.items():
+        if match(a.get("label", ""), email):
+            if a.get("accessToken") != d["access_token"]:
+                try:
+                    exp = int(datetime.datetime.fromisoformat(d["expired"]).timestamp())
+                except (KeyError, ValueError):
+                    exp = a.get("expiresAt", 0)
+                a.update({"token": d["access_token"], "accessToken": d["access_token"],
+                          "refreshToken": d["refresh_token"], "expiresAt": exp})
+                n += 1
+            break
+if n:
+    json.dump(cfg, open(p, "w"), indent=2, sort_keys=True)
+print(str(n))
+PY2
+)
+  if [ "${changed:-0}" -gt 0 ]; then
+    echo "CodexBar: $changed seat(s) drifted, resyncing"
+    if [ "${CLIPROXY_SKIP_CODEXBAR:-}" = 1 ]; then
+      echo "CodexBar: restart skipped"
+    elif pgrep -f 'CodexBar.app/Contents/MacOS/CodexBar' >/dev/null; then
+      osascript -e 'quit app "CodexBar"' 2>/dev/null || true; sleep 3
+      pkill -f 'CodexBar.app/Contents/MacOS/CodexBar' 2>/dev/null || true; sleep 2
+      open -a CodexBar && echo "CodexBar: relaunched"
+    fi
+  else
+    echo "CodexBar: already in step with the proxy, no restart"
+  fi
   ;;
 
 status)
