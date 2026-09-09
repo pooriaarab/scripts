@@ -229,6 +229,7 @@ would change every commit id in eight active repos to remove a cosmetic line.
 |---|---|---|
 | Net counted lines (`+` and `-`) | more than **500** | fail |
 | Counted files changed | more than **40** | fail |
+| Empty diff (0 counted files and 0 counted lines) | exactly zero | fail |
 | Closing issue references | not exactly **1** | fail |
 | Top-level directories touched | more than 3 | warn |
 
