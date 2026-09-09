@@ -1,12 +1,11 @@
 {
   "name": "scripts Cloud Environment",
-  "install": "echo 'No install step detected'",
-  "start": "echo 'Environment ready for cloud agents'",
+  "install": "node --version && python3 --version && bash --version",
   "terminals": [
     {
       "name": "Verify",
-      "command": "echo 'No test command detected'",
-      "description": "Run tests/lint before opening PRs"
+      "command": "export PATH=\"$PWD:$PATH\" && node --test pr-standards.test.mjs && ./hooks/pr-standards-guard.test.sh && python3 build-repo-prefixes.test.py && python3 worker-preview-provision.test.py && python3 worker-preview-access.test.py && python3 install-pr-hooks.test.py && ./adopt-branch-pattern.test.sh && ./pr-standards-rollout-labels.test.sh && ./fleet-ci-census.test.sh",
+      "description": "Run the full repo test suite (mirrors .github/workflows/tests.yml). Run this before opening a PR."
     }
   ]
 }
