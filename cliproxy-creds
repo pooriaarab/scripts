@@ -212,7 +212,10 @@ for a in claude.get("tokenAccounts", {}).get("accounts", []):
     for email, d in live.items():
         if match(a.get("label", ""), email):
             if a.get("accessToken") != d["access_token"]:
-                exp = int(datetime.datetime.fromisoformat(d["expired"]).timestamp())
+                try:
+                    exp = int(datetime.datetime.fromisoformat(d["expired"]).timestamp())
+                except (KeyError, ValueError):
+                    exp = a.get("expiresAt", 0)
                 a.update({"token": d["access_token"], "accessToken": d["access_token"],
                           "refreshToken": d["refresh_token"], "expiresAt": exp})
                 n += 1
