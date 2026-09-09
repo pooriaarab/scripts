@@ -186,6 +186,11 @@ sync-codexbar)
   # Restarts CodexBar only when something actually changed. It re-reads its
   # config on launch, and a menu-bar app that relaunches every hour for no
   # reason is its own kind of bug.
+  #
+  # CodexBar rewrites its config on quit (same fact restore relies on), so the
+  # update is staged into a temp file here and only promoted into place after
+  # CodexBar has been quit -- writing it in place first would let CodexBar's
+  # own quit-time save clobber the fresh tokens with its stale in-memory copy.
   [ -f "$CODEXBAR_CONFIG" ] || { echo "CodexBar not installed — nothing to do"; exit 0; }
   changed=$(python3 - "$LIVE" "$CODEXBAR_CONFIG" <<'PY2'
 import json, os, sys, glob, datetime
@@ -221,18 +226,26 @@ for a in claude.get("tokenAccounts", {}).get("accounts", []):
                 n += 1
             break
 if n:
-    json.dump(cfg, open(p, "w"), indent=2, sort_keys=True)
+    tmp = p + ".sync-tmp"
+    json.dump(cfg, open(tmp, "w"), indent=2, sort_keys=True)
+    # a plain new file would take the umask's mode; keep whatever CodexBar set,
+    # since this config carries OAuth tokens.
+    os.chmod(tmp, os.stat(p).st_mode & 0o777)
 print(str(n))
 PY2
 )
   if [ "${changed:-0}" -gt 0 ]; then
     echo "CodexBar: $changed seat(s) drifted, resyncing"
     if [ "${CLIPROXY_SKIP_CODEXBAR:-}" = 1 ]; then
+      mv "$CODEXBAR_CONFIG.sync-tmp" "$CODEXBAR_CONFIG"
       echo "CodexBar: restart skipped"
     elif pgrep -f 'CodexBar.app/Contents/MacOS/CodexBar' >/dev/null; then
       osascript -e 'quit app "CodexBar"' 2>/dev/null || true; sleep 3
       pkill -f 'CodexBar.app/Contents/MacOS/CodexBar' 2>/dev/null || true; sleep 2
+      mv "$CODEXBAR_CONFIG.sync-tmp" "$CODEXBAR_CONFIG"
       open -a CodexBar && echo "CodexBar: relaunched"
+    else
+      mv "$CODEXBAR_CONFIG.sync-tmp" "$CODEXBAR_CONFIG"
     fi
   else
     echo "CodexBar: already in step with the proxy, no restart"
