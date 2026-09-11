@@ -38,14 +38,14 @@ const EXTRACT = `
     // name="undefined". Observed on a live banking SPA. Treat it as absent,
     // or the map claims a control is called "undefined".
     if (raw === 'undefined' || raw === 'null') raw = e.id || '';
-    return raw.replace(/\s+/g, ' ').trim().slice(0, 60);
+    return raw.replace(/\\s+/g, ' ').trim().slice(0, 60);
   }
   function selector(e) {
-    if (e.id) return '#' + e.id;
+    if (e.id) return '#' + CSS.escape(e.id);
     const al = e.getAttribute('aria-label');
-    if (al) return e.tagName.toLowerCase() + '[aria-label="' + al.slice(0, 40) + '"]';
+    if (al) return e.tagName.toLowerCase() + '[aria-label=' + JSON.stringify(al.slice(0, 40)) + ']';
     const nm = e.getAttribute('name');
-    if (nm) return e.tagName.toLowerCase() + '[name="' + nm + '"]';
+    if (nm) return e.tagName.toLowerCase() + '[name=' + JSON.stringify(nm) + ']';
     return null;
   }
   const sel = 'a,button,input,select,textarea,[role=button],[role=tab],[role=combobox]';
@@ -61,7 +61,7 @@ const EXTRACT = `
       disabled: !!e.disabled,
       // below_fold matters: a control the agent cannot see is the single most
       // common reason an automated click lands on the wrong element.
-      below_fold: r.top > (window.innerHeight || 0),
+      below_fold: r.top > (window.innerHeight || 0) || r.bottom < 0,
       // Option COUNT only. Option TEXT is not captured and must not be:
       // on a bank page the options are account names, balances, card
       // numbers and saved payees. Knowing a select has 13 options is what
