@@ -24,7 +24,7 @@ const EXTRACT = `
   function label(e) {
     var lab = '';
     if (e.id) {
-      var l = document.querySelector('label[for="' + e.id + '"]');
+      var l = document.querySelector('label[for=' + JSON.stringify(e.id) + ']');
       if (l) lab = l.innerText || '';
     }
     if (!lab && e.closest('label')) lab = e.closest('label').innerText || '';
@@ -51,7 +51,9 @@ const EXTRACT = `
   const sel = 'a,button,input,select,textarea,[role=button],[role=tab],[role=combobox]';
   const out = [];
   document.querySelectorAll(sel).forEach(function (e) {
-    if (e.offsetParent === null) return;             // skip hidden
+    // offsetParent is also null for position:fixed elements (modals, sticky
+    // toolbars) even when visible, so don't treat those as hidden.
+    if (e.offsetParent === null && getComputedStyle(e).position !== 'fixed') return;
     const r = e.getBoundingClientRect();
     out.push({
       tag: e.tagName.toLowerCase(),
