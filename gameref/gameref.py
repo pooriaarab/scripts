@@ -160,7 +160,11 @@ def search(args) -> None:
             "--print", "%(id)s\t%(duration)s\t%(title)s",
             f"ytsearch{args.per_query}:{q}",
         ]
-        for line in subprocess.run(cmd, capture_output=True, text=True).stdout.splitlines():
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        if proc.returncode != 0:
+            print(f"  yt-dlp failed for {q!r}: {proc.stderr.strip()[:300]}", file=sys.stderr)
+            continue
+        for line in proc.stdout.splitlines():
             parts = line.split("\t")
             if len(parts) != 3 or not parts[1].isdigit():
                 continue
@@ -241,6 +245,9 @@ def merge(args) -> None:
         d = json.loads(f.read_text())
         vid = d.get("_video", {}).get("id", f.stem)
         for m in d.get("mechanics", []):
+            if not (m.get("name") and m.get("category") and m.get("what_happens")):
+                print(f"  {vid}: malformed mechanic, skipped", file=sys.stderr)
+                continue
             key = m["name"].strip().lower()
             e = by_name.setdefault(key, {
                 "name": key, "categories": Counter(), "videos": [],
