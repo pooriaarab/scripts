@@ -281,6 +281,96 @@ def merge(args) -> None:
     print("\nby category:", dict(cats.most_common()))
 
 
+
+def dedupe(args) -> None:
+    """Cluster mechanics that are the same thing under different names.
+
+    `merge` groups on the exact name string, which is not good enough: across
+    31 videos the same dash showed up as dash, dash-burst, dash-boost and
+    chef-dash, and each looked like an independent finding. That inflates the
+    count and, worse, hides how well-attested a mechanic actually is - the
+    thing the vote was for.
+
+    So the names go to the model in one batch and come back clustered. Only the
+    names and one description each, never the whole corpus, because the useful
+    signal is the wording and sending everything would cost more than the
+    analysis did.
+    """
+    items = json.loads(pathlib.Path(args.input).read_text())
+    listing = "\n".join(
+        f"{e['name']} [{e['category']}] seen_in={e['video_count']} :: {e['descriptions'][0][:110]}"
+        for e in items
+    )
+    schema = {
+        "type": "object",
+        "properties": {
+            "clusters": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "canonical": {"type": "string"},
+                        "category": {"type": "string"},
+                        "members": {"type": "array", "items": {"type": "string"}},
+                    },
+                    "required": ["canonical", "category", "members"],
+                },
+            }
+        },
+        "required": ["clusters"],
+    }
+    prompt = (
+        "These are game mechanics extracted from gameplay footage by several "
+        "separate passes, so the same mechanic often appears under different "
+        "names. Group the names that describe THE SAME mechanic.\n\n"
+        "Pick the clearest existing name as the canonical one; do not invent a "
+        "new name. Every input name must appear in exactly one cluster, "
+        "including names with no duplicates, which form a cluster of one.\n\n"
+        "Do NOT merge mechanics that differ in what the player does or in what "
+        "the game does back. Chopping and blending are both preparation and "
+        "are NOT the same mechanic. A warning and the fire it precedes are two "
+        "mechanics, not one.\n\n" + listing
+    )
+    print(f"clustering {len(items)} names")
+    r = call(token(), [{"text": prompt}], schema)
+    clusters = json.loads(r["candidates"][0]["content"]["parts"][0]["text"])["clusters"]
+
+    by_name = {e["name"]: e for e in items}
+    out = []
+    claimed = set()
+    for c in clusters:
+        members = [m for m in c["members"] if m in by_name]
+        if not members:
+            continue
+        claimed.update(members)
+        videos, descs, fb = set(), [], []
+        for m in members:
+            e = by_name[m]
+            videos.update(e["videos"])
+            descs.extend(e["descriptions"])
+            fb.extend(e["feedback"])
+        out.append({
+            "name": c["canonical"], "category": c["category"],
+            "aliases": [m for m in members if m != c["canonical"]],
+            "video_count": len(videos), "descriptions": descs[:4], "feedback": fb[:4],
+        })
+    # A name the model silently dropped is a lost finding, so carry it through
+    # rather than letting the cluster step quietly shrink the corpus.
+    for name, e in by_name.items():
+        if name not in claimed:
+            out.append({**e, "aliases": []})
+    out.sort(key=lambda e: (-e["video_count"], e["name"]))
+    pathlib.Path(args.out).write_text(json.dumps(out, indent=2))
+    dropped = len(items) - len(claimed)
+    print(f"{len(items)} names -> {len(out)} mechanics -> {args.out}")
+    if dropped:
+        print(f"  ({dropped} not clustered by the model, carried through as-is)")
+    print(f"\n{'seen in':>7}  {'category':<18} name")
+    for e in out[: args.show]:
+        alias = f"  (+{len(e['aliases'])})" if e["aliases"] else ""
+        print(f"{e['video_count']:>7}  {e['category']:<18} {e['name']}{alias}")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -307,6 +397,12 @@ def main() -> None:
     m.add_argument("--out", default="mechanics.json")
     m.add_argument("--show", type=int, default=40)
     m.set_defaults(func=merge)
+
+    dd = sub.add_parser("dedupe", help="cluster mechanics that are the same thing")
+    dd.add_argument("input", default="mechanics.json", nargs="?")
+    dd.add_argument("--out", default="mechanics-deduped.json")
+    dd.add_argument("--show", type=int, default=40)
+    dd.set_defaults(func=dedupe)
 
     args = ap.parse_args()
     args.func(args)
