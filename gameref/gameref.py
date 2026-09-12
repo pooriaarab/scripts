@@ -122,18 +122,25 @@ def call(tok: str, parts: list, schema: dict | None, retries: int = 4) -> dict:
             "responseSchema": schema,
         }
     url = ENDPOINT.format(p=PROJECT, l=LOCATION, m=MODEL)
-    req = urllib.request.Request(
-        url,
-        data=json.dumps(payload).encode(),
-        headers={"Authorization": f"Bearer {tok}", "Content-Type": "application/json"},
-    )
     delay = 5
     for attempt in range(retries):
+        req = urllib.request.Request(
+            url,
+            data=json.dumps(payload).encode(),
+            headers={"Authorization": f"Bearer {tok}", "Content-Type": "application/json"},
+        )
         try:
             with urllib.request.urlopen(req, timeout=900) as r:
                 return json.load(r)
         except urllib.error.HTTPError as e:
             detail = e.read().decode()[:300]
+            # A token minted at batch start can outlive its ~1h lifetime
+            # partway through a long analyse run; refresh and retry rather
+            # than failing every remaining video.
+            if e.code == 401 and attempt < retries - 1:
+                print("  401, refreshing token", file=sys.stderr)
+                tok = token()
+                continue
             # 429 and 5xx are worth waiting out. A 400 is our bug and will not
             # improve by being repeated.
             if e.code in (429, 500, 503) and attempt < retries - 1:
@@ -191,9 +198,10 @@ def analyse(args) -> None:
         # videoMetadata is a SIBLING of fileData inside the part, not a child of
         # it. Nesting it returns 400 "Unknown name videoMetadata at file_data".
         if v["duration"] > args.clip_seconds:
+            end = min(args.start_offset + args.clip_seconds, v["duration"])
             part["videoMetadata"] = {
                 "startOffset": f"{args.start_offset}s",
-                "endOffset": f"{args.start_offset + args.clip_seconds}s",
+                "endOffset": f"{end}s",
             }
         parts = [part, {"text": PROMPT}]
         print(f"[{i}/{min(len(videos), args.limit)}] {v['title'][:60]}")
@@ -235,10 +243,11 @@ def merge(args) -> None:
         for m in d.get("mechanics", []):
             key = m["name"].strip().lower()
             e = by_name.setdefault(key, {
-                "name": key, "category": m["category"], "videos": [],
+                "name": key, "categories": Counter(), "videos": [],
                 "descriptions": [], "feedback": [], "seen": 0, "inferred": 0,
             })
             e["videos"].append(vid)
+            e["categories"][m["category"]] += 1
             e["descriptions"].append(m["what_happens"])
             if m.get("feedback"):
                 e["feedback"].append(m["feedback"])
@@ -247,6 +256,7 @@ def merge(args) -> None:
     merged = sorted(by_name.values(), key=lambda e: (-len(set(e["videos"])), e["name"]))
     for e in merged:
         e["video_count"] = len(set(e["videos"]))
+        e["category"] = e.pop("categories").most_common(1)[0][0]
     pathlib.Path(args.out).write_text(json.dumps(merged, indent=2))
     print(f"{len(files)} reports -> {len(merged)} distinct mechanics -> {args.out}\n")
     print(f"{'count':>5}  {'category':<18} name")
