@@ -27,12 +27,17 @@ import argparse
 import json
 import os
 import pathlib
+import re
 import subprocess
 import sys
 import time
 import urllib.parse
 import urllib.request
 from collections import Counter
+
+# YouTube video ids are exactly this shape. Enforced before an id is used to
+# build a filesystem path, since videos.json can come from outside search().
+VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
 
 ADC = pathlib.Path.home() / ".config/gcloud/adc_personal.json"
 PROJECT = os.environ.get("GAMEREF_PROJECT", "pooria-personal")
@@ -191,6 +196,10 @@ def analyse(args) -> None:
     tok = token()
     done = fail = 0
     for i, v in enumerate(videos[: args.limit], 1):
+        if not VIDEO_ID_RE.match(v["id"]):
+            print(f"  bad video id, skipped: {v['id']!r}", file=sys.stderr)
+            fail += 1
+            continue
         dest = outdir / f"{v['id']}.json"
         if dest.exists() and not args.force:
             print(f"[{i}] {v['id']} cached")
