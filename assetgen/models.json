@@ -1,0 +1,50 @@
+{
+  "text-to-image": {
+    "flux-schnell": {
+      "id": "wavespeed-ai/flux-schnell",
+      "price": 0.003
+    },
+    "flux-2-flash": {
+      "id": "wavespeed-ai/flux-2-flash/text-to-image",
+      "price": 0.008
+    },
+    "flux-2-turbo": {
+      "id": "wavespeed-ai/flux-2-turbo/text-to-image",
+      "price": 0.01
+    },
+    "gpt-image": {
+      "id": "openai/gpt-image-2.5-sunburst/text-to-image",
+      "price": 0.024
+    }
+  },
+  "upscale": {
+    "real-esrgan": {
+      "id": "wavespeed-ai/real-esrgan",
+      "price": 0.0024
+    },
+    "recraft-crisp": {
+      "id": "recraft-ai/recraft-crisp-upscale",
+      "price": 0.004
+    }
+  },
+  "edit": {
+    "gpt-image-edit": {
+      "id": "openai/gpt-image-2.5-sunburst/edit",
+      "price": 0.039
+    },
+    "qwen-edit": {
+      "id": "alibaba/qwen-image-3.0/edit",
+      "price": 0.03
+    }
+  },
+  "bgremove": {
+    "feynobg": {
+      "id": "wavespeed-ai/feynobg",
+      "price": 0.001
+    },
+    "ideogram": {
+      "id": "ideogram-ai/remove-background",
+      "price": 0.01
+    }
+  }
+}
