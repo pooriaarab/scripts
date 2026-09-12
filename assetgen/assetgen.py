@@ -95,8 +95,14 @@ def gate(count, price, args, what):
 
 def each(items, fn, label):
     done = failed = consecutive = 0
+    aborted = False
     with ThreadPoolExecutor(max_workers=4) as pool:
-        for ok, name in pool.map(fn, items):
+        futures = [pool.submit(fn, item) for item in items]
+        for fut in futures:
+            if aborted:
+                fut.cancel()
+                continue
+            ok, name = fut.result()
             if ok:
                 done, consecutive = done + 1, 0
             else:
@@ -104,7 +110,7 @@ def each(items, fn, label):
                 print(f"  FAIL {name}")
                 if consecutive >= MAX_CONSECUTIVE_FAILURES:
                     print(f"  aborting: {MAX_CONSECUTIVE_FAILURES} consecutive failures")
-                    break
+                    aborted = True
     print(f"{label}: {done} ok, {failed} failed")
     return done
 
