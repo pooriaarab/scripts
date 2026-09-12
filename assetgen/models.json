@@ -46,5 +46,21 @@
       "id": "ideogram-ai/remove-background",
       "price": 0.01
     }
+  },
+  "sfx": {
+    "sonilo-sfx": {
+      "id": "sonilo/v1/text-to-sfx",
+      "price": 0.002
+    },
+    "ace-step": {
+      "id": "wavespeed-ai/ace-step/prompt-to-audio",
+      "price": 0.0002
+    }
+  },
+  "music": {
+    "sonilo-music": {
+      "id": "sonilo/text-to-music",
+      "price": 0.0025
+    }
   }
 }

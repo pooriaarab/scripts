@@ -203,6 +203,32 @@ def cmd_pipeline(args):
     cmd_upscale(stage_args(**{"in": str(stage), "out": args.out, "model": args.upscale_model}))
 
 
+def cmd_sfx(args):
+    """Generate a sound effect.
+
+    `duration` is REQUIRED and must be an INTEGER. Neither is documented. Omitting
+    it 400s naming the field; passing 1.5 400s again saying it wants an integer.
+    Two round trips to discover, so it is always sent and always coerced.
+
+    The file comes back as AAC regardless of the extension you ask for, so name
+    outputs .aac unless you intend to transcode.
+    """
+    model_id, price = resolve("sfx", args.model)
+    if not gate(args.count, price, args, "sfx"):
+        return
+    out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+
+    def one(i):
+        dest = out / (f"{args.name}.aac" if args.count == 1 else f"{args.name}-{i:03d}.aac")
+        if dest.exists():
+            return True, dest.name
+        return run_model(model_id, {"prompt": args.prompt, "duration": int(args.duration)}, dest), dest.name
+
+    done = each(range(args.count), one, "sfx")
+    print(f"spend ~{money(done, price)}  ->  {out}")
+
+
 def cmd_models(args):
     for kind, table in MODELS.items():
         print(f"\n{kind}:")
@@ -256,6 +282,15 @@ def main():
     pl.add_argument("--scale", type=int, default=4)
     pl.add_argument("--out", default="./assets/final")
     common(pl); pl.set_defaults(func=cmd_pipeline)
+
+    sx = sub.add_parser("sfx", help="generate a sound effect")
+    sx.add_argument("--prompt", required=True)
+    sx.add_argument("--model", default="sonilo-sfx")
+    sx.add_argument("--duration", type=int, default=2, help="whole seconds; the model requires an integer")
+    sx.add_argument("--count", type=int, default=1)
+    sx.add_argument("--name", default="sfx")
+    sx.add_argument("--out", default="./assets/audio")
+    common(sx); sx.set_defaults(func=cmd_sfx)
 
     m = sub.add_parser("models", help="list models, prices and styles")
     m.set_defaults(func=cmd_models)
