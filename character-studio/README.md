@@ -64,7 +64,7 @@ Keep one render that you know is wrong. Then run the `verify` command against
 it.
 
 ```sh
-node tools/character-studio/bin/character-studio.mjs verify pooria \
+node character-studio/bin/character-studio.mjs verify pooria \
   characters/pooria/out/hero-builder.attempt-1.jpg \
   --verifier gemini://gemini-3.1-pro-preview
 ```
@@ -123,7 +123,7 @@ and `.env` at the repository root.
 There is no `package.json` and no bin link. Call the script by path.
 
 ```sh
-node tools/character-studio/bin/character-studio.mjs help
+node character-studio/bin/character-studio.mjs help
 ```
 
 ## The character pack
@@ -187,7 +187,7 @@ Uploads every file in `refs/` to the CDN and writes the URLs back into
 `character.json`. Run this first, and again whenever you add a photograph.
 
 ```sh
-node tools/character-studio/bin/character-studio.mjs refs pooria
+node character-studio/bin/character-studio.mjs refs pooria
 ```
 
 ### shot
@@ -195,7 +195,7 @@ node tools/character-studio/bin/character-studio.mjs refs pooria
 Renders one or more named shots. Each one is verified and retried on its own.
 
 ```sh
-node tools/character-studio/bin/character-studio.mjs shot pooria portrait-neutral hero-builder
+node character-studio/bin/character-studio.mjs shot pooria portrait-neutral hero-builder
 ```
 
 ### gallery
@@ -204,8 +204,8 @@ Renders every shot in the pack. Use `--group` to render one group, `--max` to
 stop after a count, and `--only-failed` to skip shots whose last report passed.
 
 ```sh
-node tools/character-studio/bin/character-studio.mjs gallery pooria --group site
-node tools/character-studio/bin/character-studio.mjs gallery pooria --only-failed
+node character-studio/bin/character-studio.mjs gallery pooria --group site
+node character-studio/bin/character-studio.mjs gallery pooria --only-failed
 ```
 
 ### sheet
@@ -216,7 +216,7 @@ and `google/nano-banana-pro/edit-ultra` at 4k. Override those with `--model` and
 `--resolution`.
 
 ```sh
-node tools/character-studio/bin/character-studio.mjs sheet pooria
+node character-studio/bin/character-studio.mjs sheet pooria
 ```
 
 ### verify
@@ -225,7 +225,7 @@ Scores one image that already exists. Nothing is generated. Use this to validate
 a verifier, or to judge an image from somewhere else.
 
 ```sh
-node tools/character-studio/bin/character-studio.mjs verify pooria characters/pooria/out/portrait-neutral.jpg
+node character-studio/bin/character-studio.mjs verify pooria characters/pooria/out/portrait-neutral.jpg
 ```
 
 The command prints the score for every anchor, what the verifier saw in the
@@ -238,7 +238,7 @@ relative to the repository root. A shot that did not pass is skipped unless you
 pass `--force`.
 
 ```sh
-node tools/character-studio/bin/character-studio.mjs install pooria
+node character-studio/bin/character-studio.mjs install pooria
 ```
 
 ### report
@@ -247,7 +247,7 @@ Rebuilds the HTML contact sheet from the JSON reports already in the output
 directory. No model is called, so this is free and fast.
 
 ```sh
-node tools/character-studio/bin/character-studio.mjs report pooria
+node character-studio/bin/character-studio.mjs report pooria
 ```
 
 ### Flags
@@ -268,13 +268,15 @@ node tools/character-studio/bin/character-studio.mjs report pooria
 
 ## How to write an anchor
 
-An anchor is one trait, with a weight, a MUST line, a NEVER line and a reason.
+An anchor is one trait, with a weight, a short `check` line, a MUST line, a
+NEVER line and a reason.
 
 ```json
 {
   "id": "forehead",
   "label": "Tall forehead and high recessed hairline",
   "weight": 3,
+  "check": "tall forehead, about 38% of face height, high hairline recessed at each temple",
   "must": "A tall, broad, gently convex forehead that takes roughly the top 38-40% of the face from brow to hairline. The hairline sits high and is clearly mature: the corners above each temple are recessed well back, leaving a rounded central peak between two visible bare temple triangles.",
   "never": "A low or straight hairline. Hair falling forward onto the forehead. A short forehead. A dense fringe. A juvenile hairline with square corners.",
   "why": "This is the single fastest tell. Every earlier failed render put hair low on the forehead and it stopped looking like him immediately."
@@ -349,7 +351,7 @@ score, and writes them into the prompt under a faults heading.
 3. **Upload the references.**
 
    ```sh
-   node tools/character-studio/bin/character-studio.mjs refs <you>
+   node character-studio/bin/character-studio.mjs refs <you>
    ```
 
 4. **Write the anchors.** Open every photograph side by side. Order the anchors by
@@ -360,7 +362,7 @@ score, and writes them into the prompt under a faults heading.
    wrong. You now have your known-bad image.
 
    ```sh
-   node tools/character-studio/bin/character-studio.mjs shot <you> portrait-neutral
+   node character-studio/bin/character-studio.mjs shot <you> portrait-neutral
    ```
 
 6. **Validate the verifier against that image.** Run `verify` with at least two
@@ -373,7 +375,7 @@ score, and writes them into the prompt under a faults heading.
 8. **Run the gallery and read the contact sheet.**
 
    ```sh
-   node tools/character-studio/bin/character-studio.mjs gallery <you>
+   node character-studio/bin/character-studio.mjs gallery <you>
    open characters/<you>/out/index.html
    ```
 
@@ -384,7 +386,7 @@ score, and writes them into the prompt under a faults heading.
 10. **Install the renders you keep.**
 
     ```sh
-    node tools/character-studio/bin/character-studio.mjs install <you>
+    node character-studio/bin/character-studio.mjs install <you>
     ```
 
 The prompt ends with a final check paragraph in `src/prompt.mjs`. That paragraph
@@ -394,16 +396,17 @@ add a second character.
 ## What the tool writes
 
 Everything lands in the pack's `out/` directory, or in the directory you pass to
-`--out`.
+`--out`. `<ext>` comes from `output_format` in `shots.json`. The tool writes
+`jpeg` as `.jpg` and keeps every other format as it is.
 
-| File                     | Contents                                                            |
-| ------------------------ | ------------------------------------------------------------------- |
-| `<shot>.attempt-<n>.jpg` | One render per attempt, kept for comparison.                        |
-| `<shot>.jpg`             | The best attempt, copied under the shot id.                         |
-| `<shot>.report.json`     | The scores, the observations and the corrections for every attempt. |
-| `character-sheet.jpg`    | The best model sheet.                                               |
-| `index.html`             | The contact sheet.                                                  |
-| `refs/`                  | A copy of the real photographs, for the contact sheet.              |
+| File                       | Contents                                                            |
+| -------------------------- | ------------------------------------------------------------------- |
+| `<shot>.attempt-<n>.<ext>` | One render per attempt, kept for comparison.                        |
+| `<shot>.<ext>`             | The best attempt, copied under the shot id.                         |
+| `<shot>.report.json`       | The scores, the observations and the corrections for every attempt. |
+| `character-sheet.jpg`      | The best model sheet.                                               |
+| `index.html`               | The contact sheet.                                                  |
+| `refs/`                    | A copy of the real photographs, for the contact sheet.              |
 
 The contact sheet is self-contained. Open it with a browser, or point `--web` at
 a directory your dev server already serves.
