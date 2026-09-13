@@ -8,6 +8,7 @@ import {
   allShots,
   anchorsForScope,
   applyVariant,
+  castingUrl,
   criticalAnchors,
   findShot,
   loadPack,
@@ -120,4 +121,9 @@ test('criticalAnchors uses the default weight of 3 unless the pack overrides it'
   assert.deepEqual(criticalAnchors(baseCharacter).map((a) => a.id), ['jaw']);
   const lowered = { ...baseCharacter, verification: { critical_weight: 2 } };
   assert.deepEqual(criticalAnchors(lowered).map((a) => a.id), ['jaw', 'eyes']);
+});
+
+test('castingUrl returns the registered casting sheet url, and throws when none is registered', () => {
+  assert.equal(castingUrl({ castingSheet: { url: 'https://cdn.example/casting.jpg' } }), 'https://cdn.example/casting.jpg');
+  assert.throws(() => castingUrl({}), /No casting sheet registered/);
 });
