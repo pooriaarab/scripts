@@ -33,7 +33,7 @@ jobs:
         continue-on-error: true
         run: |
           set -euo pipefail
-          node --test pr-standards.test.mjs assisted-by.test.mjs
+          node --test pr-standards.test.mjs assisted-by.test.mjs character-studio/src/pack.test.mjs character-studio/src/prompt.test.mjs
 
       - name: Run guard tests
         id: guard-tests
