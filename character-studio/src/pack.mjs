@@ -42,6 +42,21 @@ export function refSource(pack, file) {
 }
 
 /**
+ * CDN url of the approved casting sheet, for a shot that sets `useCasting`.
+ *
+ * Only the plain four-frame casting card belongs in `castingSheet`. A busy
+ * production board — nine or more panels with labels, palette strips and
+ * callout lines — must never be fed back as a reference image, because the
+ * model reproduces the board layout instead of the person. The `sheet` and
+ * `compose` commands both produce that kind of board. Neither output goes here.
+ */
+export function castingUrl(character) {
+  const url = character.castingSheet?.url;
+  if (!url) throw new Error(`No casting sheet registered. Run: character-studio casting <pack>`);
+  return url;
+}
+
+/**
  * Applies a shot's variant to the character.
  *
  * Some traits vary shot to shot while the anchor around them holds. Beard shape
