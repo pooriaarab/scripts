@@ -12,7 +12,7 @@ import { verify } from "./verify.mjs";
  */
 export async function renderShot({ pack, shot, outDir, apiKey, log = () => {} }) {
   const character = applyVariant(pack.character, shot.variant);
-  const maxAttempts = character.verification?.max_attempts ?? 3;
+  const maxAttempts = Math.max(1, character.verification?.max_attempts ?? 3);
   const verifyModel = character.verification?.model ?? DEFAULT_VERIFIER;
   const refFiles = shot.refs ?? character.references.slice(0, 4).map((r) => r.file);
 
