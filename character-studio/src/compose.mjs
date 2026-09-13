@@ -17,7 +17,7 @@ import { renderShot } from "./pipeline.mjs";
  * the quality a single portrait gets. The text is real text in a real document,
  * so it cannot garble at all.
  */
-export async function compose({ pack, outDir, apiKey, only, log = () => {} }) {
+export async function compose({ pack, outDir, apiKey, only, force, log = () => {} }) {
   const spec = JSON.parse(await readFile(path.join(pack.dir, "sheet-panels.json"), "utf8"));
   await mkdir(outDir, { recursive: true });
 
@@ -32,7 +32,7 @@ export async function compose({ pack, outDir, apiKey, only, log = () => {} }) {
       done++;
       const shot = { ...spec.defaults, ...panel, group: `sheet-${group.id}` };
       const reportFile = path.join(outDir, `${shot.id}.report.json`);
-      if (existsSync(reportFile) && !only) {
+      if (existsSync(reportFile) && !only && !force) {
         const prev = JSON.parse(await readFile(reportFile, "utf8"));
         if (prev.passed) { log(`  [${done}/${total}] ${panel.id} — already passed, skipping`); continue; }
       }
