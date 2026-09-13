@@ -91,8 +91,27 @@ export function allShots(pack) {
  * fix. Shots declare `scope` as head, half or full.
  */
 export function anchorsForScope(character, scope = "full") {
+  // A shot that cannot show a trait must not be scored on it. Two things went
+  // wrong before this was explicit. The prompt told a head-and-shoulders render
+  // to match a height it cannot show, and a rear view scored 100% because the
+  // seven face anchors all came back "not visible" and were dropped from the
+  // average — a perfect score over six anchors out of thirteen, which is not a
+  // perfect score at all. Naming the scope makes the denominator honest.
+  if (scope === "back") return character.anchors.filter((a) => a.requires !== "face");
   if (scope === "full") return character.anchors;
   return character.anchors.filter((a) => a.requires !== "body");
+}
+
+/**
+ * The anchors that apply to one shot: scoped to what the crop can show, minus
+ * the expression anchor when the shot names its own expression.
+ *
+ * Generation and verification must agree on this set. When only the prompt
+ * dropped the expression anchor, the verifier went on scoring a "serious" panel
+ * against his habitual half-smile and marked the correct render down for it.
+ */
+export function anchorsForShot(character, shot) {
+  return anchorsForScope(character, shot.scope).filter((a) => !(shot.expression && a.id === "expression"));
 }
 
 /** Anchors at or above the pack's critical weight must each clear critical_min on their own. */
