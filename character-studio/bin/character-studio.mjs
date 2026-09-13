@@ -14,7 +14,7 @@ import { triage, chooseReferences } from "../src/triage.mjs";
 import { compose, writeSheet } from "../src/compose.mjs";
 import { renderCasting, registerCastingSheet, CASTING_LABEL } from "../src/casting.mjs";
 
-const root = path.resolve(fileURLToPath(import.meta.url), "../../../..");
+const root = path.resolve(fileURLToPath(import.meta.url), "../../..");
 
 const USAGE = `character-studio — generate images of a real person that actually look like them
 
@@ -81,7 +81,11 @@ async function apiKey(character) {
   for (const p of files) {
     if (!p || !existsSync(p)) continue;
     const m = (await readFile(p, "utf8")).match(new RegExp(`^(?:export\\s+)?${varName}\\s*=\\s*(.+)$`, "m"));
-    if (m) return { key: m[1].trim().replace(/^["']|["']$/g, ""), varName };
+    if (m) {
+      const raw = m[1].trim();
+      const key = /^["']/.test(raw) ? raw.replace(/^["']|["']$/g, "") : raw.replace(/\s+#.*$/, "").trim();
+      return { key, varName };
+    }
   }
   throw new Error(
     `${varName} not set. Export it, or pass --env-file <path>, or set CHARACTER_STUDIO_ENV to a file that defines it.`,
