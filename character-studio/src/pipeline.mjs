@@ -1,7 +1,7 @@
 import { mkdir, writeFile, copyFile } from "node:fs/promises";
 import path from "node:path";
 import { buildPrompt } from "./prompt.mjs";
-import { refSource, DEFAULT_VERIFIER, anchorsForScope, applyVariant, castingUrl } from "./pack.mjs";
+import { refSource, DEFAULT_VERIFIER, anchorsForShot, applyVariant, castingUrl } from "./pack.mjs";
 import { wavespeedRun, download } from "./wavespeed.mjs";
 import { verify } from "./verify.mjs";
 
@@ -12,7 +12,7 @@ import { verify } from "./verify.mjs";
  */
 export async function renderShot({ pack, shot, outDir, apiKey, log = () => {} }) {
   const character = applyVariant(pack.character, shot.variant);
-  const maxAttempts = Math.max(1, character.verification?.max_attempts ?? 3);
+  const maxAttempts = character.verification?.max_attempts ?? 3;
   const verifyModel = character.verification?.model ?? DEFAULT_VERIFIER;
   const refFiles = shot.refs ?? character.references.slice(0, 4).map((r) => r.file);
 
@@ -58,11 +58,15 @@ export async function renderShot({ pack, shot, outDir, apiKey, log = () => {} })
 
     log(`  attempt ${n} — verifying with ${verifyModel}`);
     const result = await verify({
-      character: { ...character, anchors: anchorsForScope(character, shot.scope) },
+      character: { ...character, anchors: anchorsForShot(character, shot) },
       candidate: file,
       refSources: refFiles.map((f) => refSource(pack, f)),
       model: verifyModel,
       apiKey,
+      // Camera, expression and wardrobe are the parts of the brief the likeness
+      // score cannot see. They go in separately so the verifier judges them
+      // separately.
+      brief: { framing: shot.framing, expression: shot.expression, wardrobe: shot.wardrobe },
     });
 
     attempts.push({ n, file, prompt, ...result });
@@ -75,10 +79,19 @@ export async function renderShot({ pack, shot, outDir, apiKey, log = () => {} })
     // One correction per round. Feeding every fault back made the model trade one
     // for another and the score bounced instead of climbing.
     corrections = result.weakest ? [result.weakest.correction] : result.corrections.slice(0, 1);
+    if (result.brief_followed === false) log(`  attempt ${n} — brief: ${result.brief_note}`);
     if (result.weakest) log(`  attempt ${n} — next round targets: ${result.weakest.id}`);
   }
 
-  const best = attempts.reduce((a, b) => (b.score > a.score ? b : a));
+  // A passing attempt always beats a failing one, whatever the scores say, and a
+  // tie goes to the later attempt because it is the one that carried a
+  // correction. Ranking on score alone with a strict > silently published a
+  // failed render: a back view scored 1.0 on both attempts, attempt 1 was judged
+  // a different person and attempt 2 was not, and the tie handed it to attempt 1.
+  const best = attempts.reduce((a, b) => {
+    if (a.pass !== b.pass) return b.pass ? b : a;
+    return b.score >= a.score ? b : a;
+  });
   const finalExt = shot.output_format === "jpeg" ? "jpg" : shot.output_format;
   const finalFile = path.join(outDir, `${shot.id}.${finalExt}`);
   await copyFile(best.file, finalFile);
@@ -105,6 +118,11 @@ export async function renderShot({ pack, shot, outDir, apiKey, log = () => {} })
           same_person: a.same_person,
           overall: a.overall,
           criticalFailures: a.criticalFailures,
+          // Recorded because a "brief" failure is otherwise invisible after the
+          // run: the report showed a critical failure with no way to read what
+          // the verifier actually objected to.
+          brief_followed: a.brief_followed,
+          brief_note: a.brief_note,
           anchors: a.anchors.map(({ id, label, weight, score, reference, candidate, correction }) => ({
             id,
             label,
