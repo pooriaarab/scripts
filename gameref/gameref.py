@@ -339,7 +339,11 @@ def dedupe(args) -> None:
     out = []
     claimed = set()
     for c in clusters:
-        members = [m for m in c["members"] if m in by_name]
+        # A name the model puts in two clusters would otherwise get double-
+        # counted into both, inflating exactly the attestation count this
+        # stage exists to fix - so once a name is claimed, later clusters
+        # cannot claim it again.
+        members = [m for m in c["members"] if m in by_name and m not in claimed]
         if not members:
             continue
         claimed.update(members)
@@ -349,9 +353,13 @@ def dedupe(args) -> None:
             videos.update(e["videos"])
             descs.extend(e["descriptions"])
             fb.extend(e["feedback"])
+        # The model is told to reuse an existing name, not invent one; if it
+        # ignores that, fall back to a member name instead of writing a
+        # canonical that never appeared in the input.
+        canonical = c["canonical"] if c["canonical"] in members else members[0]
         out.append({
-            "name": c["canonical"], "category": c["category"],
-            "aliases": [m for m in members if m != c["canonical"]],
+            "name": canonical, "category": c["category"],
+            "aliases": [m for m in members if m != canonical],
             "video_count": len(videos), "descriptions": descs[:4], "feedback": fb[:4],
         })
     # A name the model silently dropped is a lost finding, so carry it through
