@@ -12,9 +12,9 @@ import { toInlineImage } from "./image.mjs";
  *   openrouter://<model>   (default)
  *   gemini://<model>
  */
-export async function verify({ character, candidate, refSources, model, apiKey }) {
+export async function verify({ character, candidate, refSources, model, apiKey, brief }) {
   const { provider, name } = parseModel(model);
-  const instructions = buildInstructions(character, refSources.length);
+  const instructions = buildInstructions(character, refSources.length, brief);
 
   const images = [];
   for (const src of refSources) images.push({ label: `REFERENCE: ${path.basename(src)}`, ...(await toInlineImage(src, { maxEdge: 1400 })) });
@@ -22,12 +22,13 @@ export async function verify({ character, candidate, refSources, model, apiKey }
   // hard-edged composite beard that was obvious at full size.
   images.push({ label: "CANDIDATE:", ...(await toInlineImage(candidate, { maxEdge: 2000 })) });
 
+  const withBrief = Boolean(brief && Object.values(brief).some(Boolean));
   const raw =
     provider === "gemini"
-      ? await callGemini({ name, apiKey, instructions, images })
-      : await callOpenRouter({ name, apiKey, instructions, images });
+      ? await callGemini({ name, apiKey, instructions, images, withBrief })
+      : await callOpenRouter({ name, apiKey, instructions, images, withBrief });
 
-  return score(character, raw);
+  return score(character, raw, withBrief);
 }
 
 export function parseModel(model) {
@@ -36,7 +37,7 @@ export function parseModel(model) {
   return { provider: "openrouter", name: model };
 }
 
-function buildInstructions(character, refCount) {
+function buildInstructions(character, refCount, brief) {
   return [
     `You are a forensic likeness examiner. Your job is to catch impostors, not to confirm a brief.`,
     ``,
@@ -89,6 +90,41 @@ function buildInstructions(character, refCount) {
     `                   if that is all you can write, the score was 5. Empty string when the score is 5.`,
     ``,
     `Then set "same_person" to false if a stranger shown the references and the candidate side by side would say these are two different people.`,
+    ...(brief && Object.values(brief).some(Boolean)
+      ? [
+          ``,
+          `## DID IT OBEY THE BRIEF`,
+          ``,
+          `This render was asked for specific things that have nothing to do with whose face it is:`,
+          ``,
+          ...(brief.framing ? [`CAMERA AND CROP: ${brief.framing}`] : []),
+          ...(brief.expression ? [`EXPRESSION: ${brief.expression}`] : []),
+          ...(brief.wardrobe ? [`WARDROBE: ${brief.wardrobe}`] : []),
+          ``,
+          `Set "brief_followed" to false if the candidate departs from any line above.`,
+          ``,
+          `Judge only those lines. A render can be a flawless likeness and still be the wrong shot, the wrong`,
+          `expression or the wrong clothes. These are the mistakes to catch:`,
+          `- A rear view delivered with the body facing the camera and only the head turned. If the brief says the`,
+          `  camera is behind him, you must be looking at his back.`,
+          `- A full-length asked for and delivered as a head-and-shoulders, or the reverse.`,
+          `- An expression that is really a different one. A serious face and a closed-mouth half-smile are`,
+          `  different briefs, and a faint smile delivered for "serious" is a failure, not a near miss.`,
+          `- A garment drawn front-on over a body facing away. On a rear view you must see the BACK of the shirt:`,
+          `  a shoulder yoke and an unbroken panel. A button placket, an open shirt front or a chest pocket on a`,
+          `  back view means the model drew the front of the garment onto the back of the man. Fail it.`,
+          `- Clothing that drifts between renders: sleeves rolled in one and long in another, a missing watch,`,
+          `  a different shirt. The wardrobe line is exact.`,
+          ``,
+          `Judge the wardrobe ONLY on what this crop can show. The wardrobe line is written once for every`,
+          `shot in the set, so it names trousers, a watch and shoes even for a head-and-shoulders frame. An item`,
+          `the crop cannot reach is out of shot, not missing, and is NOT a failure. The framing decides what is`,
+          `in frame; the wardrobe only decides what those items look like when they are.`,
+          ``,
+          `Do not let a good likeness excuse any of these, and do not let any of these change a likeness score above.`,
+          `In "brief_note", name what you actually see and what was asked for. Empty string when it obeyed.`,
+        ]
+      : []),
     `Write "overall" as two or three sentences: what carries the likeness, and what breaks it.`,
     ``,
     `## THE ANCHORS`,
@@ -99,7 +135,8 @@ function buildInstructions(character, refCount) {
   ].join("\n");
 }
 
-const SCHEMA = {
+function buildSchema(withBrief) {
+  return {
   type: "object",
   additionalProperties: false,
   properties: {
@@ -120,11 +157,13 @@ const SCHEMA = {
     },
     overall: { type: "string" },
     same_person: { type: "boolean" },
+    ...(withBrief ? { brief_followed: { type: "boolean" }, brief_note: { type: "string" } } : {}),
   },
-  required: ["anchors", "overall", "same_person"],
-};
+  required: ["anchors", "overall", "same_person", ...(withBrief ? ["brief_followed", "brief_note"] : [])],
+  };
+}
 
-async function callOpenRouter({ name, apiKey, instructions, images }) {
+async function callOpenRouter({ name, apiKey, instructions, images, withBrief }) {
   const content = [{ type: "text", text: instructions }];
   for (const img of images) {
     content.push({ type: "text", text: img.label });
@@ -142,7 +181,7 @@ async function callOpenRouter({ name, apiKey, instructions, images }) {
       model: name,
       temperature: 0,
       messages: [{ role: "user", content }],
-      response_format: { type: "json_schema", json_schema: { name: "likeness", strict: true, schema: SCHEMA } },
+      response_format: { type: "json_schema", json_schema: { name: "likeness", strict: true, schema: buildSchema(withBrief) } },
     }),
   });
   if (!res.ok) throw new Error(`OpenRouter ${res.status}: ${(await res.text()).slice(0, 600)}`);
@@ -154,7 +193,7 @@ async function callOpenRouter({ name, apiKey, instructions, images }) {
 }
 
 /** Gemini wants its own OpenAPI-flavoured schema, and honours propertyOrdering. */
-function geminiSchema() {
+function geminiSchema(withBrief) {
   return {
     type: "OBJECT",
     properties: {
@@ -175,13 +214,14 @@ function geminiSchema() {
       },
       overall: { type: "STRING" },
       same_person: { type: "BOOLEAN" },
+      ...(withBrief ? { brief_followed: { type: "BOOLEAN" }, brief_note: { type: "STRING" } } : {}),
     },
-    required: ["anchors", "overall", "same_person"],
-    propertyOrdering: ["anchors", "overall", "same_person"],
+    required: ["anchors", "overall", "same_person", ...(withBrief ? ["brief_followed", "brief_note"] : [])],
+    propertyOrdering: ["anchors", "overall", "same_person", ...(withBrief ? ["brief_followed", "brief_note"] : [])],
   };
 }
 
-async function callGemini({ name, apiKey, instructions, images }) {
+async function callGemini({ name, apiKey, instructions, images, withBrief }) {
   const parts = [{ text: instructions }];
   for (const img of images) {
     parts.push({ text: img.label });
@@ -197,7 +237,7 @@ async function callGemini({ name, apiKey, instructions, images }) {
         generationConfig: {
           temperature: 0,
           responseMimeType: "application/json",
-          responseSchema: geminiSchema(),
+          responseSchema: geminiSchema(withBrief),
         },
       }),
     },
@@ -212,7 +252,7 @@ async function callGemini({ name, apiKey, instructions, images }) {
 const stripFence = (t) => t.trim().replace(/^```(?:json)?\s*/i, "").replace(/```$/, "").trim();
 
 /** Weighted mean over judgeable anchors, plus a hard floor on every critical anchor. */
-function score(character, report) {
+function score(character, report, withBrief = false) {
   const cfg = character.verification ?? {};
   const passScore = cfg.pass_score ?? 0.85;
   const criticalMin = cfg.critical_min ?? 4;
@@ -236,16 +276,33 @@ function score(character, report) {
   const ranked = rows
     .filter((r) => r.correction && r.score > 0 && r.score < 5)
     .sort((a, b) => b.weight * (5 - b.score) - a.weight * (5 - a.score));
-  const corrections = ranked.map((r) => r.correction);
-  const weakest = ranked.length ? { id: ranked[0].id, label: ranked[0].label, correction: ranked[0].correction } : null;
+  // A brief the render ignored is its own kind of failure, kept apart from the
+  // likeness score on purpose. Camera, expression and wardrobe all say nothing
+  // about whose face it is, so a render can be a flawless likeness of the right
+  // man in the wrong shot, wearing the wrong clothes, pulling the wrong face.
+  // Scoring the two together would let either one hide the other.
+  //
+  // It leads the corrections because only the first is fed back each round. A
+  // sharper beard on a shot pointing the wrong way is a wasted attempt.
+  const briefFailed = withBrief && report.brief_followed === false;
+  const briefNote = briefFailed ? report.brief_note || "The render departs from the camera, expression or wardrobe the shot asked for." : "";
+
+  const corrections = [...(briefFailed ? [briefNote] : []), ...ranked.map((r) => r.correction)];
+  const weakest = briefFailed
+    ? { id: "brief", label: "Camera, expression and wardrobe", correction: briefNote }
+    : ranked.length
+      ? { id: ranked[0].id, label: ranked[0].label, correction: ranked[0].correction }
+      : null;
 
   return {
     score: Number(normalized.toFixed(3)),
-    pass: normalized >= passScore && failures.length === 0 && report.same_person !== false,
+    pass: normalized >= passScore && failures.length === 0 && report.same_person !== false && !briefFailed,
     same_person: report.same_person,
     overall: report.overall,
     anchors: rows,
-    criticalFailures: failures.map((f) => f.id),
+    criticalFailures: [...failures.map((f) => f.id), ...(briefFailed ? ["brief"] : [])],
+    brief_followed: withBrief ? report.brief_followed !== false : undefined,
+    brief_note: briefNote,
     corrections,
     weakest,
   };
