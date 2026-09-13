@@ -1,3 +1,5 @@
+import { anchorsForScope } from "./pack.mjs";
+
 /**
  * Composes the prompt sent to the image model.
  *
@@ -12,7 +14,8 @@
  * stay the source of the likeness; the words only catch drift.
  */
 export function buildPrompt({ character, shot, corrections = [] }) {
-  const anchors = [...character.anchors].sort((a, b) => b.weight - a.weight);
+  const anchors = [...anchorsForScope(character, shot.scope)].sort((a, b) => b.weight - a.weight);
+  const criticalWeight = character.verification?.critical_weight ?? 3;
   const out = [];
 
   out.push(
@@ -42,7 +45,7 @@ export function buildPrompt({ character, shot, corrections = [] }) {
     ``,
   );
 
-  for (const a of anchors) out.push(`- ${a.check}${a.weight >= 3 ? "  (critical)" : ""}`);
+  for (const a of anchors) out.push(`- ${a.check}${a.weight >= criticalWeight ? "  (critical)" : ""}`);
   out.push(``);
 
   if (corrections.length) {
@@ -68,6 +71,7 @@ export function buildPrompt({ character, shot, corrections = [] }) {
  */
 export function buildSheetPrompt({ character, board, corrections = [] }) {
   const anchors = [...character.anchors].sort((a, b) => b.weight - a.weight);
+  const criticalWeight = character.verification?.critical_weight ?? 3;
   const out = [];
 
   out.push(
@@ -88,7 +92,7 @@ export function buildSheetPrompt({ character, board, corrections = [] }) {
     `## CHECK EVERY PANEL AGAINST THE PHOTOGRAPHS`,
     `These traits are the ones that drift. Each must match the attached photographs in every panel:`,
     ``,
-    ...anchors.map((a) => `- ${a.check}${a.weight >= 3 ? "  (critical)" : ""}`),
+    ...anchors.map((a) => `- ${a.check}${a.weight >= criticalWeight ? "  (critical)" : ""}`),
     ``,
     `## RENDER FINISH — PHOTOGRAPHIC, NOT ILLUSTRATED`,
     `Every panel is PHOTOREALISTIC. Render the man as photographs of a real person: real skin with pores and texture, real hair with individual strands, real fabric weave, real specular highlights, true photographic depth and tonality.`,
