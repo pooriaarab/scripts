@@ -397,16 +397,19 @@ add a second character.
 
 Everything lands in the pack's `out/` directory, or in the directory you pass to
 `--out`. `<ext>` comes from `output_format` in `shots.json`. The tool writes
-`jpeg` as `.jpg` and keeps every other format as it is.
+`jpeg` as `.jpg` and keeps every other format as it is. `<model>` is the second
+segment of the sheet model id, so the default `google/nano-banana-pro/edit`
+writes `character-sheet-nano-banana-pro.jpg`. Pass `--label` to name the sheet
+files yourself.
 
-| File                       | Contents                                                            |
-| -------------------------- | ------------------------------------------------------------------- |
-| `<shot>.attempt-<n>.<ext>` | One render per attempt, kept for comparison.                        |
-| `<shot>.<ext>`             | The best attempt, copied under the shot id.                         |
-| `<shot>.report.json`       | The scores, the observations and the corrections for every attempt. |
-| `character-sheet.jpg`      | The best model sheet.                                               |
-| `index.html`               | The contact sheet.                                                  |
-| `refs/`                    | A copy of the real photographs, for the contact sheet.              |
+| File                          | Contents                                                            |
+| ----------------------------- | ------------------------------------------------------------------- |
+| `<shot>.attempt-<n>.<ext>`    | One render per attempt, kept for comparison.                        |
+| `<shot>.<ext>`                | The best attempt, copied under the shot id.                         |
+| `<shot>.report.json`          | The scores, the observations and the corrections for every attempt. |
+| `character-sheet-<model>.jpg` | The best model sheet.                                               |
+| `index.html`                  | The contact sheet.                                                  |
+| `refs/`                       | A copy of the real photographs, for the contact sheet.              |
 
 The contact sheet is self-contained. Open it with a browser, or point `--web` at
 a directory your dev server already serves.
