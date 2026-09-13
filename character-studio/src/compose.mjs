@@ -21,7 +21,14 @@ export async function compose({ pack, outDir, apiKey, only, force, log = () => {
   const spec = JSON.parse(await readFile(path.join(pack.dir, "sheet-panels.json"), "utf8"));
   await mkdir(outDir, { recursive: true });
 
-  const groups = only ? spec.groups.filter((g) => only.includes(g.id)) : spec.groups;
+  // --only takes a group id or a panel id. Panel ids matter because a group
+  // renders in sequence, so a six-panel group is a six-panel queue however many
+  // cores are idle. Naming panels lets one process per panel run at once.
+  const groups = only
+    ? spec.groups
+        .filter((g) => only.includes(g.id) || g.panels.some((p) => only.includes(p.id)))
+        .map((g) => (only.includes(g.id) ? g : { ...g, panels: g.panels.filter((p) => only.includes(p.id)) }))
+    : spec.groups;
   const total = groups.reduce((n, g) => n + g.panels.length, 0);
   log(`composing ${total} panels across ${groups.length} groups\n`);
 
@@ -32,7 +39,11 @@ export async function compose({ pack, outDir, apiKey, only, force, log = () => {
       done++;
       const shot = { ...spec.defaults, ...panel, group: `sheet-${group.id}` };
       const reportFile = path.join(outDir, `${shot.id}.report.json`);
-      if (existsSync(reportFile) && !only && !force) {
+      // Resume is independent of --only. Group filtering exists so several
+      // groups can render at once in separate processes, and a filtered run
+      // that re-rendered work already passed would make that parallelism cost
+      // more than it saves. --force is the way to redo a passing panel.
+      if (existsSync(reportFile) && !force) {
         const prev = JSON.parse(await readFile(reportFile, "utf8"));
         if (prev.passed) { log(`  [${done}/${total}] ${panel.id} — already passed, skipping`); continue; }
       }

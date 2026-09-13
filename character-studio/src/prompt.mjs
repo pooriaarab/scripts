@@ -1,4 +1,4 @@
-import { anchorsForScope } from "./pack.mjs";
+import { anchorsForShot } from "./pack.mjs";
 
 /**
  * Composes the prompt sent to the image model.
@@ -14,7 +14,12 @@ import { anchorsForScope } from "./pack.mjs";
  * stay the source of the likeness; the words only catch drift.
  */
 export function buildPrompt({ character, shot, corrections = [] }) {
-  const anchors = [...anchorsForScope(character, shot.scope)].sort((a, b) => b.weight - a.weight);
+  // The shot's own expression wins over the expression anchor. The anchor
+  // describes his habitual face — "closed-mouth asymmetric half-smile" — which
+  // is the right thing to hold in a portrait and flatly wrong in a panel asking
+  // for neutral or serious. Leaving both in the prompt made the model split the
+  // difference, and every expression panel came back as the same faint smile.
+  const anchors = [...anchorsForShot(character, shot)].sort((a, b) => b.weight - a.weight);
   const criticalWeight = character.verification?.critical_weight ?? 3;
   const out = [];
 
@@ -28,6 +33,11 @@ export function buildPrompt({ character, shot, corrections = [] }) {
     `Change only the scene, the pose, the wardrobe and the light, as specified here:`,
     ``,
     `Framing: ${shot.framing}`,
+    // The wardrobe is written once for the whole pack, so it names chinos, a
+    // watch and shoes. On a head-and-shoulders panel that contradicts the crop,
+    // and the model resolved the contradiction by pulling the camera back and
+    // rendering the whole body. Saying which instruction wins costs one line.
+    `The framing is the final word on what is in frame. Wardrobe items the crop cannot reach — shoes, trousers, a watch — are simply out of shot. Do NOT widen the shot to include them.`,
     `Scene: ${shot.scene}`,
     `Wardrobe: ${shot.wardrobe}`,
     `Expression: ${shot.expression}`,
