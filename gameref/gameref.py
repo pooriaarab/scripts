@@ -333,7 +333,11 @@ def dedupe(args) -> None:
     )
     print(f"clustering {len(items)} names")
     r = call(token(), [{"text": prompt}], schema)
-    clusters = json.loads(r["candidates"][0]["content"]["parts"][0]["text"])["clusters"]
+    try:
+        clusters = json.loads(r["candidates"][0]["content"]["parts"][0]["text"])["clusters"]
+    except (KeyError, IndexError, json.JSONDecodeError) as e:
+        print(f"  unparseable response: {e}, carrying all names through unclustered", file=sys.stderr)
+        clusters = []
 
     by_name = {e["name"]: e for e in items}
     out = []
