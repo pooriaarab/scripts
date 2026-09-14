@@ -19,9 +19,9 @@ what a program can enforce.
 Everything below is that sentence, made checkable.
 
 - **One sentence.** The repo says what it is in one sentence. The same sentence
-  appears in the GitHub About panel and as the first line of the README. Two
-  different sentences describe two different products, and the reader believes
-  the one you did not mean.
+  appears in the GitHub About panel and as the pitch in the README's front door,
+  directly under the title. Two different sentences describe two different
+  products, and the reader believes the one you did not mean.
 - **One command.** There is one supported way to install or run it, and it sits
   in the first screen. Four alternatives are not generosity. They are a reader
   deciding which of your four paths is the one you actually test.
@@ -45,6 +45,12 @@ Everything above the first `##`, in this order.
 
 Then the first `##`, which is `Contents` or `Install`.
 
+**A kind's deltas beat this list.** An infrastructure repo carries no banner, no
+pitch and no badges past CI, and a private repo carries no language switcher.
+Those are not exceptions to be argued; they are stated under
+[The kinds](#the-kinds) and [What private repos do differently](#what-private-repos-do-differently),
+and they win.
+
 **Proof is the part most READMEs miss.** It is a screenshot of the product
 working, a terminal capture of the real command and its real output, or a
 benchmark chart with a caption. It sits above the first heading, before the
@@ -65,6 +71,8 @@ Serve a hero image in both themes, or it disappears for half your readers:
       <source media="(prefers-color-scheme: dark)" srcset="assets/hero-dark.png"/>
       <img src="assets/hero-light.png" alt="Search results, ranked by score" width="900"/>
     </picture>
+
+A whole front door, in order:
 
     <p align="center">
       <img src="assets/banner.png" alt="Two terminals sharing one cursor" width="900"/>
@@ -124,6 +132,9 @@ star count is not a claim about the software.
 **A dynamic badge pointed at a private repo renders a lie.** Verified
 2026-09-14:
 
+    $ gh api repos/pooriaarab/offrouter --jq .visibility
+    private
+
     $ curl -s "https://img.shields.io/github/v/release/pooriaarab/offrouter" | grep -o '<title>[^<]*</title>'
     <title>release: no releases or repo not found</title>
 
@@ -139,6 +150,8 @@ Required, in this order. A kind may add sections. No kind may reorder these.
     <front door>
 
     ## Contents
+    Optional. Only once the README passes 200 lines. When present it sits here,
+    between the front door and Install, and nowhere else.
 
     ## Install
     The one supported way, as a single code block. No prose between the reader
@@ -421,7 +434,7 @@ each for a stated reason:
 |---|---|
 | Static badges, or none | A dynamic badge cannot authenticate and renders "repo not found". Shields will not take a token, and a token in a badge URL is a leaked token. |
 | No translations | The audience is one person. |
-| No social preview | GitHub does not share a private repo's card, so the upload changes nothing. |
+| No social preview | GitHub does not serve a private repo's card to the places a preview is for, so the upload cannot reach the audience it exists for. |
 | No banner required | Identity is not the job. Operability is. |
 
 One thing does not relax and surprises people: **topic names on a private repo
