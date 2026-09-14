@@ -19,6 +19,7 @@ import {
   hasUiDiff,
   uiDiffFiles,
   isCommittedProofMedia,
+  isReleasePromotion,
   isUiFile,
   loadConfig,
   matchesGlob,
@@ -2535,4 +2536,140 @@ test('splitBlobLines drops the phantom line a trailing newline would add', () =>
   assert.deepEqual(splitBlobLines('alpha\nbeta'), ['alpha', 'beta']);
   assert.deepEqual(splitBlobLines(''), []);
   assert.deepEqual(splitBlobLines('\n'), ['']);
+});
+
+// The promotion tests below share their scaffolding: no gh on PATH, a token, a
+// repository that is not the local checkout, and a captured stdout. Written out
+// once per test that is more boilerplate than test. Routes are matched in the
+// order they are declared, so a caller lists `pulls/N/commits` before `pulls/N`.
+async function runPrWithRoutes(number, routes) {
+  const originalWrite = process.stdout.write;
+  const originalPath = process.env.PATH;
+  const originalToken = process.env.GITHUB_TOKEN;
+  const originalFetch = globalThis.fetch;
+  let output = '';
+  process.stdout.write = (chunk) => { output += chunk; return true; };
+  process.env.PATH = '';
+  process.env.GITHUB_TOKEN = 'test-token';
+  process.env.GITHUB_REPOSITORY = 'other/repo';
+  globalThis.fetch = async (url) => {
+    for (const [fragment, body] of Object.entries(routes)) {
+      if (url.includes(fragment)) return { ok: true, json: async () => body };
+    }
+    throw new Error(`Unexpected fetch URL: ${url}`);
+  };
+  try {
+    const exitCode = await main(['pr', '--repo', 'test/repo', '--number', String(number), '--json']);
+    return { exitCode, result: JSON.parse(output) };
+  } finally {
+    process.stdout.write = originalWrite;
+    process.env.PATH = originalPath;
+    process.env.GITHUB_TOKEN = originalToken;
+    globalThis.fetch = originalFetch;
+    delete process.env.GITHUB_REPOSITORY;
+  }
+}
+
+// 792 counted lines over a 500 cap: the exact shape of
+// pooriaarab/pooriaarab.com#271, which had no route to green.
+function promotionRoutes(number, { head, base, title, commitMessage } = {}) {
+  return {
+    'contents/.github/pr-standards.json': {
+      encoding: 'base64',
+      content: Buffer.from(JSON.stringify({ prefix: 'pc' })).toString('base64'),
+    },
+    [`pulls/${number}/commits`]: [{ sha: 'abc1234', commit: { message: commitMessage || 'Remove the character studio route (#267)' } }],
+    [`pulls/${number}/files`]: [{ filename: 'apps/website/app/page.tsx', additions: 700, deletions: 92 }],
+    '/compare/': { behind_by: 0, merge_base_commit: { sha: '1234567' } },
+    [`pulls/${number}`]: {
+      head: { ref: head || 'main', sha: 'deadbee', repo: { full_name: 'test/repo' } },
+      base: { ref: base || 'release', repo: { full_name: 'test/repo', default_branch: 'main' } },
+      title: title || 'Promote main to release',
+      body: 'Promotes the merged work to release.',
+    },
+  };
+}
+
+test('a release promotion is decided by the refs, not by anything the author writes', () => {
+  const promotion = {
+    head: { ref: 'main', repo: { full_name: 'pooriaarab/pooriaarab.com' } },
+    base: { ref: 'release', repo: { full_name: 'pooriaarab/pooriaarab.com', default_branch: 'main' } },
+  };
+  assert.equal(isReleasePromotion(promotion), true);
+
+  // A fork's default branch is called `main` too, and holds whatever its owner
+  // put there. Same ref name, unreviewed code.
+  assert.equal(isReleasePromotion({
+    ...promotion,
+    head: { ref: 'main', repo: { full_name: 'someone-else/pooriaarab.com' } },
+  }), false);
+
+  // The ordinary pull request the cap exists to bound.
+  assert.equal(isReleasePromotion({
+    head: { ref: 'pc-270-remove-the-route', repo: { full_name: 'a/b' } },
+    base: { ref: 'main', repo: { full_name: 'a/b', default_branch: 'main' } },
+  }), false);
+
+  // The default branch into itself is not a promotion either.
+  assert.equal(isReleasePromotion({
+    head: { ref: 'main', repo: { full_name: 'a/b' } },
+    base: { ref: 'main', repo: { full_name: 'a/b', default_branch: 'main' } },
+  }), false);
+
+  // A response missing the repo objects -- a deleted fork sends `repo: null` --
+  // must read as "not a promotion", never as "the fields matched".
+  assert.equal(isReleasePromotion({ head: { ref: 'main' }, base: { ref: 'release' } }), false);
+  assert.equal(isReleasePromotion({
+    ...promotion,
+    head: { ref: 'main', repo: null },
+  }), false);
+  assert.equal(isReleasePromotion(undefined), false);
+});
+
+test('a release promotion over the cap passes, and says so out loud', async () => {
+  const { exitCode, result } = await runPrWithRoutes(30, promotionRoutes(30));
+
+  assert.equal(result.failures.some((f) => f.check === 'PR size'), false);
+  assert.equal(exitCode, 0);
+  assert.equal(result.size.countedLines, 792);
+  const warning = result.warnings.find((w) => w.check === 'release promotion: size cap not applied');
+  assert.notEqual(warning, undefined, 'a skipped cap that prints nothing cannot be audited');
+  assert.match(warning.got, /792 counted lines/);
+});
+
+test('an ordinary pull request over the cap still fails, promotion or not', async () => {
+  // Same repository, same diff, same size. Only the refs differ, which is the
+  // whole of the exemption.
+  const { exitCode, result } = await runPrWithRoutes(31, promotionRoutes(31, { head: 'refactor', base: 'main' }));
+
+  assert.equal(exitCode, 1);
+  const size = result.failures.find((f) => f.check === 'PR size');
+  assert.notEqual(size, undefined);
+  assert.match(size.got, /792 counted lines/);
+  assert.equal(result.warnings.some((w) => w.check === 'release promotion: size cap not applied'), false);
+});
+
+test('a release promotion still fails every rule but the line cap', async () => {
+  const { exitCode, result } = await runPrWithRoutes(32, promotionRoutes(32, {
+    commitMessage: 'Promote to release\n\nCo-authored-by: Claude <noreply@anthropic.com>',
+  }));
+
+  assert.equal(exitCode, 1);
+  assert.equal(result.failures.some((f) => f.check === 'AI attribution in abc1234'), true);
+  assert.equal(result.failures.some((f) => f.check === 'PR size'), false);
+});
+
+test('a promotion from a default branch that is not named main still fails a bad title', async () => {
+  // The exemption keys on the repository's default branch, not on the string
+  // `main`, so a repository on `trunk` gets it -- and `trunk` is not on the
+  // exempt-branch list, so this promotion still owes a title and a body.
+  const routes = promotionRoutes(33, { title: 'Updated the release branch' });
+  routes['pulls/33'].head.ref = 'trunk';
+  routes['pulls/33'].base.repo.default_branch = 'trunk';
+
+  const { exitCode, result } = await runPrWithRoutes(33, routes);
+
+  assert.equal(exitCode, 1);
+  assert.equal(result.failures.some((f) => f.check.startsWith('PR title')), true);
+  assert.equal(result.failures.some((f) => f.check === 'PR size'), false);
 });

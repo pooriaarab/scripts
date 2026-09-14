@@ -2095,6 +2095,42 @@ async function fetchRemoteConfig(repo, repoName, ref) {
   return { config, provenance };
 }
 
+// A release promotion merges the repository's default branch into a long-lived
+// branch such as `release`. Its diff is not new work: it is every pull request
+// merged since the last promotion, added together, and each of those already
+// passed the size cap under its own issue and its own review. Counting those
+// lines a second time measures the wrong thing, and it leaves no route at all
+// -- `release` is protected, so a direct push is refused, a pull request is the
+// only way in, and the cap fails it. pooriaarab/pooriaarab.com#271 sat there at
+// 792 counted lines with nothing to split.
+//
+// Every term below comes from GitHub's response for the pull request, not from
+// anything the author writes. A title, a body or a label is author-controlled
+// text; where the branches actually point is not. That is what stops this from
+// becoming the label escape this standard deleted: there is no way to ask for
+// it, and no field in a pull request body that turns it on.
+//
+//   - the head ref is the repository's own default branch, so every line in the
+//     diff is already merged and already reviewed;
+//   - the head repository is the base repository, because a fork's default
+//     branch is also called `main` and holds whatever its owner put there;
+//   - the base ref is not the default branch, so the ordinary main-bound pull
+//     request that the cap exists to bound is untouched.
+//
+// Not required: that every commit in the diff is a merge commit. That is what a
+// promotion looks like in a repository that merges with merge commits, and this
+// fleet squash-merges -- the commits #271 carried are squashes with one parent
+// each. The stricter test would never fire here, so it would read as a
+// safeguard while doing nothing, which is worse than not writing it.
+export function isReleasePromotion(pull) {
+  const defaultBranch = pull?.base?.repo?.default_branch;
+  const headRepo = pull?.head?.repo?.full_name;
+  const baseRepo = pull?.base?.repo?.full_name;
+  if (!defaultBranch || !headRepo || !baseRepo) return false;
+  if (headRepo !== baseRepo) return false;
+  return pull?.head?.ref === defaultBranch && pull?.base?.ref !== defaultBranch;
+}
+
 async function runPr(options) {
   if (options.positional.length > 0 || options.branch || options.title || options.prefix) throw new ConfigurationError('pr accepts --repo and --number only');
   if (!options.repo || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(options.repo)) throw new ConfigurationError('pr requires --repo owner/name');
@@ -2195,7 +2231,29 @@ async function runPr(options) {
     if (proofResult.failures.length === 0) passes.push('proof of work');
   }
   const sizeResult = checkSize(summary, config);
-  failures.push(...sizeResult.failures);
+  // Only the line cap is lifted, and only for a promotion. checkSize stays a
+  // pure function of the diff and the config: it is the wrong place to teach
+  // about pull requests, and its arity is guarded precisely so a third input
+  // cannot quietly become the next escape hatch. The exemption therefore lives
+  // here, where the refs are, and drops the one failure it is allowed to drop.
+  // The file cap, the empty-diff check and the directory warning all stay --
+  // only the line cap has ever deadlocked a promotion, and an exemption wider
+  // than the evidence for it is how the last escape hatch got out of hand.
+  const promotion = isReleasePromotion(pull);
+  for (const item of sizeResult.failures) {
+    if (promotion && item.check === 'PR size') {
+      // Never silent. A skipped cap that prints nothing is a hole nobody can
+      // audit, so the run still names the number it would have failed on.
+      warnings.push(fail(
+        'release promotion: size cap not applied',
+        item.got,
+        `${config.maxLines.toLocaleString()} counted lines or fewer for ordinary work`,
+        `Every line here is already merged into ${pull.base.repo.default_branch}, each under its own issue and its own review. The cap applies to the pull requests that put it there, not to the promotion that ships them.`,
+      ));
+      continue;
+    }
+    failures.push(item);
+  }
   warnings.push(...sizeResult.warnings);
   const baseAgeResult = await checkRemoteBaseBranchAge(options.repo, pull, files, config);
   failures.push(...baseAgeResult.failures);
