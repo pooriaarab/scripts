@@ -2659,6 +2659,41 @@ test('a release promotion still fails every rule but the line cap', async () => 
   assert.equal(result.failures.some((f) => f.check === 'PR size'), false);
 });
 
+test('a submodule bump under an excluded path counts, vendored source does not', () => {
+  const bump = [{
+    filename: 'vendor/public-skills',
+    additions: 1,
+    deletions: 1,
+    status: 'modified',
+    patch: '@@ -1 +1 @@\n-Subproject commit a5aceef295ad860c11ee8a61a0d610fa16ba84fa\n+Subproject commit 1707b9f1f0cfb5d82f64b079ce2b225cdc80fac4',
+  }];
+  const bumped = summarizeFiles(bump);
+  assert.equal(bumped.countedFiles, 1, 'a gitlink is the whole change in a bump PR');
+  assert.equal(bumped.countedLines, 2);
+
+  const vendored = summarizeFiles([{
+    filename: 'vendor/public-skills/lib/thing.js',
+    additions: 40,
+    deletions: 3,
+    status: 'modified',
+    patch: '@@ -1 +1 @@\n-old\n+new',
+  }]);
+  assert.equal(vendored.countedFiles, 0, 'vendored source stays excluded');
+  assert.equal(vendored.countedLines, 0);
+});
+
+test('a forged submodule marker next to a real edit does not exempt the file', () => {
+  const smuggled = summarizeFiles([{
+    filename: 'vendor/public-skills/lib/thing.js',
+    additions: 2,
+    deletions: 1,
+    status: 'modified',
+    patch: '@@ -1,2 +1,2 @@\n-old\n+new\n+Subproject commit 1707b9f1f0cfb5d82f64b079ce2b225cdc80fac4',
+  }]);
+  assert.equal(smuggled.countedFiles, 0, 'one forged marker line must not exempt a file with real edits');
+  assert.equal(smuggled.countedLines, 0);
+});
+
 test('a promotion from a default branch that is not named main still fails a bad title', async () => {
   // The exemption keys on the repository's default branch, not on the string
   // `main`, so a repository on `trunk` gets it -- and `trunk` is not on the
