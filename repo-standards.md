@@ -314,9 +314,10 @@ Three fields. All three are set by API, so none of them has an excuse.
       --add-topic <topic> --add-topic <topic>
 
 - **Description.** The pitch, character for character. Required.
-- **Homepage.** The live URL when one exists. An empty string is not neutral:
-  it renders identically to having no site, so nobody notices it is wrong. Two
-  public repos carried an empty homepage on 2026-09-14 while both were live.
+- **Homepage.** The live URL when one exists. Set it or leave it null. Two
+  public repos carried an empty string instead on 2026-09-14, which the UI
+  renders identically to never having set one, so there is nothing to notice
+  and nothing to fix by hand later.
 - **Topics.** Four to twelve. On 2026-09-14, 29 of 33 public repos had none.
   For a repo with no stars, topics are the only discovery surface GitHub gives
   you, and they cost one command.
