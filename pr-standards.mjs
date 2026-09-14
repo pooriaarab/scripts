@@ -1230,9 +1230,16 @@ export function countMovedLines(files) {
 // GitHub reports a submodule bump as a one-line patch whose body is the literal
 // `Subproject commit <sha>`. That marker is how a gitlink is told apart from a
 // vendored file living at the same path, without guessing from the name.
+//
+// Every changed line must match, not just one: a single matching line would
+// let a real edit to a vendored file smuggle itself past the exclusion by
+// adding one throwaway `Subproject commit <hex>` line alongside the actual
+// change, since the whole file is exempted once any line matches.
 function isSubmoduleChange(file) {
   const patch = String(file.patch || '');
-  return /^[-+]Subproject commit [0-9a-f]{7,40}\s*$/m.test(patch);
+  const changedLines = patch.split('\n').filter((line) => line.startsWith('+') || line.startsWith('-'));
+  return changedLines.length > 0
+    && changedLines.every((line) => /^[-+]Subproject commit [0-9a-f]{7,40}\s*$/.test(line));
 }
 
 export function summarizeFiles(files, config = DEFAULT_CONFIG) {
