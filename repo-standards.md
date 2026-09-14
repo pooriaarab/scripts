@@ -35,7 +35,9 @@ Everything below is that sentence, made checkable.
 
 Everything above the first `##`, in this order.
 
-1. **Banner**, centred, with alt text.
+1. **Title.** A banner image, centred, with alt text. Or an `# H1` carrying the
+   repo name, when there is no banner. Never both: a logo above the repo's own
+   name in text is the name twice.
 2. **Pitch**, centred, one sentence, no heading.
 3. **Badges**, centred, one row.
 4. **Language switcher**, centred. Public repos with translations only.
@@ -158,7 +160,9 @@ Required, in this order. A kind may add sections. No kind may reorder these.
     The shape of the thing, for a reader deciding whether to trust it.
 
     ## Contributing
-    One line and a link. The file itself is inherited; see below.
+    One line and a link. The file is inherited, so the link points at
+    pooriaarab/.github, never at a relative CONTRIBUTING.md. That file is not
+    in the repo and the relative link 404s.
 
     ## License
     One line. The SPDX name and a link to the file.
