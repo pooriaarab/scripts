@@ -262,11 +262,14 @@ requested in a body, and it leaves a record.
 head is the repository's own default branch, in the same repository, aimed at
 any other branch, skips the line cap only. Its diff is every pull request merged
 since the last promotion, added together, and each of those already passed the
-cap. The file cap, the empty-diff check and the directory warning still apply,
-as do the branch, commit, title, body and proof rules. This is not a request an
-author can make: the checker reads the head and base refs from GitHub, and the
-run prints a `WARN release promotion: size cap not applied` line with the number
-it would have failed on.
+cap. The file cap, the empty-diff check, the directory warning and the commit
+rule still apply. So does the branch rule, on the same terms as any other pull
+request: the common case, a default branch already on the exempt list above
+(`main`), was never checked for title, body or proof either, promotion or not;
+a repository whose default branch is not on that list still owes a real title
+and body. This is not a request an author can make: the checker reads the head
+and base refs from GitHub, and the run prints a `WARN release promotion: size
+cap not applied` line with the number it would have failed on.
 
 **So open a promotion from the default branch itself:** `gh pr create --base
 release --head main`. Cutting a named branch off `release`, merging `main` into
