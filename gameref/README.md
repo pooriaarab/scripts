@@ -19,10 +19,23 @@ gameref search "Overcooked 2 gameplay walkthrough" \
 gameref analyse videos.json --limit 34 --clip-seconds 600
 
 gameref merge reports --out mechanics.json
+gameref dedupe mechanics.json --out mechanics-deduped.json
 ```
 
-`merge` prints a table sorted by how many videos saw each mechanic. That column
-is the point: it separates a quirk of one level from a rule of the genre.
+`merge` groups on the exact name, then `dedupe` clusters the names that mean the
+same thing. Both stages exist because the first is not enough: across 31 videos
+one dash arrived as `dash`, `dash-burst`, `dash-boost` and `chef-dash`, and each
+looked like an independent finding.
+
+That matters beyond tidiness. The count of how many videos saw a mechanic is the
+output you act on, and splitting one mechanic across four names understates every
+one of them. On a real run dedupe took 239 names down to 100 mechanics and moved
+dish washing from an apparent 8 sightings to its true 25, which is the difference
+between a detail and the most-attested mechanic in the genre.
+
+`dedupe` sends only the names and one description each, never the whole corpus,
+and carries through any name the model failed to place rather than letting the
+clustering step quietly shrink the findings.
 
 ## Output
 
