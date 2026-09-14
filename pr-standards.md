@@ -258,6 +258,28 @@ One escape remains, and it is deliberately awkward: a person merges past a red
 check. That takes an act by a human on a named pull request. It cannot be
 requested in a body, and it leaves a record.
 
+**A release promotion does not pay the line cap twice.** A pull request whose
+head is the repository's own default branch, in the same repository, aimed at
+any other branch, skips the line cap only. Its diff is every pull request merged
+since the last promotion, added together, and each of those already passed the
+cap. The file cap, the empty-diff check, the directory warning and the commit
+rule still apply. So does the branch rule, on the same terms as any other pull
+request: the common case, a default branch already on the exempt list above
+(`main`), was never checked for title, body or proof either, promotion or not;
+a repository whose default branch is not on that list still owes a real title
+and body. This is not a request an author can make: the checker reads the head
+and base refs from GitHub, and the run prints a `WARN release promotion: size
+cap not applied` line with the number it would have failed on.
+
+**So open a promotion from the default branch itself:** `gh pr create --base
+release --head main`. Cutting a named branch off `release`, merging `main` into
+it and aiming that at `release` promotes the same commits, but it is not a
+promotion by this test and does not get the exemption. The test cannot use the
+commits, because a branch-shaped promotion is a shape an author can build, and
+a merge commit can carry hand-written conflict resolutions that nobody reviewed.
+Where the head ref points is not a shape anyone can build: reaching the default
+branch already costs a pull request each time.
+
 **Atomic means one concern.** The mechanical proxies above catch the obvious
 cases. Whether a PR really does one thing is a judgement, and that judgement
 belongs to the review council, see the scope lens in `vibecodereview`.
