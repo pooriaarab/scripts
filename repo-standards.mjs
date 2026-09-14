@@ -74,7 +74,7 @@ function headings(text) {
   for (let i = 0; i < lines.length; i += 1) {
     if (/^\s*(```|~~~)/.test(lines[i])) { fence = !fence; continue; }
     if (fence) continue;
-    const m = /^(#{1,6})\s+(.+?)\s*$/.exec(lines[i]);
+    const m = /^(#{1,6})\s+(.+)$/.exec(lines[i]);
     if (m) out.push({ level: m[1].length, text: m[2].trim(), line: i + 1 });
   }
   return out;
