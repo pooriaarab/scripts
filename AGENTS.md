@@ -94,7 +94,7 @@ Install command lives in `.cursor/environment.json`. After dashboard setup:
 ### Verify before PR
 
 ```bash
-export PATH="$PWD:$PATH" && node --test pr-standards.test.mjs assisted-by.test.mjs && ./hooks/pr-standards-guard.test.sh && python3 build-repo-prefixes.test.py && python3 worker-preview-provision.test.py && python3 worker-preview-access.test.py && python3 install-pr-hooks.test.py && ./adopt-branch-pattern.test.sh && ./pr-standards-rollout-labels.test.sh && ./fleet-ci-census.test.sh && ./append-point-scan.test.sh && ./merge-hotspots.test.sh
+export PATH="$PATH:$PWD" && node --test pr-standards.test.mjs assisted-by.test.mjs && ./hooks/pr-standards-guard.test.sh && python3 build-repo-prefixes.test.py && python3 worker-preview-provision.test.py && python3 worker-preview-access.test.py && python3 install-pr-hooks.test.py && ./adopt-branch-pattern.test.sh && ./pr-standards-rollout-labels.test.sh && ./fleet-ci-census.test.sh && ./append-point-scan.test.sh && ./merge-hotspots.test.sh
 ```
 
 ### Pull requests
