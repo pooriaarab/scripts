@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# Run a domain email warm-up from anywhere on the fleet.
+#
+# WHY THIS EXISTS
+# The warm-up toolkit itself lives with the `domain-email-warming` skill, not
+# here, because the skill and the tool it drives go stale the moment they live
+# in two places. This is a launcher, not a copy: it locates warmctl.mjs and
+# execs it, so `warm-domain report --config ...` works from any directory and
+# from a scheduler, without the caller knowing where the skill is checked out.
+#
+#   warm-domain <warmctl args...>
+#   warm-domain --where            print the resolved toolkit path and exit
+#
+# Override the search with WARM_DOMAIN_HOME.
+set -uo pipefail
+
+CANDIDATES=(
+  "${WARM_DOMAIN_HOME:-}"
+  "$HOME/.local/share/domain-email-warming"
+  "$HOME/Documents/Personal/skills/domain-email-warming"
+  "$HOME/.claude/skills/domain-email-warming"
+  "$HOME/.agents/skills/domain-email-warming"
+)
+
+TOOLKIT=""
+for c in "${CANDIDATES[@]}"; do
+  [ -n "$c" ] || continue
+  if [ -f "$c/scripts/warmctl.mjs" ]; then TOOLKIT="$c"; break; fi
+done
+
+if [ -z "$TOOLKIT" ]; then
+  echo "warm-domain: cannot find warmctl.mjs" >&2
+  echo "looked in:" >&2
+  for c in "${CANDIDATES[@]}"; do [ -n "$c" ] && echo "  $c" >&2; done
+  echo "Install the domain-email-warming skill, or set WARM_DOMAIN_HOME." >&2
+  exit 127
+fi
+
+if [ "${1:-}" = "--where" ]; then
+  echo "$TOOLKIT"
+  exit 0
+fi
+
+command -v node >/dev/null 2>&1 || { echo "warm-domain: node is not on PATH" >&2; exit 127; }
+
+exec node "$TOOLKIT/scripts/warmctl.mjs" "$@"
