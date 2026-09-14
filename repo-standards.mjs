@@ -129,32 +129,6 @@ function collectImages(text) {
   return images;
 }
 
-function collectHrefs(text) {
-  const hrefs = [];
-  for (const m of text.matchAll(/(?<!!)\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g)) {
-    hrefs.push({ href: m[2], text: m[1], line: lineAt(text, m.index) });
-  }
-  for (const m of text.matchAll(/\bhref\s*=\s*"([^"]+)"/gi)) hrefs.push({ href: m[1], text: '', line: lineAt(text, m.index) });
-  return hrefs;
-}
-
-function bashFences(text) {
-  const lines = String(text).replace(/\r\n/g, '\n').split('\n');
-  const fences = [];
-  let fence = null;
-  let body = [];
-  for (let i = 0; i < lines.length; i += 1) {
-    const opener = /^\s*(```|~~~)\s*(\S*)/.exec(lines[i]);
-    if (fence) {
-      if (opener && !opener[2]) { fences.push({ lang: fence.lang, line: fence.line, body: body.join('\n') }); fence = null; body = []; }
-      else body.push(lines[i]);
-      continue;
-    }
-    if (opener && opener[2]) fence = { lang: opener[2].toLowerCase(), line: i + 1 };
-  }
-  return fences;
-}
-
 export function lintReadme(readmePath, options = {}) {
   const findings = [];
   const readme = path.resolve(readmePath);
@@ -193,9 +167,7 @@ export function lintReadme(readmePath, options = {}) {
       roles.push({ role, line: block.line, block });
     } else if (role !== 'other') roles.push({ role, line: block.line, block });
   }
-  const hasRole = (role) => roles.some((r) => r.role === role);
   const pitchBlock = roles.find((r) => r.role === 'pitch');
-  const applyKind = !sharedOnly && kind !== 'unknown';
 
   if (!infra) {
     if (state.h1 && state.banner) add(findings, 'front-door-9', 'error', 1, 'A banner and an H1 both name the repo. Use one.');
