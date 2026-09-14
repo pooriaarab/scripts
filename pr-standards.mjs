@@ -1227,6 +1227,21 @@ export function countMovedLines(files) {
   return { moved, complete: true };
 }
 
+// GitHub reports a submodule bump as a one-line patch whose body is the literal
+// `Subproject commit <sha>`. That marker is how a gitlink is told apart from a
+// vendored file living at the same path, without guessing from the name.
+//
+// Every changed line must match, not just one: a single matching line would
+// let a real edit to a vendored file smuggle itself past the exclusion by
+// adding one throwaway `Subproject commit <hex>` line alongside the actual
+// change, since the whole file is exempted once any line matches.
+function isSubmoduleChange(file) {
+  const patch = String(file.patch || '');
+  const changedLines = patch.split('\n').filter((line) => line.startsWith('+') || line.startsWith('-'));
+  return changedLines.length > 0
+    && changedLines.every((line) => /^[-+]Subproject commit [0-9a-f]{7,40}\s*$/.test(line));
+}
+
 export function summarizeFiles(files, config = DEFAULT_CONFIG) {
   let rawLines = 0;
   let countedLines = 0;
@@ -1241,7 +1256,13 @@ export function summarizeFiles(files, config = DEFAULT_CONFIG) {
     const lines = additions + deletions;
     const filename = String(file.filename || '');
     rawLines += lines;
-    if ((config.excludeGlobs || []).some((pattern) => matchesGlob(filename, pattern))) {
+    // A submodule pointer under an excluded path is not vendored source. It is a
+    // one-line decision about which upstream commit this repo depends on, and it
+    // is the whole change in a bump PR. Excluding it counted such a PR as an
+    // empty diff, which no amount of editing could fix: agents-private#367 moved
+    // vendor/public-skills and failed with 0 counted files on a real 1/1 diff.
+    if (!isSubmoduleChange(file)
+      && (config.excludeGlobs || []).some((pattern) => matchesGlob(filename, pattern))) {
       excludedLines += lines;
       excludedFiles += 1;
       continue;
