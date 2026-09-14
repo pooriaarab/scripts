@@ -12,7 +12,6 @@ export const BANNED_PITCH = [
   'powerful', 'seamless', 'robust', 'blazing', 'effortless', 'comprehensive', 'revolutionary',
 ];
 const ORDER = ['title', 'pitch', 'badges', 'switcher', 'proof'];
-const EMOJI_RE = /[\p{Extended_Pictographic}\p{Regional_Indicator}\uFE0F\u200D]/u;
 const BANNED_RE = new RegExp(`\\b(${BANNED_PITCH.join('|')})\\b`, 'i');
 
 export class ConfigurationError extends Error {
@@ -20,7 +19,6 @@ export class ConfigurationError extends Error {
 }
 
 const add = (out, rule, level, line, message) => { out.push({ rule, level, line, message }); };
-const norm = (text) => String(text).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 const strip = (text) => String(text).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
 const attr = (tag, name) => (new RegExp(`${name}\\s*=\\s*"([^"]*)"`, 'i').exec(tag)
   || new RegExp(`${name}\\s*=\\s*'([^']*)'`, 'i').exec(tag) || [])[1] || '';
