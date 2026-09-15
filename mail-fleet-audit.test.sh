@@ -31,6 +31,12 @@ case "$url" in
     ;;
 esac
 fix="${MAIL_FLEET_FIXTURE:?}"
+# Simulates a transport failure (a timeout) for one zone, which is different
+# from a 404: curl exits non-zero and writes no status at all.
+if [ -n "${MAIL_FLEET_FAIL_ZONE:-}" ] && case "$url" in *"/zones/$MAIL_FLEET_FAIL_ZONE/"*) true ;; *) false ;; esac; then
+  echo "curl: (28) Connection timed out" >&2
+  exit 28
+fi
 # path after the host, query stripped
 rest="${url#*://}"
 path="/${rest#*/}"
@@ -114,8 +120,6 @@ FIX1="$ROOT/missing-mx"
 setup_fix "$FIX1"
 envelope '[{"id":"z1","name":"popcornteam.org","status":"active"}]' > "$FIX1/zones.json"
 envelope '[{"name":"go.popcornteam.org","enabled":true}]' > "$FIX1/sending/z1.json"
-envelope '[{"enabled":true,"matchers":[{"type":"literal","field":"to","value":"hello@popcornteam.org"}],"actions":[{"type":"forward","value":["pooria@gmail.com"]}]}]' > "$FIX1/rules/z1.json"
-envelope '{"enabled":true,"matchers":[{"type":"all"}],"actions":[{"type":"drop"}]}' > "$FIX1/catch_all/z1.json"
 printf '10 route1.mx.cloudflare.net.\n20 route2.mx.cloudflare.net.\n' > "$FIX1/mx/popcornteam.org"
 # go.popcornteam.org has no mx file → no MX
 
@@ -136,7 +140,6 @@ FIX2="$ROOT/third-party"
 setup_fix "$FIX2"
 envelope '[{"id":"z2","name":"beeloud.xyz","status":"active"}]' > "$FIX2/zones.json"
 envelope '[]' > "$FIX2/sending/z2.json"
-envelope '[]' > "$FIX2/rules/z2.json"
 printf '10 mx.zoho.com.\n20 mx2.zoho.com.\n' > "$FIX2/mx/beeloud.xyz"
 
 out2=$(run_audit "$FIX2")
@@ -156,8 +159,6 @@ FIX3="$ROOT/healthy"
 setup_fix "$FIX3"
 envelope '[{"id":"z3","name":"healthy.test","status":"active"}]' > "$FIX3/zones.json"
 envelope '[{"name":"mail.healthy.test","enabled":true}]' > "$FIX3/sending/z3.json"
-envelope '[{"enabled":true,"matchers":[{"type":"literal","field":"to","value":"hello@healthy.test"}],"actions":[{"type":"forward","value":["inbox@healthy.test"]}]}]' > "$FIX3/rules/z3.json"
-envelope '{"enabled":true,"matchers":[{"type":"all"}],"actions":[{"type":"forward","value":["catch@healthy.test"]}]}' > "$FIX3/catch_all/z3.json"
 printf '10 route1.mx.cloudflare.net.\n' > "$FIX3/mx/healthy.test"
 printf '10 route1.mx.cloudflare.net.\n' > "$FIX3/mx/mail.healthy.test"
 
@@ -172,6 +173,32 @@ case "$out3" in
   *FAULTS*) bad "healthy fleet listed FAULTS: $out3" ;;
   *ok:\ every\ sending\ host\ can\ receive*) ok "healthy fleet prints the ok line" ;;
   *) bad "healthy fleet missing ok line: $out3" ;;
+esac
+
+# --- 4. a zone that cannot be read is a fault, never a clean pass ----------
+# An audit that could not look must not report "nothing wrong". Omitting the
+# sending fixture makes the stub fail that one request, which is what a real
+# timeout looks like to the script.
+FIX4="$ROOT/unreadable"
+setup_fix "$FIX4"
+envelope '[{"id":"z4","name":"opaque.test","status":"active"},{"id":"z5","name":"fine.test","status":"active"}]' > "$FIX4/zones.json"
+# MAIL_FLEET_FAIL_ZONE makes every z4 request time out at the transport
+# layer, which is what a real slow zone looks like to the script.
+envelope '[]' > "$FIX4/sending/z4.json"
+envelope '[]' > "$FIX4/sending/z5.json"
+printf '10 route1.mx.cloudflare.net.\n' > "$FIX4/mx/opaque.test"
+printf '10 route1.mx.cloudflare.net.\n' > "$FIX4/mx/fine.test"
+
+out4=$(MAIL_FLEET_FAIL_ZONE=z4 run_audit "$FIX4")
+st4=$?
+[ $st4 -ne 0 ] && ok "unreadable zone exits non-zero" || bad "unreadable zone exited 0: $out4"
+case "$out4" in
+  *COULD\ NOT\ AUDIT*) ok "unreadable zone is named in the report" ;;
+  *) bad "unreadable zone not reported: $out4" ;;
+esac
+case "$out4" in
+  *fine.test*) ok "a later zone is still audited after an unreadable one" ;;
+  *) bad "audit stopped at the unreadable zone: $out4" ;;
 esac
 
 echo
