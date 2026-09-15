@@ -16,12 +16,12 @@
 #
 #   mail-fleet-audit
 #
-# Per domain it prints apex MX (Cloudflare or a third party) and every
-# Email Sending subdomain with whether it has MX. It exits non-zero only
-# when an address something sends FROM cannot receive — that is the
-# bounce, and the only fault worth failing on. A third-party apex MX is
-# reported, not flagged: some domains deliberately receive on Zoho or
-# Hostinger.
+# Per domain it prints apex MX (Cloudflare or a third party), every Email
+# Sending subdomain and whether it has MX, every Email Routing rule, and
+# the catch-all. It exits non-zero only when an address something sends
+# FROM cannot receive — that is the bounce, and the only fault worth
+# failing on. A third-party apex MX is reported, not flagged: some
+# domains deliberately receive on Zoho or Hostinger.
 #
 # Credentials: CLOUDFLARE_API_TOKEN (Bearer). No secrets file is read.
 # MX is resolved against MAIL_FLEET_RESOLVER (default 1.1.1.1), not the
@@ -117,6 +117,14 @@ def cf_list(path):
         page += 1
 
 
+def cf_object(path):
+    status, data = cf_get(path)
+    if status not in (200,) or not isinstance(data, dict) or data.get("success") is False:
+        return None
+    result = data.get("result")
+    return result if isinstance(result, dict) else None
+
+
 def resolve_mx(host):
     try:
         proc = subprocess.run(
@@ -158,6 +166,36 @@ def format_mx(records):
         return "none"
     targets = ", ".join(f"{pri} {ex}" for pri, ex in records)
     return f"{targets} ({mx_kind(records)})"
+
+
+def action_text(actions):
+    parts = []
+    for act in actions or []:
+        if not isinstance(act, dict):
+            continue
+        typ = (act.get("type") or "unknown").lower()
+        values = act.get("value") or []
+        if isinstance(values, str):
+            values = [values]
+        dest = ", ".join(values) if values else ""
+        if typ == "forward":
+            parts.append(f"forward -> {dest or '(no destination)'}")
+        elif typ == "worker":
+            parts.append(f"worker {dest or '(unnamed worker)'}")
+        else:
+            parts.append(typ)
+    return "; ".join(parts) if parts else "unknown"
+
+
+def matcher_address(matchers):
+    for m in matchers or []:
+        if not isinstance(m, dict):
+            continue
+        if (m.get("type") or "").lower() == "all":
+            return "*"
+        if (m.get("field") or "").lower() == "to" and m.get("value"):
+            return m["value"]
+    return "(unmatched)"
 
 
 def subdomain_name(item, zone_name):
@@ -221,6 +259,32 @@ def main(argv):
                 send_rows.append(f"    {host}  no MX  cannot receive")
                 faults.append(f"{host}: sending host has no MX; replies bounce")
         lines += (["  sending:"] + send_rows) if send_rows else ["  sending: (none)"]
+
+        rules = cf_list(f"/zones/{zid}/email/routing/rules")
+        rules = rules if isinstance(rules, list) else []
+        rule_rows = []
+        for rule in rules:
+            if not isinstance(rule, dict):
+                continue
+            matchers = rule.get("matchers") or []
+            if any(
+                (m.get("type") or "").lower() == "all"
+                for m in matchers if isinstance(m, dict)
+            ):
+                continue
+            suffix = "" if rule.get("enabled") is not False else " (disabled)"
+            rule_rows.append(
+                f"    {matcher_address(matchers)}  {action_text(rule.get('actions'))}{suffix}"
+            )
+        lines += (["  routing:"] + rule_rows) if rule_rows else ["  routing: (none)"]
+
+        catch = cf_object(f"/zones/{zid}/email/routing/rules/catch_all")
+        if not catch:
+            lines.append("  catch-all: none")
+        elif catch.get("enabled") is False:
+            lines.append(f"  catch-all: disabled ({action_text(catch.get('actions'))})")
+        else:
+            lines.append(f"  catch-all: {action_text(catch.get('actions'))}")
         lines.append("")
 
     if not zones:
