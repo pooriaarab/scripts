@@ -56,8 +56,13 @@ case "$path" in
     ;;
   /zones/*/email/sending/subdomains)
     zid="${path#/zones/}"; zid="${zid%%/*}"
-    f="$fix/sending/$zid.json"
-    if [ -f "$f" ]; then body=$(cat "$f"); else status=404; body='{"success":false,"errors":[{"message":"not found"}],"result":null}'; fi
+    if [ "$zid" = "${MAIL_FLEET_SENDING_ERROR_ZONE:-}" ]; then
+      status="${MAIL_FLEET_SENDING_ERROR_STATUS:-429}"
+      body='{"success":false,"errors":[{"message":"rate limited"}],"result":null}'
+    else
+      f="$fix/sending/$zid.json"
+      if [ -f "$f" ]; then body=$(cat "$f"); else status=404; body='{"success":false,"errors":[{"message":"not found"}],"result":null}'; fi
+    fi
     ;;
   /zones/*/email/routing/rules/catch_all)
     zid="${path#/zones/}"; zid="${zid%%/*}"
@@ -118,6 +123,8 @@ run_audit() {
     MAIL_FLEET_DIG="$ROOT/bin/dig" \
     MAIL_FLEET_RESOLVER="1.1.1.1" \
     MAIL_FLEET_ZONES_STATUS="${MAIL_FLEET_ZONES_STATUS:-}" \
+    MAIL_FLEET_SENDING_ERROR_ZONE="${MAIL_FLEET_SENDING_ERROR_ZONE:-}" \
+    MAIL_FLEET_SENDING_ERROR_STATUS="${MAIL_FLEET_SENDING_ERROR_STATUS:-}" \
     "$SCRIPT" 2>&1
 }
 
@@ -220,6 +227,30 @@ st5=$?
 case "$out5" in
   *ok:\ every\ sending\ host\ can\ receive*) bad "failed /zones call was reported as a clean audit: $out5" ;;
   *) ok "failed /zones call is not reported as clean" ;;
+esac
+
+# --- 6. an HTTP-level API error on one zone's subresource is a fault, ------
+# not a crash. A rate limit or a 5xx from Cloudflare on the per-zone
+# sending-subdomains call is a different failure than a connection timeout,
+# but it must be treated the same way: that zone is unreadable, and every
+# other zone still gets audited.
+FIX6="$ROOT/rate-limited"
+setup_fix "$FIX6"
+envelope '[{"id":"z6","name":"limited.test","status":"active"},{"id":"z7","name":"fine2.test","status":"active"}]' > "$FIX6/zones.json"
+envelope '[]' > "$FIX6/sending/z7.json"
+printf '10 route1.mx.cloudflare.net.\n' > "$FIX6/mx/limited.test"
+printf '10 route1.mx.cloudflare.net.\n' > "$FIX6/mx/fine2.test"
+
+out6=$(MAIL_FLEET_SENDING_ERROR_ZONE=z6 MAIL_FLEET_SENDING_ERROR_STATUS=429 run_audit "$FIX6")
+st6=$?
+[ $st6 -ne 0 ] && ok "a rate-limited zone exits non-zero" || bad "rate-limited zone exited 0: $out6"
+case "$out6" in
+  *COULD\ NOT\ AUDIT*) ok "rate-limited zone is named in the report" ;;
+  *) bad "rate-limited zone not reported: $out6" ;;
+esac
+case "$out6" in
+  *fine2.test*) ok "a later zone is still audited after a rate-limited one" ;;
+  *) bad "audit crashed instead of continuing past the rate-limited zone: $out6" ;;
 esac
 
 echo
