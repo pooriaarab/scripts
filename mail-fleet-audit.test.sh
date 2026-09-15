@@ -47,7 +47,12 @@ body=""
 status=200
 case "$path" in
   /zones)
-    body=$(cat "$fix/zones.json")
+    if [ -n "${MAIL_FLEET_ZONES_STATUS:-}" ]; then
+      status="$MAIL_FLEET_ZONES_STATUS"
+      body='{"success":false,"errors":[{"message":"not found"}],"result":null}'
+    else
+      body=$(cat "$fix/zones.json")
+    fi
     ;;
   /zones/*/email/sending/subdomains)
     zid="${path#/zones/}"; zid="${zid%%/*}"
@@ -112,6 +117,7 @@ run_audit() {
     MAIL_FLEET_CURL="$ROOT/bin/curl" \
     MAIL_FLEET_DIG="$ROOT/bin/dig" \
     MAIL_FLEET_RESOLVER="1.1.1.1" \
+    MAIL_FLEET_ZONES_STATUS="${MAIL_FLEET_ZONES_STATUS:-}" \
     "$SCRIPT" 2>&1
 }
 
@@ -199,6 +205,21 @@ esac
 case "$out4" in
   *fine.test*) ok "a later zone is still audited after an unreadable one" ;;
   *) bad "audit stopped at the unreadable zone: $out4" ;;
+esac
+
+# --- 5. GET /zones itself failing must never look like a clean audit ------
+# A broken CLOUDFLARE_API_BASE or a token missing Zone Read makes the
+# top-level zones call fail. Unlike a per-zone subresource, "empty" here
+# is indistinguishable from "the audit never ran" and must not print ok.
+FIX5="$ROOT/zones-unreadable"
+setup_fix "$FIX5"
+
+out5=$(MAIL_FLEET_ZONES_STATUS=404 run_audit "$FIX5")
+st5=$?
+[ $st5 -eq 2 ] && ok "a failed /zones call exits with the API-error code" || bad "failed /zones call exited $st5: $out5"
+case "$out5" in
+  *ok:\ every\ sending\ host\ can\ receive*) bad "failed /zones call was reported as a clean audit: $out5" ;;
+  *) ok "failed /zones call is not reported as clean" ;;
 esac
 
 echo

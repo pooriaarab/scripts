@@ -16,12 +16,12 @@
 #
 #   mail-fleet-audit
 #
-# Per domain it prints apex MX (Cloudflare or a third party), every Email
-# Sending subdomain and whether it has MX, every Email Routing rule, and
-# the catch-all. It exits non-zero only when an address something sends
-# FROM cannot receive — that is the bounce, and the only fault worth
-# failing on. A third-party apex MX is reported, not flagged: some
-# domains deliberately receive on Zoho or Hostinger.
+# Per domain it prints apex MX (Cloudflare or a third party) and every
+# Email Sending subdomain with whether it has MX. It exits non-zero only
+# when an address something sends FROM cannot receive — that is the
+# bounce, and the only fault worth failing on. A third-party apex MX is
+# reported, not flagged: some domains deliberately receive on Zoho or
+# Hostinger.
 #
 # Credentials: CLOUDFLARE_API_TOKEN (Bearer). No secrets file is read.
 # MX is resolved against MAIL_FLEET_RESOLVER (default 1.1.1.1), not the
@@ -59,9 +59,10 @@ def cf_get(path):
         proc = subprocess.run(
             [
                 CURL, "-sS", "--max-time", "20", "--retry", "3", "--retry-delay", "2", "-w", "\n%{http_code}",
-                "-H", f"Authorization: Bearer {TOKEN}",
+                "-H", "@-",
                 "-H", "Accept: application/json", url,
             ],
+            input=f"Authorization: Bearer {TOKEN}\n",
             capture_output=True, text=True,
         )
     except FileNotFoundError:
@@ -94,18 +95,22 @@ def cf_get(path):
     return status, data
 
 
-def cf_list(path):
+def cf_list(path, required=False):
     items, page = [], 1
     while True:
         sep = "&" if "?" in path else "?"
         status, data = cf_get(f"{path}{sep}page={page}&per_page=50")
         if status in (400, 404, 405):
+            if required:
+                die(f"GET {path} failed (HTTP {status})")
             return items
         if status != 200:
             die(f"GET {path} failed (HTTP {status})")
         if not isinstance(data, dict):
             die(f"GET {path} returned non-JSON")
         if data.get("success") is False:
+            if required:
+                die(f"GET {path} failed: API returned success=false")
             return items
         result = data.get("result")
         if result is None:
@@ -199,7 +204,7 @@ def main(argv):
     if not TOKEN:
         die("CLOUDFLARE_API_TOKEN is not set")
 
-    zones = cf_list("/zones?status=active")
+    zones = cf_list("/zones?status=active", required=True)
     if not isinstance(zones, list):
         die("GET /zones returned unexpected result")
 
