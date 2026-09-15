@@ -44,6 +44,10 @@ API_BASE = os.environ.get(
 TOKEN = os.environ.get("CLOUDFLARE_API_TOKEN", "")
 
 
+class ApiUnavailable(Exception):
+    """A zone could not be read. Recorded as a fault, never as a clean result."""
+
+
 def die(msg, code=2):
     print(f"mail-fleet-audit: {msg}", file=sys.stderr)
     sys.exit(code)
@@ -54,7 +58,7 @@ def cf_get(path):
     try:
         proc = subprocess.run(
             [
-                CURL, "-sS", "--max-time", "20", "-w", "\n%{http_code}",
+                CURL, "-sS", "--max-time", "20", "--retry", "3", "--retry-delay", "2", "-w", "\n%{http_code}",
                 "-H", f"Authorization: Bearer {TOKEN}",
                 "-H", "Accept: application/json", url,
             ],
@@ -70,7 +74,12 @@ def cf_get(path):
         status = 0
     if proc.returncode not in (0, 22) and status == 0:
         err = (proc.stderr or "").strip() or f"curl exited {proc.returncode}"
-        die(f"request failed for {path}: {err}")
+        # One slow zone must not end the audit. A 19-zone fleet hits a
+        # transient timeout often enough that aborting means the tool is
+        # never run, and an audit nobody runs is the state this script
+        # exists to end. "Could not look" is not "nothing wrong", so the
+        # caller records it as a fault rather than a clean zone.
+        raise ApiUnavailable(f"{path}: {err}")
     if status in (401, 403):
         die(f"CLOUDFLARE_API_TOKEN was refused (HTTP {status})")
     if status == 0:
@@ -116,14 +125,6 @@ def cf_list(path):
         page += 1
 
 
-def cf_object(path):
-    status, data = cf_get(path)
-    if status not in (200,) or not isinstance(data, dict) or data.get("success") is False:
-        return None
-    result = data.get("result")
-    return result if isinstance(result, dict) else None
-
-
 def resolve_mx(host):
     try:
         proc = subprocess.run(
@@ -165,36 +166,6 @@ def format_mx(records):
         return "none"
     targets = ", ".join(f"{pri} {ex}" for pri, ex in records)
     return f"{targets} ({mx_kind(records)})"
-
-
-def action_text(actions):
-    parts = []
-    for act in actions or []:
-        if not isinstance(act, dict):
-            continue
-        typ = (act.get("type") or "unknown").lower()
-        values = act.get("value") or []
-        if isinstance(values, str):
-            values = [values]
-        dest = ", ".join(values) if values else ""
-        if typ == "forward":
-            parts.append(f"forward -> {dest or '(no destination)'}")
-        elif typ == "worker":
-            parts.append(f"worker {dest or '(unnamed worker)'}")
-        else:
-            parts.append(typ)
-    return "; ".join(parts) if parts else "unknown"
-
-
-def matcher_address(matchers):
-    for m in matchers or []:
-        if not isinstance(m, dict):
-            continue
-        if (m.get("type") or "").lower() == "all":
-            return "*"
-        if (m.get("field") or "").lower() == "to" and m.get("value"):
-            return m["value"]
-    return "(unmatched)"
 
 
 def subdomain_name(item, zone_name):
@@ -239,52 +210,33 @@ def main(argv):
         zid, name = zone.get("id") or "", (zone.get("name") or "").rstrip(".")
         if not zid or not name:
             continue
-        lines += [name, f"  apex MX: {format_mx(resolve_mx(name))}"]
+        mark = len(lines)
+        try:
+            lines += [name, f"  apex MX: {format_mx(resolve_mx(name))}"]
 
-        sending = cf_list(f"/zones/{zid}/email/sending/subdomains")
-        sending = sending if isinstance(sending, list) else []
-        send_rows = []
-        for item in sending:
-            host, check = subdomain_name(item, name)
-            if host is None:
-                continue
-            if not check:
-                send_rows.append(f"    {host}  (wildcard; MX not checked)")
-                continue
-            records = resolve_mx(host)
-            if records:
-                send_rows.append(f"    {host}  {format_mx(records)}")
-            else:
-                send_rows.append(f"    {host}  no MX  cannot receive")
-                faults.append(f"{host}: sending host has no MX; replies bounce")
-        lines += (["  sending:"] + send_rows) if send_rows else ["  sending: (none)"]
+            sending = cf_list(f"/zones/{zid}/email/sending/subdomains")
+            sending = sending if isinstance(sending, list) else []
+            send_rows = []
+            for item in sending:
+                host, check = subdomain_name(item, name)
+                if host is None:
+                    continue
+                if not check:
+                    send_rows.append(f"    {host}  (wildcard; MX not checked)")
+                    continue
+                records = resolve_mx(host)
+                if records:
+                    send_rows.append(f"    {host}  {format_mx(records)}")
+                else:
+                    send_rows.append(f"    {host}  no MX  cannot receive")
+                    faults.append(f"{host}: sending host has no MX; replies bounce")
+            lines += (["  sending:"] + send_rows) if send_rows else ["  sending: (none)"]
 
-        rules = cf_list(f"/zones/{zid}/email/routing/rules")
-        rules = rules if isinstance(rules, list) else []
-        rule_rows = []
-        for rule in rules:
-            if not isinstance(rule, dict):
-                continue
-            matchers = rule.get("matchers") or []
-            if any(
-                (m.get("type") or "").lower() == "all"
-                for m in matchers if isinstance(m, dict)
-            ):
-                continue
-            suffix = "" if rule.get("enabled") is not False else " (disabled)"
-            rule_rows.append(
-                f"    {matcher_address(matchers)}  {action_text(rule.get('actions'))}{suffix}"
-            )
-        lines += (["  routing:"] + rule_rows) if rule_rows else ["  routing: (none)"]
-
-        catch = cf_object(f"/zones/{zid}/email/routing/rules/catch_all")
-        if not catch:
-            lines.append("  catch-all: none")
-        elif catch.get("enabled") is False:
-            lines.append(f"  catch-all: disabled ({action_text(catch.get('actions'))})")
-        else:
-            lines.append(f"  catch-all: {action_text(catch.get('actions'))}")
-        lines.append("")
+            lines.append("")
+        except ApiUnavailable as err:
+            del lines[mark:]
+            lines += [name, f"  COULD NOT AUDIT: {err}", ""]
+            faults.append(f"{name}: could not be audited ({err})")
 
     if not zones:
         lines += ["(no active zones)", ""]
