@@ -48,6 +48,16 @@ case "$path" in
     f="$fix/sending/$zid.json"
     if [ -f "$f" ]; then body=$(cat "$f"); else status=404; body='{"success":false,"errors":[{"message":"not found"}],"result":null}'; fi
     ;;
+  /zones/*/email/routing/rules/catch_all)
+    zid="${path#/zones/}"; zid="${zid%%/*}"
+    f="$fix/catch_all/$zid.json"
+    if [ -f "$f" ]; then body=$(cat "$f"); else status=404; body='{"success":false,"errors":[{"message":"not found"}],"result":null}'; fi
+    ;;
+  /zones/*/email/routing/rules)
+    zid="${path#/zones/}"; zid="${zid%%/*}"
+    f="$fix/rules/$zid.json"
+    if [ -f "$f" ]; then body=$(cat "$f"); else status=404; body='{"success":false,"errors":[{"message":"not found"}],"result":null}'; fi
+    ;;
   *)
     echo "stub curl: unknown path $path" >&2
     exit 9
@@ -84,7 +94,7 @@ envelope() {
 setup_fix() {
   local dir="$1"
   rm -rf "$dir"
-  mkdir -p "$dir/sending" "$dir/mx"
+  mkdir -p "$dir/sending" "$dir/rules" "$dir/catch_all" "$dir/mx"
 }
 
 run_audit() {
@@ -104,6 +114,8 @@ FIX1="$ROOT/missing-mx"
 setup_fix "$FIX1"
 envelope '[{"id":"z1","name":"popcornteam.org","status":"active"}]' > "$FIX1/zones.json"
 envelope '[{"name":"go.popcornteam.org","enabled":true}]' > "$FIX1/sending/z1.json"
+envelope '[{"enabled":true,"matchers":[{"type":"literal","field":"to","value":"hello@popcornteam.org"}],"actions":[{"type":"forward","value":["pooria@gmail.com"]}]}]' > "$FIX1/rules/z1.json"
+envelope '{"enabled":true,"matchers":[{"type":"all"}],"actions":[{"type":"drop"}]}' > "$FIX1/catch_all/z1.json"
 printf '10 route1.mx.cloudflare.net.\n20 route2.mx.cloudflare.net.\n' > "$FIX1/mx/popcornteam.org"
 # go.popcornteam.org has no mx file → no MX
 
@@ -118,12 +130,21 @@ case "$out1" in
   *FAULTS*) ok "missing MX is listed under FAULTS" ;;
   *) bad "FAULTS section missing: $out1" ;;
 esac
+case "$out1" in
+  *hello@popcornteam.org*forward\ -\>\ pooria@gmail.com*) ok "routing rule is reported on a faulting zone" ;;
+  *) bad "routing rule missing on faulting zone: $out1" ;;
+esac
+case "$out1" in
+  *catch-all:\ drop*) ok "drop catch-all is reported" ;;
+  *) bad "drop catch-all missing: $out1" ;;
+esac
 
 # --- 2. third-party apex MX: reported, does not fail -----------------------
 FIX2="$ROOT/third-party"
 setup_fix "$FIX2"
 envelope '[{"id":"z2","name":"beeloud.xyz","status":"active"}]' > "$FIX2/zones.json"
 envelope '[]' > "$FIX2/sending/z2.json"
+envelope '[]' > "$FIX2/rules/z2.json"
 printf '10 mx.zoho.com.\n20 mx2.zoho.com.\n' > "$FIX2/mx/beeloud.xyz"
 
 out2=$(run_audit "$FIX2")
@@ -137,12 +158,22 @@ case "$out2" in
   *FAULTS*) bad "third-party MX was flagged as a fault: $out2" ;;
   *) ok "third-party MX is not a fault" ;;
 esac
+case "$out2" in
+  *'routing: (none)'*) ok "empty routing is reported" ;;
+  *) bad "empty routing missing: $out2" ;;
+esac
+case "$out2" in
+  *'catch-all: none'*) ok "missing catch-all is reported as none" ;;
+  *) bad "missing catch-all not reported: $out2" ;;
+esac
 
 # --- 3. fully healthy fleet: exit zero -------------------------------------
 FIX3="$ROOT/healthy"
 setup_fix "$FIX3"
 envelope '[{"id":"z3","name":"healthy.test","status":"active"}]' > "$FIX3/zones.json"
 envelope '[{"name":"mail.healthy.test","enabled":true}]' > "$FIX3/sending/z3.json"
+envelope '[{"enabled":true,"matchers":[{"type":"literal","field":"to","value":"hello@healthy.test"}],"actions":[{"type":"forward","value":["inbox@healthy.test"]}]}]' > "$FIX3/rules/z3.json"
+envelope '{"enabled":true,"matchers":[{"type":"all"}],"actions":[{"type":"forward","value":["catch@healthy.test"]}]}' > "$FIX3/catch_all/z3.json"
 printf '10 route1.mx.cloudflare.net.\n' > "$FIX3/mx/healthy.test"
 printf '10 route1.mx.cloudflare.net.\n' > "$FIX3/mx/mail.healthy.test"
 
@@ -157,6 +188,31 @@ case "$out3" in
   *FAULTS*) bad "healthy fleet listed FAULTS: $out3" ;;
   *ok:\ every\ sending\ host\ can\ receive*) ok "healthy fleet prints the ok line" ;;
   *) bad "healthy fleet missing ok line: $out3" ;;
+esac
+case "$out3" in
+  *hello@healthy.test*forward\ -\>\ inbox@healthy.test*) ok "routing rule is reported" ;;
+  *) bad "routing rule missing: $out3" ;;
+esac
+case "$out3" in
+  *catch-all:\ forward\ -\>\ catch@healthy.test*) ok "catch-all is reported" ;;
+  *) bad "catch-all missing: $out3" ;;
+esac
+
+# --- 4. disabled catch-all is reported ------------------------------------
+FIX4="$ROOT/disabled-catch"
+setup_fix "$FIX4"
+envelope '[{"id":"z4","name":"quiet.test","status":"active"}]' > "$FIX4/zones.json"
+envelope '[]' > "$FIX4/sending/z4.json"
+envelope '[]' > "$FIX4/rules/z4.json"
+envelope '{"enabled":false,"matchers":[{"type":"all"}],"actions":[{"type":"drop"}]}' > "$FIX4/catch_all/z4.json"
+printf '10 route1.mx.cloudflare.net.\n' > "$FIX4/mx/quiet.test"
+
+out4=$(run_audit "$FIX4")
+st4=$?
+[ $st4 -eq 0 ] && ok "disabled catch-all does not cause a non-zero exit" || bad "disabled catch-all exited $st4: $out4"
+case "$out4" in
+  *'catch-all: disabled (drop)'*) ok "disabled catch-all is reported" ;;
+  *) bad "disabled catch-all missing: $out4" ;;
 esac
 
 echo
