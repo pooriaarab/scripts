@@ -105,9 +105,13 @@ def cf_list(path, required=False):
                 die(f"GET {path} failed (HTTP {status})")
             return items
         if status != 200:
-            die(f"GET {path} failed (HTTP {status})")
+            if required:
+                die(f"GET {path} failed (HTTP {status})")
+            raise ApiUnavailable(f"GET {path} failed (HTTP {status})")
         if not isinstance(data, dict):
-            die(f"GET {path} returned non-JSON")
+            if required:
+                die(f"GET {path} returned non-JSON")
+            raise ApiUnavailable(f"GET {path} returned non-JSON")
         if data.get("success") is False:
             if required:
                 die(f"GET {path} failed: API returned success=false")
@@ -118,7 +122,9 @@ def cf_list(path, required=False):
         if isinstance(result, dict):
             return result
         if not isinstance(result, list):
-            die(f"GET {path} returned unexpected result")
+            if required:
+                die(f"GET {path} returned unexpected result")
+            raise ApiUnavailable(f"GET {path} returned unexpected result")
         items.extend(result)
         info = data.get("result_info") or {}
         try:
