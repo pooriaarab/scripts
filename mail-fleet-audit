@@ -138,6 +138,13 @@ def resolve_mx(host):
         )
     except FileNotFoundError:
         die(f"dig not found: {DIG}")
+    if proc.returncode != 0:
+        # dig itself exits non-zero only when it could not get an answer at
+        # all (server unreachable, timeout) - not for a genuine empty
+        # answer. That is "could not look", not "no MX", and must be a
+        # fault rather than a false "cannot receive".
+        err = (proc.stderr or "").strip() or f"dig exited {proc.returncode}"
+        raise ApiUnavailable(f"MX lookup for {host}: {err}")
     records = []
     for line in (proc.stdout or "").splitlines():
         line = line.strip()
