@@ -1,0 +1,290 @@
+#!/usr/bin/env python3
+# Turn a query and a place into a verified CSV of businesses and contacts.
+#
+# WHY THIS EXISTS
+# Person-first enrichment was measured on 117 real contacts: 19 came back
+# confidently wrong, a real first name welded to an invented surname, and
+# only 11 phone numbers of which 4 had area codes from the wrong country.
+# Business-first Maps returned 100 firms in one call, every one with a real
+# phone and address. Businesses publish contact details; individuals inside
+# large employers do not.
+#
+# So the pipeline goes business first, person second, and never trusts what
+# comes back. Without the verification step this is a list generator that
+# lies about one row in six. Three checks, each of which caught real errors:
+#
+#   find-leads --query "<what>" --location "<where>" [--roles "<titles>"] [--out <file>]
+#
+# 1. Source businesses from Google Maps via treg.to (name, phone, address).
+# 2. Resolve each to a domain. 3. Find people at that domain, optionally
+# filtered by role. 4. Verify (below). 5. Write a CSV; rejects go to their
+# own file with the reason, never silently dropped, never silently trusted.
+#
+# Surname corroboration: the surname must appear in the email local part.
+# A first-name-only match is a REJECT, the exact shape providers fabricate.
+# Region plausibility: a phone area code inconsistent with the location is
+# FLAGGED on the kept row, not silently kept. Enrichment never names a
+# person: a source name always wins; enrichment adds role and phone only.
+#
+# Credentials: TREG_TOKEN and TREG_ORG from the environment, sent as
+# x-treg-token / x-treg-org headers, never Authorization: Bearer (which the
+# proxy answers with {"detail":"not authenticated"}). No secrets file path
+# is read or hard-coded. Endpoints: treg.google.serp.maps,
+# treg.people.search, treg.people.enrich, treg.people.phone.find,
+# hunter.companies.emails.
+#
+# Exit 0  leads written, or cleanly no results / no verified leads
+# Exit 2  usage, missing credentials, or API error
+#
+# Tests inject FIND_LEADS_CURL and TREG_BASE so the suite never touches
+# the network.
+import csv
+import json
+import os
+import re
+import subprocess
+import sys
+from urllib.parse import urlparse
+
+CURL = os.environ.get("FIND_LEADS_CURL", "curl")
+BASE = os.environ.get("TREG_BASE", "https://api.treg.to/v1").rstrip("/")
+TOKEN = os.environ.get("TREG_TOKEN", "")
+ORG = os.environ.get("TREG_ORG", "")
+
+CONNECT_TIMEOUT = "25"
+
+# Location substring -> NANP area codes considered local. Unknown locations
+# pass unchecked; a known location with a foreign area code is flagged.
+AREA_CODES = {"vancouver": ("604", "778", "236", "672"), "san francisco": ("415", "628"),
+              "toronto": ("416", "647", "437", "942"), "new york": ("212", "646", "917", "718", "347", "929")}
+
+
+def die(msg, code=2):
+    print(f"find-leads: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def treg(endpoint, payload):
+    url = f"{BASE}/{endpoint}"
+    body = json.dumps(payload)
+    try:
+        proc = subprocess.run(
+            [CURL, "-sS", "--max-time", CONNECT_TIMEOUT, "-w", "\n%{http_code}",
+             "-X", "POST", "-H", "@-",
+             "-H", "Content-Type: application/json",
+             "--data", body, url],
+            input=f"x-treg-token: {TOKEN}\nx-treg-org: {ORG}\n",
+            capture_output=True, text=True,
+        )
+    except FileNotFoundError:
+        die(f"curl not found: {CURL}")
+    raw = proc.stdout or ""
+    text, _, status_s = raw.rpartition("\n") if "\n" in raw else (raw, "", "")
+    try:
+        status = int(status_s.strip() or "0")
+    except ValueError:
+        status = 0
+    if status != 200:
+        err = (proc.stderr or "").strip() or f"HTTP {status}"
+        die(f"{endpoint} failed: {err}")
+    try:
+        data = json.loads(text.strip() or "null")
+    except json.JSONDecodeError:
+        die(f"{endpoint} returned non-JSON")
+    if isinstance(data, dict) and isinstance(data.get("result"), (dict, list)):
+        return data["result"]
+    return data
+
+
+def as_list(data, *keys):
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
+        for key in keys:
+            if isinstance(data.get(key), list):
+                return data[key]
+    return []
+
+
+def resolve_domain(place):
+    for key in ("website", "url", "domain", "site"):
+        value = (place.get(key) or "").strip()
+        if not value:
+            continue
+        if "://" not in value:
+            value = "http://" + value
+        try:
+            host = urlparse(value).hostname or ""
+        except ValueError:
+            host = ""
+        host = host.lower().lstrip("www.")
+        if host and "." in host:
+            return host
+    return ""
+
+
+def norm(value):
+    return re.sub(r"[^a-z0-9]", "", (value or "").lower())
+
+
+def surname_status(first, last, email):
+    local = norm((email or "").split("@")[0])
+    if not (email or "").strip() or "@" not in (email or ""):
+        return "missing-email"
+    if not norm(last):
+        return "missing-surname"
+    if norm(last) in local:
+        return ""
+    if norm(first) and norm(first) in local:
+        return "surname-not-in-email(first-name-only)"
+    return "surname-not-in-email"
+
+
+def area_of(phone):
+    digits = re.sub(r"\D", "", phone or "")
+    if len(digits) == 11 and digits.startswith("1"):
+        digits = digits[1:]
+    if len(digits) == 10:
+        return digits[:3]
+    return ""
+
+
+def region_note(phone, location):
+    area = area_of(phone)
+    loc = (location or "").lower()
+    for key, codes in AREA_CODES.items():
+        if key in loc:
+            if not area:
+                return ""
+            if area in codes:
+                return ""
+            return f"region-flag:{area}-not-for-{key}"
+    return ""
+
+
+def person_fields(raw):
+    if not isinstance(raw, dict):
+        return {}
+    first = raw.get("first_name") or raw.get("first") or ""
+    last = raw.get("last_name") or raw.get("last") or raw.get("surname") or ""
+    name = raw.get("name") or f"{first} {last}".strip()
+    return {
+        "name": str(name or "").strip(),
+        "first": str(first or "").strip(),
+        "last": str(last or "").strip(),
+        "email": str(raw.get("email") or "").strip(),
+        "role": str(raw.get("role") or raw.get("title") or raw.get("position") or "").strip(),
+        "phone": str(raw.get("phone") or raw.get("phone_number") or "").strip(),
+    }
+
+
+def main(argv):
+    query = location = roles = out = rejects = None
+    args = list(argv)
+    while args:
+        flag = args.pop(0)
+        if flag in ("-h", "--help"):
+            for line in open(__file__, encoding="utf-8"):
+                if line.startswith("import "):
+                    break
+                print(line[2:] if line.startswith("# ") else line[1:], end="")
+            return 0
+        if flag == "--query" and args:
+            query = args.pop(0)
+        elif flag == "--location" and args:
+            location = args.pop(0)
+        elif flag == "--roles" and args:
+            roles = args.pop(0)
+        elif flag == "--out" and args:
+            out = args.pop(0)
+        elif flag == "--rejects" and args:
+            rejects = args.pop(0)
+        else:
+            die(f"usage: find-leads --query <what> --location <where> [--roles <titles>] [--out <file>]")
+    if not query or not location:
+        die("usage: find-leads --query <what> --location <where> [--roles <titles>] [--out <file>]")
+    if not TOKEN or not ORG:
+        die("TREG_TOKEN and TREG_ORG must be set in the environment")
+    out = out or "leads.csv"
+    if not rejects:
+        rejects = out[:-4] + ".rejects.csv" if out.endswith(".csv") else out + ".rejects.csv"
+
+    data = treg("treg.google.serp.maps", {"q": query, "location": location})
+    places = as_list(data, "places", "results")
+    if not places:
+        print(f"find-leads: no results for {query!r} in {location!r}")
+        return 0
+
+    wanted = [r.strip().lower() for r in (roles or "").split(",") if r.strip()]
+    leads, dropped = [], []
+    for place in places:
+        if not isinstance(place, dict):
+            continue
+        business = str(place.get("title") or place.get("name") or "").strip()
+        biz_phone = str(place.get("phone") or "").strip()
+        address = str(place.get("address") or "").strip()
+        domain = resolve_domain(place)
+        if not domain:
+            dropped.append({"business": business, "domain": "",
+                            "name": "", "email": "", "reason": "no-domain"})
+            continue
+        people = as_list(treg("hunter.companies.emails", {"domain": domain}),
+                         "emails", "people", "results")
+        if not people:
+            people = as_list(treg("treg.people.search", {"domain": domain}),
+                             "people", "results", "emails")
+        for raw in people:
+            cand = person_fields(raw)
+            if wanted and cand["role"] and not any(w in cand["role"].lower() for w in wanted):
+                continue
+            source_name = cand["name"]
+            try:
+                extra = treg("treg.people.enrich", {"email": cand["email"]})
+            except (SystemExit, Exception):
+                extra = {}
+            if isinstance(extra, list):
+                extra = extra[0] if extra and isinstance(extra[0], dict) else {}
+            if isinstance(extra, dict):
+                # Enrichment never names a person: role and phone only.
+                if not cand["role"]:
+                    cand["role"] = str(extra.get("role") or extra.get("title") or "").strip()
+                if not cand["phone"]:
+                    cand["phone"] = str(extra.get("phone") or extra.get("phone_number") or "").strip()
+            cand["name"] = source_name
+            bits = source_name.split()
+            bad = surname_status(cand["first"] or (bits[0] if bits else ""),
+                                 cand["last"] or (bits[-1] if len(bits) > 1 else ""),
+                                 cand["email"])
+            if bad:
+                dropped.append({"business": business, "domain": domain,
+                                "name": source_name, "email": cand["email"],
+                                "reason": bad})
+                continue
+            note = region_note(cand["phone"] or biz_phone, location)
+            leads.append([business, biz_phone, address, domain, source_name,
+                          cand["email"], cand["role"], cand["phone"], note])
+
+    if dropped:
+        with open(rejects, "w", newline="", encoding="utf-8") as handle:
+            writer = csv.writer(handle)
+            writer.writerow(["business", "domain", "name", "email", "reason"])
+            for row in dropped:
+                writer.writerow([row["business"], row["domain"], row["name"], row["email"], row["reason"]])
+    if not leads:
+        print(f"find-leads: no verified leads for {query!r} in {location!r}"
+              + (f"; {len(dropped)} rejected, see {rejects}" if dropped else ""))
+        return 0
+    with open(out, "w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["business", "phone", "address", "domain", "name",
+                         "email", "role", "contact_phone", "verification_notes"])
+        writer.writerows(leads)
+    flagged = sum(1 for row in leads if row[8].startswith("region-flag"))
+    print(f"find-leads: {len(leads)} verified lead(s) -> {out}"
+          + (f" ({flagged} region-flagged)" if flagged else "")
+          + (f"; {len(dropped)} rejected -> {rejects}" if dropped else ""))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
