@@ -1,0 +1,239 @@
+#!/usr/bin/env python3
+# Walk every Cloudflare zone and report which addresses can receive mail.
+#
+# WHY THIS EXISTS
+# On 2026-09-15, 49 of 50 sending subdomains on the real account had no MX.
+# Every mail./news./go./referrals. host across sixteen domains could send
+# and not receive, so replies bounced with "Address not found". Nothing
+# reported it. The per-domain preflight in the domain-email-warming skill
+# treats a missing MX on a send-only host as correct, and no tool looked
+# across the fleet at all. A human found it by reading a bounce on their
+# phone.
+#
+# The fleet sweep is a different job from the per-domain check. A config
+# can be internally consistent while the account as a whole has a hole,
+# and the hole is what bounces.
+#
+#   mail-fleet-audit
+#
+# Per domain it prints apex MX (Cloudflare or a third party) and every
+# Email Sending subdomain with whether it has MX. It exits non-zero only
+# when an address something sends FROM cannot receive — that is the
+# bounce, and the only fault worth failing on. A third-party apex MX is
+# reported, not flagged: some domains deliberately receive on Zoho or
+# Hostinger.
+#
+# Credentials: CLOUDFLARE_API_TOKEN (Bearer). No secrets file is read.
+# MX is resolved against MAIL_FLEET_RESOLVER (default 1.1.1.1), not the
+# zone's own records: what a sending host actually sees is what matters.
+#
+# Exit 0  every sending host can receive
+# Exit 1  a sending host has no MX
+# Exit 2  usage, missing token, or API error
+#
+# Tests inject MAIL_FLEET_CURL and MAIL_FLEET_DIG so the suite never
+# touches the network.
+import json, os, subprocess, sys
+
+CURL = os.environ.get("MAIL_FLEET_CURL", "curl")
+DIG = os.environ.get("MAIL_FLEET_DIG", "dig")
+RESOLVER = os.environ.get("MAIL_FLEET_RESOLVER", "1.1.1.1")
+API_BASE = os.environ.get(
+    "CLOUDFLARE_API_BASE", "https://api.cloudflare.com/client/v4"
+).rstrip("/")
+TOKEN = os.environ.get("CLOUDFLARE_API_TOKEN", "")
+
+
+def die(msg, code=2):
+    print(f"mail-fleet-audit: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def cf_get(path):
+    url = API_BASE + path
+    try:
+        proc = subprocess.run(
+            [
+                CURL, "-sS", "--max-time", "20", "-w", "\n%{http_code}",
+                "-H", "@-",
+                "-H", "Accept: application/json", url,
+            ],
+            input=f"Authorization: Bearer {TOKEN}\n",
+            capture_output=True, text=True,
+        )
+    except FileNotFoundError:
+        die(f"curl not found: {CURL}")
+    raw = proc.stdout or ""
+    body, _, status_s = raw.rpartition("\n") if "\n" in raw else (raw, "", "")
+    try:
+        status = int(status_s.strip() or "0")
+    except ValueError:
+        status = 0
+    if proc.returncode not in (0, 22) and status == 0:
+        err = (proc.stderr or "").strip() or f"curl exited {proc.returncode}"
+        die(f"request failed for {path}: {err}")
+    if status in (401, 403):
+        die(f"CLOUDFLARE_API_TOKEN was refused (HTTP {status})")
+    if status == 0:
+        die(f"empty response from {API_BASE}")
+    data = None
+    text = body.strip()
+    if text:
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError:
+            data = None
+    return status, data
+
+
+def cf_list(path):
+    items, page = [], 1
+    while True:
+        sep = "&" if "?" in path else "?"
+        status, data = cf_get(f"{path}{sep}page={page}&per_page=50")
+        if status in (400, 404, 405):
+            return items
+        if status != 200:
+            die(f"GET {path} failed (HTTP {status})")
+        if not isinstance(data, dict):
+            die(f"GET {path} returned non-JSON")
+        if data.get("success") is False:
+            return items
+        result = data.get("result")
+        if result is None:
+            return items
+        if isinstance(result, dict):
+            return result
+        if not isinstance(result, list):
+            die(f"GET {path} returned unexpected result")
+        items.extend(result)
+        info = data.get("result_info") or {}
+        try:
+            total_pages = int(info.get("total_pages") or 1)
+        except (TypeError, ValueError):
+            total_pages = 1
+        if page >= total_pages or not result:
+            return items
+        page += 1
+
+
+def resolve_mx(host):
+    try:
+        proc = subprocess.run(
+            [DIG, "+short", "MX", host, f"@{RESOLVER}"],
+            capture_output=True, text=True,
+        )
+    except FileNotFoundError:
+        die(f"dig not found: {DIG}")
+    records = []
+    for line in (proc.stdout or "").splitlines():
+        line = line.strip()
+        if not line or line.startswith(";"):
+            continue
+        parts = line.split()
+        if len(parts) >= 2 and parts[0].isdigit():
+            pri, exch = int(parts[0]), parts[1].rstrip(".").lower()
+        else:
+            pri, exch = 0, parts[-1].rstrip(".").lower()
+        if exch:
+            records.append((pri, exch))
+    records.sort()
+    return records
+
+
+def mx_kind(records):
+    if not records:
+        return None
+    joined = " ".join(ex for _p, ex in records)
+    if "cloudflare" in joined:
+        return "Cloudflare"
+    for needle, label in (("zoho", "Zoho"), ("hostinger", "Hostinger")):
+        if needle in joined:
+            return f"third party: {label}"
+    return "third party"
+
+
+def format_mx(records):
+    if not records:
+        return "none"
+    targets = ", ".join(f"{pri} {ex}" for pri, ex in records)
+    return f"{targets} ({mx_kind(records)})"
+
+
+def subdomain_name(item, zone_name):
+    if isinstance(item, str):
+        name = item
+    elif isinstance(item, dict):
+        if item.get("enabled") is False:
+            return None, False
+        name = item.get("name") or item.get("domain") or ""
+    else:
+        return None, False
+    name = name.strip().rstrip(".")
+    if not name:
+        return None, False
+    if name.startswith("*"):
+        return name, False
+    if "." not in name:
+        name = f"{name}.{zone_name}"
+    return name, True
+
+
+def main(argv):
+    if argv and argv[0] in ("-h", "--help"):
+        for line in open(__file__, encoding="utf-8"):
+            if line.startswith("import "):
+                break
+            print(line[2:] if line.startswith("# ") else line[1:], end="")
+        return 0
+    if argv:
+        die(f"unexpected argument: {argv[0]}")
+    if not TOKEN:
+        die("CLOUDFLARE_API_TOKEN is not set")
+
+    zones = cf_list("/zones?status=active")
+    if not isinstance(zones, list):
+        die("GET /zones returned unexpected result")
+
+    faults, lines = [], ["mail-fleet-audit", ""]
+    for zone in zones:
+        if not isinstance(zone, dict):
+            continue
+        zid, name = zone.get("id") or "", (zone.get("name") or "").rstrip(".")
+        if not zid or not name:
+            continue
+        lines += [name, f"  apex MX: {format_mx(resolve_mx(name))}"]
+
+        sending = cf_list(f"/zones/{zid}/email/sending/subdomains")
+        sending = sending if isinstance(sending, list) else []
+        send_rows = []
+        for item in sending:
+            host, check = subdomain_name(item, name)
+            if host is None:
+                continue
+            if not check:
+                send_rows.append(f"    {host}  (wildcard; MX not checked)")
+                continue
+            records = resolve_mx(host)
+            if records:
+                send_rows.append(f"    {host}  {format_mx(records)}")
+            else:
+                send_rows.append(f"    {host}  no MX  cannot receive")
+                faults.append(f"{host}: sending host has no MX; replies bounce")
+        lines += (["  sending:"] + send_rows) if send_rows else ["  sending: (none)"]
+        lines.append("")
+
+    if not zones:
+        lines += ["(no active zones)", ""]
+    if faults:
+        lines.append(f"FAULTS ({len(faults)})")
+        lines += [f"  {f}" for f in faults]
+        lines += ["", f"{len(faults)} sending host(s) cannot receive"]
+    else:
+        lines.append("ok: every sending host can receive")
+    print("\n".join(lines))
+    return 1 if faults else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
