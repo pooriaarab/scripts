@@ -19,6 +19,7 @@ mkdir -p "$ROOT/bin"
 cat > "$ROOT/bin/curl" <<'STUB'
 #!/usr/bin/env bash
 set -uo pipefail
+[ -n "${MAIL_FLEET_ARGV_LOG:-}" ] && printf '%s\n' "$*" >> "$MAIL_FLEET_ARGV_LOG"
 url=""
 for a in "$@"; do
   case "$a" in http://*|https://*) url="$a" ;; esac
@@ -90,6 +91,7 @@ setup_fix() {
 run_audit() {
   local fix="$1"
   MAIL_FLEET_FIXTURE="$fix" MAIL_FLEET_MX="$fix/mx" \
+    MAIL_FLEET_ARGV_LOG="${MAIL_FLEET_ARGV_LOG:-}" \
     PATH="$ROOT/bin:$PATH" \
     CLOUDFLARE_API_TOKEN="test-token" \
     CLOUDFLARE_API_BASE="http://mail-fleet-audit.test/client/v4" \
@@ -157,6 +159,23 @@ case "$out3" in
   *FAULTS*) bad "healthy fleet listed FAULTS: $out3" ;;
   *ok:\ every\ sending\ host\ can\ receive*) ok "healthy fleet prints the ok line" ;;
   *) bad "healthy fleet missing ok line: $out3" ;;
+esac
+
+# --- the API token must never reach the command line ------------------------
+# argv is world-readable in the process list, so a token passed as -H "..."
+# leaks to any local user for the life of the request. It goes in on stdin.
+# Nothing tested this, so putting it back on the command line stayed green.
+ARGVLOG="$ROOT/argv.log"
+: > "$ARGVLOG"
+MAIL_FLEET_ARGV_LOG="$ARGVLOG" run_audit "$FIX3" >/dev/null 2>&1
+if grep -q "test-token" "$ARGVLOG"; then
+  bad "the API token appeared in curl's argv"
+else
+  ok "the API token never reaches curl's argv"
+fi
+case "$(cat "$ARGVLOG")" in
+  *"-H @-"*) ok "the auth header is passed on stdin" ;;
+  *) bad "curl was not asked to read the header from stdin: $(head -1 "$ARGVLOG")" ;;
 esac
 
 echo
