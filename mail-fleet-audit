@@ -115,7 +115,7 @@ def cf_list(path, required=False):
         if data.get("success") is False:
             if required:
                 die(f"GET {path} failed: API returned success=false")
-            return items
+            raise ApiUnavailable(f"GET {path} failed: API returned success=false")
         result = data.get("result")
         if result is None:
             return items
@@ -217,7 +217,10 @@ def main(argv):
     if not TOKEN:
         die("CLOUDFLARE_API_TOKEN is not set")
 
-    zones = cf_list("/zones?status=active", required=True)
+    try:
+        zones = cf_list("/zones?status=active", required=True)
+    except ApiUnavailable as err:
+        die(f"GET /zones failed: {err}")
     if not isinstance(zones, list):
         die("GET /zones returned unexpected result")
 
