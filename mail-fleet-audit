@@ -44,6 +44,10 @@ API_BASE = os.environ.get(
 TOKEN = os.environ.get("CLOUDFLARE_API_TOKEN", "")
 
 
+class ApiUnavailable(Exception):
+    """A zone could not be read. Recorded as a fault, never as a clean result."""
+
+
 def die(msg, code=2):
     print(f"mail-fleet-audit: {msg}", file=sys.stderr)
     sys.exit(code)
@@ -54,7 +58,7 @@ def cf_get(path):
     try:
         proc = subprocess.run(
             [
-                CURL, "-sS", "--max-time", "20", "-w", "\n%{http_code}",
+                CURL, "-sS", "--max-time", "20", "--retry", "3", "--retry-delay", "2", "-w", "\n%{http_code}",
                 "-H", "@-",
                 "-H", "Accept: application/json", url,
             ],
@@ -71,7 +75,12 @@ def cf_get(path):
         status = 0
     if proc.returncode not in (0, 22) and status == 0:
         err = (proc.stderr or "").strip() or f"curl exited {proc.returncode}"
-        die(f"request failed for {path}: {err}")
+        # One slow zone must not end the audit. A 19-zone fleet hits a
+        # transient timeout often enough that aborting means the tool is
+        # never run, and an audit nobody runs is the state this script
+        # exists to end. "Could not look" is not "nothing wrong", so the
+        # caller records it as a fault rather than a clean zone.
+        raise ApiUnavailable(f"{path}: {err}")
     if status in (401, 403):
         die(f"CLOUDFLARE_API_TOKEN was refused (HTTP {status})")
     if status == 0:
@@ -86,18 +95,26 @@ def cf_get(path):
     return status, data
 
 
-def cf_list(path):
+def cf_list(path, required=False):
     items, page = [], 1
     while True:
         sep = "&" if "?" in path else "?"
         status, data = cf_get(f"{path}{sep}page={page}&per_page=50")
         if status in (400, 404, 405):
+            if required:
+                die(f"GET {path} failed (HTTP {status})")
             return items
         if status != 200:
-            die(f"GET {path} failed (HTTP {status})")
+            if required:
+                die(f"GET {path} failed (HTTP {status})")
+            raise ApiUnavailable(f"GET {path} failed (HTTP {status})")
         if not isinstance(data, dict):
-            die(f"GET {path} returned non-JSON")
+            if required:
+                die(f"GET {path} returned non-JSON")
+            raise ApiUnavailable(f"GET {path} returned non-JSON")
         if data.get("success") is False:
+            if required:
+                die(f"GET {path} failed: API returned success=false")
             return items
         result = data.get("result")
         if result is None:
@@ -105,7 +122,9 @@ def cf_list(path):
         if isinstance(result, dict):
             return result
         if not isinstance(result, list):
-            die(f"GET {path} returned unexpected result")
+            if required:
+                die(f"GET {path} returned unexpected result")
+            raise ApiUnavailable(f"GET {path} returned unexpected result")
         items.extend(result)
         info = data.get("result_info") or {}
         try:
@@ -125,6 +144,13 @@ def resolve_mx(host):
         )
     except FileNotFoundError:
         die(f"dig not found: {DIG}")
+    if proc.returncode != 0:
+        # dig itself exits non-zero only when it could not get an answer at
+        # all (server unreachable, timeout) - not for a genuine empty
+        # answer. That is "could not look", not "no MX", and must be a
+        # fault rather than a false "cannot receive".
+        err = (proc.stderr or "").strip() or f"dig exited {proc.returncode}"
+        raise ApiUnavailable(f"MX lookup for {host}: {err}")
     records = []
     for line in (proc.stdout or "").splitlines():
         line = line.strip()
@@ -191,7 +217,7 @@ def main(argv):
     if not TOKEN:
         die("CLOUDFLARE_API_TOKEN is not set")
 
-    zones = cf_list("/zones?status=active")
+    zones = cf_list("/zones?status=active", required=True)
     if not isinstance(zones, list):
         die("GET /zones returned unexpected result")
 
@@ -202,26 +228,33 @@ def main(argv):
         zid, name = zone.get("id") or "", (zone.get("name") or "").rstrip(".")
         if not zid or not name:
             continue
-        lines += [name, f"  apex MX: {format_mx(resolve_mx(name))}"]
+        mark = len(lines)
+        try:
+            lines += [name, f"  apex MX: {format_mx(resolve_mx(name))}"]
 
-        sending = cf_list(f"/zones/{zid}/email/sending/subdomains")
-        sending = sending if isinstance(sending, list) else []
-        send_rows = []
-        for item in sending:
-            host, check = subdomain_name(item, name)
-            if host is None:
-                continue
-            if not check:
-                send_rows.append(f"    {host}  (wildcard; MX not checked)")
-                continue
-            records = resolve_mx(host)
-            if records:
-                send_rows.append(f"    {host}  {format_mx(records)}")
-            else:
-                send_rows.append(f"    {host}  no MX  cannot receive")
-                faults.append(f"{host}: sending host has no MX; replies bounce")
-        lines += (["  sending:"] + send_rows) if send_rows else ["  sending: (none)"]
-        lines.append("")
+            sending = cf_list(f"/zones/{zid}/email/sending/subdomains")
+            sending = sending if isinstance(sending, list) else []
+            send_rows = []
+            for item in sending:
+                host, check = subdomain_name(item, name)
+                if host is None:
+                    continue
+                if not check:
+                    send_rows.append(f"    {host}  (wildcard; MX not checked)")
+                    continue
+                records = resolve_mx(host)
+                if records:
+                    send_rows.append(f"    {host}  {format_mx(records)}")
+                else:
+                    send_rows.append(f"    {host}  no MX  cannot receive")
+                    faults.append(f"{host}: sending host has no MX; replies bounce")
+            lines += (["  sending:"] + send_rows) if send_rows else ["  sending: (none)"]
+
+            lines.append("")
+        except ApiUnavailable as err:
+            del lines[mark:]
+            lines += [name, f"  COULD NOT AUDIT: {err}", ""]
+            faults.append(f"{name}: could not be audited ({err})")
 
     if not zones:
         lines += ["(no active zones)", ""]
