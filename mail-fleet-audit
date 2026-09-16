@@ -119,8 +119,12 @@ def cf_list(path):
 
 def cf_object(path):
     status, data = cf_get(path)
-    if status not in (200,) or not isinstance(data, dict) or data.get("success") is False:
+    if status in (400, 404, 405):
         return None
+    if status != 200:
+        die(f"GET {path} failed (HTTP {status})")
+    if not isinstance(data, dict) or data.get("success") is False:
+        die(f"GET {path} failed (HTTP {status})")
     result = data.get("result")
     return result if isinstance(result, dict) else None
 

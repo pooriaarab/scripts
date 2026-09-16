@@ -50,8 +50,13 @@ case "$path" in
     ;;
   /zones/*/email/routing/rules/catch_all)
     zid="${path#/zones/}"; zid="${zid%%/*}"
-    f="$fix/catch_all/$zid.json"
-    if [ -f "$f" ]; then body=$(cat "$f"); else status=404; body='{"success":false,"errors":[{"message":"not found"}],"result":null}'; fi
+    if [ "$zid" = "${MAIL_FLEET_CATCH_ALL_ERROR_ZONE:-}" ]; then
+      status="${MAIL_FLEET_CATCH_ALL_ERROR_STATUS:-429}"
+      body='{"success":false,"errors":[{"message":"rate limited"}],"result":null}'
+    else
+      f="$fix/catch_all/$zid.json"
+      if [ -f "$f" ]; then body=$(cat "$f"); else status=404; body='{"success":false,"errors":[{"message":"not found"}],"result":null}'; fi
+    fi
     ;;
   /zones/*/email/routing/rules)
     zid="${path#/zones/}"; zid="${zid%%/*}"
@@ -106,6 +111,8 @@ run_audit() {
     MAIL_FLEET_CURL="$ROOT/bin/curl" \
     MAIL_FLEET_DIG="$ROOT/bin/dig" \
     MAIL_FLEET_RESOLVER="1.1.1.1" \
+    MAIL_FLEET_CATCH_ALL_ERROR_ZONE="${MAIL_FLEET_CATCH_ALL_ERROR_ZONE:-}" \
+    MAIL_FLEET_CATCH_ALL_ERROR_STATUS="${MAIL_FLEET_CATCH_ALL_ERROR_STATUS:-}" \
     "$SCRIPT" 2>&1
 }
 
@@ -213,6 +220,24 @@ st4=$?
 case "$out4" in
   *'catch-all: disabled (drop)'*) ok "disabled catch-all is reported" ;;
   *) bad "disabled catch-all missing: $out4" ;;
+esac
+
+# --- 5. an HTTP-level API error on the catch-all call is not "none" ------
+# A 429 must not be indistinguishable from a zone with no catch-all.
+# Without per-zone resilience this aborts the run (see #440).
+FIX5="$ROOT/catch-all-rate-limited"
+setup_fix "$FIX5"
+envelope '[{"id":"z5","name":"limited2.test","status":"active"}]' > "$FIX5/zones.json"
+envelope '[]' > "$FIX5/sending/z5.json"
+envelope '[]' > "$FIX5/rules/z5.json"
+printf '10 route1.mx.cloudflare.net.\n' > "$FIX5/mx/limited2.test"
+
+out5=$(MAIL_FLEET_CATCH_ALL_ERROR_ZONE=z5 MAIL_FLEET_CATCH_ALL_ERROR_STATUS=429 run_audit "$FIX5")
+st5=$?
+[ $st5 -ne 0 ] && ok "a rate-limited catch-all call exits non-zero" || bad "rate-limited catch-all call exited 0: $out5"
+case "$out5" in
+  *'catch-all: none'*) bad "rate-limited catch-all was reported as no catch-all: $out5" ;;
+  *) ok "rate-limited catch-all is not reported as none" ;;
 esac
 
 echo
