@@ -37,6 +37,13 @@ if [ -n "${MAIL_FLEET_FAIL_ZONE:-}" ] && case "$url" in *"/zones/$MAIL_FLEET_FAI
   echo "curl: (28) Connection timed out" >&2
   exit 28
 fi
+# Simulates the top-level GET /zones call itself timing out at the
+# transport layer (no HTTP status at all), as opposed to /zones
+# returning a 4xx, which MAIL_FLEET_ZONES_STATUS covers instead.
+if [ -n "${MAIL_FLEET_FAIL_ZONES:-}" ] && case "$url" in *"/zones?"*) true ;; *) false ;; esac; then
+  echo "curl: (7) Failed to connect to host" >&2
+  exit 7
+fi
 # path after the host, query stripped
 rest="${url#*://}"
 path="/${rest#*/}"
@@ -251,6 +258,40 @@ esac
 case "$out6" in
   *fine2.test*) ok "a later zone is still audited after a rate-limited one" ;;
   *) bad "audit crashed instead of continuing past the rate-limited zone: $out6" ;;
+esac
+
+# --- 7. GET /zones itself timing out must not crash with a traceback ------
+# The per-zone ApiUnavailable path is caught inside the loop, but the
+# top-level /zones call sits above that loop entirely. A transport-level
+# failure there (as opposed to the 4xx MAIL_FLEET_ZONES_STATUS already
+# covers) must still hit die()'s exit 2, not an uncaught exception.
+FIX7="$ROOT/zones-timeout"
+setup_fix "$FIX7"
+
+out7=$(MAIL_FLEET_FAIL_ZONES=1 run_audit "$FIX7")
+st7=$?
+[ $st7 -eq 2 ] && ok "a /zones transport failure exits with the API-error code" || bad "a /zones transport failure exited $st7: $out7"
+case "$out7" in
+  *Traceback*) bad "a /zones transport failure crashed with a traceback: $out7" ;;
+  *) ok "a /zones transport failure does not crash with a traceback" ;;
+esac
+
+# --- 8. success:false with HTTP 200 on a zone's subresource is a fault, ---
+# not a silent clean pass. Cloudflare can return 200 with success:false;
+# that must not be read as "this zone has no sending subdomains".
+FIX8="$ROOT/success-false"
+setup_fix "$FIX8"
+envelope '[{"id":"z8","name":"degraded.test","status":"active"},{"id":"z9","name":"fine3.test","status":"active"}]' > "$FIX8/zones.json"
+envelope '[]' > "$FIX8/sending/z9.json"
+printf '10 route1.mx.cloudflare.net.\n' > "$FIX8/mx/degraded.test"
+printf '10 route1.mx.cloudflare.net.\n' > "$FIX8/mx/fine3.test"
+
+out8=$(MAIL_FLEET_SENDING_ERROR_ZONE=z8 MAIL_FLEET_SENDING_ERROR_STATUS=200 run_audit "$FIX8")
+st8=$?
+[ $st8 -ne 0 ] && ok "success:false with HTTP 200 exits non-zero" || bad "success:false with HTTP 200 exited 0: $out8"
+case "$out8" in
+  *COULD\ NOT\ AUDIT*) ok "success:false with HTTP 200 is named in the report" ;;
+  *) bad "success:false with HTTP 200 was read as a clean zone: $out8" ;;
 esac
 
 echo
