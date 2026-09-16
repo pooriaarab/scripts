@@ -28,8 +28,8 @@
 # zone's own records: what a sending host actually sees is what matters.
 #
 # Exit 0  every sending host can receive
-# Exit 1  a sending host has no MX
-# Exit 2  usage, missing token, or API error
+# Exit 1  a sending host has no MX, or a zone could not be audited
+# Exit 2  usage, missing token, or GET /zones itself failed
 #
 # Tests inject MAIL_FLEET_CURL and MAIL_FLEET_DIG so the suite never
 # touches the network.
@@ -221,7 +221,8 @@ def main(argv):
     if not isinstance(zones, list):
         die("GET /zones returned unexpected result")
 
-    faults, lines = [], ["mail-fleet-audit", ""]
+    faults, no_mx_count, audit_error_count = [], 0, 0
+    lines = ["mail-fleet-audit", ""]
     for zone in zones:
         if not isinstance(zone, dict):
             continue
@@ -248,6 +249,7 @@ def main(argv):
                 else:
                     send_rows.append(f"    {host}  no MX  cannot receive")
                     faults.append(f"{host}: sending host has no MX; replies bounce")
+                    no_mx_count += 1
             lines += (["  sending:"] + send_rows) if send_rows else ["  sending: (none)"]
 
             lines.append("")
@@ -255,13 +257,19 @@ def main(argv):
             del lines[mark:]
             lines += [name, f"  COULD NOT AUDIT: {err}", ""]
             faults.append(f"{name}: could not be audited ({err})")
+            audit_error_count += 1
 
     if not zones:
         lines += ["(no active zones)", ""]
     if faults:
         lines.append(f"FAULTS ({len(faults)})")
         lines += [f"  {f}" for f in faults]
-        lines += ["", f"{len(faults)} sending host(s) cannot receive"]
+        summary = []
+        if no_mx_count:
+            summary.append(f"{no_mx_count} sending host(s) cannot receive")
+        if audit_error_count:
+            summary.append(f"{audit_error_count} zone(s) could not be audited")
+        lines += ["", "; ".join(summary)]
     else:
         lines.append("ok: every sending host can receive")
     print("\n".join(lines))
