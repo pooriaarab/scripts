@@ -82,10 +82,12 @@ def kc_write(svc, blob):
 def refresh(refresh_token):
     body = json.dumps({"grant_type": "refresh_token",
                        "refresh_token": refresh_token, "client_id": CLIENT_ID})
+    # -d @- (not "-d body"): the refresh token must never appear in argv,
+    # where any local user can read it via `ps`.
     r = subprocess.run(
         ["curl", "-sS", "-X", "POST", TOKEN_URL,
          "-H", "content-type: application/json", "-H", "accept: application/json",
-         "-d", body], capture_output=True, text=True, timeout=30)
+         "-d", "@-"], input=body, capture_output=True, text=True, timeout=30)
     try:
         j = json.loads(r.stdout)
     except json.JSONDecodeError:
@@ -244,7 +246,7 @@ def main():
         sfx = acct.get("envSuffix")
         if sfx:
             wanted = {f"CLAUDE_OAUTH_{sfx}": access,
-                      f"CLAUDE_OAUTH_REFRESH_{sfx}": refresh_tok,
+                      f"CLAUDE_OAUTH_REFRESH_{sfx}": refresh_tok or "",
                       f"CLAUDE_OAUTH_EXPIRES_{sfx}": str(exp_ms)}
             seen = set()
             for i, line in enumerate(env_lines):
