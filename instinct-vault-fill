@@ -3,8 +3,8 @@
 
 Drives the vault UI at app.instinct.com/vault through agent-browser against an
 already-signed-in session (the real-Chrome clone launched by the
-`browser-personal` zsh function; run that once first so the clone exists and
-the login is warm).
+`browser-personal-real` zsh function; run that once first so the clone exists
+and the login is warm).
 
 Reads an entries file kept OUTSIDE the repo:
   entries.json = [{"name": "Costco", "username": "...", "password": "...",
@@ -137,6 +137,8 @@ def main():
         ok += res == "ok"
         fail += res != "ok"
         emit(f"[{i}] {e['name']}: {res}")
+        if res == "ok" and e.get("otpauth"):
+            emit(f"[{i}] {e['name']}: otpauth not filled — add TOTP manually")
     emit(f"DONE ok={ok} fail={fail} skip={skip}")
     sys.exit(1 if fail else 0)
 
