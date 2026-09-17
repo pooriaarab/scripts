@@ -1,0 +1,138 @@
+#!/usr/bin/env python3
+"""instinct-vault-fill — seed login entries into an Instinct vault.
+
+Drives the vault UI at app.instinct.com/vault through agent-browser against an
+already-signed-in session (the real-Chrome clone launched by the
+`browser-personal` zsh function; run that once first so the clone exists and
+the login is warm).
+
+Reads an entries file kept OUTSIDE the repo:
+  entries.json = [{"name": "Costco", "username": "...", "password": "...",
+                   "otpauth": "otpauth://..."(optional)}]
+
+Two traps this encodes, both learned the hard way:
+  * a11y-ref clicks drop silently on this app (buttons carry icon badges, so
+    textContent never equals the a11y name) — clicks go through DOM eval by
+    aria-label/title/text instead.
+  * the Add-login dialog renders its fields asynchronously — the opener retries
+    until the textboxes exist rather than sleeping a fixed time.
+
+Usage:
+  instinct-vault-fill entries.json [--session personal-real] [--port 9334]
+                                    [--url https://app.instinct.com/vault]
+The script never prints secret values; the log records names + results only.
+Idempotent: skips entries whose name is already in the vault.
+"""
+
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("entries", help="path to entries.json")
+    ap.add_argument("--session", default="personal-real")
+    ap.add_argument("--port", default="9334")
+    ap.add_argument("--url", default="https://app.instinct.com/vault")
+    args = ap.parse_args()
+
+    entries = json.load(open(os.path.expanduser(args.entries)))
+    log_path = args.entries + ".fill.log"
+
+    def ab(*cmd, timeout=40):
+        r = subprocess.run(
+            ["agent-browser", "--session", args.session, *cmd],
+            capture_output=True, text=True, timeout=timeout,
+            env={**os.environ, "AGENT_BROWSER_AUTO_CONNECT": "0"})
+        return r.stdout + r.stderr
+
+    def snap():
+        return ab("snapshot")
+
+    def ref_of(text, s):
+        for line in s.splitlines():
+            if text in line:
+                m = re.search(r"ref=(e\d+)", line)
+                if m:
+                    return m.group(1)
+        return None
+
+    def click_label(label):
+        js = ("(()=>{const b=[...document.querySelectorAll('button')].find(x=>"
+              f"[x.getAttribute('aria-label'),x.title,x.textContent.trim()]"
+              f".includes('{label}'));if(!b)return 'nf';b.click();return 'ok'}})()")
+        return ab("eval", js)
+
+    def open_dialog():
+        for _ in range(8):
+            s = snap()
+            if 'dialog "Add login"' in s and 'textbox "Username"' in s:
+                return s
+            if "dialog" in s:
+                hit = ('"nf"' not in click_label("Cancel")
+                       or '"nf"' not in click_label("Close"))
+                if hit:
+                    time.sleep(0.6)
+                    continue
+                return None
+            click_label("Add login")
+            time.sleep(1.5)
+        return None
+
+    def fill_entry(e):
+        s = open_dialog()
+        if s is None:
+            return "dialog never rendered"
+        name_r = ref_of('textbox "Name"', s)
+        user_r = ref_of('textbox "Username"', s)
+        pass_r = ref_of('textbox "Password"', s)
+        if not all([name_r, user_r, pass_r]):
+            return "dialog refs missing"
+        ab("fill", f"@{name_r}", e["name"])
+        ab("fill", f"@{user_r}", e["username"])
+        ab("fill", f"@{pass_r}", e["password"])
+        s = snap()
+        dlg = s[s.find('dialog "Add login"'):]
+        if e["username"] not in dlg:
+            return "username did not bind"
+        if re.search(r'button "Save" \[disabled', dlg):
+            return "Save still disabled"
+        click_label("Save")
+        time.sleep(1.5)
+        return "ok" if e["name"] in snap() else "not in list after save"
+
+    log = open(log_path, "a")
+
+    def emit(msg):
+        log.write(msg + "\n")
+        log.flush()
+        print(msg)
+
+    ab("connect", args.port)
+    ab("open", args.url)
+    time.sleep(1)
+    existing = snap()
+    ok = fail = skip = 0
+    for i, e in enumerate(entries):
+        if f'"{e["name"]}"' in existing:
+            skip += 1
+            emit(f"[{i}] {e['name']}: already in vault")
+            continue
+        try:
+            res = fill_entry(e)
+        except Exception as ex:
+            res = f"exception {ex.__class__.__name__}"
+        ok += res == "ok"
+        fail += res != "ok"
+        emit(f"[{i}] {e['name']}: {res}")
+    emit(f"DONE ok={ok} fail={fail} skip={skip}")
+    sys.exit(1 if fail else 0)
+
+
+if __name__ == "__main__":
+    main()
