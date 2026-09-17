@@ -162,6 +162,14 @@ def main():
     env_lines = (open(SECRETS_ENV).read().splitlines()
                  if os.path.exists(SECRETS_ENV) else [])
 
+    if not read_only:
+        if or_secrets is None:
+            print(f"warn: {OFFROUTER_SECRETS} not found; OffRouter sync skipped",
+                  file=sys.stderr)
+        if codexbar is None:
+            print(f"warn: {CODEXBAR_CFG} not found; CodexBar sync skipped",
+                  file=sys.stderr)
+
     for acct in load_accounts():
         aid = acct["id"]
         svc = keychain_service(acct["configDir"])
@@ -225,7 +233,8 @@ def main():
             blob["claudeAiOauth"] = {**oauth, "accessToken": access,
                                      "refreshToken": refresh_tok,
                                      "expiresAt": exp_ms}
-            kc_write(svc, blob)
+            if not kc_write(svc, blob):
+                print(f"{aid:11} WARN  keychain write failed", file=sys.stderr)
 
         # offrouter secrets.json
         if or_secrets is not None:
