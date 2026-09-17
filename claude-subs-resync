@@ -1,0 +1,282 @@
+#!/usr/bin/env python3
+"""claude-subs-resync — re-sync live Claude Code OAuth sessions into every store.
+
+Source of truth: the macOS Keychain entries Claude Code maintains per
+CLAUDE_CONFIG_DIR ("Claude Code-credentials-<sha256(abs dir)[:8]>").
+
+For each account in the local map file: read the keychain session (fallback:
+the OffRouter-stored refresh token), refresh it if the access token is expired
+or nearly so, then write the pair to keychain + OffRouter secrets.json +
+CodexBar config + the .secrets env file, and clear the stale usage-store
+backoff so pick-account re-polls immediately.
+
+Anthropic tolerates a concurrent refresh — rotating here does not kill the
+keychain session — and the new pair is written back to the keychain anyway, so
+the topology stays consistent even if rotation ever goes strict single-use.
+
+Account map (kept out of this repo; emails and labels are local config):
+  ~/.config/claude-subs/accounts.json   (see claude-subs-accounts.example.json)
+    {"accounts": [{"id": "personal", "configDir": "~/.claude-personal",
+                   "codexbarLabel": "pooria@", "envSuffix": "POORIA_AT_X"}]}
+
+Usage:
+  claude-subs-resync            sync all accounts (refresh only when needed)
+  claude-subs-resync --check    read-only: report per-account health + usage
+  claude-subs-resync --dry-run  resolve sources and report, write nothing
+
+Path overrides (env): OFFROUTER_HOME, CODEXBAR_CONFIG, CLAUDE_OAUTH_ENV,
+CLAUDE_SUBS_MAP. No `security` binary (Linux/CI): keychain steps are skipped,
+the OffRouter store can still serve as the refresh source.
+"""
+
+import argparse
+import hashlib
+import json
+import os
+import shutil
+import subprocess
+import sys
+import time
+
+HOME = os.path.expanduser("~")
+OFFROUTER_HOME = os.environ.get("OFFROUTER_HOME", f"{HOME}/.offrouter-personal")
+OFFROUTER_SECRETS = f"{OFFROUTER_HOME}/secrets.json"
+USAGE_JSON = f"{OFFROUTER_HOME}/state/usage.json"
+CODEXBAR_CFG = os.environ.get("CODEXBAR_CONFIG", f"{HOME}/.codexbar/config.json")
+SECRETS_ENV = os.environ.get(
+    "CLAUDE_OAUTH_ENV", f"{HOME}/Documents/Personal/.secrets/claude-oauth.env")
+MAP_FILE = os.environ.get(
+    "CLAUDE_SUBS_MAP", f"{HOME}/.config/claude-subs/accounts.json")
+TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
+USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
+CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"  # public Claude Code client
+
+
+def keychain_service(config_dir):
+    path = os.path.abspath(os.path.expanduser(config_dir))
+    return "Claude Code-credentials-" + hashlib.sha256(path.encode()).hexdigest()[:8]
+
+
+def security(*args):
+    if not shutil.which("security"):
+        return None
+    return subprocess.run(["security", *args], capture_output=True, text=True)
+
+
+def kc_read(svc):
+    r = security("find-generic-password", "-s", svc, "-w")
+    if r is None or r.returncode != 0:
+        return None
+    try:
+        return json.loads(r.stdout)
+    except json.JSONDecodeError:
+        return None
+
+
+def kc_write(svc, blob):
+    r = security("add-generic-password", "-U", "-a", os.environ.get("USER", ""),
+                 "-s", svc, "-w", json.dumps(blob, separators=(",", ":")))
+    return bool(r and r.returncode == 0)
+
+
+def refresh(refresh_token):
+    body = json.dumps({"grant_type": "refresh_token",
+                       "refresh_token": refresh_token, "client_id": CLIENT_ID})
+    # -d @- (not "-d body"): the refresh token must never appear in argv,
+    # where any local user can read it via `ps`.
+    r = subprocess.run(
+        ["curl", "-sS", "-X", "POST", TOKEN_URL,
+         "-H", "content-type: application/json", "-H", "accept: application/json",
+         "-d", "@-"], input=body, capture_output=True, text=True, timeout=30)
+    try:
+        j = json.loads(r.stdout)
+    except json.JSONDecodeError:
+        return None, f"bad response: {r.stdout[:80]}"
+    if not j.get("access_token"):
+        return None, j.get("error_description") or j.get("error") or "no access_token"
+    return j, None
+
+
+def usage_pct(access_token):
+    if not access_token:
+        return None
+    r = subprocess.run(["curl", "-sS", USAGE_URL,
+                        "-H", f"authorization: Bearer {access_token}",
+                        "-H", "anthropic-beta: oauth-2025-04-20"],
+                       capture_output=True, text=True, timeout=30)
+    try:
+        j = json.loads(r.stdout)
+    except json.JSONDecodeError:
+        return None
+    fh = (j.get("five_hour") or {}).get("utilization")
+    sd = (j.get("seven_day") or {}).get("utilization")
+    return None if fh is None and sd is None else (fh, sd)
+
+
+def backup(path):
+    shutil.copy2(path, f"{path}.bak-resync-{time.strftime('%Y%m%d-%H%M%S')}")
+
+
+def load_json(path):
+    try:
+        return json.load(open(path))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def load_accounts():
+    doc = load_json(MAP_FILE)
+    if not doc or "accounts" not in doc:
+        sys.exit(f"account map not found: {MAP_FILE}\n"
+                 "copy claude-subs-accounts.example.json and fill it in")
+    return doc["accounts"]
+
+
+def offrouter_pair(acct):
+    j = load_json(OFFROUTER_SECRETS) or {}
+    raw = (j.get("secrets") or {}).get(f"anthropic:{acct}:oauth")
+    try:
+        return json.loads(raw) if raw else None
+    except json.JSONDecodeError:
+        return None
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--check", action="store_true",
+                    help="read-only health report (queries the usage endpoint)")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="resolve sources and report; write nothing")
+    args = ap.parse_args()
+    read_only = args.check or args.dry_run
+    now_ms = int(time.time() * 1000)
+
+    if not read_only:
+        for p in (OFFROUTER_SECRETS, USAGE_JSON, CODEXBAR_CFG, SECRETS_ENV):
+            if os.path.exists(p):
+                backup(p)
+
+    or_secrets = load_json(OFFROUTER_SECRETS)
+    codexbar = load_json(CODEXBAR_CFG)
+    usage_doc = load_json(USAGE_JSON)
+    env_lines = (open(SECRETS_ENV).read().splitlines()
+                 if os.path.exists(SECRETS_ENV) else [])
+
+    for acct in load_accounts():
+        aid = acct["id"]
+        svc = keychain_service(acct["configDir"])
+        blob = kc_read(svc)
+        oauth = (blob or {}).get("claudeAiOauth") or {}
+        kc_refresh = oauth.get("refreshToken")
+        stored = offrouter_pair(aid) or {}
+
+        if args.check:
+            pct = usage_pct(oauth.get("accessToken") or stored.get("accessToken"))
+            print(f"{aid:11} keychain refresh={'yes' if kc_refresh else 'NO'}  "
+                  f"offrouter refresh={'yes' if stored.get('refreshToken') else 'NO'}  "
+                  f"usage={pct if pct else 'unreadable'}")
+            continue
+
+        # Fresh keychain access token: copy the live pair, don't rotate it.
+        kc_access = oauth.get("accessToken")
+        kc_exp = oauth.get("expiresAt") or 0
+        fresh = kc_access and kc_exp > now_ms + 60_000
+
+        if fresh:
+            pair = {"access_token": kc_access, "refresh_token": kc_refresh,
+                    "expires_in": int((kc_exp - now_ms) / 1000),
+                    "scope": oauth.get("scope")}
+            source = "keychain-copy"
+        else:
+            pair, err, source = None, None, None
+            for label, rt in (("keychain", kc_refresh),
+                              ("offrouter", stored.get("refreshToken"))):
+                if not rt:
+                    continue
+                pair, err = refresh(rt)
+                if pair:
+                    source = label
+                    break
+            if not pair:
+                if not kc_refresh and not stored.get("refreshToken"):
+                    print(f"{aid:11} --  no OAuth session (inference-only "
+                          f"setup token; named launch still works)")
+                elif "invalid_grant" in str(err):
+                    print(f"{aid:11} FAIL  refresh token dead — "
+                          f"re-login needed for {aid}")
+                else:
+                    print(f"{aid:11} SKIP  refresh failed ({err}); "
+                          f"existing pairs kept")
+                continue
+
+        access = pair["access_token"]
+        refresh_tok = (pair.get("refresh_token") or stored.get("refreshToken")
+                       or kc_refresh)
+        exp_ms = now_ms + int(pair.get("expires_in", 28800)) * 1000
+        scope = pair.get("scope") or stored.get("scope") or oauth.get("scope") or ""
+
+        if args.dry_run:
+            print(f"{aid:11} would sync via {source} "
+                  f"(expires {time.strftime('%H:%M', time.localtime(exp_ms/1000))})")
+            continue
+
+        # keychain — write back only when an item exists; Claude Code owns creation
+        if blob is not None:
+            blob["claudeAiOauth"] = {**oauth, "accessToken": access,
+                                     "refreshToken": refresh_tok,
+                                     "expiresAt": exp_ms}
+            kc_write(svc, blob)
+
+        # offrouter secrets.json
+        if or_secrets is not None:
+            or_secrets.setdefault("secrets", {})[f"anthropic:{aid}:oauth"] = (
+                json.dumps({"accessToken": access, "refreshToken": refresh_tok,
+                            "expiresAt": exp_ms, "scope": scope,
+                            "obtainedAt": now_ms}))
+
+        # codexbar tokenAccounts
+        cb = next((p for p in ((codexbar or {}).get("providers") or [])
+                   if p.get("id") == "claude"), {})
+        for a in (cb.get("tokenAccounts") or {}).get("accounts", []):
+            if a.get("label") == acct.get("codexbarLabel"):
+                a.update(accessToken=access, token=access,
+                         refreshToken=refresh_tok, expiresAt=exp_ms // 1000)
+
+        # .secrets env — access var + refresh/expiry companions
+        sfx = acct.get("envSuffix")
+        if sfx:
+            wanted = {f"CLAUDE_OAUTH_{sfx}": access,
+                      f"CLAUDE_OAUTH_REFRESH_{sfx}": refresh_tok or "",
+                      f"CLAUDE_OAUTH_EXPIRES_{sfx}": str(exp_ms)}
+            seen = set()
+            for i, line in enumerate(env_lines):
+                k = line.split("=", 1)[0].strip()
+                if k in wanted:
+                    env_lines[i] = f"{k}={wanted[k]}"
+                    seen.add(k)
+            env_lines += [f"{k}={v}" for k, v in wanted.items() if k not in seen]
+
+        # clear stale usage backoff so pick-account re-polls now
+        rec = ((usage_doc or {}).get("accounts") or {}).get(f"anthropic:{aid}")
+        if rec:
+            rec.pop("nextPollAt", None)
+            rec.pop("lastFetchError", None)
+
+        pct = usage_pct(access)
+        print(f"{aid:11} OK via {source}  5h={pct[0]}% 7d={pct[1]}%" if pct
+              else f"{aid:11} OK via {source}  (usage unreadable)")
+
+    if not read_only:
+        if or_secrets is not None:
+            json.dump(or_secrets, open(OFFROUTER_SECRETS, "w"), indent=2)
+        if codexbar is not None:
+            json.dump(codexbar, open(CODEXBAR_CFG, "w"), indent=2)
+        if usage_doc is not None:
+            json.dump(usage_doc, open(USAGE_JSON, "w"), indent=2)
+        if env_lines:
+            open(SECRETS_ENV, "w").write("\n".join(env_lines) + "\n")
+            os.chmod(SECRETS_ENV, 0o600)
+
+
+if __name__ == "__main__":
+    main()
