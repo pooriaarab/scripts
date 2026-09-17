@@ -1,0 +1,16 @@
+{
+  "accounts": [
+    {
+      "id": "personal",
+      "configDir": "~/.claude-personal",
+      "codexbarLabel": "you@",
+      "envSuffix": "YOU_AT_EXAMPLE_COM"
+    },
+    {
+      "id": "personal-1",
+      "configDir": "~/.claude-personal-1",
+      "codexbarLabel": "alt@",
+      "envSuffix": "ALT_AT_EXAMPLE_COM"
+    }
+  ]
+}
