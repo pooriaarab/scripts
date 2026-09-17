@@ -73,6 +73,10 @@ def main():
             s = snap()
             if 'dialog "Add login"' in s and 'textbox "Username"' in s:
                 return s
+            if 'dialog "Add login"' in s:
+                # Dialog is up but its fields haven't rendered yet — wait, don't dismiss it.
+                time.sleep(0.6)
+                continue
             if "dialog" in s:
                 hit = ('"nf"' not in click_label("Cancel")
                        or '"nf"' not in click_label("Close"))
@@ -97,7 +101,10 @@ def main():
         ab("fill", f"@{user_r}", e["username"])
         ab("fill", f"@{pass_r}", e["password"])
         s = snap()
-        dlg = s[s.find('dialog "Add login"'):]
+        idx = s.find('dialog "Add login"')
+        if idx == -1:
+            return "dialog closed unexpectedly"
+        dlg = s[idx:]
         if e["username"] not in dlg:
             return "username did not bind"
         if re.search(r'button "Save" \[disabled', dlg):
