@@ -2252,24 +2252,34 @@ async function runPr(options) {
     if (proofResult.failures.length === 0) passes.push('proof of work');
   }
   const sizeResult = checkSize(summary, config);
-  // Only the line cap is lifted, and only for a promotion. checkSize stays a
-  // pure function of the diff and the config: it is the wrong place to teach
-  // about pull requests, and its arity is guarded precisely so a third input
-  // cannot quietly become the next escape hatch. The exemption therefore lives
-  // here, where the refs are, and drops the one failure it is allowed to drop.
-  // The file cap, the empty-diff check and the directory warning all stay --
-  // only the line cap has ever deadlocked a promotion, and an exemption wider
-  // than the evidence for it is how the last escape hatch got out of hand.
+  // The line cap and the file cap are lifted, and only for a promotion.
+  // checkSize stays a pure function of the diff and the config: it is the
+  // wrong place to teach about pull requests, and its arity is guarded
+  // precisely so a third input cannot quietly become the next escape hatch.
+  // The exemption therefore lives here, where the refs are, and drops only
+  // the failures the evidence allows. The empty-diff check and the directory
+  // warning stay -- an exemption wider than the evidence for it is how the
+  // last escape hatch got out of hand. The file cap deadlocked
+  // pooriaarab/usegeoaeo#142 at 90 counted files.
   const promotion = isReleasePromotion(pull);
   for (const item of sizeResult.failures) {
+    // Never silent. A skipped cap that prints nothing is a hole nobody can
+    // audit, so the run still names the number it would have failed on.
     if (promotion && item.check === 'PR size') {
-      // Never silent. A skipped cap that prints nothing is a hole nobody can
-      // audit, so the run still names the number it would have failed on.
       warnings.push(fail(
         'release promotion: size cap not applied',
         item.got,
         `${config.maxLines.toLocaleString()} counted lines or fewer for ordinary work`,
         `Every line here is already merged into ${pull.base.repo.default_branch}, each under its own issue and its own review. The cap applies to the pull requests that put it there, not to the promotion that ships them.`,
+      ));
+      continue;
+    }
+    if (promotion && item.check === 'changed files') {
+      warnings.push(fail(
+        'release promotion: file cap not applied',
+        item.got,
+        `${config.maxFiles} counted files or fewer for ordinary work`,
+        `Every file here is already merged into ${pull.base.repo.default_branch}, each under its own issue and its own review. The cap applies to the pull requests that put it there, not to the promotion that ships them.`,
       ));
       continue;
     }

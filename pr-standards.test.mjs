@@ -2649,7 +2649,41 @@ test('an ordinary pull request over the cap still fails, promotion or not', asyn
   assert.equal(result.warnings.some((w) => w.check === 'release promotion: size cap not applied'), false);
 });
 
-test('a release promotion still fails every rule but the line cap', async () => {
+// 90 counted files, one line each: over the 40-file cap, under the line cap.
+// pooriaarab/usegeoaeo#142 had no route to green at this count.
+function fileCapRoutes(number, options) {
+  const routes = promotionRoutes(number, options);
+  routes[`pulls/${number}/files`] = Array.from({ length: 90 }, (_, index) => ({
+    filename: `src/promoted-${index}.ts`,
+    additions: 1,
+    deletions: 0,
+  }));
+  return routes;
+}
+
+test('a release promotion over the file cap passes, and says so out loud', async () => {
+  const { exitCode, result } = await runPrWithRoutes(34, fileCapRoutes(34));
+
+  assert.equal(result.failures.some((f) => f.check === 'changed files'), false);
+  assert.equal(exitCode, 0);
+  assert.equal(result.size.countedFiles, 90);
+  const warning = result.warnings.find((w) => w.check === 'release promotion: file cap not applied');
+  assert.notEqual(warning, undefined, 'a skipped cap that prints nothing cannot be audited');
+  assert.match(warning.got, /90 counted files/);
+});
+
+test('an ordinary pull request over the file cap still fails', async () => {
+  // Same repository, same diff, same file count. Only the refs differ.
+  const { exitCode, result } = await runPrWithRoutes(35, fileCapRoutes(35, { head: 'refactor', base: 'main' }));
+
+  assert.equal(exitCode, 1);
+  const files = result.failures.find((f) => f.check === 'changed files');
+  assert.notEqual(files, undefined);
+  assert.match(files.got, /90 counted files/);
+  assert.equal(result.warnings.some((w) => w.check === 'release promotion: file cap not applied'), false);
+});
+
+test('a release promotion still fails every rule but the size caps', async () => {
   const { exitCode, result } = await runPrWithRoutes(32, promotionRoutes(32, {
     commitMessage: 'Promote to release\n\nCo-authored-by: Claude <noreply@anthropic.com>',
   }));
