@@ -1,0 +1,301 @@
+#!/usr/bin/env python3
+# Sign every warm-up mailbox up for a third-party CLI/API service so its inbox
+# receives real external mail: verification codes, welcome notes, and the
+# ongoing notifications those services send after signup.
+#
+# WHY THIS EXISTS
+# Warm-up mail sent only to our own seed mailboxes produces a closed loop —
+# every sender and receiver is us. Filters notice. Third-party signups make
+# strangers send mail to the domain, which is the strongest legitimate inbound
+# a fresh domain can get. The catch: signup needs an OTP read from the inbox
+# inside a ~15 minute window, and doing that by hand loses codes to expiry and
+# leaves no audit trail. This sweep runs the loop unattended.
+#
+#   signup-sweep --once      one pass: request codes, verify what arrived
+#   signup-sweep --daemon    loop passes until every mailbox is terminal
+#
+# Mailboxes come from the warm-up configs (identities[].address). Each mailbox
+# gets exactly one service, assigned round-robin so inbound is spread across
+# providers instead of piling onto one. State lives in SWEEP_STATE as JSON and
+# survives restarts; credentials land in SWEEP_CRED_DIR (0700/0600), never in
+# a repo. Verification codes are never written to state or logs.
+#
+# Services throttle. Each adapter declares the seconds between code requests
+# and a cap on codes in flight; a 429 or equivalent answer backs that
+# service's next attempt off by the server's own hint when one is given.
+#
+# Env (injectable so tests never touch the network):
+#   SWEEP_CONFIG_DIR  warmup domain configs  (~/.local/share/domain-email-warming/config/domains)
+#   SWEEP_STATE       state JSON             (~/.local/state/domain-email-warming/signups.json)
+#   SWEEP_LOG         audit JSONL            (~/.local/state/domain-email-warming/signups.jsonl)
+#   SWEEP_CRED_DIR    credential store       (~/.local/state/domain-email-warming/credentials)
+#   SWEEP_ACCOUNT     gog gmail account      (pooria.arab@gmail.com)
+#   SWEEP_CURL        curl binary            (curl)
+#   SWEEP_GOG         gog binary             (gog)
+#   SWEEP_COSMIC      cosmic CLI binary      (cosmic)
+#   SWEEP_TICK        daemon seconds/pass    (60)
+#
+# Exit 0  pass completed (daemon: all mailboxes terminal)
+# Exit 1  config dir missing or unreadable
+# Exit 2  usage error
+import json, os, random, re, subprocess, sys, time
+from datetime import datetime, timezone
+from pathlib import Path
+
+HOME = Path.home()
+CONFIG_DIR = Path(os.environ.get("SWEEP_CONFIG_DIR", HOME / ".local/share/domain-email-warming/config/domains"))
+STATE_PATH = Path(os.environ.get("SWEEP_STATE", HOME / ".local/state/domain-email-warming/signups.json"))
+LOG_PATH = Path(os.environ.get("SWEEP_LOG", HOME / ".local/state/domain-email-warming/signups.jsonl"))
+CRED_DIR = Path(os.environ.get("SWEEP_CRED_DIR", HOME / ".local/state/domain-email-warming/credentials"))
+ACCOUNT = os.environ.get("SWEEP_ACCOUNT", "pooria.arab@gmail.com")
+CURL = os.environ.get("SWEEP_CURL", "curl")
+GOG = os.environ.get("SWEEP_GOG", "gog")
+COSMIC = os.environ.get("SWEEP_COSMIC", "cosmic")
+TICK = int(os.environ.get("SWEEP_TICK", "45"))
+
+OTP_TTL = 14 * 60        # codes older than this are retried, not verified
+MAX_ATTEMPTS = 5
+
+def now():
+    return time.time()
+
+def ts():
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+def run(argv, stdin=None):
+    try:
+        p = subprocess.run(argv, input=stdin, capture_output=True, text=True, timeout=60)
+        return p.returncode, (p.stdout or "") + (p.stderr or "")
+    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+        return 127, str(e)
+
+def log(service, mailbox, ok, detail):
+    LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with open(LOG_PATH, "a") as f:
+        f.write(json.dumps({"t": ts(), "service": service, "mailbox": mailbox,
+                            "ok": ok, "detail": detail[:200]}) + "\n")
+
+def store_cred(service, mailbox, secret):
+    d = CRED_DIR / service
+    d.mkdir(parents=True, exist_ok=True)
+    os.chmod(CRED_DIR, 0o700)
+    os.chmod(d, 0o700)
+    p = d / mailbox.replace("@", "_")
+    p.write_text(secret)
+    os.chmod(p, 0o600)
+
+def load_state():
+    if STATE_PATH.exists():
+        return json.loads(STATE_PATH.read_text())
+    return {"pairs": {}, "services": {}}
+
+def save_state(state):
+    STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    tmp = STATE_PATH.with_suffix(".tmp")
+    tmp.write_text(json.dumps(state, indent=1))
+    os.replace(tmp, STATE_PATH)
+
+def mailboxes():
+    out = []
+    for f in sorted(CONFIG_DIR.glob("*.warmup.json")):
+        cfg = json.loads(f.read_text())
+        for i in cfg.get("identities", []):
+            if i.get("address"):
+                out.append(i["address"])
+    return out
+
+def strip_preamble(out):
+    # gog prints "Using keyring backend: ..." before the JSON payload.
+    i = out.find("{")
+    return out[i:] if i >= 0 else out
+
+def gmail_search(query):
+    rc, out = run([GOG, "-a", ACCOUNT, "gmail", "messages", "search", query, "--max", "50", "-j"])
+    try:
+        return json.loads(strip_preamble(out)).get("messages", [])
+    except (json.JSONDecodeError, AttributeError):
+        return []
+
+def gmail_body(mid):
+    rc, out = run([GOG, "-a", ACCOUNT, "gmail", "get", mid, "--format", "full"])
+    return out
+
+def curl_json(method, url, payload):
+    rc, out = run([CURL, "-sS", "-X", method, url,
+                   "-H", "content-type: application/json", "-d", json.dumps(payload)])
+    try:
+        return rc, json.loads(out)
+    except json.JSONDecodeError:
+        return rc, {"raw": out[:300]}
+
+def retry_after_seconds(body):
+    n = body.get("retry_after") or body.get("retryAfter")
+    try:
+        return int(n)
+    except (TypeError, ValueError):
+        return None
+
+# --- adapters ---------------------------------------------------------------
+# An adapter needs four verbs:
+#   request(email)      -> (ok, detail, backoff_seconds_or_None)
+#   mail_query()        -> gmail search that finds this service's OTP mail
+#   extract(body)       -> (to_address, code) or None
+#   verify(email, code) -> (ok, detail, credential_or_None)
+# Sender cadence comes from `interval`; at most `in_flight` unverified codes.
+
+def herenow_request(email):
+    rc, b = curl_json("POST", "https://here.now/api/auth/agent/request-code", {"email": email})
+    if b.get("success"):
+        return True, "code sent", None
+    return False, b.get("message", b.get("error", f"http {rc}")), retry_after_seconds(b)
+
+def to_addr(body):
+    # gog get dumps headers as "to<TAB>addr"; raw mail uses "To: <addr>";
+    # a JSON payload uses "to": "addr". Accept all three.
+    for pat in (r"^to\t<?([^\s>]+@[^\s>]+)>?", r"^To:\s*<?([^\s>]+@[^\s>]+)>?",
+                r'"to":\s*"([^"]+)"'):
+        m = re.search(pat, body, re.M | re.I)
+        if m:
+            return m.group(1)
+    return None
+
+def herenow_extract(body):
+    m = re.search(r"here\.now code:\s*([A-Z0-9]{4}-[A-Z0-9]{4})", body)
+    t = to_addr(body)
+    return (t, m.group(1)) if m and t else None
+
+def herenow_verify(email, code):
+    rc, b = curl_json("POST", "https://here.now/api/auth/agent/verify-code",
+                      {"email": email, "code": code})
+    if b.get("success") and b.get("apiKey"):
+        return True, "verified", b["apiKey"]
+    return False, b.get("message", b.get("error", "verify failed")), None
+
+def cosmic_request(email):
+    proj = re.sub(r"[^a-z0-9]+", "-", email.split("@")[0])[:24]
+    rc, out = run([COSMIC, "agent-signup", "-e", email, "-p", proj,
+                   "--prompt-hint", "project inbox"])
+    return rc == 0, ("created" if rc == 0 else out.strip()[:120]), None
+
+def cosmic_extract(body):
+    m = re.search(r"claim code is\s*([0-9]{6})", body)
+    t = to_addr(body)
+    return (t, m.group(1)) if m and t else None
+
+def cosmic_verify(email, code):
+    rc, out = run([COSMIC, "agent-verify", code])
+    return rc == 0, out.strip()[:120], None
+
+ADAPTERS = [
+    # OTP mail is routine spam-foldered; a default search never sees it.
+    {"name": "herenow", "interval": 20, "in_flight": 8,
+     "request": herenow_request, "query": lambda: "in:anywhere from:here.now newer_than:20m",
+     "extract": herenow_extract, "verify": herenow_verify},
+    {"name": "cosmic", "interval": 65, "in_flight": 4,
+     "request": cosmic_request, "query": lambda: "in:anywhere from:cosmicjs.com newer_than:20m",
+     "extract": cosmic_extract, "verify": cosmic_verify},
+]
+
+def service_for(email):
+    h = 0
+    for ch in email:
+        h = (h * 31 + ord(ch)) & 0xFFFFFFFF
+    return ADAPTERS[h % len(ADAPTERS)]
+
+# --- sweep ------------------------------------------------------------------
+
+def tick(state):
+    pairs, svcs = state["pairs"], state["services"]
+    t = now()
+
+    # 1. Verify pending codes against fresh OTP mail, one search per service.
+    for ad in ADAPTERS:
+        # Poll almost immediately: inbox scanners click one-time claim links,
+        # so a code left sitting loses the race before we ever try it.
+        pend = [e for e, s in pairs.items()
+                if s["service"] == ad["name"] and s["status"] == "requested"
+                and s["sent_at"] + 8 < t]
+        if not pend:
+            continue
+        hits = {}
+        for msg in gmail_search(ad["query"]()):
+            mid = msg.get("id") or msg.get("messageId")
+            if not mid:
+                continue
+            got = ad["extract"](gmail_body(mid))
+            if got:
+                hits[got[0].lower()] = got[1]
+        for e in pend:
+            code = hits.get(e.lower())
+            if not code:
+                continue
+            ok, detail, cred = ad["verify"](e, code)
+            pairs[e]["status"] = "verified" if ok else "retry"
+            pairs[e]["next_at"] = 0 if ok else t + 300
+            pairs[e]["attempts"] += 1
+            if ok and cred:
+                store_cred(ad["name"], e, cred)
+            log(ad["name"], e, ok, detail)
+
+    # 2. Expire stale codes back to retry.
+    for e, s in pairs.items():
+        if s["status"] == "requested" and s["sent_at"] + OTP_TTL < t:
+            s["status"] = "retry" if s["attempts"] < MAX_ATTEMPTS else "failed"
+            s["next_at"] = t + 60
+            log(s["service"], e, False, "otp expired")
+
+    # 3. Request fresh codes within each service's pace and in-flight cap.
+    for e, s in pairs.items():
+        if s["status"] not in ("new", "retry") or s.get("next_at", 0) > t:
+            continue
+        if s["attempts"] >= MAX_ATTEMPTS:
+            s["status"] = "failed"
+            continue
+        ad = next(a for a in ADAPTERS if a["name"] == s["service"])
+        svc = svcs.setdefault(ad["name"], {"last_at": 0})
+        if t - svc["last_at"] < ad["interval"]:
+            continue
+        flying = sum(1 for x in pairs.values()
+                     if x["service"] == ad["name"] and x["status"] == "requested")
+        if flying >= ad["in_flight"]:
+            continue
+        ok, detail, backoff = ad["request"](e)
+        svc["last_at"] = t
+        if ok:
+            s.update(status="requested", sent_at=t, attempts=s["attempts"] + 1)
+        else:
+            s["next_at"] = t + (backoff or ad["interval"] * 3)
+        log(ad["name"], e, ok, f"request: {detail}")
+
+def main():
+    if len(sys.argv) != 2 or sys.argv[1] not in ("--once", "--daemon"):
+        print(__doc__.splitlines()[14].strip() if __doc__ else "usage: signup-sweep --once|--daemon")
+        return 2
+    if not CONFIG_DIR.is_dir():
+        print(f"config dir missing: {CONFIG_DIR}", file=sys.stderr)
+        return 1
+
+    state = load_state()
+    boxes = mailboxes()
+    for e in boxes:
+        key = e
+        if key not in state["pairs"]:
+            state["pairs"][key] = {"service": service_for(e)["name"], "status": "new",
+                                   "attempts": 0, "sent_at": 0, "next_at": 0}
+    save_state(state)
+
+    daemon = sys.argv[1] == "--daemon"
+    while True:
+        state = load_state()
+        tick(state)
+        save_state(state)
+        done = sum(1 for s in state["pairs"].values() if s["status"] == "verified")
+        pend = sum(1 for s in state["pairs"].values() if s["status"] in ("new", "requested", "retry"))
+        fail = sum(1 for s in state["pairs"].values() if s["status"] == "failed")
+        print(f"{ts()} verified={done} pending={pend} failed={fail} of {len(state['pairs'])}", flush=True)
+        if not daemon or pend == 0:
+            return 0
+        time.sleep(TICK + random.uniform(0, 8))
+
+if __name__ == "__main__":
+    sys.exit(main())
