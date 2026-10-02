@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+# E2E for cc-cloud-env against a real claude.ai account.
+# Needs an agent-browser session that is logged in to claude.ai.
+# Usage: cc-cloud-env-e2e [--session <name>]
+# Creates, changes, shares and archives one throwaway environment, then prints
+# a PASS/FAIL line per step. Exit code is 0 only when every step passes.
+set -uo pipefail
+
+HERE="$(cd "$(dirname "$0")" && pwd)"
+CLI=("$HERE/cc-cloud-env" "$@")
+NAME="zz-ccenv-e2e"
+SPEC="$(mktemp -d)"
+trap 'rm -rf "$SPEC"' EXIT
+fails=0
+
+step() { # step <label> <expected-exit> <command...>
+  local label="$1" want="$2"; shift 2
+  local out got
+  out="$("$@" 2>&1)"; got=$?
+  if [ "$got" -eq "$want" ]; then echo "PASS $label"; else echo "FAIL $label (exit $got, want $want)"; echo "$out" | sed 's/^/     /'; fails=$((fails+1)); fi
+  LAST="$out"
+}
+has() { # has <label> <text>
+  if grep -qF -- "$2" <<<"$LAST"; then echo "PASS $1"; else echo "FAIL $1 (missing: $2)"; echo "$LAST" | sed 's/^/     /'; fails=$((fails+1)); fi
+}
+
+write_spec() { # write_spec <network> <env-text>
+  mkdir -p "$SPEC/$NAME"
+  printf '{"network":"%s"}\n' "$1" > "$SPEC/$NAME/spec.json"
+  printf '%s\n' "$2" > "$SPEC/$NAME/env"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$SPEC/$NAME/setup.sh"
+  rm -f "$SPEC/$NAME/domains"
+}
+
+# Failure modes that need no browser.
+step "rejects an unknown command" 1 "${CLI[@]}" frobnicate "$SPEC"
+step "rejects a missing spec root" 1 "${CLI[@]}" check /nonexistent
+write_spec custom "A=1"
+step "rejects custom network without domains" 1 "${CLI[@]}" apply "$SPEC"; has "explains the missing domains" "needs a domains file"
+write_spec bogus "A=1"
+step "rejects an unknown network" 1 "${CLI[@]}" apply "$SPEC"; has "explains the bad network" "network must be"
+
+# Lifecycle on the real account.
+write_spec trusted $'FOO=bar\nBAZ=1'
+step "apply creates the environment" 0 "${CLI[@]}" apply "$SPEC"; has "reports created" "created $NAME"
+step "check passes after create" 0 "${CLI[@]}" check "$SPEC"
+step "apply again updates the environment" 0 "${CLI[@]}" apply "$SPEC"; has "reports updated" "updated $NAME"
+
+write_spec full $'FOO=changed'
+step "check fails against a changed spec" 1 "${CLI[@]}" check "$SPEC"; has "names the network mismatch" "FAIL $NAME network"
+step "apply updates network and env" 0 "${CLI[@]}" apply "$SPEC"
+step "check passes after update" 0 "${CLI[@]}" check "$SPEC"
+
+step "share shares the environment" 0 "${CLI[@]}" share "$SPEC"; has "reports shared" "shared $NAME"
+step "share again is a no-op" 0 "${CLI[@]}" share "$SPEC"; has "reports already shared" "already shared $NAME"
+step "apply refuses a shared environment" 1 "${CLI[@]}" apply "$SPEC"; has "points at admin settings" "admin settings"
+
+step "archive removes the shared environment" 0 "${CLI[@]}" archive "$NAME"
+step "list no longer shows it" 0 "${CLI[@]}" list
+if grep -qx "$NAME" <<<"$LAST"; then echo "FAIL archived environment still listed"; fails=$((fails+1)); else echo "PASS archived environment is gone"; fi
+
+# Personal (unshared) archive path.
+write_spec trusted "A=1"
+step "apply recreates it" 0 "${CLI[@]}" apply "$SPEC"
+step "archive removes an unshared environment" 0 "${CLI[@]}" archive "$NAME"
+step "list again" 0 "${CLI[@]}" list
+if grep -qx "$NAME" <<<"$LAST"; then echo "FAIL unshared archive left it listed"; fails=$((fails+1)); else echo "PASS unshared archive is gone"; fi
+
+echo "---"
+[ "$fails" -eq 0 ] && echo "ALL PASS" || echo "$fails FAILED"
+exit $((fails > 0))
