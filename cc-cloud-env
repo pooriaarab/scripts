@@ -1,0 +1,383 @@
+#!/usr/bin/env node
+'use strict';
+
+// Create and verify claude.ai/code cloud environments from a local spec.
+// There is no API or CLI for these environments, so this drives the
+// "Add cloud environment" dialog through agent-browser.
+
+const { execFileSync } = require('node:child_process');
+const fs = require('node:fs');
+const path = require('node:path');
+
+const HELP = `cc-cloud-env - create and verify claude.ai/code cloud environments
+
+Usage:
+  cc-cloud-env list
+  cc-cloud-env apply   <spec-root> [name...]
+  cc-cloud-env check   <spec-root> [name...]
+  cc-cloud-env share   <spec-root> [name...]
+  cc-cloud-env archive <name...>
+
+Options:
+  --session <name>  agent-browser session already connected to a logged-in
+                    claude.ai Chrome (default: $CC_CLOUD_ENV_SESSION or
+                    "default")
+  --help            show this help
+
+Spec layout. Keep it OUTSIDE any repo: it holds repo names and secrets.
+  <spec-root>/<env-name>/spec.json   {"network": "none|trusted|full|custom",
+                                      "includeDefaults": true}
+  <spec-root>/<env-name>/env         .env-format variables (optional)
+  <spec-root>/<env-name>/setup.sh    setup script (optional)
+  <spec-root>/<env-name>/domains     one domain per line (network=custom)
+
+apply creates each environment, or updates it when the name already exists.
+check reopens each environment and compares every saved field to the spec.
+share shares each environment with the whole organization. Do it last: a
+shared environment is read-only outside admin settings, and every member can
+read its variables and setup script.
+archive archives the named environments (there is no delete). A shared
+environment is archived through admin settings.
+The account is whichever Claude account the browser session is logged in to.
+`;
+
+const NETWORK_LABEL = { none: 'None', trusted: 'Trusted', full: 'Full', custom: 'Custom' };
+
+function parseArgs(argv) {
+  const opts = { session: process.env.CC_CLOUD_ENV_SESSION || 'default' };
+  const rest = [];
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] === '--session') opts.session = argv[++i];
+    else if (argv[i] === '--help' || argv[i] === '-h') opts.help = true;
+    else rest.push(argv[i]);
+  }
+  return { opts, rest };
+}
+
+function fail(message) {
+  process.stderr.write(`cc-cloud-env: ${message}\n`);
+  process.exit(1);
+}
+
+function makeBrowser(session) {
+  const ab = (args) =>
+    execFileSync('agent-browser', ['--session', session, ...args], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+  const snap = () => ab(['snapshot', '-i']);
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  async function waitFor(test, what, timeoutMs = 30000) {
+    const end = Date.now() + timeoutMs;
+    let last = '';
+    while (Date.now() < end) {
+      last = snap();
+      const hit = test(last);
+      if (hit) return { snapshot: last, hit };
+      await sleep(700);
+    }
+    throw new Error(`timed out waiting for ${what}`);
+  }
+
+  const refOf = (snapshot, regex, what) => {
+    const line = snapshot.split('\n').find((l) => regex.test(l));
+    const m = line && /ref=(e\d+)/.exec(line);
+    if (!m) throw new Error(`cannot find ${what} in the page`);
+    return `@${m[1]}`;
+  };
+
+  async function clickFresh(regex, what) {
+    let error;
+    for (let attempt = 0; attempt < 4; attempt++) {
+      try {
+        ab(['click', refOf(snap(), regex, what)]);
+        return;
+      } catch (e) {
+        error = e;
+        await sleep(600);
+      }
+    }
+    throw error;
+  }
+
+  return { ab, snap, sleep, waitFor, refOf, clickFresh };
+}
+
+async function openCloudMenu(b) {
+  b.ab(['open', 'https://claude.ai/code?from=cc-cloud-env']);
+  const { snapshot } = await b.waitFor(
+    (s) => /Continue with Google|Continue with email/.test(s) || /heading ".*" \[level=1/.test(s),
+    'the claude.ai/code page',
+  );
+  if (/Continue with Google|Continue with email/.test(snapshot)) {
+    throw new Error('the browser session is not logged in to claude.ai');
+  }
+  const lines = snapshot.split('\n');
+  const at = lines.findIndex((l) => /heading ".*" \[level=1/.test(l));
+  const selector = lines.slice(at + 1).find((l) => /^\s*- button ".*" \[expanded=/.test(l));
+  if (!selector) throw new Error('cannot find the environment selector');
+  b.ab(['click', `@${/ref=(e\d+)/.exec(selector)[1]}`]);
+  const open = await b.waitFor((s) => /menuitem "Cloud"/.test(s), 'the selector menu');
+  let snap = open.snapshot;
+  for (let attempt = 0; attempt < 4; attempt++) {
+    b.ab(['focus', b.refOf(snap, /menuitem "Cloud"/, 'the Cloud menu item')]);
+    b.ab(['press', 'ArrowRight']);
+    for (let i = 0; i < 4; i++) {
+      await b.sleep(500);
+      snap = b.snap();
+      if (/Add cloud environment/.test(snap)) return { snapshot: snap };
+    }
+  }
+  throw new Error('timed out waiting for the Cloud submenu');
+}
+
+function existingNames(snapshot) {
+  return [...snapshot.matchAll(/menuitemradio "(.+?) , environment settings/g)].map((m) => m[1]);
+}
+
+function loadSpec(root, name) {
+  const dir = path.join(root, name);
+  const read = (f) => (fs.existsSync(path.join(dir, f)) ? fs.readFileSync(path.join(dir, f), 'utf8') : '');
+  if (!fs.existsSync(path.join(dir, 'spec.json'))) throw new Error(`${dir}/spec.json is missing`);
+  const meta = JSON.parse(read('spec.json'));
+  if (!NETWORK_LABEL[meta.network]) throw new Error(`${name}: network must be none, trusted, full or custom`);
+  const spec = {
+    name,
+    network: meta.network,
+    includeDefaults: Boolean(meta.includeDefaults),
+    env: read('env').replace(/\n+$/, ''),
+    script: read('setup.sh').replace(/\n+$/, ''),
+    domains: read('domains').replace(/\n+$/, ''),
+  };
+  if (spec.network === 'custom' && !spec.domains) throw new Error(`${name}: custom network needs a domains file`);
+  return spec;
+}
+
+function specNames(root, wanted) {
+  if (!root || !fs.existsSync(root)) fail('spec-root is missing');
+  const all = fs
+    .readdirSync(root, { withFileTypes: true })
+    .filter((d) => d.isDirectory() && fs.existsSync(path.join(root, d.name, 'spec.json')))
+    .map((d) => d.name)
+    .sort();
+  if (wanted.length === 0) return all;
+  for (const w of wanted) if (!all.includes(w)) fail(`no spec named ${w} in ${root}`);
+  return wanted;
+}
+
+async function fillDialog(b, spec) {
+  let dialog = b.snap();
+  b.ab(['click', b.refOf(dialog, /combobox "Network access"/, 'the network selector')]);
+  const options = await b.waitFor((s) => /option "None/.test(s), 'the network options');
+  b.ab(['click', b.refOf(options.snapshot, new RegExp(`option "${NETWORK_LABEL[spec.network]}`), 'the network option')]);
+  dialog = (await b.waitFor((s) => new RegExp(`combobox "Network access".*: ${NETWORK_LABEL[spec.network]}`).test(s), 'the network choice')).snapshot;
+
+  b.ab(['fill', b.refOf(dialog, /textbox "Name"/, 'the Name field'), spec.name]);
+  if (spec.network === 'custom') {
+    b.ab(['fill', b.refOf(dialog, /textbox "Allowed domains"/, 'the Allowed domains field'), spec.domains]);
+    const box = dialog.split('\n').find((l) => /checkbox "Also include default list/.test(l));
+    if (spec.includeDefaults !== /checked=true/.test(box || '')) {
+      b.ab(['click', b.refOf(dialog, /checkbox "Also include default list/, 'the default-list checkbox')]);
+    }
+  }
+  b.ab(['fill', b.refOf(dialog, /textbox "Environment variables"/, 'the env field'), spec.env]);
+  b.ab(['fill', b.refOf(dialog, /textbox "Setup script"/, 'the setup script field'), spec.script]);
+}
+
+async function applyOne(b, spec) {
+  const menu = await openCloudMenu(b);
+  const exists = existingNames(menu.snapshot).includes(spec.name);
+  let dialog;
+  if (exists) {
+    dialog = await openEditDialog(b, menu.snapshot, spec.name);
+  } else {
+    await b.clickFresh(/menuitem "Add cloud environment/, 'Add cloud environment');
+    dialog = (await b.waitFor((s) => /heading "Add cloud environment"/.test(s), 'the Add dialog')).snapshot;
+  }
+  await fillDialog(b, spec);
+  const submit = exists ? 'Save changes' : 'Add environment';
+  b.ab(['click', b.refOf(b.snap(), new RegExp(`button "${submit}"`), `the ${submit} button`)]);
+  await b.waitFor((s) => !/heading "(Add|Edit) cloud environment"/.test(s), `the dialog to close for ${spec.name}`, 20000);
+  return exists ? 'updated' : 'created';
+}
+
+async function openEditDialog(b, menuSnapshot, name) {
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const item = new RegExp(`menuitemradio "${escaped} , environment settings`);
+  let snapshot = menuSnapshot;
+  for (let attempt = 0; attempt < 4; attempt++) {
+    b.ab(['focus', b.refOf(snapshot, item, `the ${name} menu item`)]);
+    b.ab(['press', 'ArrowRight']);
+    for (let i = 0; i < 6; i++) {
+      await b.sleep(500);
+      snapshot = b.snap();
+      if (/heading "Edit cloud environment"/.test(snapshot)) return snapshot;
+      if (/heading "Cloud environment"/.test(snapshot)) {
+        b.ab(['press', 'Escape']);
+        const error = new Error(`${name} is shared with the organization; edit it in admin settings, or archive it and apply again`);
+        error.shared = true;
+        throw error;
+      }
+    }
+  }
+  throw new Error('timed out waiting for the Edit dialog');
+}
+
+async function archiveInAdmin(b, name) {
+  b.ab(['open', 'https://claude.ai/admin-settings/cloud-environments']);
+  const actions = new RegExp(`button "Actions for ${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}"`);
+  await b.waitFor((s) => actions.test(s), `the ${name} row in admin settings`);
+  await b.clickFresh(actions, `the ${name} row actions`);
+  await b.waitFor((s) => /menuitem "Archive"/.test(s), 'the row actions menu');
+  await b.clickFresh(/menuitem "Archive"/, 'the Archive menu item');
+  await b.waitFor((s) => /heading "Archive .*\?"/.test(s), 'the archive confirmation');
+  await b.clickFresh(/button "Archive"/, 'the archive confirmation');
+  await b.waitFor((s) => !/heading "Archive .*\?"/.test(s), `the archive dialog to close for ${name}`, 20000);
+}
+
+async function archiveOne(b, name) {
+  const menu = await openCloudMenu(b);
+  if (!existingNames(menu.snapshot).includes(name)) {
+    b.ab(['press', 'Escape']);
+    throw new Error(`${name}: environment not found in the account`);
+  }
+  let dialog;
+  try {
+    dialog = await openEditDialog(b, menu.snapshot, name);
+  } catch (error) {
+    if (!error.shared) throw error;
+    await archiveInAdmin(b, name);
+    return;
+  }
+  b.ab(['click', b.refOf(dialog, /button "Archive"/, 'the Archive button')]);
+  await b.waitFor((s) => !/heading "Edit cloud environment"/.test(s) || /heading "Archive .*\?"/.test(s), 'the archive step');
+  const confirm = b.snap();
+  if (/heading "Archive .*\?"/.test(confirm)) await b.clickFresh(/button "Archive"/, 'the archive confirmation');
+  await b.waitFor((s) => !/heading "(Edit cloud environment|Archive)/.test(s), `the archive dialog to close for ${name}`, 20000);
+}
+
+async function shareOne(b, name) {
+  const menu = await openCloudMenu(b);
+  if (!existingNames(menu.snapshot).includes(name)) {
+    b.ab(['press', 'Escape']);
+    throw new Error(`${name}: environment not found in the account`);
+  }
+  try {
+    const dialog = await openEditDialog(b, menu.snapshot, name);
+    b.ab(['click', b.refOf(dialog, /button "Share with /, 'the Share button')]);
+  } catch (error) {
+    if (error.shared) return 'already shared';
+    throw error;
+  }
+  const confirm = await b.waitFor((s) => /heading "Share this environment/.test(s), 'the share confirmation');
+  b.ab(['click', b.refOf(confirm.snapshot, /checkbox "I understand/, 'the acknowledgement checkbox')]);
+  await b.waitFor((s) => s.split('\n').some((l) => /button "Share environment"/.test(l) && !/disabled/.test(l)), 'the Share button to enable');
+  await b.clickFresh(/button "Share environment"/, 'the Share environment button');
+  await b.waitFor((s) => /Edit in admin settings/.test(s), `${name} to become shared`);
+  b.ab(['press', 'Escape']);
+  return 'shared';
+}
+
+async function readEnvironment(b, name) {
+  const menu = await openCloudMenu(b);
+  if (!existingNames(menu.snapshot).includes(name)) {
+    b.ab(['press', 'Escape']);
+    throw new Error(`${name}: environment not found in the account`);
+  }
+  const dialog = await openEditDialog(b, menu.snapshot, name);
+  const network = /combobox "Network access".*?: (\w+)/.exec(dialog)[1].toLowerCase();
+  const raw = b.ab(['eval', 'JSON.stringify([...document.querySelectorAll("textarea")].map(e=>e.value))']).trim();
+  let areas = JSON.parse(raw);
+  if (typeof areas === 'string') areas = JSON.parse(areas);
+  const defaultsLine = dialog.split('\n').find((l) => /checkbox "Also include default list/.test(l));
+  b.ab(['press', 'Escape']);
+  const custom = network === 'custom';
+  return {
+    network,
+    domains: custom ? areas[0] : '',
+    env: areas[custom ? 1 : 0] || '',
+    script: areas[custom ? 2 : 1] || '',
+    includeDefaults: custom ? /checked=true/.test(defaultsLine || '') : false,
+  };
+}
+
+const sortedLines = (s) => s.split('\n').map((l) => l.trim()).filter(Boolean).sort().join('\n');
+
+function compare(spec, saved) {
+  const rows = [
+    ['network', spec.network === saved.network],
+    ['env', sortedLines(spec.env) === sortedLines(saved.env)],
+    ['script', spec.script.trim() === saved.script.trim()],
+  ];
+  if (spec.network === 'custom') {
+    rows.push(['domains', sortedLines(spec.domains) === sortedLines(saved.domains)]);
+    rows.push(['includeDefaults', spec.includeDefaults === saved.includeDefaults]);
+  }
+  return rows;
+}
+
+async function main() {
+  const { opts, rest } = parseArgs(process.argv.slice(2));
+  const [command, root, ...names] = rest;
+  if (opts.help || !command) {
+    process.stdout.write(HELP);
+    process.exit(opts.help ? 0 : 1);
+  }
+  const b = makeBrowser(opts.session);
+
+  if (command === 'list') {
+    const menu = await openCloudMenu(b);
+    b.ab(['press', 'Escape']);
+    process.stdout.write(`${existingNames(menu.snapshot).join('\n')}\n`);
+    return;
+  }
+  if (command === 'archive') {
+    let bad = false;
+    for (const name of [root, ...names].filter(Boolean)) {
+      try {
+        await archiveOne(b, name);
+        process.stdout.write(`archived ${name}\n`);
+      } catch (error) {
+        bad = true;
+        process.stdout.write(`FAIL ${name}: ${error.message}\n`);
+      }
+    }
+    if (bad) process.exit(1);
+    return;
+  }
+  if (command === 'share') {
+    let bad = false;
+    for (const name of specNames(root, names)) {
+      try {
+        process.stdout.write(`${await shareOne(b, name)} ${name}\n`);
+      } catch (error) {
+        bad = true;
+        process.stdout.write(`FAIL ${name}: ${error.message}\n`);
+      }
+    }
+    if (bad) process.exit(1);
+    return;
+  }
+  if (command !== 'apply' && command !== 'check') fail(`unknown command ${command}`);
+
+  let failed = false;
+  for (const name of specNames(root, names)) {
+    try {
+      const spec = loadSpec(root, name);
+      if (command === 'apply') {
+        process.stdout.write(`${await applyOne(b, spec)} ${name}\n`);
+      } else {
+        const rows = compare(spec, await readEnvironment(b, name));
+        for (const [field, ok] of rows) process.stdout.write(`${ok ? 'PASS' : 'FAIL'} ${name} ${field}\n`);
+        if (rows.some(([, ok]) => !ok)) failed = true;
+      }
+    } catch (error) {
+      failed = true;
+      process.stdout.write(`FAIL ${name}: ${error.message}\n`);
+    }
+  }
+  if (failed) process.exit(1);
+}
+
+main().catch((error) => fail(error.message));
