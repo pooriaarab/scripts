@@ -196,3 +196,26 @@ native Claude Code session doing the reviewing, not a CLI invocation, so it has
 none. Tier names are durable; model names and prices are not, so update the
 JSON instead of editing CLAUDE.md copies that drift. Retune tier defaults from
 `agent-defect-rate` output, not vibes.
+
+## Brightness sync
+
+[`hammerspoon/brightness-sync.lua`](hammerspoon/brightness-sync.lua) makes the
+Mac brightness keys drive external monitors too. It polls the built-in panel
+four times a second and writes the same level (0-100) to each matching monitor
+over DDC/CI. It also follows the Control Center slider and auto-brightness, and
+re-scans monitors after a reconnect or wake.
+
+Install:
+
+```sh
+brew install m1ddc
+cp hammerspoon/brightness-sync.lua ~/.hammerspoon/
+echo 'brightnessSync = require("brightness-sync").start()' >> ~/.hammerspoon/init.lua
+```
+
+Then reload Hammerspoon. It drives monitors whose name contains `DELL`; change
+`MATCH` for others. Run `hs -c 'return brightnessSync.status()'` to see the
+monitors it found and the last level it sent.
+
+Do not trust `m1ddc ... get luminance` to confirm a write. Through some docks
+it returns a stale value after a write that worked, so look at the screen.
