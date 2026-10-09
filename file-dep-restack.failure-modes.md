@@ -28,3 +28,4 @@ This file lists every way the tool can fail. The tests in
 | 13 | The lockfile regenerates on every commit, which is slow and needs the network each time. | Regenerate only when `package.json` changed, by the commit or by the rewrite. | yes |
 | 14 | pnpm stores `file:` dependencies as paths relative to the checkout, so a worktree in another directory gets a broken lockfile. | Out of scope. The rewrite removes the `file:` specs that cause it. | no, by design |
 | 15 | A landing tool that rebases with `--onto <old tip>` reads stale tips after the restack. | `--tips FILE` rewrites the tip of each restacked branch, and sets the entry before the first one to the new base. | yes |
+| 18 | An untracked file sits in the checkout during the replay | It must never be committed; only the picked commit's files and the package files are staged |

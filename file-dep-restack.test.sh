@@ -79,8 +79,9 @@ file-dep-restack --base newbase --packages pkg-a --lock-cmd false main s-01-one 
 [ "$rc" -eq 1 ] && [ "$before" = "$(refs)" ] && ok "failing lock command exits 1 and moves nothing" || fail_msg "lock failure (rc $rc)"
 [ "$(git rev-parse --abbrev-ref HEAD)" = s-02-two ] && ok "returns to the starting branch after a failure" || fail_msg "start branch not restored"
 
-# Happy path, rows 6 and 9-13 and 15.
+# Happy path, rows 6 and 9-13 and 15 (and 18: an untracked stray file).
 : > "$COUNT"
+echo "not part of any commit" > stray-untracked.txt
 out=$(restack --tips "$d/tips" main s-01-one s-02-two 2>&1); rc=$?
 [ "$rc" -eq 0 ] && ok "restack exits 0" || fail_msg "restack (rc $rc): $out"
 git merge-base --is-ancestor newbase s-02-two && ok "the stack sits on the new base" || fail_msg "not on new base"
@@ -94,6 +95,9 @@ echo "$pj" | grep -q '"pkg-b": "npm:pkg-b-renamed@\^0.2.0"' && ok "--alias spec 
 echo "$pj" | grep -q '"pkg-local": "file:/abs/pkg-local"' && ok "file: dep outside --packages is left alone" || fail_msg "local dep: $pj"
 git show s-01-one:pnpm-lock.yaml | grep -q "$(git show s-01-one:package.json | cksum | cut -d' ' -f1)" \
   && ok "a lockfile conflict resolves by regenerating" || fail_msg "lockfile: $(git show s-01-one:pnpm-lock.yaml)"
+git log --name-only --format= newbase..s-02-two | grep -qx stray-untracked.txt \
+  && fail_msg "an untracked file was committed by the replay" || ok "an untracked file in the checkout is never committed"
+rm -f stray-untracked.txt
 runs=$(wc -l < "$COUNT" | tr -d ' ')
 [ "$runs" = 2 ] && ok "lockfile regenerates only when package.json changes" || fail_msg "lock runs: $runs"
 [ "$(sed -n 1p "$d/tips" | cut -f2)" = "$(git rev-parse newbase)" ] && [ "$(sed -n 3p "$d/tips" | cut -f2)" = "$(git rev-parse s-02-two)" ] \
