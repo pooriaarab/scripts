@@ -1,0 +1,184 @@
+#!/usr/bin/env bash
+# stack-lander - prepare one entry of a stacked-branch queue for merge.
+#
+# Usage:
+#   stack-lander --repo OWNER/NAME --queue QUEUE.tsv --entry K
+#                [--dir CHECKOUT] [--base main] [--labels a,b] [--dry-run]
+#
+# The queue is a TSV file, one line per branch, in landing order:
+#   <branch> <title> <issue-body file> <pr-body file> <label> <label>
+# Body files are relative to the queue file. A PR body says `Closes #ISSUE`;
+# the tool puts the real issue number there.
+#
+# For entry K it:
+#   1. records the original tip of every queue branch once, in QUEUE.tsv.tips;
+#   2. creates the issue (REST) with the two labels plus --labels;
+#   3. renames the branch to <prefix>-<issue>-<slug>;
+#   4. rebases it with `--onto origin/<base> <old tip of entry K-1>`, so commits
+#      that an earlier squash merge already landed drop out;
+#   5. pushes it and opens the PR (REST; `gh pr create --attach` only when the
+#      body references ./media files that sit beside the queue);
+#   6. polls the head SHA's check runs (REST) and prints them.
+# It never merges. A person reads the PR and merges it.
+#
+# The prefix comes from origin/<base>:.github/pr-standards.json. A new repo has
+# no config on its base yet, and the checker judges against the base, so the
+# tool then uses the prefix the checker derives (derivePrefix in
+# pr-standards.mjs beside this file).
+#
+# Resume after a push: RESUME_BRANCH=<pushed branch> ISSUE=<n> skips steps 2-5
+# except the PR. ISSUE=<n> alone reuses an issue that already exists.
+#
+# Pacing: GitHub has a secondary limit on content creation (about 500 per
+# hour) that is separate from the GraphQL points. Every call here is REST, and
+# polling waits STACK_LANDER_POLL_SECONDS (default 30) between calls, up to
+# STACK_LANDER_POLL_MAX (default 50) times.
+#
+# Side effects: creates an issue and a PR, renames and rebases a local branch,
+# pushes it. --dry-run prints those calls and changes nothing.
+# Credentials: the `gh` CLI login. The tool reads no token itself.
+# Needs: git, gh, jq, node.
+#
+# Exit: 0 checks passed (or dry run), 1 error or a failed check,
+# 2 checks did not finish within the poll budget.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+die() { echo "stack-lander: $*" >&2; exit 1; }
+
+repo="" queue="" entry="" dir="." base="main" extra="${STACK_LANDER_LABELS:-}" dry=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --repo) repo="$2"; shift 2 ;;
+    --queue) queue="$2"; shift 2 ;;
+    --entry) entry="$2"; shift 2 ;;
+    --dir) dir="$2"; shift 2 ;;
+    --base) base="$2"; shift 2 ;;
+    --labels) extra="$2"; shift 2 ;;
+    --dry-run) dry=1; shift ;;
+    -h|--help) sed -n '2,45p' "$0"; exit 0 ;;
+    *) die "unknown argument: $1" ;;
+  esac
+done
+[ -n "$repo" ] && [ -n "$queue" ] && [ -n "$entry" ] || die "need --repo, --queue and --entry (see --help)"
+[[ "$repo" == */* ]] || die "--repo must be OWNER/NAME"
+[[ "$entry" =~ ^[1-9][0-9]*$ ]] || die "--entry must be a positive number"
+[ -f "$queue" ] || die "no queue file: $queue"
+qdir="$(cd "$(dirname "$queue")" && pwd)"
+queue="$qdir/$(basename "$queue")"
+tips="$queue.tips"
+poll="${STACK_LANDER_POLL_SECONDS:-30}"
+poll_max="${STACK_LANDER_POLL_MAX:-50}"
+
+line=$(sed -n "${entry}p" "$queue")
+[ -n "$line" ] || die "queue has no entry $entry"
+IFS=$'\t' read -r branch title issuefile prfile label1 label2 <<<"$line"
+[ -n "$branch" ] && [ -n "$title" ] || die "entry $entry is not <branch> TAB <title> TAB ..."
+[ "${#title}" -ge 10 ] && [ "${#title}" -le 50 ] || die "title must be 10-50 characters: '$title'"
+[ -f "$qdir/$issuefile" ] || die "missing issue body: $qdir/$issuefile"
+[ -f "$qdir/$prfile" ] || die "missing PR body: $qdir/$prfile"
+media=$(grep -oE '\]\(\./[^)]+\.(png|jpg|gif|webm|mp4)\)' "$qdir/$prfile" | sed -E 's/^\]\(\.\/(.*)\)$/\1/' || true)
+for f in $media; do [ -f "$qdir/$f" ] || die "PR body references ./$f, which is not in $qdir"; done
+
+cd "$dir"
+[ -z "$(git status --porcelain --untracked-files=no)" ] || die "checkout has uncommitted changes"
+if [ -z "${RESUME_BRANCH:-}" ]; then
+  git show-ref -q --verify "refs/heads/$branch" || die "no local branch $branch"
+fi
+
+say() { printf '+'; printf ' %q' "$@"; printf '\n'; }
+run() { if [ "$dry" = 1 ]; then say "$@"; else "$@"; fi; }
+
+git fetch -q origin
+if git cat-file -e "origin/$base:.github/pr-standards.json" 2>/dev/null; then
+  prefix=$(git show "origin/$base:.github/pr-standards.json" | node -e 'let s="";process.stdin.on("data",c=>s+=c).on("end",()=>console.log(JSON.parse(s).prefix))')
+else
+  prefix=$(node -e 'import(process.argv[1]).then(m=>console.log(m.derivePrefix(process.argv[2])))' "$SCRIPT_DIR/pr-standards.mjs" "${repo#*/}")
+fi
+[[ "$prefix" =~ ^[a-z]{2,4}$ ]] || die "bad prefix: $prefix"
+PREFIX=$(printf '%s' "$prefix" | tr '[:lower:]' '[:upper:]')
+
+# Record the original tips once, before any rename or rebase changes them.
+if [ ! -f "$tips" ] && [ "$dry" = 0 ]; then
+  while IFS=$'\t' read -r b _; do
+    printf '%s\t%s\n' "$b" "$(git rev-parse "$b")"
+  done < "$queue" > "$tips"
+fi
+
+if [ -n "${RESUME_BRANCH:-}" ]; then
+  [ -n "${ISSUE:-}" ] || die "RESUME_BRANCH needs ISSUE"
+  num="$ISSUE"; newbranch="$RESUME_BRANCH"
+  git checkout -q "$newbranch"
+else
+  labels=()
+  for l in $label1 $label2 ${extra//,/ }; do labels+=(-f "labels[]=$l"); done
+  if [ -n "${ISSUE:-}" ]; then
+    num="$ISSUE"
+  elif [ "$dry" = 1 ]; then
+    say gh api "repos/$repo/issues" -f "title=$title" -F "body=@$qdir/$issuefile" "${labels[@]}" --jq .number
+    num="N"
+  else
+    num=$(gh api "repos/$repo/issues" -f "title=$title" -F "body=@$qdir/$issuefile" "${labels[@]}" --jq .number) \
+      || die "issue creation failed; nothing renamed or pushed"
+  fi
+  newbranch=$(printf '%s' "$branch" | sed -E "s/^[a-z]+-[a-z0-9]+-/${prefix}-${num}-/")
+  run git checkout -q "$branch"
+  run git branch -m "$branch" "$newbranch"
+  if [ "$entry" -gt 1 ]; then
+    prevtip=""
+    [ -f "$tips" ] && prevtip=$(sed -n "$((entry - 1))p" "$tips" | cut -f2)
+    [ -n "$prevtip" ] || prevtip=$(git rev-parse "$(sed -n "$((entry - 1))p" "$queue" | cut -f1)" 2>/dev/null || true)
+    [ -n "$prevtip" ] || die "no recorded tip for entry $((entry - 1))"
+    rebase=(git rebase -q --onto "origin/$base" "$prevtip" "$newbranch")
+  else
+    rebase=(git rebase -q "origin/$base" "$newbranch")
+  fi
+  if [ "$dry" = 1 ]; then say "${rebase[@]}"; elif ! "${rebase[@]}" >/dev/null 2>&1; then
+    git rebase --abort 2>/dev/null || true
+    die "rebase of $newbranch conflicts; nothing pushed. Resolve it by hand, push it, then re-run with RESUME_BRANCH=$newbranch ISSUE=$num"
+  fi
+  run git push -q -u origin "$newbranch"
+fi
+
+ptitle="[${PREFIX}-${num}] ${title}"
+work=$(mktemp -d); trap 'rm -rf "$work"' EXIT
+sed "s/#ISSUE/#${num}/g" "$qdir/$prfile" > "$work/body.md"
+attach=()
+for f in $media; do cp "$qdir/$f" "$work/$f"; attach+=(--attach "$work/$f"); done
+if [ ${#attach[@]} -gt 0 ]; then
+  # gh uploads media only through `pr create`. This is the one GraphQL call.
+  if [ "$dry" = 1 ]; then
+    say gh pr create -R "$repo" --base "$base" --head "$newbranch" --title "$ptitle" --body-file "$work/body.md" "${attach[@]}"; pr="N"
+  else
+    url=$(cd "$work" && gh pr create -R "$repo" --base "$base" --head "$newbranch" --title "$ptitle" --body-file body.md "${attach[@]}")
+    pr=${url##*/}
+  fi
+elif [ "$dry" = 1 ]; then
+  say gh api "repos/$repo/pulls" -f "title=$ptitle" -f "head=$newbranch" -f "base=$base" -F "body=@$work/body.md" --jq .number; pr="N"
+else
+  pr=$(gh api "repos/$repo/pulls" -f "title=$ptitle" -f "head=$newbranch" -f "base=$base" -F "body=@$work/body.md" --jq .number)
+fi
+
+if [ "$dry" = 1 ]; then
+  say gh api "repos/$repo/commits/<head sha>/check-runs?per_page=100"
+  exit 0
+fi
+sha=$(git rev-parse HEAD)
+echo "ISSUE=$num PR=$pr BRANCH=$newbranch SHA=$sha"
+
+runs='[]'; total=0; pending=0
+sleep "$poll"
+for _ in $(seq 1 "$poll_max"); do
+  runs=$(gh api "repos/$repo/commits/$sha/check-runs?per_page=100" \
+    --jq '[.check_runs[] | {n:.name, s:.status, c:(.conclusion // "")}]')
+  total=$(printf '%s' "$runs" | jq 'length')
+  pending=$(printf '%s' "$runs" | jq '[.[] | select(.s != "completed")] | length')
+  [ "$total" -gt 0 ] && [ "$pending" -eq 0 ] && break
+  sleep "$poll"
+done
+printf '%s' "$runs" | jq -r '.[] | "  \(.n)\t\(if .s == "completed" then .c else .s end)"' | sort -u
+if [ "$total" -eq 0 ] || [ "$pending" -gt 0 ]; then
+  echo "stack-lander: checks did not finish within the poll budget" >&2; exit 2
+fi
+bad=$(printf '%s' "$runs" | jq '[.[] | select(.c != "success" and .c != "neutral" and .c != "skipped")] | length')
+[ "$bad" -eq 0 ] || { echo "stack-lander: $bad check run(s) did not pass" >&2; exit 1; }
