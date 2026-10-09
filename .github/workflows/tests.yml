@@ -103,6 +103,14 @@ jobs:
           set -euo pipefail
           ./stack-lander.test.sh
 
+      - name: Run file-dep-restack tests
+        id: file-dep-restack-tests
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          ./file-dep-restack.test.sh
+
       # Every group above runs even after one fails, so one run names every
       # failure instead of only the first. This step turns the outcomes back
       # into a single verdict, and names the group that failed.
@@ -120,10 +128,11 @@ jobs:
           fleet_ci_census_tests: ${{ steps.fleet-ci-census-tests.outcome }}
           merge_throughput_tests: ${{ steps.merge-throughput-tests.outcome }}
           stack_lander_tests: ${{ steps.stack-lander-tests.outcome }}
+          file_dep_restack_tests: ${{ steps.file-dep-restack-tests.outcome }}
         run: |
           set -uo pipefail
           failed=0
-          for group in node_tests guard_tests prefix_tests hook_install_tests branch_pattern_tests rollout_label_tests fleet_ci_census_tests merge_throughput_tests stack_lander_tests; do
+          for group in node_tests guard_tests prefix_tests hook_install_tests branch_pattern_tests rollout_label_tests fleet_ci_census_tests merge_throughput_tests stack_lander_tests file_dep_restack_tests; do
             outcome="${!group}"
             printf '%-22s %s\n' "$group" "$outcome"
             [ "$outcome" = success ] || failed=1

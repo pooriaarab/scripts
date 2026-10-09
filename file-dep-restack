@@ -1,0 +1,153 @@
+#!/usr/bin/env bash
+# file-dep-restack - replay a branch stack onto a new base and swap `file:`
+# dependencies on now-published packages for a registry range.
+#
+# Usage:
+#   file-dep-restack --base REF --packages a,b [--range ^0.1.0]
+#                    [--alias name=npm:other@^1.0.0,...] [--lock-cmd CMD]
+#                    [--tips FILE] OLD_BASE BRANCH [BRANCH ...]
+#
+# OLD_BASE is the commit the first BRANCH was cut from. Each BRANCH must
+# contain the one before it (a stack). The tool replays every commit of the
+# stack onto REF, one at a time, and in each commit:
+#   - rewrites every `file:` spec of a package named in --packages to --range
+#     (default ^0.1.0), or to the --alias spec for that package. Use an alias
+#     when npm refused the first name as too similar to an existing package
+#     and you published under another one;
+#   - runs --lock-cmd (default: pnpm install --lockfile-only --ignore-scripts)
+#     only when package.json changed, by the commit or by the rewrite;
+#   - commits with `git commit -C <original>`, which keeps the message and
+#     the author, so a tests-first order stays visible in history.
+# A conflict in package.json or pnpm-workspace.yaml takes the branch side; a
+# lockfile conflict is regenerated. Any other conflict stops the run.
+#
+# The branches move only after every commit replays. On any failure no branch
+# moves and the tool returns to the branch it started on.
+#
+# --tips FILE: a TSV of `<branch> TAB <sha>` lines, as stack-lander keeps.
+# The tool sets each restacked branch to its new tip, and the line before the
+# first restacked branch to REF, so a later `rebase --onto` reads the new tips.
+#
+# Side effects: moves the named branch refs, rewrites FILE for --tips.
+# Credentials: none. The lock command may read the registry.
+# Needs: git, node.
+set -euo pipefail
+
+die() { echo "file-dep-restack: $*" >&2; exit 1; }
+
+base="" packages="" range="^0.1.0" aliases="" tips=""
+lockcmd="pnpm install --lockfile-only --ignore-scripts"
+args=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --base) base="$2"; shift 2 ;;
+    --packages) packages="$2"; shift 2 ;;
+    --range) range="$2"; shift 2 ;;
+    --alias) aliases="$2"; shift 2 ;;
+    --lock-cmd) lockcmd="$2"; shift 2 ;;
+    --tips) tips="$2"; shift 2 ;;
+    -h|--help) sed -n '2,36p' "$0"; exit 0 ;;
+    -*) die "unknown option: $1" ;;
+    *) args+=("$1"); shift ;;
+  esac
+done
+[ -n "$base" ] && [ -n "$packages" ] && [ "${#args[@]}" -ge 2 ] \
+  || die "usage: file-dep-restack --base REF --packages a,b OLD_BASE BRANCH [BRANCH ...]"
+oldbase="${args[0]}"; branches=("${args[@]:1}")
+
+[ -z "$(git status --porcelain --untracked-files=no)" ] || die "checkout has uncommitted changes"
+git rev-parse -q --verify "$base^{commit}" >/dev/null || die "no such base: $base"
+git rev-parse -q --verify "$oldbase^{commit}" >/dev/null || die "no such old base: $oldbase"
+prev="$oldbase"
+for b in "${branches[@]}"; do
+  git show-ref -q --verify "refs/heads/$b" || die "no local branch $b"
+  git merge-base --is-ancestor "$prev" "$b" || die "$prev is not an ancestor of $b; not a stack"
+  prev="$b"
+done
+
+start=$(git symbolic-ref -q --short HEAD || git rev-parse HEAD)
+log=$(mktemp)
+cleanup() {
+  git cherry-pick --quit >/dev/null 2>&1 || true
+  git reset -q --hard >/dev/null 2>&1 || true
+  git checkout -q "$start" >/dev/null 2>&1 || true
+  rm -f "$log"
+}
+fail() { cleanup; trap - EXIT; die "$*"; }
+trap cleanup EXIT
+
+rewrite() { # rewrite package.json in place; print "changed" when it did
+  [ -f package.json ] || return 0
+  node - "$packages" "$range" "$aliases" <<'EOF'
+const fs = require("fs");
+const [pkgs, range, aliasArg] = process.argv.slice(2);
+const names = pkgs.split(",").filter(Boolean);
+const alias = Object.fromEntries(aliasArg.split(",").filter(Boolean).map((s) => {
+  const i = s.indexOf("="); return [s.slice(0, i), s.slice(i + 1)];
+}));
+const p = JSON.parse(fs.readFileSync("package.json", "utf8"));
+let changed = false;
+for (const sec of ["dependencies", "devDependencies", "peerDependencies", "optionalDependencies"]) {
+  for (const [k, v] of Object.entries(p[sec] || {})) {
+    if (names.includes(k) && typeof v === "string" && v.startsWith("file:")) {
+      p[sec][k] = alias[k] || range; changed = true;
+    }
+  }
+}
+if (changed) { fs.writeFileSync("package.json", JSON.stringify(p, null, 2) + "\n"); console.log("changed"); }
+EOF
+}
+
+pkgfiles='^(package\.json|pnpm-lock\.yaml|package-lock\.json|yarn\.lock|pnpm-workspace\.yaml)$'
+git checkout -q --detach "$base"
+prev="$oldbase"
+newtips=()
+for b in "${branches[@]}"; do
+  for c in $(git rev-list --reverse "$prev..$b"); do
+    if ! git cherry-pick -n "$c" >/dev/null 2>&1; then
+      bad=$(git diff --name-only --diff-filter=U | grep -vE "$pkgfiles" || true)
+      [ -z "$bad" ] || fail "real conflict in $(echo "$bad" | tr '\n' ' ')at $c ($b); no branch moved"
+      for f in package.json pnpm-workspace.yaml; do
+        if git diff --name-only --diff-filter=U | grep -qx "$f"; then git checkout -q --theirs "$f"; git add "$f"; fi
+      done
+      for f in pnpm-lock.yaml package-lock.json yarn.lock; do
+        if git diff --name-only --diff-filter=U | grep -qx "$f"; then git checkout -q --ours "$f"; git add "$f"; fi
+      done
+    fi
+    changed=$(rewrite)
+    if [ -n "$changed" ] || git diff --name-only "$c^" "$c" | grep -qx package.json; then
+      sh -c "$lockcmd" >"$log" 2>&1 || fail "lock command failed at $c ($b): $(tail -5 "$log")"
+    fi
+    git add -A
+    git diff --cached --quiet && continue
+    git commit -q --no-verify -C "$c"
+  done
+  newtips+=("$(git rev-parse HEAD)")
+  prev="$b"
+done
+
+# Every commit replayed. Now move the branches.
+trap - EXIT
+basesha=$(git rev-parse "$base")
+for i in "${!branches[@]}"; do
+  old=$(git rev-parse "${branches[$i]}")
+  git branch -f "${branches[$i]}" "${newtips[$i]}"
+  printf '%s\t%s\t%s\n' "${branches[$i]}" "$old" "${newtips[$i]}"
+done
+git checkout -q "$start" 2>/dev/null || git checkout -q "${branches[${#branches[@]}-1]}"
+rm -f "$log"
+
+if [ -n "$tips" ]; then
+  [ -f "$tips" ] || die "no tips file: $tips"
+  node - "$tips" "$basesha" "$(IFS=,; echo "${branches[*]}")" "$(IFS=,; echo "${newtips[*]}")" <<'EOF'
+const fs = require("fs");
+const [file, base, names, shas] = process.argv.slice(2);
+const first = names.split(",")[0];
+const map = Object.fromEntries(names.split(",").map((n, i) => [n, shas.split(",")[i]]));
+const lines = fs.readFileSync(file, "utf8").split("\n").filter(Boolean).map((l) => l.split("\t"));
+const at = lines.findIndex((l) => l[0] === first);
+if (at > 0) lines[at - 1][1] = base;
+for (const l of lines) if (map[l[0]]) l[1] = map[l[0]];
+fs.writeFileSync(file, lines.map((l) => l.join("\t")).join("\n") + "\n");
+EOF
+fi
