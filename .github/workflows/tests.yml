@@ -130,6 +130,16 @@ jobs:
       # Every group above runs even after one fails, so one run names every
       # failure instead of only the first. This step turns the outcomes back
       # into a single verdict, and names the group that failed.
+      - name: Run demo-video tests
+        id: demo-video-tests
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg >/dev/null
+          python3 -m pip install --quiet pillow
+          ./demo-video/demo-video.test.sh
+
       - name: Report the verdict
         if: ${{ !cancelled() }}
         env:
@@ -143,6 +153,7 @@ jobs:
           rollout_label_tests: ${{ steps.rollout-label-tests.outcome }}
           fleet_ci_census_tests: ${{ steps.fleet-ci-census-tests.outcome }}
           merge_throughput_tests: ${{ steps.merge-throughput-tests.outcome }}
+          demo_video_tests: ${{ steps.demo-video-tests.outcome }}
           stack_lander_tests: ${{ steps.stack-lander-tests.outcome }}
           file_dep_restack_tests: ${{ steps.file-dep-restack-tests.outcome }}
           ship_sync_tests: ${{ steps.ship-sync-tests.outcome }}
@@ -150,7 +161,7 @@ jobs:
         run: |
           set -uo pipefail
           failed=0
-          for group in node_tests guard_tests prefix_tests hook_install_tests branch_pattern_tests rollout_label_tests fleet_ci_census_tests merge_throughput_tests stack_lander_tests file_dep_restack_tests ship_sync_tests amo_sign_retry_tests; do
+          for group in node_tests guard_tests prefix_tests hook_install_tests branch_pattern_tests rollout_label_tests fleet_ci_census_tests merge_throughput_tests demo_video_tests stack_lander_tests file_dep_restack_tests ship_sync_tests amo_sign_retry_tests; do
             outcome="${!group}"
             printf '%-22s %s\n' "$group" "$outcome"
             [ "$outcome" = success ] || failed=1

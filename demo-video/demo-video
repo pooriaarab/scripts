@@ -1,0 +1,152 @@
+#!/usr/bin/env python3
+"""demo-video: build and check HyperFrames demo videos (see the ship-demo-video skill in pooriaarab/skills).
+
+Usage:
+  demo-video build <spec.json> <project-dir>   Build index.html + compositions/ for the spec's style
+  demo-video audit <video> <grid.png>          One frame every 1.5 s, tiled 6 wide (needs Pillow)
+  demo-video energy <audio>                    Loudness per second, EBU R128 momentary, in LUFS
+  demo-video beats <project-dir>               First beat, period and strongest beats from beats/*.json
+  demo-video avatar --look ID --voice ID --script TEXT --out FILE [--speed 1.08] [--aspect 1:1]
+                                               Render a HeyGen talking-head clip (needs HEYGEN_API_KEY)
+
+Exit status: 0 on success, 1 when the spec or a check fails, 2 on bad usage.
+"""
+import importlib.util
+import json
+import os
+import re
+import statistics
+import subprocess
+import sys
+import time
+import urllib.request
+from io import BytesIO
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+import dvkit  # noqa: E402
+
+
+def die(msg, code=1):
+    print(f"demo-video: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def styles():
+    return sorted(p.stem.replace("_", "-") for p in (HERE / "styles").glob("*.py") if not p.stem.startswith("_"))
+
+
+def cmd_build(spec_path, project):
+    spec = dvkit.load_spec(spec_path)
+    mod_path = HERE / "styles" / (spec["style"].replace("-", "_") + ".py")
+    if not mod_path.exists():
+        die(f"unknown style '{spec['style']}'. Available: {', '.join(styles()) or 'none yet'}")
+    spec_mod = importlib.util.spec_from_file_location(mod_path.stem, mod_path)
+    mod = importlib.util.module_from_spec(spec_mod)
+    spec_mod.loader.exec_module(mod)
+    built = mod.build(spec, Path(project))
+    print(json.dumps({"style": spec["style"], "project": str(project), "compositions": built}))
+
+
+def cmd_audit(video, out, step=1.5, width=320, cols=6):
+    try:
+        from PIL import Image
+    except ImportError:
+        die("audit needs Pillow (python3 -m pip install pillow)")
+    d = dvkit.media_seconds(video)
+    imgs, t = [], 0.7
+    while t < d:
+        png = subprocess.run(["ffmpeg", "-loglevel", "error", "-ss", f"{t:.2f}", "-i", str(video), "-frames:v", "1",
+                              "-vf", f"scale={width}:-2", "-f", "image2pipe", "-vcodec", "png", "-"], capture_output=True).stdout
+        imgs.append(Image.open(BytesIO(png)))
+        t += step
+    if not imgs:
+        die(f"{video}: no frames")
+    h, rows = imgs[0].height, (len(imgs) + cols - 1) // cols
+    sheet = Image.new("RGB", (cols * width, rows * h), "black")
+    for i, im in enumerate(imgs):
+        sheet.paste(im, ((i % cols) * width, (i // cols) * h))
+    sheet.save(out)
+    print(json.dumps({"video": str(video), "frames": len(imgs), "grid": str(out)}))
+
+
+def cmd_energy(audio):
+    err = subprocess.run(["ffmpeg", "-hide_banner", "-i", str(audio), "-af", "ebur128=metadata=1,ametadata=print:key=lavfi.r128.M",
+                          "-f", "null", "-"], capture_output=True, text=True).stderr
+    vals = [float(x) for x in re.findall(r"lavfi\.r128\.M=(-?[0-9.]+)", err)]
+    if not vals:
+        die(f"{audio}: no loudness readings")
+    per_s = [round(sum(vals[i:i + 10]) / len(vals[i:i + 10]), 1) for i in range(0, len(vals), 10)]
+    print(json.dumps({"audio": str(audio), "lufs_per_second": per_s}))
+
+
+def cmd_beats(project):
+    files = sorted(Path(project).glob("beats/**/*.json"))
+    if not files:
+        die(f"{project}: no beats/*.json (run `npx hyperframes beats` in the project first)")
+    beats = json.loads(files[0].read_text())["beats"]
+    t = [b["time"] for b in beats]
+    gap = statistics.median(t[i + 1] - t[i] for i in range(len(t) - 1))
+    strong = sorted(round(b["time"], 2) for b in sorted(beats, key=lambda b: -b["strength"])[:8])
+    note = "the gap is under 0.33 s, so the detector probably counted eighth notes: try period = 2 x gap" if gap < 0.33 else ""
+    print(json.dumps({"file": str(files[0]), "first": round(t[0], 3), "period": round(gap, 4), "strongest": strong, "note": note}))
+
+
+def heygen(method, path, body=None):
+    key = os.environ.get("HEYGEN_API_KEY")
+    if not key:
+        die("HEYGEN_API_KEY is not set")
+    req = urllib.request.Request(f"https://api.heygen.com{path}", method=method,
+                                 data=json.dumps(body).encode() if body else None,
+                                 headers={"X-Api-Key": key, "Content-Type": "application/json"})
+    return json.load(urllib.request.urlopen(req))
+
+
+def cmd_avatar(args):
+    opts = dict(zip(args[::2], args[1::2]))
+    for k in ("--look", "--voice", "--script", "--out"):
+        if k not in opts:
+            die(f"avatar needs {k}", 2)
+    body = {"type": "avatar", "avatar_id": opts["--look"], "voice_id": opts["--voice"], "script": opts["--script"],
+            "resolution": "1080p", "aspect_ratio": opts.get("--aspect", "1:1"), "fit": "cover",
+            "voice_settings": {"speed": float(opts.get("--speed", 1.08))}}
+    vid = heygen("POST", "/v3/videos", body)["data"]["video_id"]
+    print(f"demo-video: HeyGen video {vid} submitted", file=sys.stderr)
+    for _ in range(120):
+        d = heygen("GET", f"/v3/videos/{vid}")["data"]
+        if d.get("status") == "completed":
+            urllib.request.urlretrieve(d["video_url"], opts["--out"])
+            print(json.dumps({"video_id": vid, "out": opts["--out"], "seconds": dvkit.media_seconds(opts["--out"])}))
+            return
+        if d.get("status") == "failed":
+            die(f"HeyGen video {vid} failed: {d.get('failure_message') or d}")
+        time.sleep(15)
+    die(f"HeyGen video {vid} did not finish in 30 minutes")
+
+
+def main(argv):
+    if len(argv) < 2 or argv[1] in ("-h", "--help"):
+        print(__doc__)
+        return 0 if len(argv) >= 2 else 2
+    cmd, rest = argv[1], argv[2:]
+    try:
+        if cmd == "build" and len(rest) == 2:
+            cmd_build(*rest)
+        elif cmd == "audit" and len(rest) == 2:
+            cmd_audit(*rest)
+        elif cmd == "energy" and len(rest) == 1:
+            cmd_energy(rest[0])
+        elif cmd == "beats" and len(rest) == 1:
+            cmd_beats(rest[0])
+        elif cmd == "avatar":
+            cmd_avatar(rest)
+        else:
+            die(f"bad usage: {' '.join(argv[1:])}\n{__doc__}", 2)
+    except dvkit.SpecError as e:
+        die(str(e))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
