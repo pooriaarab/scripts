@@ -1,0 +1,31 @@
+{
+  "style": "dossier",
+  "duration": 22.5,
+  "beat": { "first": 0.06, "period": 0.504 },
+  "music": { "src": "assets/music.mp3", "volume": 0.9, "fade_in": 0, "fade_out": 1.3 },
+  "footage": { "run": { "src": "assets/footage.mp4", "safe_end": 144.0 } },
+  "scenes": {
+    "type": { "at_beat": 0, "label": "Message to an AI chat", "segments": [
+      { "text": "Hi! I'm " },
+      { "text": "Maria Gonzalez", "pii": "name", "underline_beat": 4 },
+      { "text": ", my email is " },
+      { "text": "maria.g@example.com", "pii": "email", "underline_beat": 5 },
+      { "text": ". Can you fix my CV?" }
+    ] },
+    "wait": { "at_beat": 8, "word": "Wait." },
+    "about": { "at_beat": 11, "rows": ["You're about to send this", "to an <i class=\"red\">AI.</i>"] },
+    "exhibits": { "at_beat": 19, "headline": "Caught before you send.", "clips": [
+      { "at_beat": 19, "exhibit": "Exhibit A", "site": "ChatGPT", "footage": "run", "media": 7.9, "rate": 1.0, "zoom": [1.6, -16, -8], "tilt": -1.2 },
+      { "at_beat": 25, "exhibit": "Exhibit B", "site": "Perplexity", "footage": "run", "media": 49.0, "rate": 1.3, "zoom": [1.6, -15, -3], "tilt": 1.0 },
+      { "at_beat": 28, "exhibit": "Exhibit C", "site": "Gemini", "footage": "run", "media": 93.8, "rate": 1.3, "zoom": [1.6, 0, -12], "tilt": -0.8 }
+    ] },
+    "redact": { "at_beat": 31, "label": "What the AI receives", "stamp": "Redacted", "stamp_beat": 35, "segments": [
+      { "text": "Hi! I'm " },
+      { "text": "Maria Gonzalez", "tag": "[NAME_1]", "swap_beat": 33 },
+      { "text": ", my email is " },
+      { "text": "maria.g@example.com", "tag": "[EMAIL_1]", "swap_beat": 34 },
+      { "text": ". Can you fix my CV?" }
+    ] },
+    "end": { "at_beat": 37, "word": "PII Guard", "lines": ["A free Firefox add-on. Checks run on your device.", "github.com/pooriaarab/foxpilot"] }
+  }
+}
