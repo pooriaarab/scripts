@@ -1,0 +1,123 @@
+#!/usr/bin/env bash
+# amo-sign-retry - re-run release workflows whose AMO signing step was
+# throttled, after each reported window passes.
+#
+# Usage:
+#   amo-sign-retry [--workflow release.yml] [--step Sign] [--margin 30]
+#                  [--max-attempts 10] [--interval 60] [--once]
+#                  OWNER/NAME [OWNER/NAME ...]
+#
+# addons.mozilla.org throttles new add-on submissions per account, and the
+# signing step fails with "Expected available in N seconds". For each repo
+# the tool reads the newest run of --workflow:
+#   - success                         -> "signed", stop watching it;
+#   - in progress                     -> keep watching;
+#   - failed, and the step matching --step did not fail -> "failed before
+#     signing", stop (a re-run cannot fix a red build);
+#   - signing failed with no window   -> "not a throttle", stop;
+#   - signing throttled               -> wait until the run's end time + N +
+#     --margin, then `gh run rerun <id> --failed`, up to --max-attempts.
+# Each repo has its own due time, so one long window does not hold up the
+# others. The loop sleeps until the next due time, at most --interval.
+#
+# --once checks each repo one time and never sleeps, for cron. It re-runs
+# only the repos whose window has passed.
+#
+# A re-run helps only when the workflow can run twice. If it publishes to npm
+# before it signs, make it skip `npm publish` when that version is on npm.
+#
+# Exit: 0 every repo signed; 1 any repo failed or gave up; 3 (--once) a repo
+# is still running or waiting.
+# Side effects: `gh run rerun --failed` on throttled runs.
+# Credentials: the `gh` CLI login. The tool reads no token itself.
+# Needs: gh, node.
+# AMO_SIGN_RETRY_SETTLE (default 30) is the pause after a re-run before the
+# next poll of that repo, so the old failed run is not read again.
+set -uo pipefail
+
+die() { echo "amo-sign-retry: $*" >&2; exit 1; }
+
+workflow="release.yml" step="Sign" margin=30 max=10 interval=60 once=0
+settle="${AMO_SIGN_RETRY_SETTLE:-30}"
+sleeper="${AMO_SIGN_RETRY_SLEEP:-sleep}"
+repos=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --workflow) workflow="$2"; shift 2 ;;
+    --step) step="$2"; shift 2 ;;
+    --margin) margin="$2"; shift 2 ;;
+    --max-attempts) max="$2"; shift 2 ;;
+    --interval) interval="$2"; shift 2 ;;
+    --once) once=1; shift ;;
+    -h|--help) sed -n '2,36p' "$0"; exit 0 ;;
+    -*) die "unknown option: $1" ;;
+    *) [[ "$1" == */* ]] || die "repo must be OWNER/NAME: $1"; repos+=("$1"); shift ;;
+  esac
+done
+[ "${#repos[@]}" -gt 0 ] || die "usage: amo-sign-retry [options] OWNER/NAME [...] (see --help)"
+for n in "$margin" "$max" "$interval" "$settle"; do [[ "$n" =~ ^[0-9]+$ ]] || die "numbers only: $n"; done
+
+epoch() { node -e 'const t=Date.parse(process.argv[1]);console.log(Number.isNaN(t)?0:Math.floor(t/1000))' "$1"; }
+log() { echo "$(date -u +%H:%M:%S) $*"; }
+
+# Parallel arrays, one slot per repo (Bash 3.2 has no associative arrays).
+# state: active | done | failed | waiting
+state=() attempts=() due=() hold=()
+for i in "${!repos[@]}"; do state[i]=active; attempts[i]=0; due[i]=0; hold[i]=0; done
+
+rerun() { # i id
+  gh run rerun "$2" -R "${repos[$1]}" --failed >/dev/null 2>&1 || log "${repos[$1]}: re-run request did not go through"
+  attempts[$1]=$(( attempts[$1] + 1 )); due[$1]=0; hold[$1]=$(( $(date +%s) + settle ))
+  log "${repos[$1]}: re-run ${attempts[$1]} of $max (run $2)"
+}
+
+while :; do
+  now=$(date +%s); wait_for=$interval; active=0
+  for i in "${!repos[@]}"; do
+    case "${state[i]}" in "done"|failed) continue ;; esac
+    state[i]=active; active=1; r="${repos[i]}"
+    if [ "${hold[i]}" -gt "$now" ]; then
+      left=$(( hold[i] - now )); [ "$left" -lt "$wait_for" ] && wait_for=$left
+      state[i]=waiting; continue
+    fi
+    if [ "${due[i]}" -gt 0 ]; then
+      if [ "${due[i]}" -gt "$now" ]; then
+        left=$(( due[i] - now )); [ "$left" -lt "$wait_for" ] && wait_for=$left
+        state[i]=waiting; continue
+      fi
+      rerun "$i" "${runid[i]}"; state[i]=waiting; continue
+    fi
+    line=$(gh api "repos/$r/actions/workflows/$workflow/runs?per_page=1" \
+      --jq '.workflow_runs[0] | "\(.id) \(.status) \(.conclusion) \(.updated_at)"')
+    read -r id status concl updated <<<"$line"
+    if [ -z "${id:-}" ] || [ "$id" = null ]; then log "$r: no run of $workflow"; state[i]=failed; continue; fi
+    runid[i]=$id
+    if [ "$status" != completed ]; then log "$r: running (run $id)"; state[i]=waiting; continue; fi
+    if [ "$concl" = success ]; then log "$r: signed (run $id)"; state[i]="done"; continue; fi
+    sign=$(gh api "repos/$r/actions/runs/$id/jobs" \
+      --jq "[.jobs[].steps[] | select(.name | test(\"$step\"))][0].conclusion // \"\"")
+    if [ "$sign" != failure ]; then log "$r: failed before signing (run $id)"; state[i]=failed; continue; fi
+    window=$(gh run view "$id" -R "$r" --log-failed 2>/dev/null | grep -oE 'available in [0-9]+ seconds' | grep -oE '[0-9]+' | tail -1)
+    if [ -z "$window" ]; then log "$r: signing failed, not a throttle (run $id)"; state[i]=failed; continue; fi
+    if [ "${attempts[i]}" -ge "$max" ]; then log "$r: gave up after $max re-runs (run $id)"; state[i]=failed; continue; fi
+    due[i]=$(( $(epoch "$updated") + window + margin ))
+    if [ "${due[i]}" -le "$now" ]; then
+      rerun "$i" "$id"
+    else
+      left=$(( due[i] - now )); [ "$left" -lt "$wait_for" ] && wait_for=$left
+      log "$r: throttled, re-run in $left s (run $id)"
+    fi
+    state[i]=waiting
+  done
+  pending=0
+  for i in "${!repos[@]}"; do [ "${state[i]}" = waiting ] && pending=1; done
+  if [ "$once" = 1 ] || [ "$active" = 0 ] || [ "$pending" = 0 ]; then break; fi
+  "$sleeper" "$wait_for"
+done
+
+rc=0
+for i in "${!repos[@]}"; do
+  [ "${state[i]}" = failed ] && rc=1
+  [ "${state[i]}" = waiting ] && [ "$rc" = 0 ] && rc=3
+done
+exit "$rc"
