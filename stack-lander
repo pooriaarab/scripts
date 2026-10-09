@@ -115,10 +115,10 @@ else
   if [ -n "${ISSUE:-}" ]; then
     num="$ISSUE"
   elif [ "$dry" = 1 ]; then
-    say gh api "repos/$repo/issues" -f "title=$title" -F "body=@$qdir/$issuefile" "${labels[@]}" --jq .number
+    say gh api "repos/$repo/issues" -f "title=$title" -F "body=@$qdir/$issuefile" ${labels[@]+"${labels[@]}"} --jq .number
     num="N"
   else
-    num=$(gh api "repos/$repo/issues" -f "title=$title" -F "body=@$qdir/$issuefile" "${labels[@]}" --jq .number) \
+    num=$(gh api "repos/$repo/issues" -f "title=$title" -F "body=@$qdir/$issuefile" ${labels[@]+"${labels[@]}"} --jq .number) \
       || die "issue creation failed; nothing renamed or pushed"
   fi
   newbranch=$(printf '%s' "$branch" | sed -E "s/^[a-z]+-[a-z0-9]+-/${prefix}-${num}-/")
