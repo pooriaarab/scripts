@@ -118,7 +118,13 @@ for b in "${branches[@]}"; do
     if [ -n "$changed" ] || git diff --name-only "$c^" "$c" | grep -qx package.json; then
       sh -c "$lockcmd" >"$log" 2>&1 || fail "lock command failed at $c ($b): $(tail -5 "$log")"
     fi
-    git add -A
+    # Stage only what the replay owns: tracked changes (the picked commit's
+    # files are already in the index) and the package files. Never git add -A:
+    # it would commit untracked files that happen to sit in the checkout.
+    git add -u
+    for f in package.json pnpm-lock.yaml package-lock.json yarn.lock pnpm-workspace.yaml; do
+      [ -e "$f" ] && git add -- "$f"
+    done
     git diff --cached --quiet && continue
     git commit -q --no-verify -C "$c"
   done
