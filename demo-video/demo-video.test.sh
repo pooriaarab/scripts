@@ -77,7 +77,9 @@ print("lane ok")'
 # --- Style builders: each example spec must build, and a footage over-read must fail ---
 sfx_pack() { mkdir -p "$1/assets/sfx" "$1/assets/fonts"; for n in whoosh click pop type scribble hit stamp chime riser glitch; do
   ffmpeg -loglevel error -f lavfi -i "anullsrc=r=44100:cl=mono" -t 0.5 -y "$1/assets/sfx/$n.mp3"; done
-  for f in newsreader-normal-500 newsreader-italic-500; do printf 'wOF2' > "$1/assets/fonts/$f.woff2"; done; }
+  for f in newsreader-normal-500 newsreader-italic-500; do printf 'wOF2' > "$1/assets/fonts/$f.woff2"; done
+  mkdir -p "$1/assets/montage"; for i in 0 1 2 3 4 5 6; do
+    ffmpeg -loglevel error -f lavfi -i "color=c=gray:s=64x40" -frames:v 1 -y "$1/assets/montage/b$i.png"; done; }
 check_style() { # style, expected scene count
   local style=$1 want=$2 p="$T/$1"; sfx_pack "$p"
   if out=$($DV build "examples/$style.json" "$p" 2>&1); then
@@ -94,6 +96,10 @@ check_style dossier 6
 [ -f "$T/dossier/compositions/fonts/newsreader-normal-500.woff2" ] && ok "dossier copies its fonts next to the scenes" || bad "dossier fonts not copied"
 mkdir -p "$T/nofonts/assets/sfx"
 expect_exit "dossier refuses to build without its fonts" 1 "Dossier needs newsreader" $DV build examples/dossier.json "$T/nofonts"
+
+check_style pop-flats 9
+[ -f "$T/pop-flats/compositions/montage/b6.png" ] && ok "pop-flats copies montage images next to the scenes" || bad "pop-flats montage not copied"
+grep -q 'backgroundColor: "#19c37d" }, 7.01' "$T/pop-flats/index.html" && ok "pop-flats cuts the ground on the scene's beat" || bad "pop-flats ground cut missing"
 
 echo
 [ "$fails" -eq 0 ] && echo "demo-video: all tests passed" || { echo "demo-video: $fails test(s) failed"; exit 1; }
