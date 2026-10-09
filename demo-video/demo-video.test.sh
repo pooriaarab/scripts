@@ -74,5 +74,21 @@ assert {"t": 1.3, "v": 0.26} in pts and {"t": 20.2, "v": 1.0} in pts, pts
 assert [p["t"] for p in pts] == sorted(p["t"] for p in pts), pts
 print("lane ok")'
 
+# --- Style builders: each example spec must build, and a footage over-read must fail ---
+sfx_pack() { mkdir -p "$1/assets/sfx"; for n in whoosh click pop type scribble hit stamp chime riser glitch; do
+  ffmpeg -loglevel error -f lavfi -i "anullsrc=r=44100:cl=mono" -t 0.5 -y "$1/assets/sfx/$n.mp3"; done; }
+check_style() { # style, expected scene count
+  local style=$1 want=$2 p="$T/$1"; sfx_pack "$p"
+  if out=$($DV build "examples/$style.json" "$p" 2>&1); then
+    n=$(ls "$p/compositions"/*.html | wc -l | tr -d ' ')
+    hosts=$(grep -c 'data-composition-src="compositions/' "$p/index.html")
+    [ "$n" = "$want" ] && [ "$hosts" = "$want" ] && ok "$style builds $want scenes with matching hosts" || bad "$style built $n scenes, $hosts hosts: $out"
+  else bad "$style example failed to build: $out"; fi
+  python3 -c 'import json,sys; s=json.load(open(sys.argv[1])); f=next(iter(s["footage"].values())); f["safe_end"]=1.0; json.dump(s,open(sys.argv[2],"w"))' "examples/$style.json" "$T/$style-late.json"
+  expect_exit "$style refuses footage read past safe_end" 1 "past its safe_end" $DV build "$T/$style-late.json" "$T/$style-late"
+}
+check_style keynote-whip 8
+grep -q '"t":1.3,"v":0.26' "$T/keynote-whip/index.html" && ok "keynote-whip ducks the music under the presenter" || bad "keynote-whip music duck missing"
+
 echo
 [ "$fails" -eq 0 ] && echo "demo-video: all tests passed" || { echo "demo-video: $fails test(s) failed"; exit 1; }
