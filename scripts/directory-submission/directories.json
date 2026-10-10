@@ -593,16 +593,16 @@
       "link": "dofollow",
       "cost": "free",
       "method": "github-pr",
-      "gate": "PR adds a row to their data list. Largest llms.txt registry."
+      "gate": "PR adds one MDX under packages/content/data/websites/. Largest llms.txt registry."
     },
     {
       "name": "llms.txt Directory (cloud)",
       "url": "https://directory.llmstxt.cloud",
-      "submit": "https://directory.llmstxt.cloud",
+      "submit": "https://directory.llmstxt.cloud/submit",
       "link": "dofollow",
       "cost": "free",
-      "method": "github-pr",
-      "gate": "Submission per their repo docs."
+      "method": "form-email",
+      "gate": "Free standard waitlist (1-3 months, nofollow) or $29 fast track; email + Cloudflare Turnstile, so a human fills it."
     }
   ],
   "web_engines": [
