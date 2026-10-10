@@ -54,6 +54,16 @@ if (site.registry_name.length > 100 || !/^io\.github\.[A-Za-z0-9-]+\/[A-Za-z0-9.
   console.error("gen.mjs: registry_name must look like io.github.<user>/<repo>.");
   process.exit(1);
 }
+if (!Array.isArray(site.tags) || site.tags.some((t) => typeof t !== "string" || t.length === 0)) {
+  console.error("gen.mjs: site.json \"tags\" must be a non-empty array of non-empty strings.");
+  process.exit(1);
+}
+site.tools.forEach((t, i) => {
+  if (!t || typeof t.name !== "string" || t.name.length === 0 || typeof t.description !== "string" || t.description.length === 0) {
+    console.error(`gen.mjs: site.json tools[${i}] needs a non-empty string "name" and "description".`);
+    process.exit(1);
+  }
+});
 
 mkdirSync(outDir, { recursive: true });
 const write = (name, content) => writeFileSync(join(outDir, name), content);
@@ -104,7 +114,6 @@ ${toolLines}
 
 // server.json — official MCP registry manifest, remote-only.
 const mcpDesc = site.tagline.length <= 100 ? site.tagline : site.tagline.slice(0, 97) + "...";
-const repoId = site.repo.replace(/^https:\/\/github\.com\//, "");
 write("server.json", JSON.stringify({
   $schema: "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   name: site.registry_name,
