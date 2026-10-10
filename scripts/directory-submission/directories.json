@@ -1,6 +1,6 @@
 {
-  "version": 2,
-  "note": "DR figures are approximate (Ahrefs, mid-2026) and drift. Re-check before quoting. method: api | github-pr | github-issue | verify-deploy | form-anon | form-email | form-account | paid | pitch | crawl. New directories are added here first; pooriaarab/private-repo-297b data/directories.json is a synced copy.",
+  "version": 3,
+  "note": "DR figures are approximate (Ahrefs, mid-2026) and drift. Re-check before quoting. method: api | github-pr | github-issue | verify-deploy | form-anon | form-email | form-account | form-oauth | form-captcha | form-turnstile | paid | pitch | crawl. New directories are added here first; pooriaarab/private-repo-297b data/directories.json is a synced copy.",
   "web_tier1_launch": [
     {"name": "Product Hunt", "url": "https://www.producthunt.com", "submit": "https://www.producthunt.com/posts/new", "dr": 91, "link": "nofollow", "cost": "free", "method": "form-account", "gate": "Full launch ops; see product-hunt-launch skill. ~6 months between launches per product."},
     {"name": "BetaList", "url": "https://betalist.com", "submit": "https://betalist.com/submit", "dr": 67, "link": "dofollow", "cost": "paid", "method": "paid", "gate": "No free lane since 2026 (~$39 entry). Pre-launch or recently launched only."},
@@ -109,5 +109,15 @@
     {"name": "MCP Hunt", "url": "https://mcp-hunt.com", "submit": "Site submit flow", "automatable": "human", "method": "crawl", "gate": "No public submit form found on the site; check for an auto-listing after registry publish."},
     {"name": "mcp.directory", "url": "https://mcp.directory", "submit": "Claim auto-listing", "automatable": "human", "method": "form-account", "gate": "Check for existing auto entry first."},
     {"name": "PulseMCP", "url": "https://www.pulsemcp.com", "submit": "none (ingests registry)", "automatable": "none", "method": "crawl", "gate": "Submissions paused; registry publish covers it."}
+  ],
+  "agent_bot_platforms": [
+    {"name": "Claude Connectors Directory", "url": "https://claude.ai/directory/manage", "submit": "Developer portal, Submit new > MCP connector", "automatable": "browser", "cost": "free", "method": "form-account", "gate": "Any paid Claude plan can submit a remote HTTPS MCP server; Anthropic reviews then lists a Community connector. Public docs link required by publish date; reviewers exercise every tool."},
+    {"name": "ChatGPT plugin directory", "url": "https://chatgpt.com/plugins", "submit": "OpenAI Platform dashboard", "automatable": "browser", "cost": "free", "method": "form-account", "gate": "Verified org + api.apps.write permission + public HTTPS MCP URL + CSP allow-list. Custom GPTs retire Dec 2026 — this is the live path."},
+    {"name": "cursor.directory", "url": "https://cursor.directory/mcp/new", "submit": "https://cursor.directory/mcp/new", "automatable": "browser", "cost": "free", "method": "form-oauth", "gate": "GitHub/Google OAuth; name + description + install-instructions URL. A repo-root .mcp.json also powers the /plugins/new auto-detect path."},
+    {"name": "grokbots.best", "url": "https://grokbots.best", "submit": "POST /api/bots/submit", "automatable": "agent", "cost": "free", "method": "api", "gate": "Asset-first: requires an existing https://x.ai/bot/... template link (create the Grok bot inside Grok, X Premium). 409 = already listed."},
+    {"name": "templatebot.lol", "url": "https://templatebot.lol", "submit": "POST /api/agent/templates", "automatable": "agent", "cost": "free", "method": "api", "gate": "Asset-first: requires an x.ai/bot share link; fetches name and description from x.ai."},
+    {"name": "grokbot.wtf", "url": "https://www.grokbot.wtf", "submit": "PR to github.com/keshav-exe/bot-directory", "automatable": "agent", "cost": "free", "method": "github-pr", "gate": "Asset-first: x.ai/bot share link required. Fork, pnpm template:new, pnpm template:check, PR."},
+    {"name": "grok-bot.app", "url": "https://grok-bot.app", "submit": "Site submit form", "automatable": "human", "cost": "free", "method": "form-anon", "gate": "Human editor review (PENDING_REVIEW). Accepts x.ai/bot links or a licensed GitHub PROFILE."},
+    {"name": "Poe", "url": "https://poe.com/create_bot", "submit": "poe.com/create_bot", "automatable": "browser", "cost": "free", "method": "form-account", "gate": "Poe account; a prompt bot pointing at the site or its /mcp publishes immediately at poe.com/<handle> — no review for basic bots."}
   ]
 }

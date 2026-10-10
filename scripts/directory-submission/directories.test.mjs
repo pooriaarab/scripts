@@ -48,7 +48,7 @@ test("no duplicate directory names across tiers", () => {
 });
 
 const AGENT_METHODS = ["api", "github-pr", "github-issue"];
-const BROWSER_METHODS = ["form-oauth", "form-captcha", "form-turnstile"];
+const BROWSER_METHODS = ["form-oauth", "form-captcha", "form-turnstile", "form-account"];
 
 test("automatable flag matches method", () => {
   for (const tier of tiers) {
