@@ -130,9 +130,12 @@ const tiers = [
   ["web_tier1_launch", "web-tier1-launch"], ["web_tier1_startup", "web-tier1-startup"],
   ["web_tier1_saas", "web-tier1-saas"], ["web_tier1_review", "web-tier1-review"],
   ["web_ai_geo", "web-ai-geo"], ["web_longtail", "web-longtail"],
+  ["web_curated", "web-curated"], ["web_llms_txt", "web-llms-txt"],
+  ["web_engines", "web-engines"], ["agent_submittable", "agent-submittable"],
+  ["agent_bot_platforms", "agent-bot-platforms"],
 ];
 for (const [key, tier] of tiers) {
-  for (const d of DIRS[key]) rows.push([d.name, tier, d.url, d.submit, d.dr, d.link, d.gate, "", "todo"]);
+  for (const d of DIRS[key] ?? []) rows.push([d.name, tier, d.url, d.submit, d.dr, d.link, d.gate, "", "todo"]);
 }
 for (const d of DIRS.mcp) rows.push([d.name, "mcp", d.url, d.submit, "", "", d.gate, "", "todo"]);
 write("submissions.csv", rows.map((r) => r.map(csvCell).join(",")).join("\n") + "\n");
