@@ -370,7 +370,8 @@
       "link": "dofollow",
       "cost": "free",
       "method": "form-account",
-      "gate": "None."
+      "gate": "Fetch fails as of 2026-10; recheck before submitting.",
+      "automatable": "none"
     },
     {
       "name": "MicroLaunch",
@@ -540,7 +541,8 @@
       "link": "dofollow",
       "cost": "free",
       "method": "form-account",
-      "gate": "None."
+      "gate": "Times out as of 2026-10; recheck before submitting.",
+      "automatable": "none"
     },
     {
       "name": "Hive Index",
@@ -562,7 +564,7 @@
       "link": "dofollow",
       "cost": "free",
       "method": "form-account",
-      "gate": "Free account; human-edited DMOZ successor; weeks-long review. Pick the tightest category."
+      "gate": "Account + email verify confirmed working. Directory listing still needs a human volunteer-editor application — stop at the account."
     },
     {
       "name": "Jasmine Directory",
@@ -570,9 +572,9 @@
       "submit": "https://www.jasminedirectory.com/submit-a-website",
       "dr": 62,
       "link": "dofollow",
-      "cost": "freemium",
+      "cost": "paid",
       "method": "form-account",
-      "gate": "Free lane slow; paid express."
+      "gate": "Paid-only submission now; skip."
     }
   ],
   "web_llms_txt": [
@@ -601,8 +603,9 @@
       "submit": "https://directory.llmstxt.cloud/submit",
       "link": "dofollow",
       "cost": "free",
-      "method": "form-email",
-      "gate": "Free standard waitlist (1-3 months, nofollow) or $29 fast track; email + Cloudflare Turnstile, so a human fills it."
+      "method": "form-turnstile",
+      "gate": "Confirmed: Turnstile passes unattended in a real browser profile (browser-personal). Fill URL+name+desc, wait for Success!, submit -> 'You're on the waitlist!'",
+      "automatable": "browser"
     }
   ],
   "web_engines": [
@@ -630,8 +633,9 @@
       "submit": "https://wiby.me/submit/",
       "link": "crawl",
       "cost": "free",
-      "method": "form-anon",
-      "gate": "Captcha; favours lightweight sites."
+      "method": "form-captcha",
+      "gate": "Confirmed: image captcha read from browser screenshot; ~1-3 tries per site. Keep worksafe checked.",
+      "automatable": "browser"
     },
     {
       "name": "Marginalia",
@@ -660,7 +664,7 @@
       "link": "dofollow",
       "cost": "freemium",
       "method": "verify-deploy",
-      "gate": "MCP server or POST /api/v1/submissions. Free with their badge on the site, or $4.99; needs a verification file deployed on the domain."
+      "gate": "Confirmed end-to-end. POST /api/v1/submissions with Idempotency-Key header (platform value is 'web'). Save control_token. Deploy badge into server-rendered HTML, then POST /api/v1/submissions/:id/verify with Bearer token -> published in minutes."
     },
     {
       "name": "directree",
@@ -669,7 +673,7 @@
       "link": "dofollow",
       "cost": "free",
       "method": "api",
-      "gate": "Free SaaS directory with an agent API for listing upkeep."
+      "gate": "Not a first-time submission path: agent API only updates already-claimed listings."
     },
     {
       "name": "justlaunch",
@@ -706,7 +710,7 @@
       "submit": "mcp-publisher publish (server.json)",
       "automatable": "agent",
       "method": "api",
-      "gate": "GitHub login for io.github.* namespace. JWT expires under an hour."
+      "gate": "mcp-publisher + DNS TXT at the APEX (not _mcp): 'v=MCPv1; k=ed25519; p=<base64 pubkey>'. server.json description <=100 chars. Registry JWT expires fast; login then publish immediately."
     },
     {
       "name": "mcp.tc",
@@ -714,15 +718,15 @@
       "submit": "POST https://mcp.tc/submit",
       "automatable": "agent",
       "method": "api",
-      "gate": "JSON POST {url, note}; no account."
+      "gate": "Confirmed: POST {url,note} -> queued for review; slug reserved at /i/<slug>. marriagelicense.fyi listed live."
     },
     {
       "name": "AllMCPs",
       "url": "https://allmcps.com",
-      "submit": "submit_mcp_server tool on their MCP endpoint",
-      "automatable": "agent",
-      "method": "api",
-      "gate": "Needs a contact email; hosting their badge verifies instantly."
+      "submit": "https://allmcps.com/submit",
+      "automatable": "browser",
+      "method": "form-turnstile",
+      "gate": "Confirmed: 3-step wizard (URL -> details -> Cloudflare Turnstile waits for Success! -> Submit to AllMCPs). Email confirmation per submission. Has a hosted-endpoint field; an 'agent prompt' on the page describes their MCP submission."
     },
     {
       "name": "402.ad",
@@ -746,7 +750,7 @@
       "submit": "GitHub issue on chatmcp/mcpso",
       "automatable": "agent",
       "method": "github-issue",
-      "gate": "None."
+      "gate": "Confirmed: file one GitHub issue per server on chatmcp/mcpso. Open issues stay queued for human review."
     },
     {
       "name": "Docker MCP Registry",
@@ -758,11 +762,11 @@
     },
     {
       "name": "awesome-remote-mcp-servers",
-      "url": "https://github.com/sylviangth/awesome-remote-mcp-servers",
-      "submit": "GitHub PR",
+      "url": "https://github.com/punkpeye/awesome-remote-mcp-servers",
+      "submit": "GitHub PR (add entry alphabetically in the right section)",
       "automatable": "agent",
       "method": "github-pr",
-      "gate": "None."
+      "gate": "Confirmed PR path. Remote-only endpoints go to punkpeye's repo, not the installable-servers list."
     },
     {
       "name": "awesome-mcp-servers (punkpeye)",
@@ -792,17 +796,17 @@
       "name": "Glama",
       "url": "https://glama.ai/mcp/servers",
       "submit": "Web form (Add server)",
-      "automatable": "human",
-      "method": "form-account",
-      "gate": "Login required."
+      "automatable": "browser",
+      "method": "form-oauth",
+      "gate": "Confirmed: GitHub OAuth in personal browser -> /mcp/servers -> Add Server -> 'Hosted endpoint' tab (NOT 'Runs from source'). 'Pending review' email per server = authoritative."
     },
     {
       "name": "Smithery",
       "url": "https://smithery.ai/new",
       "submit": "Web flow, URL method",
-      "automatable": "human",
-      "method": "form-account",
-      "gate": "Login required."
+      "automatable": "browser",
+      "method": "form-oauth",
+      "gate": "Confirmed: GitHub OAuth at smithery.ai/new -> slug + upstream URL -> step 2 click Skip with real mouse events (plain .click() does not register) -> lands on /servers/<ns>/<slug>/releases with SUCCESS."
     },
     {
       "name": "mcpservers.org",

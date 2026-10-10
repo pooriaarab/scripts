@@ -10,7 +10,8 @@ const table = JSON.parse(readFileSync(join(HERE, "directories.json"), "utf8"));
 
 const METHODS = new Set([
   "api", "github-pr", "github-issue", "verify-deploy",
-  "form-anon", "form-email", "form-account", "paid", "pitch", "crawl",
+  "form-anon", "form-email", "form-account", "form-oauth",
+  "form-captcha", "form-turnstile", "paid", "pitch", "crawl",
 ]);
 const COSTS = new Set(["free", "freemium", "paid"]);
 
@@ -46,10 +47,18 @@ test("no duplicate directory names across tiers", () => {
   }
 });
 
-test("automatable flag matches method for mcp tier", () => {
-  for (const e of table.mcp ?? []) {
-    if (e.automatable === "agent") {
-      assert.ok(["api", "github-pr", "github-issue"].includes(e.method), `${e.name}: automatable but method is ${e.method}`);
+const AGENT_METHODS = ["api", "github-pr", "github-issue"];
+const BROWSER_METHODS = ["form-oauth", "form-captcha", "form-turnstile"];
+
+test("automatable flag matches method", () => {
+  for (const tier of tiers) {
+    for (const e of table[tier] ?? []) {
+      if (e.automatable === "agent") {
+        assert.ok(AGENT_METHODS.includes(e.method), `${tier}/${e.name}: automatable=agent but method is ${e.method}`);
+      }
+      if (e.automatable === "browser") {
+        assert.ok(BROWSER_METHODS.includes(e.method), `${tier}/${e.name}: automatable=browser but method is ${e.method}`);
+      }
     }
   }
 });
