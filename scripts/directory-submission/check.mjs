@@ -66,7 +66,7 @@ if (cmd === "list") {
   let dead = 0;
   for (const r of results) {
     console.log(r);
-    if (/\bDEAD\b|\t5\d\d|\t4\d\d/.test(r)) dead += 1;
+    if (/\tDEAD|\t[45]\d\d$/.test(r)) dead += 1;
   }
   console.log(`\n${rows.length - dead} alive, ${dead} dead/blocked`);
   if (dead > 0) process.exitCode = 2;
