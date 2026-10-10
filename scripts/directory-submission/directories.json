@@ -2,851 +2,112 @@
   "version": 2,
   "note": "DR figures are approximate (Ahrefs, mid-2026) and drift. Re-check before quoting. method: api | github-pr | github-issue | verify-deploy | form-anon | form-email | form-account | paid | pitch | crawl. New directories are added here first; pooriaarab/directory-template data/directories.json is a synced copy.",
   "web_tier1_launch": [
-    {
-      "name": "Product Hunt",
-      "url": "https://www.producthunt.com",
-      "submit": "https://www.producthunt.com/posts/new",
-      "dr": 91,
-      "link": "nofollow",
-      "cost": "free",
-      "method": "form-account",
-      "gate": "Full launch ops; see product-hunt-launch skill. ~6 months between launches per product."
-    },
-    {
-      "name": "BetaList",
-      "url": "https://betalist.com",
-      "submit": "https://betalist.com/submit",
-      "dr": 67,
-      "link": "dofollow",
-      "cost": "paid",
-      "method": "paid",
-      "gate": "No free lane since 2026 (~$39 entry). Pre-launch or recently launched only."
-    },
-    {
-      "name": "Peerlist Launchpad",
-      "url": "https://peerlist.io",
-      "submit": "https://peerlist.io",
-      "dr": 64,
-      "link": "nofollow",
-      "cost": "free",
-      "method": "form-account",
-      "gate": "Weekly launchpad Wed-Sun."
-    },
-    {
-      "name": "TinyLaunch",
-      "url": "https://www.tinylaunch.com",
-      "submit": "https://www.tinylaunch.com",
-      "dr": 55,
-      "link": "conditional-dofollow",
-      "cost": "free",
-      "method": "form-account",
-      "gate": "Low friction."
-    }
+    {"name": "Product Hunt", "url": "https://www.producthunt.com", "submit": "https://www.producthunt.com/posts/new", "dr": 91, "link": "nofollow", "cost": "free", "method": "form-account", "gate": "Full launch ops; see product-hunt-launch skill. ~6 months between launches per product."},
+    {"name": "BetaList", "url": "https://betalist.com", "submit": "https://betalist.com/submit", "dr": 67, "link": "dofollow", "cost": "paid", "method": "paid", "gate": "No free lane since 2026 (~$39 entry). Pre-launch or recently launched only."},
+    {"name": "Peerlist Launchpad", "url": "https://peerlist.io", "submit": "https://peerlist.io", "dr": 64, "link": "nofollow", "cost": "free", "method": "form-account", "gate": "Weekly launchpad Wed-Sun."},
+    {"name": "TinyLaunch", "url": "https://www.tinylaunch.com", "submit": "https://www.tinylaunch.com", "dr": 55, "link": "conditional-dofollow", "cost": "free", "method": "form-account", "gate": "Low friction."}
   ],
   "web_tier1_startup": [
-    {
-      "name": "Crunchbase",
-      "url": "https://www.crunchbase.com",
-      "submit": "https://www.crunchbase.com",
-      "dr": 93,
-      "link": "nofollow",
-      "cost": "free",
-      "method": "form-account",
-      "gate": "Social auth required."
-    },
-    {
-      "name": "F6S",
-      "url": "https://www.f6s.com",
-      "submit": "https://www.f6s.com",
-      "dr": 72,
-      "link": "dofollow",
-      "cost": "free",
-      "method": "form-account",
-      "gate": "None."
-    },
-    {
-      "name": "StartupRanking",
-      "url": "https://www.startupranking.com",
-      "submit": "https://www.startupranking.com",
-      "dr": 60,
-      "link": "conditional-dofollow",
-      "cost": "free",
-      "method": "form-account",
-      "gate": "Rank-based."
-    },
-    {
-      "name": "StartupBlink",
-      "url": "https://www.startupblink.com",
-      "submit": "https://www.startupblink.com",
-      "dr": 56,
-      "link": "dofollow",
-      "cost": "free",
-      "method": "form-account",
-      "gate": "None."
-    },
-    {
-      "name": "StartupStash",
-      "url": "https://startupstash.com",
-      "submit": "https://startupstash.com",
-      "dr": 55,
-      "link": "dofollow",
-      "cost": "free",
-      "method": "form-account",
-      "gate": "Curated; needs a real product page."
-    },
-    {
-      "name": "Wellfound",
-      "url": "https://wellfound.com",
-      "submit": "https://wellfound.com/recruit",
-      "dr": 80,
-      "link": "nofollow",
-      "cost": "free",
-      "method": "form-account",
-      "gate": "Company profile; AngelList successor."
-    }
+    {"name": "Crunchbase", "url": "https://www.crunchbase.com", "submit": "https://www.crunchbase.com", "dr": 93, "link": "nofollow", "cost": "free", "method": "form-account", "gate": "Social auth required."},
+    {"name": "F6S", "url": "https://www.f6s.com", "submit": "https://www.f6s.com", "dr": 72, "link": "dofollow", "cost": "free", "method": "form-account", "gate": "None."},
+    {"name": "StartupRanking", "url": "https://www.startupranking.com", "submit": "https://www.startupranking.com", "dr": 60, "link": "conditional-dofollow", "cost": "free", "method": "form-account", "gate": "Rank-based."},
+    {"name": "StartupBlink", "url": "https://www.startupblink.com", "submit": "https://www.startupblink.com", "dr": 56, "link": "dofollow", "cost": "free", "method": "form-account", "gate": "None."},
+    {"name": "StartupStash", "url": "https://startupstash.com", "submit": "https://startupstash.com", "dr": 55, "link": "dofollow", "cost": "free", "method": "form-account", "gate": "Curated; needs a real product page."},
+    {"name": "Wellfound", "url": "https://wellfound.com", "submit": "https://wellfound.com/recruit", "dr": 80, "link": "nofollow", "cost": "free", "method": "form-account", "gate": "Company profile; AngelList successor."}
   ],
   "web_tier1_saas": [
-    {
-      "name": "AlternativeTo",
-      "url": "https://alternativeto.net",
-      "submit": "https://alternativeto.net",
-      "dr": 76,
-      "link": "dofollow",
-      "cost": "free",
-      "method": "form-account",
-      "gate": "List as an alternative to named competitors. Queue is months long."
-    },
-    {
-      "name": "SaaSHub",
-      "url": "https://www.saashub.com",
-      "submit": "https://www.saashub.com",
-      "dr": 76,
-      "link": "dofollow",
-      "cost": "free",
-      "method": "form-account",
-      "gate": "Register, then submit. Free queue runs 1-2 months."
-    },
-    {
-      "name": "Slant",
-      "url": "https://slant.co",
-      "submit": "https://slant.co",
-      "dr": 58,
-      "link": "nofollow",
-      "cost": "free",
-      "method": "form-account",
-      "gate": "Community-curated comparisons."
-    },
-    {
-      "name": "Alternative.me",
-      "url": "https://alternative.me",
-      "submit": "https://alternative.me",
-      "dr": 55,
-      "link": "dofollow",
-      "cost": "free",
-      "method": "form-account",
-      "gate": "None."
-    },
-    {
-      "name": "SaaSWorthy",
-      "url": "https://www.saasworthy.com",
-      "submit": "https://www.saasworthy.com",
-      "dr": 52,
-      "link": "dofollow",
-      "cost": "free",
-      "method": "form-account",
-      "gate": "Vendor form."
-    },
-    {
-      "name": "SoftwareSuggest",
-      "url": "https://www.softwaresuggest.com",
-      "submit": "https://www.softwaresuggest.com",
-      "dr": 53,
-      "link": "dofollow",
-      "cost": "free",
-      "method": "form-account",
-      "gate": "Pick the closest software category."
-    },
-    {
-      "name": "Crozdesk",
-      "url": "https://crozdesk.com",
-      "submit": "https://crozdesk.com",
-      "dr": 51,
-      "link": "dofollow",
-      "cost": "free",
-      "method": "form-account",
-      "gate": "Ranking-based."
-    }
+    {"name": "AlternativeTo", "url": "https://alternativeto.net", "submit": "https://alternativeto.net", "dr": 76, "link": "dofollow", "cost": "free", "method": "form-account", "gate": "List as an alternative to named competitors. Queue is months long."},
+    {"name": "SaaSHub", "url": "https://www.saashub.com", "submit": "https://www.saashub.com", "dr": 76, "link": "dofollow", "cost": "free", "method": "form-account", "gate": "Register, then submit. Free queue runs 1-2 months."},
+    {"name": "Slant", "url": "https://slant.co", "submit": "https://slant.co", "dr": 58, "link": "nofollow", "cost": "free", "method": "form-account", "gate": "Community-curated comparisons."},
+    {"name": "Alternative.me", "url": "https://alternative.me", "submit": "https://alternative.me", "dr": 55, "link": "dofollow", "cost": "free", "method": "form-account", "gate": "None."},
+    {"name": "SaaSWorthy", "url": "https://www.saasworthy.com", "submit": "https://www.saasworthy.com", "dr": 52, "link": "dofollow", "cost": "free", "method": "form-account", "gate": "Vendor form."},
+    {"name": "SoftwareSuggest", "url": "https://www.softwaresuggest.com", "submit": "https://www.softwaresuggest.com", "dr": 53, "link": "dofollow", "cost": "free", "method": "form-account", "gate": "Pick the closest software category."},
+    {"name": "Crozdesk", "url": "https://crozdesk.com", "submit": "https://crozdesk.com", "dr": 51, "link": "dofollow", "cost": "free", "method": "form-account", "gate": "Ranking-based."}
   ],
   "web_tier1_review": [
-    {
-      "name": "Capterra",
-      "url": "https://www.capterra.com",
-      "submit": "https://www.capterra.com",
-      "dr": 93,
-      "link": "nofollow",
-      "cost": "free",
-      "method": "form-account",
-      "gate": "Gartner vendor onboarding (covers Capterra + GetApp + Software Advice). B2B software fit."
-    },
-    {
-      "name": "SourceForge",
-      "url": "https://sourceforge.net",
-      "submit": "https://sourceforge.net",
-      "dr": 93,
-      "link": "dofollow",
-      "cost": "free",
-      "method": "form-account",
-      "gate": "Claim + complete the profile. Software fit."
-    },
-    {
-      "name": "G2",
-      "url": "https://www.g2.com",
-      "submit": "https://www.g2.com",
-      "dr": 92,
-      "link": "nofollow",
-      "cost": "free",
-      "method": "form-account",
-      "gate": "Needs verified-user reviews for visibility. B2B software fit."
-    },
-    {
-      "name": "TrustRadius",
-      "url": "https://www.trustradius.com",
-      "submit": "https://www.trustradius.com",
-      "dr": 85,
-      "link": "nofollow",
-      "cost": "free",
-      "method": "form-account",
-      "gate": "Review-gated like G2."
-    },
-    {
-      "name": "Trustpilot",
-      "url": "https://www.trustpilot.com",
-      "submit": "https://www.trustpilot.com",
-      "dr": 92,
-      "link": "nofollow",
-      "cost": "free",
-      "method": "form-account",
-      "gate": "Real users only."
-    },
-    {
-      "name": "GetApp",
-      "url": "https://www.getapp.com",
-      "submit": "https://www.getapp.com",
-      "dr": 76,
-      "link": "nofollow",
-      "cost": "free",
-      "method": "form-account",
-      "gate": "Same Gartner vendor flow as Capterra."
-    },
-    {
-      "name": "Software Advice",
-      "url": "https://www.softwareadvice.com",
-      "submit": "https://www.softwareadvice.com",
-      "dr": 66,
-      "link": "nofollow",
-      "cost": "free",
-      "method": "form-account",
-      "gate": "Same Gartner vendor flow as Capterra."
-    }
+    {"name": "Capterra", "url": "https://www.capterra.com", "submit": "https://www.capterra.com", "dr": 93, "link": "nofollow", "cost": "free", "method": "form-account", "gate": "Gartner vendor onboarding (covers Capterra + GetApp + Software Advice). B2B software fit."},
+    {"name": "SourceForge", "url": "https://sourceforge.net", "submit": "https://sourceforge.net", "dr": 93, "link": "dofollow", "cost": "free", "method": "form-account", "gate": "Claim + complete the profile. Software fit."},
+    {"name": "G2", "url": "https://www.g2.com", "submit": "https://www.g2.com", "dr": 92, "link": "nofollow", "cost": "free", "method": "form-account", "gate": "Needs verified-user reviews for visibility. B2B software fit."},
+    {"name": "TrustRadius", "url": "https://www.trustradius.com", "submit": "https://www.trustradius.com", "dr": 85, "link": "nofollow", "cost": "free", "method": "form-account", "gate": "Review-gated like G2."},
+    {"name": "Trustpilot", "url": "https://www.trustpilot.com", "submit": "https://www.trustpilot.com", "dr": 92, "link": "nofollow", "cost": "free", "method": "form-account", "gate": "Real users only."},
+    {"name": "GetApp", "url": "https://www.getapp.com", "submit": "https://www.getapp.com", "dr": 76, "link": "nofollow", "cost": "free", "method": "form-account", "gate": "Same Gartner vendor flow as Capterra."},
+    {"name": "Software Advice", "url": "https://www.softwareadvice.com", "submit": "https://www.softwareadvice.com", "dr": 66, "link": "nofollow", "cost": "free", "method": "form-account", "gate": "Same Gartner vendor flow as Capterra."}
   ],
   "web_ai_geo": [
-    {
-      "name": "There's An AI For That",
-      "url": "https://theresanaiforthat.com",
-      "submit": "https://theresanaiforthat.com",
-      "dr": 62,
-      "link": "dofollow",
-      "cost": "free",
-      "method": "form-account",
-      "gate": "Real AI surface required. Free tier is slow."
-    },
-    {
-      "name": "FutureTools",
-      "url": "https://futuretools.io",
-      "submit": "https://futuretools.io",
-      "dr": 55,
-      "link": "dofollow",
-      "cost": "free",
-      "method": "form-account",
-      "gate": "Curated, AI-only."
-    },
-    {
-      "name": "PeerPush",
-      "url": "https://peerpush.net",
-      "submit": "https://peerpush.net",
-      "dr": 50,
-      "link": "dofollow",
-      "cost": "free",
-      "method": "form-account",
-      "gate": "None. GEO-friendly structured data."
-    },
-    {
-      "name": "Futurepedia",
-      "url": "https://www.futurepedia.io",
-      "submit": "https://www.futurepedia.io",
-      "dr": 42,
-      "link": "conditional-dofollow",
-      "cost": "free",
-      "method": "form-account",
-      "gate": "None."
-    },
-    {
-      "name": "AIToolkit",
-      "url": "https://aitoolkit.org",
-      "submit": "https://aitoolkit.org",
-      "dr": 35,
-      "link": "dofollow",
-      "cost": "free",
-      "method": "form-account",
-      "gate": "None."
-    },
-    {
-      "name": "Dang.ai",
-      "url": "https://dang.ai",
-      "submit": "https://dang.ai",
-      "dr": 35,
-      "link": "dofollow",
-      "cost": "free",
-      "method": "form-account",
-      "gate": "None."
-    },
-    {
-      "name": "TopApps.ai",
-      "url": "https://topapps.ai",
-      "submit": "https://topapps.ai",
-      "dr": 30,
-      "link": "dofollow",
-      "cost": "free",
-      "method": "form-account",
-      "gate": "None."
-    },
-    {
-      "name": "aitools.fyi",
-      "url": "https://aitools.fyi",
-      "submit": "https://aitools.fyi",
-      "dr": 27,
-      "link": "dofollow",
-      "cost": "free",
-      "method": "form-account",
-      "gate": "None."
-    },
-    {
-      "name": "Easy With AI",
-      "url": "https://easywithai.com",
-      "submit": "https://easywithai.com",
-      "dr": 27,
-      "link": "dofollow",
-      "cost": "free",
-      "method": "form-account",
-      "gate": "None."
-    }
+    {"name": "There's An AI For That", "url": "https://theresanaiforthat.com", "submit": "https://theresanaiforthat.com", "dr": 62, "link": "dofollow", "cost": "free", "method": "form-account", "gate": "Real AI surface required. Free tier is slow."},
+    {"name": "FutureTools", "url": "https://futuretools.io", "submit": "https://futuretools.io", "dr": 55, "link": "dofollow", "cost": "free", "method": "form-account", "gate": "Curated, AI-only."},
+    {"name": "PeerPush", "url": "https://peerpush.net", "submit": "https://peerpush.net", "dr": 50, "link": "dofollow", "cost": "free", "method": "form-account", "gate": "None. GEO-friendly structured data."},
+    {"name": "Futurepedia", "url": "https://www.futurepedia.io", "submit": "https://www.futurepedia.io", "dr": 42, "link": "conditional-dofollow", "cost": "free", "method": "form-account", "gate": "None."},
+    {"name": "AIToolkit", "url": "https://aitoolkit.org", "submit": "https://aitoolkit.org", "dr": 35, "link": "dofollow", "cost": "free", "method": "form-account", "gate": "None."},
+    {"name": "Dang.ai", "url": "https://dang.ai", "submit": "https://dang.ai", "dr": 35, "link": "dofollow", "cost": "free", "method": "form-account", "gate": "None."},
+    {"name": "TopApps.ai", "url": "https://topapps.ai", "submit": "https://topapps.ai", "dr": 30, "link": "dofollow", "cost": "free", "method": "form-account", "gate": "None."},
+    {"name": "aitools.fyi", "url": "https://aitools.fyi", "submit": "https://aitools.fyi", "dr": 27, "link": "dofollow", "cost": "free", "method": "form-account", "gate": "None."},
+    {"name": "Easy With AI", "url": "https://easywithai.com", "submit": "https://easywithai.com", "dr": 27, "link": "dofollow", "cost": "free", "method": "form-account", "gate": "None."}
   ],
   "web_longtail": [
-    {
-      "name": "Uneed",
-      "url": "https://www.uneed.best",
-      "submit": "https://www.uneed.best",
-      "dr": 32,
-      "link": "dofollow",
-      "cost": "free",
-      "method": "form-account",
-      "gate": "None."
-    },
-    {
-      "name": "Fazier",
-      "url": "https://fazier.com",
-      "submit": "https://fazier.com",
-      "dr": 45,
-      "link": "nofollow",
-      "cost": "free",
-      "method": "form-account",
-      "gate": "Free + paid lanes."
-    },
-    {
-      "name": "Launched.io",
-      "url": "https://launched.io",
-      "submit": "https://launched.io",
-      "dr": 35,
-      "link": "dofollow",
-      "cost": "free",
-      "method": "form-account",
-      "gate": "Fetch fails as of 2026-10; recheck before submitting.",
-      "automatable": "none"
-    },
-    {
-      "name": "MicroLaunch",
-      "url": "https://microlaunch.net",
-      "submit": "https://microlaunch.net",
-      "dr": 30,
-      "link": "dofollow",
-      "cost": "free",
-      "method": "form-account",
-      "gate": "None."
-    },
-    {
-      "name": "Open Launch",
-      "url": "https://openlaunch.ai",
-      "submit": "https://openlaunch.ai",
-      "dr": 30,
-      "link": "nofollow",
-      "cost": "free",
-      "method": "form-account",
-      "gate": "None."
-    },
-    {
-      "name": "Launch Vault",
-      "url": "https://www.launchvault.dev",
-      "submit": "https://www.launchvault.dev",
-      "dr": 30,
-      "link": "nofollow",
-      "cost": "free",
-      "method": "form-account",
-      "gate": "None."
-    },
-    {
-      "name": "NextGen Tools",
-      "url": "https://www.nxgntools.com",
-      "submit": "https://www.nxgntools.com",
-      "dr": 25,
-      "link": "conditional-dofollow",
-      "cost": "free",
-      "method": "form-account",
-      "gate": "None."
-    },
-    {
-      "name": "SideProjectors",
-      "url": "https://www.sideprojectors.com",
-      "submit": "https://www.sideprojectors.com",
-      "dr": 45,
-      "link": "dofollow",
-      "cost": "free",
-      "method": "form-account",
-      "gate": "None."
-    },
-    {
-      "name": "StartupBuffer",
-      "url": "https://startupbuffer.com",
-      "submit": "https://startupbuffer.com",
-      "dr": 44,
-      "link": "dofollow",
-      "cost": "free",
-      "method": "form-account",
-      "gate": "None."
-    },
-    {
-      "name": "Launching Next",
-      "url": "https://www.launchingnext.com",
-      "submit": "https://www.launchingnext.com",
-      "dr": 43,
-      "link": "dofollow",
-      "cost": "free",
-      "method": "form-account",
-      "gate": "Free queue or paid expedite."
-    },
-    {
-      "name": "PitchWall",
-      "url": "https://pitchwall.co",
-      "submit": "https://pitchwall.co",
-      "dr": 48,
-      "link": "dofollow",
-      "cost": "free",
-      "method": "form-account",
-      "gate": "None."
-    },
-    {
-      "name": "StartupBase",
-      "url": "https://startupbase.io",
-      "submit": "https://startupbase.io",
-      "dr": 35,
-      "link": "dofollow",
-      "cost": "free",
-      "method": "form-account",
-      "gate": "None."
-    },
-    {
-      "name": "10words",
-      "url": "https://10words.io",
-      "submit": "https://10words.io",
-      "dr": 20,
-      "link": "dofollow",
-      "cost": "free",
-      "method": "form-account",
-      "gate": "10-word pitch."
-    },
-    {
-      "name": "Startups FYI",
-      "url": "https://www.startups.fyi",
-      "submit": "https://www.startups.fyi",
-      "dr": 19,
-      "link": "dofollow",
-      "cost": "free",
-      "method": "form-account",
-      "gate": "None."
-    },
-    {
-      "name": "FeedMyStartup",
-      "url": "https://feedmystartup.com",
-      "submit": "https://feedmystartup.com",
-      "dr": 18,
-      "link": "dofollow",
-      "cost": "free",
-      "method": "form-account",
-      "gate": "None."
-    },
-    {
-      "name": "PromoteProject",
-      "url": "https://promoteproject.com",
-      "submit": "https://promoteproject.com",
-      "dr": 15,
-      "link": "dofollow",
-      "cost": "free",
-      "method": "form-account",
-      "gate": "None."
-    },
-    {
-      "name": "GoodFirms",
-      "url": "https://www.goodfirms.co",
-      "submit": "https://www.goodfirms.co",
-      "dr": 55,
-      "link": "dofollow",
-      "cost": "free",
-      "method": "form-account",
-      "gate": "None."
-    },
-    {
-      "name": "Serchen",
-      "url": "https://www.serchen.com",
-      "submit": "https://www.serchen.com",
-      "dr": 49,
-      "link": "dofollow",
-      "cost": "free",
-      "method": "form-account",
-      "gate": "None."
-    },
-    {
-      "name": "SoftwareWorld",
-      "url": "https://www.softwareworld.co",
-      "submit": "https://www.softwareworld.co",
-      "dr": 40,
-      "link": "dofollow",
-      "cost": "free",
-      "method": "form-account",
-      "gate": "None."
-    },
-    {
-      "name": "ToolSalad",
-      "url": "https://toolsalad.com",
-      "submit": "https://toolsalad.com",
-      "dr": 35,
-      "link": "dofollow",
-      "cost": "free",
-      "method": "form-account",
-      "gate": "Times out as of 2026-10; recheck before submitting.",
-      "automatable": "none"
-    },
-    {
-      "name": "Hive Index",
-      "url": "https://thehiveindex.com",
-      "submit": "https://thehiveindex.com",
-      "dr": 31,
-      "link": "dofollow",
-      "cost": "free",
-      "method": "form-account",
-      "gate": "None."
-    }
+    {"name": "Uneed", "url": "https://www.uneed.best", "submit": "https://www.uneed.best", "dr": 32, "link": "dofollow", "cost": "free", "method": "form-account", "gate": "None."},
+    {"name": "Fazier", "url": "https://fazier.com", "submit": "https://fazier.com", "dr": 45, "link": "nofollow", "cost": "free", "method": "form-account", "gate": "Free + paid lanes."},
+    {"name": "Launched.io", "url": "https://launched.io", "submit": "https://launched.io", "dr": 35, "link": "dofollow", "cost": "free", "method": "form-account", "gate": "Fetch fails as of 2026-10; recheck before submitting.", "automatable": "none"},
+    {"name": "MicroLaunch", "url": "https://microlaunch.net", "submit": "https://microlaunch.net", "dr": 30, "link": "dofollow", "cost": "free", "method": "form-account", "gate": "None."},
+    {"name": "Open Launch", "url": "https://openlaunch.ai", "submit": "https://openlaunch.ai", "dr": 30, "link": "nofollow", "cost": "free", "method": "form-account", "gate": "None."},
+    {"name": "Launch Vault", "url": "https://www.launchvault.dev", "submit": "https://www.launchvault.dev", "dr": 30, "link": "nofollow", "cost": "free", "method": "form-account", "gate": "None."},
+    {"name": "NextGen Tools", "url": "https://www.nxgntools.com", "submit": "https://www.nxgntools.com", "dr": 25, "link": "conditional-dofollow", "cost": "free", "method": "form-account", "gate": "None."},
+    {"name": "SideProjectors", "url": "https://www.sideprojectors.com", "submit": "https://www.sideprojectors.com", "dr": 45, "link": "dofollow", "cost": "free", "method": "form-account", "gate": "None."},
+    {"name": "StartupBuffer", "url": "https://startupbuffer.com", "submit": "https://startupbuffer.com", "dr": 44, "link": "dofollow", "cost": "free", "method": "form-account", "gate": "None."},
+    {"name": "Launching Next", "url": "https://www.launchingnext.com", "submit": "https://www.launchingnext.com", "dr": 43, "link": "dofollow", "cost": "free", "method": "form-account", "gate": "Free queue or paid expedite."},
+    {"name": "PitchWall", "url": "https://pitchwall.co", "submit": "https://pitchwall.co", "dr": 48, "link": "dofollow", "cost": "free", "method": "form-account", "gate": "None."},
+    {"name": "StartupBase", "url": "https://startupbase.io", "submit": "https://startupbase.io", "dr": 35, "link": "dofollow", "cost": "free", "method": "form-account", "gate": "None."},
+    {"name": "10words", "url": "https://10words.io", "submit": "https://10words.io", "dr": 20, "link": "dofollow", "cost": "free", "method": "form-account", "gate": "10-word pitch."},
+    {"name": "Startups FYI", "url": "https://www.startups.fyi", "submit": "https://www.startups.fyi", "dr": 19, "link": "dofollow", "cost": "free", "method": "form-account", "gate": "None."},
+    {"name": "FeedMyStartup", "url": "https://feedmystartup.com", "submit": "https://feedmystartup.com", "dr": 18, "link": "dofollow", "cost": "free", "method": "form-account", "gate": "None."},
+    {"name": "PromoteProject", "url": "https://promoteproject.com", "submit": "https://promoteproject.com", "dr": 15, "link": "dofollow", "cost": "free", "method": "form-account", "gate": "None."},
+    {"name": "GoodFirms", "url": "https://www.goodfirms.co", "submit": "https://www.goodfirms.co", "dr": 55, "link": "dofollow", "cost": "free", "method": "form-account", "gate": "None."},
+    {"name": "Serchen", "url": "https://www.serchen.com", "submit": "https://www.serchen.com", "dr": 49, "link": "dofollow", "cost": "free", "method": "form-account", "gate": "None."},
+    {"name": "SoftwareWorld", "url": "https://www.softwareworld.co", "submit": "https://www.softwareworld.co", "dr": 40, "link": "dofollow", "cost": "free", "method": "form-account", "gate": "None."},
+    {"name": "ToolSalad", "url": "https://toolsalad.com", "submit": "https://toolsalad.com", "dr": 35, "link": "dofollow", "cost": "free", "method": "form-account", "gate": "Times out as of 2026-10; recheck before submitting.", "automatable": "none"},
+    {"name": "Hive Index", "url": "https://thehiveindex.com", "submit": "https://thehiveindex.com", "dr": 31, "link": "dofollow", "cost": "free", "method": "form-account", "gate": "None."}
   ],
   "web_curated": [
-    {
-      "name": "Curlie",
-      "url": "https://curlie.org",
-      "submit": "https://curlie.org/public/applypublic",
-      "dr": 82,
-      "link": "dofollow",
-      "cost": "free",
-      "method": "form-account",
-      "gate": "Account + email verify confirmed working. Directory listing still needs a human volunteer-editor application — stop at the account."
-    },
-    {
-      "name": "Jasmine Directory",
-      "url": "https://www.jasminedirectory.com",
-      "submit": "https://www.jasminedirectory.com/submit-a-website",
-      "dr": 62,
-      "link": "dofollow",
-      "cost": "paid",
-      "method": "form-account",
-      "gate": "Paid-only submission now; skip."
-    }
+    {"name": "Curlie", "url": "https://curlie.org", "submit": "https://curlie.org/public/applypublic", "dr": 82, "link": "dofollow", "cost": "free", "method": "form-account", "gate": "Account + email verify confirmed working. Directory listing still needs a human volunteer-editor application — stop at the account."},
+    {"name": "Jasmine Directory", "url": "https://www.jasminedirectory.com", "submit": "https://www.jasminedirectory.com/submit-a-website", "dr": 62, "link": "dofollow", "cost": "paid", "method": "form-account", "gate": "Paid-only submission now; skip."}
   ],
   "web_llms_txt": [
-    {
-      "name": "llmstxt.site",
-      "url": "https://llmstxt.site",
-      "submit": "https://llmstxt.site/submit",
-      "link": "dofollow",
-      "cost": "free",
-      "method": "form-email",
-      "gate": "Site must serve /llms.txt; form asks a contact email."
-    },
-    {
-      "name": "llms-txt-hub",
-      "url": "https://llmstxthub.com",
-      "submit": "https://github.com/thedaviddias/llms-txt-hub",
-      "dr": 60,
-      "link": "dofollow",
-      "cost": "free",
-      "method": "github-pr",
-      "gate": "PR adds one MDX under packages/content/data/websites/. Largest llms.txt registry."
-    },
-    {
-      "name": "llms.txt Directory (cloud)",
-      "url": "https://directory.llmstxt.cloud",
-      "submit": "https://directory.llmstxt.cloud/submit",
-      "link": "dofollow",
-      "cost": "free",
-      "method": "form-turnstile",
-      "gate": "Confirmed: Turnstile passes unattended in a real browser profile (browser-personal). Fill URL+name+desc, wait for Success!, submit -> 'You're on the waitlist!'",
-      "automatable": "browser"
-    }
+    {"name": "llmstxt.site", "url": "https://llmstxt.site", "submit": "https://llmstxt.site/submit", "link": "dofollow", "cost": "free", "method": "form-email", "gate": "Site must serve /llms.txt; form asks a contact email."},
+    {"name": "llms-txt-hub", "url": "https://llmstxthub.com", "submit": "https://github.com/thedaviddias/llms-txt-hub", "dr": 60, "link": "dofollow", "cost": "free", "method": "github-pr", "gate": "PR adds one MDX under packages/content/data/websites/. Largest llms.txt registry."},
+    {"name": "llms.txt Directory (cloud)", "url": "https://directory.llmstxt.cloud", "submit": "https://directory.llmstxt.cloud/submit", "link": "dofollow", "cost": "free", "method": "form-turnstile", "gate": "Confirmed: Turnstile passes unattended in a real browser profile (browser-personal). Fill URL+name+desc, wait for Success!, submit -> 'You're on the waitlist!'", "automatable": "browser"}
   ],
   "web_engines": [
-    {
-      "name": "Internet Archive",
-      "url": "https://web.archive.org",
-      "submit": "https://web.archive.org/save/",
-      "link": "nofollow",
-      "cost": "free",
-      "method": "api",
-      "gate": "GET /save/<url> anonymous; instant snapshot feeds the largest public crawl archive."
-    },
-    {
-      "name": "Mojeek",
-      "url": "https://www.mojeek.com",
-      "submit": "https://www.mojeek.com",
-      "link": "crawl",
-      "cost": "free",
-      "method": "crawl",
-      "gate": "Independent index; suggest a URL via their site contact; no public submit API."
-    },
-    {
-      "name": "Wiby",
-      "url": "https://wiby.me",
-      "submit": "https://wiby.me/submit/",
-      "link": "crawl",
-      "cost": "free",
-      "method": "form-captcha",
-      "gate": "Confirmed: image captcha read from browser screenshot; ~1-3 tries per site. Keep worksafe checked.",
-      "automatable": "browser"
-    },
-    {
-      "name": "Marginalia",
-      "url": "https://marginalia-search.com",
-      "submit": "https://marginalia-search.com",
-      "link": "crawl",
-      "cost": "free",
-      "method": "pitch",
-      "gate": "Indie-web index; suggest through the site explorer."
-    },
-    {
-      "name": "Entireweb",
-      "url": "https://www.entireweb.com",
-      "submit": "https://www.entireweb.com/free_submission/",
-      "link": "crawl",
-      "cost": "free",
-      "method": "form-anon",
-      "gate": "Free submission form; the site bot-blocks scripts, expect to do it by hand."
-    }
+    {"name": "Internet Archive", "url": "https://web.archive.org", "submit": "https://web.archive.org/save/", "link": "nofollow", "cost": "free", "method": "api", "gate": "GET /save/<url> anonymous; instant snapshot feeds the largest public crawl archive."},
+    {"name": "Mojeek", "url": "https://www.mojeek.com", "submit": "https://www.mojeek.com", "link": "crawl", "cost": "free", "method": "crawl", "gate": "Independent index; suggest a URL via their site contact; no public submit API."},
+    {"name": "Wiby", "url": "https://wiby.me", "submit": "https://wiby.me/submit/", "link": "crawl", "cost": "free", "method": "form-captcha", "gate": "Confirmed: image captcha read from browser screenshot; ~1-3 tries per site. Keep worksafe checked.", "automatable": "browser"},
+    {"name": "Marginalia", "url": "https://marginalia-search.com", "submit": "https://marginalia-search.com", "link": "crawl", "cost": "free", "method": "pitch", "gate": "Indie-web index; suggest through the site explorer."},
+    {"name": "Entireweb", "url": "https://www.entireweb.com", "submit": "https://www.entireweb.com/free_submission/", "link": "crawl", "cost": "free", "method": "form-anon", "gate": "Free submission form; the site bot-blocks scripts, expect to do it by hand."}
   ],
   "agent_submittable": [
-    {
-      "name": "submitby.ai",
-      "url": "https://submitby.ai",
-      "submit": "https://submitby.ai/mcp",
-      "link": "dofollow",
-      "cost": "freemium",
-      "method": "verify-deploy",
-      "gate": "Confirmed end-to-end. POST /api/v1/submissions with Idempotency-Key header (platform value is 'web'). Save control_token. Deploy badge into server-rendered HTML, then POST /api/v1/submissions/:id/verify with Bearer token -> published in minutes."
-    },
-    {
-      "name": "directree",
-      "url": "https://www.directree.io",
-      "submit": "https://www.directree.io",
-      "link": "dofollow",
-      "cost": "free",
-      "method": "api",
-      "gate": "Not a first-time submission path: agent API only updates already-claimed listings."
-    },
-    {
-      "name": "justlaunch",
-      "url": "https://justlaunch.org",
-      "submit": "https://justlaunch.org",
-      "link": "dofollow",
-      "cost": "paid",
-      "method": "paid",
-      "gate": "REST API launch across ~35 platforms; per-launch pricing."
-    },
-    {
-      "name": "Launch Llama",
-      "url": "https://tools.launchllama.co",
-      "submit": "https://tools.launchllama.co/developers/mcp.md",
-      "link": "dofollow",
-      "cost": "free",
-      "method": "api",
-      "gate": "MCP tools open drafts + plan; the founder finishes on /submit."
-    },
-    {
-      "name": "AI Directories",
-      "url": "https://www.aidirectori.es",
-      "submit": "https://www.aidirectori.es/developers/docs/mcp-tools",
-      "link": "dofollow",
-      "cost": "paid",
-      "method": "paid",
-      "gate": "Partner API submits an AI tool to 30-100+ directories; issued key + fee. AI tools only."
-    }
+    {"name": "submitby.ai", "url": "https://submitby.ai", "submit": "https://submitby.ai/mcp", "link": "dofollow", "cost": "freemium", "method": "verify-deploy", "gate": "Confirmed end-to-end. POST /api/v1/submissions with Idempotency-Key header (platform value is 'web'). Save control_token. Deploy badge into server-rendered HTML, then POST /api/v1/submissions/:id/verify with Bearer token -> published in minutes."},
+    {"name": "directree", "url": "https://www.directree.io", "submit": "https://www.directree.io", "link": "dofollow", "cost": "free", "method": "api", "gate": "Not a first-time submission path: agent API only updates already-claimed listings."},
+    {"name": "justlaunch", "url": "https://justlaunch.org", "submit": "https://justlaunch.org", "link": "dofollow", "cost": "paid", "method": "paid", "gate": "REST API launch across ~35 platforms; per-launch pricing."},
+    {"name": "Launch Llama", "url": "https://tools.launchllama.co", "submit": "https://tools.launchllama.co/developers/mcp.md", "link": "dofollow", "cost": "free", "method": "api", "gate": "MCP tools open drafts + plan; the founder finishes on /submit."},
+    {"name": "AI Directories", "url": "https://www.aidirectori.es", "submit": "https://www.aidirectori.es/developers/docs/mcp-tools", "link": "dofollow", "cost": "paid", "method": "paid", "gate": "Partner API submits an AI tool to 30-100+ directories; issued key + fee. AI tools only."}
   ],
   "mcp": [
-    {
-      "name": "Official MCP registry",
-      "url": "https://registry.modelcontextprotocol.io",
-      "submit": "mcp-publisher publish (server.json)",
-      "automatable": "agent",
-      "method": "api",
-      "gate": "mcp-publisher + DNS TXT at the APEX (not _mcp): 'v=MCPv1; k=ed25519; p=<base64 pubkey>'. server.json description <=100 chars. Registry JWT expires fast; login then publish immediately."
-    },
-    {
-      "name": "mcp.tc",
-      "url": "https://mcp.tc",
-      "submit": "POST https://mcp.tc/submit",
-      "automatable": "agent",
-      "method": "api",
-      "gate": "Confirmed: POST {url,note} -> queued for review; slug reserved at /i/<slug>. marriagelicense.fyi listed live."
-    },
-    {
-      "name": "AllMCPs",
-      "url": "https://allmcps.com",
-      "submit": "https://allmcps.com/submit",
-      "automatable": "browser",
-      "method": "form-turnstile",
-      "gate": "Confirmed: 3-step wizard (URL -> details -> Cloudflare Turnstile waits for Success! -> Submit to AllMCPs). Email confirmation per submission. Has a hosted-endpoint field; an 'agent prompt' on the page describes their MCP submission."
-    },
-    {
-      "name": "402.ad",
-      "url": "https://402.ad",
-      "submit": "POST https://402.ad/v1/submit",
-      "automatable": "agent",
-      "method": "api",
-      "gate": "$0.10 USDC via x402 for programmatic submit, or free form with questions."
-    },
-    {
-      "name": "MCPCentral",
-      "url": "https://mcpcentral.io",
-      "submit": "API via npx mcp-submit",
-      "automatable": "agent",
-      "method": "api",
-      "gate": "None."
-    },
-    {
-      "name": "mcp.so",
-      "url": "https://mcp.so",
-      "submit": "GitHub issue on chatmcp/mcpso",
-      "automatable": "agent",
-      "method": "github-issue",
-      "gate": "Confirmed: file one GitHub issue per server on chatmcp/mcpso. Open issues stay queued for human review."
-    },
-    {
-      "name": "Docker MCP Registry",
-      "url": "https://github.com/docker/mcp-registry",
-      "submit": "GitHub PR",
-      "automatable": "agent",
-      "method": "github-pr",
-      "gate": "Needs a Dockerfile."
-    },
-    {
-      "name": "awesome-remote-mcp-servers",
-      "url": "https://github.com/punkpeye/awesome-remote-mcp-servers",
-      "submit": "GitHub PR (add entry alphabetically in the right section)",
-      "automatable": "agent",
-      "method": "github-pr",
-      "gate": "Confirmed PR path. Remote-only endpoints go to punkpeye's repo, not the installable-servers list."
-    },
-    {
-      "name": "awesome-mcp-servers (punkpeye)",
-      "url": "https://github.com/punkpeye/awesome-mcp-servers",
-      "submit": "GitHub PR (cloud-hosted marker)",
-      "automatable": "agent",
-      "method": "github-pr",
-      "gate": "None."
-    },
-    {
-      "name": "awesome-mcp-servers (appcypher)",
-      "url": "https://github.com/appcypher/awesome-mcp-servers",
-      "submit": "GitHub PR",
-      "automatable": "agent",
-      "method": "github-pr",
-      "gate": "None."
-    },
-    {
-      "name": "Cline MCP Marketplace",
-      "url": "https://github.com/cline/mcp-marketplace",
-      "submit": "GitHub issue",
-      "automatable": "agent",
-      "method": "github-issue",
-      "gate": "400x400 PNG logo; quality-gated. Defer for new servers."
-    },
-    {
-      "name": "Glama",
-      "url": "https://glama.ai/mcp/servers",
-      "submit": "Web form (Add server)",
-      "automatable": "browser",
-      "method": "form-oauth",
-      "gate": "Confirmed: GitHub OAuth in personal browser -> /mcp/servers -> Add Server -> 'Hosted endpoint' tab (NOT 'Runs from source'). 'Pending review' email per server = authoritative."
-    },
-    {
-      "name": "Smithery",
-      "url": "https://smithery.ai/new",
-      "submit": "Web flow, URL method",
-      "automatable": "browser",
-      "method": "form-oauth",
-      "gate": "Confirmed: GitHub OAuth at smithery.ai/new -> slug + upstream URL -> step 2 click Skip with real mouse events (plain .click() does not register) -> lands on /servers/<ns>/<slug>/releases with SUCCESS."
-    },
-    {
-      "name": "mcpservers.org",
-      "url": "https://mcpservers.org",
-      "submit": "Site submit flow",
-      "automatable": "human",
-      "method": "form-account",
-      "gate": "Check current submit path first."
-    },
-    {
-      "name": "FindMCP",
-      "url": "https://findmcp.dev/submit",
-      "submit": "Public form",
-      "automatable": "human",
-      "method": "crawl",
-      "gate": "No public submit form found (Oct 2026); ingests the official registry — registry publish covers it."
-    },
-    {
-      "name": "MCP Hunt",
-      "url": "https://mcp-hunt.com",
-      "submit": "Site submit flow",
-      "automatable": "human",
-      "method": "crawl",
-      "gate": "No public submit form found on the site; check for an auto-listing after registry publish."
-    },
-    {
-      "name": "mcp.directory",
-      "url": "https://mcp.directory",
-      "submit": "Claim auto-listing",
-      "automatable": "human",
-      "method": "form-account",
-      "gate": "Check for existing auto entry first."
-    },
-    {
-      "name": "PulseMCP",
-      "url": "https://www.pulsemcp.com",
-      "submit": "none (ingests registry)",
-      "automatable": "none",
-      "method": "crawl",
-      "gate": "Submissions paused; registry publish covers it."
-    }
+    {"name": "Official MCP registry", "url": "https://registry.modelcontextprotocol.io", "submit": "mcp-publisher publish (server.json)", "automatable": "agent", "method": "api", "gate": "mcp-publisher + DNS TXT at the APEX (not _mcp): 'v=MCPv1; k=ed25519; p=<base64 pubkey>'. server.json description <=100 chars. Registry JWT expires fast; login then publish immediately."},
+    {"name": "mcp.tc", "url": "https://mcp.tc", "submit": "POST https://mcp.tc/submit", "automatable": "agent", "method": "api", "gate": "Confirmed: POST {url,note} -> queued for review; slug reserved at /i/<slug>. marriagelicense.fyi listed live."},
+    {"name": "AllMCPs", "url": "https://allmcps.com", "submit": "https://allmcps.com/submit", "automatable": "browser", "method": "form-turnstile", "gate": "Confirmed: 3-step wizard (URL -> details -> Cloudflare Turnstile waits for Success! -> Submit to AllMCPs). Email confirmation per submission. Has a hosted-endpoint field; an 'agent prompt' on the page describes their MCP submission."},
+    {"name": "402.ad", "url": "https://402.ad", "submit": "POST https://402.ad/v1/submit", "automatable": "agent", "method": "api", "gate": "$0.10 USDC via x402 for programmatic submit, or free form with questions."},
+    {"name": "MCPCentral", "url": "https://mcpcentral.io", "submit": "API via npx mcp-submit", "automatable": "agent", "method": "api", "gate": "None."},
+    {"name": "mcp.so", "url": "https://mcp.so", "submit": "GitHub issue on chatmcp/mcpso", "automatable": "agent", "method": "github-issue", "gate": "Confirmed: file one GitHub issue per server on chatmcp/mcpso. Open issues stay queued for human review."},
+    {"name": "Docker MCP Registry", "url": "https://github.com/docker/mcp-registry", "submit": "GitHub PR", "automatable": "agent", "method": "github-pr", "gate": "Needs a Dockerfile."},
+    {"name": "awesome-remote-mcp-servers", "url": "https://github.com/punkpeye/awesome-remote-mcp-servers", "submit": "GitHub PR (add entry alphabetically in the right section)", "automatable": "agent", "method": "github-pr", "gate": "Confirmed PR path. Remote-only endpoints go to punkpeye's repo, not the installable-servers list."},
+    {"name": "awesome-mcp-servers (punkpeye)", "url": "https://github.com/punkpeye/awesome-mcp-servers", "submit": "GitHub PR (cloud-hosted marker)", "automatable": "agent", "method": "github-pr", "gate": "None."},
+    {"name": "awesome-mcp-servers (appcypher)", "url": "https://github.com/appcypher/awesome-mcp-servers", "submit": "GitHub PR", "automatable": "agent", "method": "github-pr", "gate": "None."},
+    {"name": "Cline MCP Marketplace", "url": "https://github.com/cline/mcp-marketplace", "submit": "GitHub issue", "automatable": "agent", "method": "github-issue", "gate": "400x400 PNG logo; quality-gated. Defer for new servers."},
+    {"name": "Glama", "url": "https://glama.ai/mcp/servers", "submit": "Web form (Add server)", "automatable": "browser", "method": "form-oauth", "gate": "Confirmed: GitHub OAuth in personal browser -> /mcp/servers -> Add Server -> 'Hosted endpoint' tab (NOT 'Runs from source'). 'Pending review' email per server = authoritative."},
+    {"name": "Smithery", "url": "https://smithery.ai/new", "submit": "Web flow, URL method", "automatable": "browser", "method": "form-oauth", "gate": "Confirmed: GitHub OAuth at smithery.ai/new -> slug + upstream URL -> step 2 click Skip with real mouse events (plain .click() does not register) -> lands on /servers/<ns>/<slug>/releases with SUCCESS."},
+    {"name": "mcpservers.org", "url": "https://mcpservers.org", "submit": "Site submit flow", "automatable": "human", "method": "form-account", "gate": "Check current submit path first."},
+    {"name": "FindMCP", "url": "https://findmcp.dev/submit", "submit": "Public form", "automatable": "human", "method": "crawl", "gate": "No public submit form found (Oct 2026); ingests the official registry — registry publish covers it."},
+    {"name": "MCP Hunt", "url": "https://mcp-hunt.com", "submit": "Site submit flow", "automatable": "human", "method": "crawl", "gate": "No public submit form found on the site; check for an auto-listing after registry publish."},
+    {"name": "mcp.directory", "url": "https://mcp.directory", "submit": "Claim auto-listing", "automatable": "human", "method": "form-account", "gate": "Check for existing auto entry first."},
+    {"name": "PulseMCP", "url": "https://www.pulsemcp.com", "submit": "none (ingests registry)", "automatable": "none", "method": "crawl", "gate": "Submissions paused; registry publish covers it."}
   ]
 }
