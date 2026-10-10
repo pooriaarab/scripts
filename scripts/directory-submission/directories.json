@@ -1,0 +1,83 @@
+{
+  "version": 1,
+  "note": "DR figures are approximate (Ahrefs, mid-2026) and drift. Re-check before quoting.",
+  "web_tier1_launch": [
+    {"name": "Product Hunt", "url": "https://www.producthunt.com", "submit": "https://www.producthunt.com/posts/new", "dr": 91, "link": "nofollow", "cost": "free", "gate": "Full launch ops; see product-hunt-launch skill. ~6 months between launches per product."},
+    {"name": "BetaList", "url": "https://betalist.com", "submit": "https://betalist.com/submit", "dr": 67, "link": "dofollow", "cost": "free", "gate": "Pre-launch or recently launched only."},
+    {"name": "Peerlist Launchpad", "url": "https://peerlist.io", "submit": "https://peerlist.io", "dr": 64, "link": "nofollow", "cost": "free", "gate": "Weekly launchpad Wed-Sun."},
+    {"name": "TinyLaunch", "url": "https://www.tinylaunch.com", "submit": "https://www.tinylaunch.com", "dr": 55, "link": "conditional-dofollow", "cost": "free", "gate": "Low friction."}
+  ],
+  "web_tier1_startup": [
+    {"name": "Crunchbase", "url": "https://www.crunchbase.com", "submit": "https://www.crunchbase.com", "dr": 93, "link": "nofollow", "cost": "free", "gate": "Social auth required."},
+    {"name": "F6S", "url": "https://www.f6s.com", "submit": "https://www.f6s.com", "dr": 72, "link": "dofollow", "cost": "free", "gate": "None."},
+    {"name": "StartupRanking", "url": "https://www.startupranking.com", "submit": "https://www.startupranking.com", "dr": 60, "link": "conditional-dofollow", "cost": "free", "gate": "Rank-based."},
+    {"name": "StartupBlink", "url": "https://www.startupblink.com", "submit": "https://www.startupblink.com", "dr": 56, "link": "dofollow", "cost": "free", "gate": "None."},
+    {"name": "StartupStash", "url": "https://startupstash.com", "submit": "https://startupstash.com", "dr": 55, "link": "dofollow", "cost": "free", "gate": "Curated; needs a real product page."}
+  ],
+  "web_tier1_saas": [
+    {"name": "AlternativeTo", "url": "https://alternativeto.net", "submit": "https://alternativeto.net", "dr": 76, "link": "dofollow", "cost": "free", "gate": "List as an alternative to named competitors."},
+    {"name": "SaaSHub", "url": "https://www.saashub.com", "submit": "https://www.saashub.com", "dr": 76, "link": "dofollow", "cost": "free", "gate": "Register, then submit."},
+    {"name": "Slant", "url": "https://slant.co", "submit": "https://slant.co", "dr": 58, "link": "nofollow", "cost": "free", "gate": "Community-curated comparisons."},
+    {"name": "Alternative.me", "url": "https://alternative.me", "submit": "https://alternative.me", "dr": 55, "link": "dofollow", "cost": "free", "gate": "None."},
+    {"name": "SaaSWorthy", "url": "https://www.saasworthy.com", "submit": "https://www.saasworthy.com", "dr": 52, "link": "dofollow", "cost": "free", "gate": "Vendor form."},
+    {"name": "SoftwareSuggest", "url": "https://www.softwaresuggest.com", "submit": "https://www.softwaresuggest.com", "dr": 53, "link": "dofollow", "cost": "free", "gate": "Pick the closest software category."},
+    {"name": "Crozdesk", "url": "https://crozdesk.com", "submit": "https://crozdesk.com", "dr": 51, "link": "dofollow", "cost": "free", "gate": "Ranking-based."}
+  ],
+  "web_tier1_review": [
+    {"name": "Capterra", "url": "https://www.capterra.com", "submit": "https://www.capterra.com", "dr": 93, "link": "nofollow", "cost": "free", "gate": "Gartner vendor onboarding (covers Capterra + GetApp + Software Advice)."},
+    {"name": "SourceForge", "url": "https://sourceforge.net", "submit": "https://sourceforge.net", "dr": 93, "link": "dofollow", "cost": "free", "gate": "Claim + complete the profile."},
+    {"name": "G2", "url": "https://www.g2.com", "submit": "https://www.g2.com", "dr": 92, "link": "nofollow", "cost": "free", "gate": "Needs verified-user reviews for visibility."},
+    {"name": "TrustRadius", "url": "https://www.trustradius.com", "submit": "https://www.trustradius.com", "dr": 85, "link": "nofollow", "cost": "free", "gate": "Review-gated like G2."},
+    {"name": "Trustpilot", "url": "https://www.trustpilot.com", "submit": "https://www.trustpilot.com", "dr": 92, "link": "nofollow", "cost": "free", "gate": "Real users only."},
+    {"name": "GetApp", "url": "https://www.getapp.com", "submit": "https://www.getapp.com", "dr": 76, "link": "nofollow", "cost": "free", "gate": "Same Gartner vendor flow as Capterra."},
+    {"name": "Software Advice", "url": "https://www.softwareadvice.com", "submit": "https://www.softwareadvice.com", "dr": 66, "link": "nofollow", "cost": "free", "gate": "Same Gartner vendor flow as Capterra."}
+  ],
+  "web_ai_geo": [
+    {"name": "There's An AI For That", "url": "https://theresanaiforthat.com", "submit": "https://theresanaiforthat.com", "dr": 62, "link": "dofollow", "cost": "free", "gate": "Real AI surface required. Free tier is slow."},
+    {"name": "FutureTools", "url": "https://futuretools.io", "submit": "https://futuretools.io", "dr": 55, "link": "dofollow", "cost": "free", "gate": "Curated, AI-only."},
+    {"name": "PeerPush", "url": "https://peerpush.net", "submit": "https://peerpush.net", "dr": 50, "link": "dofollow", "cost": "free", "gate": "None. GEO-friendly structured data."},
+    {"name": "Futurepedia", "url": "https://www.futurepedia.io", "submit": "https://www.futurepedia.io", "dr": 42, "link": "conditional-dofollow", "cost": "free", "gate": "None."},
+    {"name": "AIToolkit", "url": "https://aitoolkit.org", "submit": "https://aitoolkit.org", "dr": 35, "link": "dofollow", "cost": "free", "gate": "None."},
+    {"name": "Dang.ai", "url": "https://dang.ai", "submit": "https://dang.ai", "dr": 35, "link": "dofollow", "cost": "free", "gate": "None."},
+    {"name": "TopApps.ai", "url": "https://topapps.ai", "submit": "https://topapps.ai", "dr": 30, "link": "dofollow", "cost": "free", "gate": "None."},
+    {"name": "aitools.fyi", "url": "https://aitools.fyi", "submit": "https://aitools.fyi", "dr": 27, "link": "dofollow", "cost": "free", "gate": "None."},
+    {"name": "Easy With AI", "url": "https://easywithai.com", "submit": "https://easywithai.com", "dr": 27, "link": "dofollow", "cost": "free", "gate": "None."}
+  ],
+  "web_longtail": [
+    {"name": "Uneed", "url": "https://www.uneed.best", "submit": "https://www.uneed.best", "dr": 32, "link": "dofollow", "cost": "free", "gate": "None."},
+    {"name": "Fazier", "url": "https://fazier.com", "submit": "https://fazier.com", "dr": 45, "link": "nofollow", "cost": "free", "gate": "None."},
+    {"name": "Launched.io", "url": "https://launched.io", "submit": "https://launched.io", "dr": 35, "link": "dofollow", "cost": "free", "gate": "None."},
+    {"name": "MicroLaunch", "url": "https://microlaunch.net", "submit": "https://microlaunch.net", "dr": 30, "link": "dofollow", "cost": "free", "gate": "None."},
+    {"name": "Open Launch", "url": "https://openlaunch.ai", "submit": "https://openlaunch.ai", "dr": 30, "link": "nofollow", "cost": "free", "gate": "None."},
+    {"name": "Launch Vault", "url": "https://www.launchvault.dev", "submit": "https://www.launchvault.dev", "dr": 30, "link": "nofollow", "cost": "free", "gate": "None."},
+    {"name": "NextGen Tools", "url": "https://www.nxgntools.com", "submit": "https://www.nxgntools.com", "dr": 25, "link": "conditional-dofollow", "cost": "free", "gate": "None."},
+    {"name": "SideProjectors", "url": "https://www.sideprojectors.com", "submit": "https://www.sideprojectors.com", "dr": 45, "link": "dofollow", "cost": "free", "gate": "None."},
+    {"name": "StartupBuffer", "url": "https://startupbuffer.com", "submit": "https://startupbuffer.com", "dr": 44, "link": "dofollow", "cost": "free", "gate": "None."},
+    {"name": "Launching Next", "url": "https://www.launchingnext.com", "submit": "https://www.launchingnext.com", "dr": 43, "link": "dofollow", "cost": "free", "gate": "None."},
+    {"name": "PitchWall", "url": "https://pitchwall.co", "submit": "https://pitchwall.co", "dr": 48, "link": "dofollow", "cost": "free", "gate": "None."},
+    {"name": "StartupBase", "url": "https://startupbase.io", "submit": "https://startupbase.io", "dr": 35, "link": "dofollow", "cost": "free", "gate": "None."},
+    {"name": "10words", "url": "https://10words.io", "submit": "https://10words.io", "dr": 20, "link": "dofollow", "cost": "free", "gate": "10-word pitch."},
+    {"name": "Startups FYI", "url": "https://www.startups.fyi", "submit": "https://www.startups.fyi", "dr": 19, "link": "dofollow", "cost": "free", "gate": "None."},
+    {"name": "FeedMyStartup", "url": "https://feedmystartup.com", "submit": "https://feedmystartup.com", "dr": 18, "link": "dofollow", "cost": "free", "gate": "None."},
+    {"name": "PromoteProject", "url": "https://promoteproject.com", "submit": "https://promoteproject.com", "dr": 15, "link": "dofollow", "cost": "free", "gate": "None."},
+    {"name": "GoodFirms", "url": "https://www.goodfirms.co", "submit": "https://www.goodfirms.co", "dr": 55, "link": "dofollow", "cost": "free", "gate": "None."},
+    {"name": "Serchen", "url": "https://www.serchen.com", "submit": "https://www.serchen.com", "dr": 49, "link": "dofollow", "cost": "free", "gate": "None."},
+    {"name": "SoftwareWorld", "url": "https://www.softwareworld.co", "submit": "https://www.softwareworld.co", "dr": 40, "link": "dofollow", "cost": "free", "gate": "None."},
+    {"name": "ToolSalad", "url": "https://toolsalad.com", "submit": "https://toolsalad.com", "dr": 35, "link": "dofollow", "cost": "free", "gate": "None."},
+    {"name": "Hive Index", "url": "https://thehiveindex.com", "submit": "https://thehiveindex.com", "dr": 31, "link": "dofollow", "cost": "free", "gate": "None."}
+  ],
+  "mcp": [
+    {"name": "Official MCP registry", "url": "https://registry.modelcontextprotocol.io", "submit": "mcp-publisher publish (server.json)", "automatable": "agent", "gate": "GitHub login for io.github.* namespace."},
+    {"name": "awesome-remote-mcp-servers", "url": "https://github.com/sylviangth/awesome-remote-mcp-servers", "submit": "GitHub PR", "automatable": "agent", "gate": "None."},
+    {"name": "mcp.so", "url": "https://mcp.so", "submit": "GitHub issue on chatmcp/mcp-directory", "automatable": "agent", "gate": "None."},
+    {"name": "Glama", "url": "https://glama.ai/mcp/servers", "submit": "Web form (Add server)", "automatable": "human", "gate": "Login required."},
+    {"name": "Smithery", "url": "https://smithery.ai/new", "submit": "Web flow, URL method", "automatable": "human", "gate": "Login required."},
+    {"name": "mcpservers.org", "url": "https://mcpservers.org", "submit": "Site submit flow", "automatable": "human", "gate": "Check current submit path first."},
+    {"name": "FindMCP", "url": "https://findmcp.dev/submit", "submit": "Public form", "automatable": "human", "gate": "None."},
+    {"name": "MCP Hunt", "url": "https://mcp-hunt.com", "submit": "Site submit flow", "automatable": "human", "gate": "None."},
+    {"name": "mcp.directory", "url": "https://mcp.directory", "submit": "Claim auto-listing", "automatable": "human", "gate": "Check for existing auto entry first."},
+    {"name": "awesome-mcp-servers", "url": "https://github.com/punkpeye/awesome-mcp-servers", "submit": "GitHub PR (cloud-hosted marker)", "automatable": "agent", "gate": "None."},
+    {"name": "Cline MCP Marketplace", "url": "https://github.com/cline/mcp-marketplace", "submit": "GitHub issue", "automatable": "agent", "gate": "400x400 PNG logo; quality-gated. Defer for new servers."},
+    {"name": "PulseMCP", "url": "https://www.pulsemcp.com", "submit": "none (ingests registry)", "automatable": "none", "gate": "Submissions paused; registry publish covers it."}
+  ]
+}
