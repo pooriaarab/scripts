@@ -95,6 +95,15 @@ jobs:
           ./append-point-scan.test.sh
           ./merge-hotspots.test.sh
 
+      - name: Run warmup sync tests
+        id: warmup-sync-tests
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          ./warm-domain.test.sh
+          ./warm-domain-sync.test.sh
+
       - name: Run stack-lander tests
         id: stack-lander-tests
         if: ${{ !cancelled() }}
@@ -158,10 +167,11 @@ jobs:
           file_dep_restack_tests: ${{ steps.file-dep-restack-tests.outcome }}
           ship_sync_tests: ${{ steps.ship-sync-tests.outcome }}
           amo_sign_retry_tests: ${{ steps.amo-sign-retry-tests.outcome }}
+          warmup_sync_tests: ${{ steps.warmup-sync-tests.outcome }}
         run: |
           set -uo pipefail
           failed=0
-          for group in node_tests guard_tests prefix_tests hook_install_tests branch_pattern_tests rollout_label_tests fleet_ci_census_tests merge_throughput_tests demo_video_tests stack_lander_tests file_dep_restack_tests ship_sync_tests amo_sign_retry_tests; do
+          for group in node_tests guard_tests prefix_tests hook_install_tests branch_pattern_tests rollout_label_tests fleet_ci_census_tests merge_throughput_tests demo_video_tests stack_lander_tests file_dep_restack_tests ship_sync_tests amo_sign_retry_tests warmup_sync_tests; do
             outcome="${!group}"
             printf '%-22s %s\n' "$group" "$outcome"
             [ "$outcome" = success ] || failed=1
