@@ -1,0 +1,99 @@
+#!/usr/bin/env python3
+"""Run one JIT runner at a time. Install with boat-pool; systemd restarts this loop."""
+import json
+import os
+import pathlib
+import signal
+import subprocess
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+
+
+def request(path, body=None):
+    req = urllib.request.Request(os.environ['BROKER_URL'].rstrip('/') + path,
+        data=None if body is None else json.dumps(body).encode(),
+        headers={'Authorization': 'Bearer ' + os.environ['POOL_TOKEN'],
+                 'Content-Type': 'application/json'})
+    with urllib.request.urlopen(req, timeout=60) as response:
+        return json.loads(response.read() or 'null')
+
+
+def stop(process):
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+        process.wait(timeout=15)
+    except subprocess.TimeoutExpired:
+        os.killpg(process.pid, signal.SIGKILL)
+        process.wait()
+    except ProcessLookupError:
+        pass
+
+
+def main():
+    for key in ('BROKER_URL', 'POOL_TOKEN', 'POOL_LABEL', 'BOX_ID'):
+        if not os.environ.get(key):
+            raise SystemExit('Missing ' + key)
+    root = pathlib.Path(os.environ.get('RUNNER_DIR', '/home/user/actions-runner'))
+    os.chdir(root)
+    current, busy = root / '.boat-lease.json', root / '.boat-busy'
+    hook = root / 'boat-job-started.sh'
+    hook.write_text('#!/bin/sh\ntouch "$(dirname "$0")/.boat-busy"\n')
+    hook.chmod(0o700)
+    last_prune = root / '.boat-pruned'
+    while True:
+        try:
+            # A previous service incarnation may have died before reporting done.
+            if current.exists():
+                lease = json.loads(current.read_text())
+                request('/done', lease)
+                current.unlink()
+                work = root / '_work'
+                if work.exists():
+                    for entry in work.iterdir():
+                        if not entry.name.startswith('_') and entry.name != '.cache':
+                            subprocess.run(['sudo', '-n', 'rm', '-rf', '--', str(entry)], check=True)
+                print('Lease cleaned; caches retained', flush=True)
+            if not last_prune.exists() or time.time() - last_prune.stat().st_mtime > 86400:
+                result = subprocess.run(['docker', 'image', 'prune', '-f'], stdout=subprocess.DEVNULL)
+                if result.returncode == 0:
+                    last_prune.touch()
+                else:
+                    print('Docker prune failed; retrying later', flush=True)
+            query = urllib.parse.urlencode({'label': os.environ['POOL_LABEL'], 'box': os.environ['BOX_ID']})
+            lease = request('/lease?' + query)
+            if not lease:
+                continue
+            temporary = current.with_suffix('.tmp')
+            with os.fdopen(os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), 'w') as file:
+                json.dump(lease, file)
+                file.flush()
+                os.fsync(file.fileno())
+            temporary.replace(current)
+            busy.unlink(missing_ok=True)
+            environment = {key: value for key, value in os.environ.items()
+                           if key not in ('POOL_TOKEN', 'WEBHOOK_SECRET', 'GITHUB_TOKEN')}
+            environment['ACTIONS_RUNNER_HOOK_JOB_STARTED'] = str(hook)
+            with (root / 'boat-runner.log').open('w') as log:
+                process = subprocess.Popen(['./run.sh', '--jitconfig', lease['encoded_jit_config']],
+                    env=environment, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+                print(f"Started runner {lease['runner_id']} for job {lease['job_id']}", flush=True)
+                deadline = time.monotonic() + 180
+                try:
+                    while process.poll() is None:
+                        if not busy.exists() and time.monotonic() >= deadline:
+                            print('Runner idle for 180 seconds; stopping', flush=True)
+                            break
+                        time.sleep(1)
+                finally:
+                    stop(process)
+                print(f'Runner exited {process.returncode}; reporting done', flush=True)
+        except (OSError, ValueError, urllib.error.URLError, subprocess.SubprocessError) as error:
+            # Do not print upstream bodies, lease configs, URLs or credentials.
+            print(f'Agent operation failed: {type(error).__name__}; retry in 5 seconds', flush=True)
+            time.sleep(5)
+
+
+if __name__ == '__main__':
+    main()
