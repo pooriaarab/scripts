@@ -45,6 +45,11 @@ export class BrokerDO {
     this.sql.exec('CREATE TABLE IF NOT EXISTS ended(id INTEGER PRIMARY KEY, seen INTEGER)');
     this.sql.exec('CREATE TABLE IF NOT EXISTS repos(repo TEXT PRIMARY KEY, seen INTEGER)');
     this.sql.exec('CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v INTEGER)');
+    // Backoff for jobs whose mint failed. Without it every Box retried the same
+    // job every few seconds and drained the API budget in minutes.
+    for (const col of ['tries INTEGER DEFAULT 0', 'next INTEGER DEFAULT 0']) {
+      try { this.sql.exec(`ALTER TABLE jobs ADD COLUMN ${col}`); } catch { /* column exists */ }
+    }
     this.sql.exec('CREATE TABLE IF NOT EXISTS boxes(box TEXT PRIMARY KEY, label TEXT, seen INTEGER)');
   }
   rows(query: string, ...args: any[]): Row[] { return this.sql.exec(query, ...args).toArray(); }
@@ -67,7 +72,7 @@ export class BrokerDO {
   add(repo: string, job: Row) {
     const label = job.labels?.find((l: string) => labels.includes(l));
     if (!label || this.rows('SELECT id FROM ended WHERE id=?', job.id).length) return;
-    this.rows('INSERT OR IGNORE INTO jobs VALUES(?,?,?,?,?,NULL)', job.id, repo, label, job.run_id, Date.now());
+    this.rows('INSERT OR IGNORE INTO jobs(id,repo,label,run_id,queued,lease) VALUES(?,?,?,?,?,NULL)', job.id, repo, label, job.run_id, Date.now());
   }
   async end(id: number, completed: boolean) {
     this.ctx.storage.transactionSync(() => {
@@ -93,10 +98,11 @@ export class BrokerDO {
       return true;
     } catch { return false; }
   }
+  tries(job: number): number { return this.rows('SELECT tries FROM jobs WHERE id=?', job)[0]?.tries ?? 0; }
   async mint(label: string, box: string): Promise<Response | null> {
     let lease: Row | undefined;
     this.ctx.storage.transactionSync(() => {
-      const job = this.rows('SELECT * FROM jobs WHERE label=? AND lease IS NULL ORDER BY queued,id LIMIT 1', label)[0];
+      const job = this.rows('SELECT * FROM jobs WHERE label=? AND lease IS NULL AND next<=? ORDER BY queued,id LIMIT 1', label, Date.now())[0];
       if (!job) return;
       const id = crypto.randomUUID();
       lease = { id, job: job.id, repo: job.repo, name: `boat-${box.slice(0, 16)}-${id}`, created: Date.now(), pending: 1 };
@@ -106,9 +112,10 @@ export class BrokerDO {
     if (!lease) return null;
     const l = lease;
     try {
-      const repo = await this.data(`/repos/${l.repo}`);
+      // Only private-repo webhooks and the private-repo sweep add jobs, so the
+      // repo is not fetched again here.
       const job = await this.data(`/repos/${l.repo}/actions/jobs/${l.job}`);
-      if (repo.private !== true || job.status !== 'queued') {
+      if (job.status !== 'queued') {
         await this.end(l.job, job.status !== 'in_progress');
         this.rows('UPDATE leases SET closing=1 WHERE id=?', l.id);
         await this.cleanup(l);
@@ -127,9 +134,10 @@ export class BrokerDO {
     } catch {
       this.ctx.storage.transactionSync(() => {
         this.rows('UPDATE leases SET closing=1 WHERE id=?', l.id);
-        this.rows('UPDATE jobs SET lease=NULL WHERE lease=?', l.id);
+        this.rows('UPDATE jobs SET lease=NULL, tries=tries+1, next=? WHERE lease=?', Date.now() + Math.min(600_000, 30_000 * 2 ** this.tries(l.job)), l.id);
       });
       await this.cleanup(l);
+      if (this.tries(l.job) >= 6) await this.end(l.job, false);
       return json({ error: 'Mint failed; claim released' }, 502);
     }
   }
