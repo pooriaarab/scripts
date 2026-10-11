@@ -46,16 +46,21 @@ SRC_FILES=( "$SRC"/scripts/*.mjs "$SRC"/scripts/*.py "$SRC"/scripts/*.sh "$SRC"/
 
 drift=0
 synced=0
+failed=0
 for f in "${SRC_FILES[@]}"; do
   rel="${f#$SRC/}"
   if [ ! -f "$DST/$rel" ]; then
     echo "missing: $rel"
     drift=1
-    if [ "$CHECK" -eq 0 ]; then mkdir -p "$DST/$(dirname "$rel")"; cp -p "$f" "$DST/$rel"; synced=$((synced+1)); fi
+    if [ "$CHECK" -eq 0 ]; then
+      if mkdir -p "$DST/$(dirname "$rel")" && cp -p "$f" "$DST/$rel"; then synced=$((synced+1)); else echo "failed: $rel" >&2; failed=1; fi
+    fi
   elif ! cmp -s "$f" "$DST/$rel"; then
     echo "differs: $rel"
     drift=1
-    if [ "$CHECK" -eq 0 ]; then cp -p "$f" "$DST/$rel"; synced=$((synced+1)); fi
+    if [ "$CHECK" -eq 0 ]; then
+      if cp -p "$f" "$DST/$rel"; then synced=$((synced+1)); else echo "failed: $rel" >&2; failed=1; fi
+    fi
   fi
 done
 
@@ -74,4 +79,5 @@ if [ "$CHECK" -eq 1 ]; then
   if [ "$drift" -eq 0 ]; then echo "in sync: ${#SRC_FILES[@]} files"; exit 0; fi
   exit 2
 fi
+if [ "$failed" -eq 1 ]; then echo "warm-domain-sync: $synced synced, some copies failed" >&2; exit 1; fi
 echo "$synced synced, $((${#SRC_FILES[@]}-synced)) unchanged"
