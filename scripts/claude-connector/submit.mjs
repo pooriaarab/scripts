@@ -65,6 +65,7 @@ for (const k of REQUIRED) {
     process.exit(1);
   }
 }
+if (!/^[a-z0-9-]+$/.test(cfg.slug)) { console.error("slug: lowercase letters, digits, hyphens only"); process.exit(1); }
 if (cfg.use_cases.length > 3) { console.error("use_cases: max 3"); process.exit(1); }
 
 // One agent-browser eval through the personal-profile zsh functions. The
