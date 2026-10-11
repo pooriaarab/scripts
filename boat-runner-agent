@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Run one JIT runner at a time. Install with boat-pool; systemd restarts this loop."""
 import json
+import datetime
 import os
 import pathlib
 import signal
@@ -33,6 +34,58 @@ def stop(process):
         pass
 
 
+def cleanup_attempt(label, operation):
+    """Cleanup is best effort: even an unexpected failure must not block leasing."""
+    try:
+        return operation()
+    except Exception as error:
+        print(f'Cleanup {label} failed: {type(error).__name__}; continuing', flush=True)
+
+
+def cleanup_job(root, started, previous_tmp):
+    # Stop containers first, so they cannot keep ports open or write more files.
+    def containers():
+        ids = subprocess.check_output(['docker', 'ps', '-aq'], text=True, timeout=30).split()
+        for container in ids:
+            def remove_container():
+                details = json.loads(subprocess.check_output(
+                    ['docker', 'inspect', container], text=True, timeout=30))[0]
+                created = datetime.datetime.fromisoformat(
+                    details['Created'].replace('Z', '+00:00')).timestamp()
+                if created > started:
+                    subprocess.run(['docker', 'rm', '-f', container], check=True,
+                                   timeout=45, stdout=subprocess.DEVNULL)
+            cleanup_attempt('container', remove_container)
+
+    if started is not None:
+        cleanup_attempt('containers', containers)
+
+    def temporary_files():
+        for entry in pathlib.Path('/tmp').iterdir():
+            def remove_entry():
+                # lstat never follows a job-created symlink into a warm cache.
+                metadata = entry.lstat()
+                if (entry.name not in previous_tmp and metadata.st_mtime > started
+                        and metadata.st_uid in (0, os.getuid())):
+                    subprocess.run(['sudo', '-n', 'rm', '-rf', '--one-file-system',
+                                    '--', str(entry)], check=True, timeout=30)
+            cleanup_attempt('temporary entry', remove_entry)
+
+    # Old lease files or a failed snapshot must never trigger a broad /tmp wipe.
+    if started is not None and previous_tmp is not None:
+        cleanup_attempt('temporary files', temporary_files)
+
+    def workspaces():
+        work = root / '_work'
+        if work.exists():
+            for entry in work.iterdir():
+                if not entry.name.startswith('_') and entry.name != '.cache':
+                    cleanup_attempt('workspace', lambda: subprocess.run(
+                        ['sudo', '-n', 'rm', '-rf', '--', str(entry)], check=True, timeout=30))
+    cleanup_attempt('workspaces', workspaces)
+    print('Lease cleanup attempted; caches retained', flush=True)
+
+
 def main():
     for key in ('BROKER_URL', 'POOL_TOKEN', 'POOL_LABEL', 'BOX_ID'):
         if not os.environ.get(key):
@@ -48,15 +101,12 @@ def main():
         try:
             # A previous service incarnation may have died before reporting done.
             if current.exists():
-                lease = json.loads(current.read_text())
+                state = json.loads(current.read_text())
+                lease = state.get('lease', state)  # Accept pre-upgrade lease files.
                 request('/done', lease)
+                cleanup_attempt('job', lambda: cleanup_job(
+                    root, state.get('started'), state.get('previous_tmp')))
                 current.unlink()
-                work = root / '_work'
-                if work.exists():
-                    for entry in work.iterdir():
-                        if not entry.name.startswith('_') and entry.name != '.cache':
-                            subprocess.run(['sudo', '-n', 'rm', '-rf', '--', str(entry)], check=True)
-                print('Lease cleaned; caches retained', flush=True)
             if not last_prune.exists() or time.time() - last_prune.stat().st_mtime > 86400:
                 result = subprocess.run(['docker', 'image', 'prune', '-f'], stdout=subprocess.DEVNULL)
                 if result.returncode == 0:
@@ -67,9 +117,13 @@ def main():
             lease = request('/lease?' + query)
             if not lease:
                 continue
+            previous_tmp = cleanup_attempt('snapshot', lambda: [
+                entry.name for entry in pathlib.Path('/tmp').iterdir()])
+            started = time.time()
             temporary = current.with_suffix('.tmp')
             with os.fdopen(os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), 'w') as file:
-                json.dump(lease, file)
+                json.dump({'lease': lease, 'started': started,
+                           'previous_tmp': previous_tmp}, file)
                 file.flush()
                 os.fsync(file.fileno())
             temporary.replace(current)
