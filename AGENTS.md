@@ -7,9 +7,15 @@ Repository identity and interface rules live in
 ## CI runners
 
 This repo is public, so every job runs on GitHub-hosted `ubuntu-latest`.
-Public repos get those runners for free; Ubicloud bills by the minute.
-Private `pooriaarab/*` repos stay on Ubicloud. The Dell fleet is retired.
-Never re-add a self-hosted label. See #217.
+Public repos get those runners for free. Do not use Boat for public repos:
+a self-hosted runner can run code from fork PRs.
+Private `pooriaarab/*` repos use `boat`, or `boat-8` for larger jobs.
+JIT runners get only the labels passed. Do not add `self-hosted` to `runs-on`.
+Declare `boat` and `boat-8` in `.github/actionlint.yaml`:
+
+```yaml
+self-hosted-runner: { labels: [boat, boat-8] }
+```
 
 <!-- pr-standards:start -->
 

@@ -8,10 +8,8 @@ concurrency:
   group: pr-standards-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
-# This job waits on the GitHub API and does no compute, so it takes the
-# smallest runner. This repo is public, so that runner is GitHub-hosted
-# `ubuntu-latest` (free). Private pooriaarab repos stay on Ubicloud. The
-# self-hosted fleet is retired. See #217.
+# Public repos use free GitHub-hosted runners. Private repos use Boat.
+# A self-hosted runner in a public repo can run code from fork PRs.
 jobs:
   pr-standards:
     name: PR standards

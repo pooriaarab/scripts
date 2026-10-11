@@ -17,7 +17,7 @@ permissions:
 jobs:
   eval:
     if: github.repository == 'pooriaarab/scripts'
-    # Public repo — match the other workflows here (not Ubicloud).
+    # Public repo: use a free GitHub-hosted runner.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

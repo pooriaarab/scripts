@@ -15,7 +15,7 @@ CI. This file is for the person who operates it at 2am.
 ## Failure modes
 
 <!-- for example: `codeload` 403 means `pooriaarab/scripts` went private — restore public or add an auth header. -->
-<!-- for example: a job queued 40 minutes is Ubicloud quota, not a broken workflow. -->
+<!-- for example: a queued Boat job can mean no pool slot is free. Check the broker and pool. -->
 <!-- for example: a grey Shields badge on a private repo is "not found", not a dead project. -->
 | What you will see | Cause | What to do |
 |---|---|---|
@@ -54,7 +54,7 @@ For __WHO__, who today uses __ALTERNATIVE__. Not for __WHO_NOT__.
 
 ## Usage
 
-<!-- for example: on every PR that touches `README.md`, about 12s on `ubicloud-standard-2`. -->
+<!-- for example: on every PR that touches `README.md`, about 12s on `boat` in a private repo, or `ubuntu-latest` in a public repo. -->
 <!-- for example: nightly on `main`, about `__NIGHTLY_MINUTES__` across the fleet. -->
 | When | What runs | What it costs |
 |---|---|---|

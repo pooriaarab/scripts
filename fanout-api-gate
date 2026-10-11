@@ -194,7 +194,7 @@ if [ -f .github/workflows/worker-preview.yml ]; then
     name: Scout API gate
     needs: lifecycle
     if: github.event.action != 'closed'
-    runs-on: ubicloud-standard-2
+    runs-on: ${{ github.event.repository.private == true && 'boat' || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v4
         with: { ref: '${{ github.event.pull_request.head.sha }}' }
@@ -219,7 +219,7 @@ else
   scout:
     name: Scout API gate
     if: github.ref == 'refs/heads/main'
-    runs-on: ubicloud-standard-2
+    runs-on: ${{ github.event.repository.private == true && 'boat' || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

@@ -534,7 +534,8 @@ Merged is not live. CI proves the change is good on a runner. This job proves
 the change reached production. It runs on every `push` and on
 `workflow_dispatch`, but the job itself skips unless the push landed on the
 repo's actual default branch — not every repo in the fleet defaults to `main`.
-It uses the `ubicloud-standard-2` runner and one concurrency group per repo.
+It uses `boat` for private repos and `ubuntu-latest` for public repos.
+The concurrency group includes the repo and ref.
 
 Add `postMergeVerify` to `.github/pr-standards.json` to enable it:
 
@@ -590,3 +591,36 @@ pr-standards drift                       # check the managed AGENTS.md block and
 
 Exit 0 clean, exit 1 on any failure, exit 2 on a configuration problem.
 Warnings never change the exit code.
+
+## Boat runners
+
+Private repos use `boat`. Use `boat-8` for jobs that need 8 vCPU and 16 GB.
+Public repos use free GitHub-hosted runners. A self-hosted runner in a public
+repo can run code from fork PRs. The templates select the runner from the
+repository visibility.
+
+Boat JIT runners get only the labels passed. Use `runs-on: boat` or
+`runs-on: boat-8`; do not require `self-hosted`. Copy this config to
+`.github/actionlint.yaml` when you install a workflow template:
+
+```yaml
+self-hosted-runner: { labels: [boat, boat-8] }
+```
+
+The pool keeps Boxes on, with one JIT runner per Box at a time. It keeps
+`~/.bun`, Playwright browsers, and Docker images warm between jobs. A
+Cloudflare Worker broker takes `workflow_job` webhooks and hands out JIT
+configs. The GitHub token stays off the Box. Pool code is in
+`workers/boat-runners/`, `boat-runner-agent`, and `boat-pool` in scripts
+(#508 and #509, in progress).
+
+Boxes run Ubuntu 24.04 with passwordless sudo, Docker 29, Node 24, and Bun.
+The default Box has 4 vCPU and 8 GB at $0.036/h. A small Box has 2 vCPU and
+4 GB at half that rate. A large Box has 8 vCPU and 16 GB at $0.072/h.
+$1 buys 100,000 Box-seconds at the default rate. Always-on Boxes bill while
+idle too. For comparison, Ubicloud standard-2 costs $0.075/h, standard-4
+costs $0.15/h, and standard-8 costs $0.30/h (2026-10-11).
+
+`ci-runner-audit pooriaarab` reports the `boat` tier and flags legacy
+Ubicloud labels. `ci-pr-latency` groups Boat job time under `boat` and keeps
+the `cloud` tier for comparison with old Ubicloud runs.
