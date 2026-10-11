@@ -1,6 +1,7 @@
 # secrets, tokens, credentials — never commit
 .env
 .env.*
+.dev.vars
 *.key
 *.pem
 auth.json
@@ -20,3 +21,6 @@ __pycache__/
 # Cursor cloud — local secrets stay local
 .env.local
 .env.*.local
+
+# Local Worker state
+.wrangler/
