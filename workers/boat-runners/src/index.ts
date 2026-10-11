@@ -47,7 +47,8 @@ export class BrokerDO {
     this.sql.exec('CREATE TABLE IF NOT EXISTS repos(repo TEXT PRIMARY KEY, seen INTEGER)');
     this.sql.exec('CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v INTEGER)');
     // Backoff for jobs whose mint failed. Without it every Box retried the same
-    // job every few seconds and drained the API budget in minutes.
+    // job every few seconds and drained the API budget in minutes. A job is
+    // never dropped for failing: GitHub would keep it queued with no runner.
     for (const col of ['tries INTEGER DEFAULT 0', 'next INTEGER DEFAULT 0']) {
       try { this.sql.exec(`ALTER TABLE jobs ADD COLUMN ${col}`); } catch { /* column exists */ }
     }
@@ -155,7 +156,6 @@ export class BrokerDO {
         this.rows('UPDATE jobs SET lease=NULL, tries=tries+1, next=? WHERE lease=?', Date.now() + Math.min(600_000, 30_000 * 2 ** this.tries(l.job)), l.id);
       });
       await this.cleanup(l);
-      if (this.tries(l.job) >= 6) await this.end(l.job, false);
       return json({ error: 'Mint failed; claim released' }, 502);
     }
   }
@@ -214,15 +214,15 @@ export class BrokerDO {
         if (!await this.cleanup(l)) errors++;
       } catch { errors++; }
     }
-    // The reconcile costs several API calls per repo and shares the owner's
-    // 5,000/h budget, so it runs every 10 minutes and only for repos active in
-    // the last 2 hours. Lease expiry above still runs on every 2-minute tick.
-    // Privacy is re-checked in mint() before any runner is issued.
+    // The reconcile costs several API calls per repo, so it runs every 10
+    // minutes and only for repos active in the last 24 hours. Lease expiry
+    // above still runs on every 2-minute tick. Privacy is re-checked in mint()
+    // before any runner is issued.
     const now = Date.now();
     const last = this.rows("SELECT v FROM meta WHERE k='reconciled'")[0]?.v ?? 0;
     const due = now - last >= 600_000;
     if (due) this.rows("INSERT OR REPLACE INTO meta VALUES('reconciled',?)", now);
-    const repos = due ? this.rows('SELECT repo FROM repos WHERE seen>?', now - 7_200_000) : [];
+    const repos = due ? this.rows('SELECT repo FROM repos WHERE seen>?', now - 86_400_000) : [];
     for (const { repo } of repos) {
       try {
         for (const status of ['queued', 'in_progress']) {
