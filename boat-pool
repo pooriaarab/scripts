@@ -1,0 +1,225 @@
+#!/usr/bin/env python3
+"""Manage the owner's Boat runner pool. Requires gh and ~/.ascii/bin/box on Mac."""
+import argparse
+import json
+import os
+import pathlib
+import re
+import shlex
+import subprocess
+import sys
+import urllib.request
+import urllib.error
+
+BOX = str(pathlib.Path.home() / '.ascii/bin/box')
+LABELS = {'boat': 'default', 'boat-8': 'large'}
+OWNER = 'pooriaarab'
+VERSION = '2.338.0'
+
+
+def run(args, body=None, secret=False):
+    result = subprocess.run(args, input=body, text=True, capture_output=True)
+    if result.returncode:
+        raise RuntimeError('Command failed: ' + ('remote provisioning' if secret else shlex.join(args)) +
+                           ('' if secret else '\n' + result.stderr.strip()))
+    return result.stdout
+
+
+def box(*args):
+    return json.loads(run([BOX, '--json', *args]))
+
+
+def gh(path, method='GET', body=None):
+    args = ['gh', 'api', path, '--method', method]
+    if body is not None:
+        args += ['--input', '-']
+    return json.loads(run(args, None if body is None else json.dumps(body), secret=body is not None) or 'null')
+
+
+def pages(path):
+    return json.loads(run(['gh', 'api', '--paginate', '--slurp', path + '?per_page=100']))
+
+
+def required(*names):
+    for name in names:
+        if not os.environ.get(name):
+            raise RuntimeError('Missing ' + name)
+
+
+def pool_boxes():
+    return [b for b in box('list')['boxes'] if b.get('environment') in
+            ['boat-runner-' + label for label in LABELS]]
+
+
+def remote(id, command, body=None):
+    return run([BOX, 'ssh', id, command], body, secret=body is not None)
+
+
+def provision(label, dry):
+    environment = 'boat-runner-' + label
+    command = [BOX, '--json', 'new', '--no-env', '--no-auto-stop', '--environment', environment,
+               '--type', LABELS[label]]
+    if dry:
+        print(shlex.join([BOX, 'env', 'new', environment]))
+        print(shlex.join([BOX, 'env', 'set', environment, '--safe-for-third-parties', 'true']))
+        print(shlex.join(command))
+        print('Verify archiveAfter=null; install runner ' + VERSION + ', agent and systemd service; env mode=0600')
+        return
+    required('BROKER_URL', 'POOL_TOKEN')
+    environments = box('env', 'list')['environments']
+    if not any(e['name'] == environment for e in environments):
+        box('env', 'new', environment)
+    box('env', 'set', environment, '--safe-for-third-parties', 'true')
+    events = [json.loads(line) for line in run(command).splitlines()]
+    id = next((e['id'] for e in events if e.get('event') == 'ready'), None)
+    if not id:
+        raise RuntimeError('Box creation returned no ready event')
+    info = box('info', id)['box']
+    if 'archiveAfter' not in info or info['archiveAfter'] is not None:
+        raise RuntimeError('Box ' + id + ' did not confirm archiveAfter=null; inspect before retrying')
+    try:
+        install(id, label)
+    except Exception:
+        print('Provisioning failed for ' + id + '; inspect or use boat-pool down ' + id, file=sys.stderr)
+        raise
+    print('Ready ' + id + ' ' + label)
+
+
+def install(id, label):
+    agent = pathlib.Path(__file__).resolve().with_name('boat-runner-agent').read_text()
+    env = {'BROKER_URL': os.environ['BROKER_URL'], 'POOL_TOKEN': os.environ['POOL_TOKEN'],
+           'POOL_LABEL': label, 'BOX_ID': id, 'RUNNER_DIR': '/home/user/actions-runner'}
+    if any('\n' in value or '\r' in value or '"' in value or '\\' in value for value in env.values()):
+        raise RuntimeError('Invalid environment value')
+    values = ''.join(key + '="' + value + '"\n' for key, value in env.items())
+    unit = '''[Unit]
+Description=Boat JIT runner agent
+After=network-online.target docker.service
+Wants=network-online.target
+[Service]
+User=user
+EnvironmentFile=/etc/boat-runner.env
+ExecStart=/usr/local/bin/boat-runner-agent
+Restart=always
+RestartSec=5
+KillMode=control-group
+TimeoutStopSec=30
+[Install]
+WantedBy=multi-user.target
+'''
+    # Secrets travel over SSH stdin, never argv, Box environments or files on Mac.
+    script = f'''set -euo pipefail
+mkdir -p /home/user/actions-runner
+cd /home/user/actions-runner
+curl -fsSL https://github.com/actions/runner/releases/download/v{VERSION}/actions-runner-linux-x64-{VERSION}.tar.gz | tar xz
+sudo install -m 755 /dev/stdin /usr/local/bin/boat-runner-agent <<'BOAT_AGENT'
+{agent}
+BOAT_AGENT
+sudo install -m 600 /dev/stdin /etc/boat-runner.env <<'BOAT_ENV'
+{values}BOAT_ENV
+sudo install -m 644 /dev/stdin /etc/systemd/system/boat-runner-agent.service <<'BOAT_UNIT'
+{unit}BOAT_UNIT
+sudo systemctl daemon-reload
+sudo systemctl enable boat-runner-agent
+sudo systemctl restart boat-runner-agent
+sudo systemctl is-active boat-runner-agent
+'''
+    remote(id, 'bash -s', script)
+
+
+def agent_state(b):
+    if b['state'] != 'running':
+        return b['state']
+    try:
+        return remote(b['id'], 'systemctl is-active boat-runner-agent || true').strip()
+    except RuntimeError:
+        return 'unreachable'
+
+
+def status():
+    for b in pool_boxes():
+        state = agent_state(b)
+        print(b['id'], b['environment'], state)
+    required('BROKER_URL', 'POOL_TOKEN')
+    req = urllib.request.Request(os.environ['BROKER_URL'].rstrip('/') + '/status',
+                                 headers={'Authorization': 'Bearer ' + os.environ['POOL_TOKEN']})
+    with urllib.request.urlopen(req, timeout=30) as response:
+        print(json.dumps(json.load(response)))
+
+
+def down(id, dry):
+    if dry:
+        print(shlex.join([BOX, 'stop', id]))
+        print(shlex.join([BOX, 'delete', id]))
+        return
+    boxes = {b['id']: b for b in pool_boxes()}
+    if id not in boxes:
+        raise RuntimeError('Not a pool Box: ' + id)
+    if boxes[id]['state'] == 'running':
+        box('stop', id)
+    box('delete', id)
+
+
+def hooks(dry):
+    if not dry:
+        required('BROKER_URL', 'WEBHOOK_SECRET')
+    for page in pages('user/repos'):
+        for repo in page:
+            if repo['owner']['login'] != OWNER or not repo['private'] or repo['archived']:
+                continue
+            name = repo['full_name']
+            if dry:
+                print(name + ' private workflow_job')
+                continue
+            current = gh('repos/' + name)
+            if not current['private'] or current['archived']:
+                continue
+            url = os.environ['BROKER_URL'].rstrip('/') + '/webhook'
+            existing = [hook for page in pages('repos/' + name + '/hooks') for hook in page
+                        if hook['config'].get('url') == url]
+            body = {'name': 'web', 'active': True, 'events': ['workflow_job'],
+                    'config': {'url': url, 'content_type': 'json', 'secret': os.environ['WEBHOOK_SECRET']}}
+            if existing:
+                gh('repos/' + name + '/hooks/' + str(existing[0]['id']), 'PATCH', body)
+            else:
+                gh('repos/' + name + '/hooks', 'POST', body)
+            print(name + ' configured')
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('command', choices=['up', 'status', 'heal', 'down', 'hooks'])
+    parser.add_argument('args', nargs='*')
+    parser.add_argument('--dry-run', action='store_true')
+    a = parser.parse_args()
+    if a.command == 'up':
+        if len(a.args) != 2 or a.args[0] not in LABELS or not a.args[1].isdigit() or not 1 <= int(a.args[1]) <= 20:
+            parser.error('up requires boat|boat-8 and a count from 1 to 20')
+        for _ in range(int(a.args[1])):
+            provision(a.args[0], a.dry_run)
+    elif a.command == 'down':
+        if len(a.args) != 1 or not re.fullmatch(r'bx_[a-z0-9]+', a.args[0]):
+            parser.error('down requires a Box ID')
+        down(a.args[0], a.dry_run)
+    else:
+        if a.args:
+            parser.error('Unexpected arguments')
+        if a.command == 'hooks':
+            hooks(a.dry_run)
+        elif a.command == 'status':
+            status()
+        else:
+            for b in pool_boxes():
+                active = agent_state(b) == 'active'
+                if not active:
+                    label = b['environment'].removeprefix('boat-runner-')
+                    provision(label, a.dry_run)
+                    down(b['id'], a.dry_run)
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except (RuntimeError, OSError, ValueError, urllib.error.URLError) as error:
+        print('boat-pool: ' + str(error), file=sys.stderr)
+        sys.exit(1)

@@ -1,0 +1,34 @@
+# Boat runner pool
+
+Run `boat-pool` on the owner's Mac with `gh` authenticated and the Box CLI at
+`~/.ascii/bin/box`. Install the broker from #508 first. Set `BROKER_URL`,
+`POOL_TOKEN` and (for hooks) `WEBHOOK_SECRET` in the operator shell; never commit
+those values. The service needs only the pool token, not the GitHub token.
+
+- `./boat-pool up boat 1 --dry-run` shows provisioning without creating a Box.
+- `./boat-pool up boat 1` creates a default 4-vCPU Box; `boat-8` uses large.
+  Creation is serial. The named environment injects no account credentials,
+  and each Box uses `--no-env --no-auto-stop`. Non-null or missing
+  `archiveAfter` stops provisioning. A failed install reports the Box ID for
+  inspection or deletion; it never silently creates another Box.
+- `./boat-pool status` reads pool Boxes, agent state and broker counts.
+- `./boat-pool heal --dry-run` inspects existing Boxes and plans replacements
+  for inactive agents. Omit dry-run to replace them, then remove the old Boxes.
+- `./boat-pool down bx_<id>` stops and deletes only a named pool Box.
+- `./boat-pool hooks --dry-run` lists private, non-archived owner repos.
+  Omit dry-run to create/update matching webhook URLs; this affects all listed
+  repositories. Repo privacy is checked again immediately before mutation.
+
+Provisioning downloads runner v2.338.0 onto the standard Boat image and installs
+`boat-runner-agent` at `/usr/local/bin`. `/etc/boat-runner.env` has mode 0600,
+transferred through SSH stdin. The service runs as `user` with `Restart=always`.
+Inspect it with `systemctl status boat-runner-agent` and
+`journalctl -u boat-runner-agent`. Runner output is in
+`/home/user/actions-runner/boat-runner.log`.
+
+The agent persists each lease before launch. After a runner exits or a service
+restart it reports done before taking another lease. Failed reports retry every
+five seconds. An idle runner stops after 180 seconds; a job-start hook disables
+that idle timer. Cleanup removes `_work/<repo>` and retains `_work/_tool`, Bun,
+Playwright and tagged Docker images. Docker image pruning runs once a day.
+Broker/GitHub outages delay work until lease cleanup is acknowledged.
