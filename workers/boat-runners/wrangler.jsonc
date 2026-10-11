@@ -1,0 +1,11 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "boat-runners",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-08-01",
+  "durable_objects": {
+    "bindings": [{ "name": "BROKER", "class_name": "BrokerDO" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["BrokerDO"] }],
+  "triggers": { "crons": ["*/2 * * * *"] }
+}

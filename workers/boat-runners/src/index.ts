@@ -1,0 +1,216 @@
+interface Env { GITHUB_TOKEN: string; WEBHOOK_SECRET: string; POOL_TOKEN: string; BROKER: DurableObjectNamespace }
+const labels = ['boat', 'boat-8'];
+const json = (body: unknown, status = 200) => Response.json(body, { status });
+const pause = (ms: number) => new Promise(r => setTimeout(r, ms));
+const repoPattern = /^pooriaarab\/[A-Za-z0-9_.-]+$/;
+async function signature(raw: string, header: string | null, secret: string) {
+  if (!secret || !/^sha256=[a-f0-9]{64}$/.test(header ?? '')) return false;
+  const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['verify']);
+  const bytes = Uint8Array.from(header!.slice(7).match(/../g)!, x => parseInt(x, 16));
+  return crypto.subtle.verify('HMAC', key, bytes, new TextEncoder().encode(raw));
+}
+export default {
+  async fetch(req: Request, env: Env): Promise<Response> {
+    const path = new URL(req.url).pathname;
+    const broker = env.BROKER.get(env.BROKER.idFromName('broker'));
+    try {
+      if (path === '/webhook' && req.method === 'POST') {
+        const raw = await req.text();
+        if (!await signature(raw, req.headers.get('x-hub-signature-256'), env.WEBHOOK_SECRET)) return json({ error: 'Bad signature' }, 401);
+        if (req.headers.get('x-github-event') !== 'workflow_job') return json({ ignored: true });
+        const p = JSON.parse(raw);
+        if (p.repository?.private !== true) return json({ ignored: 'not-private' });
+        if (!repoPattern.test(p.repository.full_name) || !Number.isSafeInteger(p.workflow_job?.id)) return json({ error: 'Bad payload' }, 400);
+        return broker.fetch('https://broker/ingest', { method: 'POST', body: JSON.stringify(p) });
+      }
+      if (!['/lease', '/done', '/status'].includes(path)) return json({ error: 'Not found' }, 404);
+      if (!env.POOL_TOKEN || req.headers.get('authorization') !== `Bearer ${env.POOL_TOKEN}`) return json({ error: 'Unauthorized' }, 401);
+      return await broker.fetch(req);
+    } catch (error) {
+      return json({ error: error instanceof SyntaxError ? 'Bad JSON' : 'Broker unavailable' }, error instanceof SyntaxError ? 400 : 503);
+    }
+  },
+  async scheduled(_event: ScheduledEvent, env: Env) {
+    const response = await env.BROKER.get(env.BROKER.idFromName('broker')).fetch('https://broker/sweep', { method: 'POST' });
+    if (!response.ok) throw new Error('Reconciliation failed');
+  },
+};
+type Row = Record<string, any>;
+export class BrokerDO {
+  sql: SqlStorage;
+  constructor(private ctx: DurableObjectState, private env: Env) {
+    this.sql = ctx.storage.sql;
+    this.sql.exec('CREATE TABLE IF NOT EXISTS jobs(id INTEGER PRIMARY KEY, repo TEXT, label TEXT, run_id INTEGER, queued INTEGER, lease TEXT)');
+    this.sql.exec('CREATE TABLE IF NOT EXISTS leases(id TEXT PRIMARY KEY, job INTEGER, repo TEXT, name TEXT, runner INTEGER, created INTEGER, closing INTEGER DEFAULT 0, pending INTEGER DEFAULT 1)');
+    this.sql.exec('CREATE TABLE IF NOT EXISTS ended(id INTEGER PRIMARY KEY, seen INTEGER)');
+    this.sql.exec('CREATE TABLE IF NOT EXISTS repos(repo TEXT PRIMARY KEY, seen INTEGER)');
+    this.sql.exec('CREATE TABLE IF NOT EXISTS boxes(box TEXT PRIMARY KEY, label TEXT, seen INTEGER)');
+  }
+  rows(query: string, ...args: any[]): Row[] { return this.sql.exec(query, ...args).toArray(); }
+  async gh(path: string, method = 'GET', body?: unknown) {
+    return fetch(`https://api.github.com${path}`, { method, headers: { Authorization: `Bearer ${this.env.GITHUB_TOKEN}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': 'boat-runners', 'Content-Type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(20_000) });
+  }
+  async data(path: string) {
+    const r = await this.gh(path);
+    if (!r.ok) throw new Error(`GitHub ${r.status}`);
+    return r.json() as Promise<any>;
+  }
+  async list(path: string, key: string) {
+    const all: Row[] = [];
+    for (let page = 1; ; page++) {
+      const p = await this.data(`${path}${path.includes('?') ? '&' : '?'}per_page=100&page=${page}`);
+      all.push(...p[key]);
+      if (p[key].length < 100) return all;
+    }
+  }
+  add(repo: string, job: Row) {
+    const label = job.labels?.find((l: string) => labels.includes(l));
+    if (!label || this.rows('SELECT id FROM ended WHERE id=?', job.id).length) return;
+    this.rows('INSERT OR IGNORE INTO jobs VALUES(?,?,?,?,?,NULL)', job.id, repo, label, job.run_id, Date.now());
+  }
+  async end(id: number, completed: boolean) {
+    this.ctx.storage.transactionSync(() => {
+      this.rows('INSERT OR REPLACE INTO ended VALUES(?,?)', id, Date.now());
+      this.rows('DELETE FROM jobs WHERE id=?', id);
+      if (completed) this.rows('UPDATE leases SET closing=1 WHERE job=?', id);
+    });
+    if (completed) for (const lease of this.rows('SELECT * FROM leases WHERE job=?', id)) await this.cleanup(lease);
+  }
+  async cleanup(lease: Row): Promise<boolean> {
+    if (lease.pending && lease.created > Date.now() - 180_000) return false;
+    try {
+      let runner = lease.runner;
+      if (!runner) runner = (await this.list(`/repos/${lease.repo}/actions/runners`, 'runners')).find(r => r.name === lease.name)?.id;
+      if (runner) {
+        const r = await this.gh(`/repos/${lease.repo}/actions/runners/${runner}`, 'DELETE');
+        if (!r.ok && r.status !== 404) return false;
+      }
+      this.ctx.storage.transactionSync(() => {
+        this.rows('UPDATE jobs SET lease=NULL WHERE lease=?', lease.id);
+        this.rows('DELETE FROM leases WHERE id=?', lease.id);
+      });
+      return true;
+    } catch { return false; }
+  }
+  async mint(label: string, box: string): Promise<Response | null> {
+    let lease: Row | undefined;
+    this.ctx.storage.transactionSync(() => {
+      const job = this.rows('SELECT * FROM jobs WHERE label=? AND lease IS NULL ORDER BY queued,id LIMIT 1', label)[0];
+      if (!job) return;
+      const id = crypto.randomUUID();
+      lease = { id, job: job.id, repo: job.repo, name: `boat-${box.slice(0, 16)}-${id}`, created: Date.now(), pending: 1 };
+      this.rows('INSERT INTO leases(id,job,repo,name,created) VALUES(?,?,?,?,?)', id, job.id, job.repo, lease.name, lease.created);
+      this.rows('UPDATE jobs SET lease=? WHERE id=?', id, job.id);
+    });
+    if (!lease) return null;
+    const l = lease;
+    try {
+      const repo = await this.data(`/repos/${l.repo}`);
+      const job = await this.data(`/repos/${l.repo}/actions/jobs/${l.job}`);
+      if (repo.private !== true || job.status !== 'queued') {
+        await this.end(l.job, job.status !== 'in_progress');
+        this.rows('UPDATE leases SET closing=1 WHERE id=?', l.id);
+        await this.cleanup(l);
+        return null;
+      }
+      const r = await this.gh(`/repos/${l.repo}/actions/runners/generate-jitconfig`, 'POST', { name: l.name, runner_group_id: 1, labels: [label], work_folder: '_work' });
+      if (!r.ok) { this.rows('UPDATE leases SET pending=0 WHERE id=?', l.id); l.pending = 0; throw new Error(`Mint ${r.status}`); }
+      const cfg: any = await r.json();
+      l.runner = cfg.runner.id; l.pending = 0;
+      this.rows('UPDATE leases SET runner=?, pending=0 WHERE id=?', l.runner, l.id);
+      if (!this.rows('SELECT id FROM jobs WHERE lease=?', l.id).length || !this.rows('SELECT id FROM leases WHERE id=? AND closing=0', l.id).length) {
+        await this.cleanup(l);
+        return null;
+      }
+      return json({ lease_id: l.id, job_id: l.job, repo: l.repo, label, runner_id: l.runner, encoded_jit_config: cfg.encoded_jit_config });
+    } catch {
+      this.ctx.storage.transactionSync(() => {
+        this.rows('UPDATE leases SET closing=1 WHERE id=?', l.id);
+        this.rows('UPDATE jobs SET lease=NULL WHERE lease=?', l.id);
+      });
+      await this.cleanup(l);
+      return json({ error: 'Mint failed; claim released' }, 502);
+    }
+  }
+  async fetch(req: Request): Promise<Response> {
+    const url = new URL(req.url), path = url.pathname;
+    if (path === '/ingest' && req.method === 'POST') {
+      const p: any = await req.json(), repo = p.repository.full_name, job = p.workflow_job;
+      this.rows('INSERT OR REPLACE INTO repos VALUES(?,?)', repo, Date.now());
+      if (p.action === 'queued') this.add(repo, job);
+      if (['in_progress', 'completed'].includes(p.action)) await this.end(job.id, p.action === 'completed');
+      return json({ ok: true });
+    }
+    if (path === '/lease' && req.method === 'GET') {
+      const label = url.searchParams.get('label') ?? '', box = url.searchParams.get('box') ?? '';
+      if (!labels.includes(label) || !/^[\w.-]{1,80}$/.test(box)) return json({ error: 'Invalid label or box' }, 400);
+      this.rows('INSERT OR REPLACE INTO boxes VALUES(?,?,?)', box, label, Date.now());
+      const deadline = Date.now() + 25_000;
+      do {
+        const r = await this.mint(label, box);
+        if (r) return r;
+        await pause(Math.min(1000, Math.max(0, deadline - Date.now())));
+      } while (Date.now() < deadline);
+      return new Response(null, { status: 204 });
+    }
+    if (path === '/done' && req.method === 'POST') {
+      const b: any = await req.json();
+      if (typeof b.lease_id !== 'string' || !Number.isSafeInteger(b.runner_id) || !repoPattern.test(b.repo)) return json({ error: 'Invalid lease' }, 400);
+      const lease = this.rows('SELECT * FROM leases WHERE id=? AND repo=? AND runner=?', b.lease_id, b.repo, b.runner_id)[0];
+      if (!lease) return json({ deleted: true });
+      this.rows('UPDATE leases SET closing=1 WHERE id=?', lease.id);
+      const deleted = await this.cleanup(lease);
+      return json({ deleted }, deleted ? 200 : 502);
+    }
+    if (path === '/status' && req.method === 'GET') {
+      const open: Row = {}, claimed: Row = {}, boxes: Row = {};
+      for (const label of labels) {
+        open[label] = this.rows('SELECT COUNT(*) n FROM jobs WHERE label=? AND lease IS NULL', label)[0].n;
+        claimed[label] = this.rows('SELECT COUNT(*) n FROM jobs WHERE label=? AND lease IS NOT NULL', label)[0].n;
+        boxes[label] = this.rows('SELECT box,seen FROM boxes WHERE label=? AND seen>?', label, Date.now() - 600_000);
+      }
+      return json({ open, claimed, boxes });
+    }
+    if (path === '/sweep' && req.method === 'POST') return json(await this.sweep());
+    return json({ error: 'Not found' }, 404);
+  }
+  async sweep() {
+    let errors = 0;
+    for (const l of this.rows('SELECT * FROM leases WHERE closing=1 OR created<?', Date.now() - 180_000)) {
+      try {
+        const r = await this.gh(`/repos/${l.repo}/actions/jobs/${l.job}`);
+        if (!r.ok && r.status !== 404) throw new Error('Job lookup failed');
+        const job: any = r.ok ? await r.json() : { status: 'completed' };
+        if (!l.closing && job.status === 'in_progress') { await this.end(l.job, false); continue; }
+        if (job.status !== 'queued') await this.end(l.job, false);
+        this.rows('UPDATE leases SET closing=1 WHERE id=?', l.id);
+        if (!await this.cleanup(l)) errors++;
+      } catch { errors++; }
+    }
+    for (const { repo } of this.rows('SELECT repo FROM repos WHERE seen>?', Date.now() - 172_800_000)) {
+      try {
+        if ((await this.data(`/repos/${repo}`)).private !== true) {
+          this.rows('DELETE FROM jobs WHERE repo=?', repo);
+          this.rows('DELETE FROM repos WHERE repo=?', repo);
+          continue;
+        }
+        for (const status of ['queued', 'in_progress']) {
+          for (const run of await this.list(`/repos/${repo}/actions/runs?status=${status}`, 'workflow_runs')) {
+            for (const job of await this.list(`/repos/${repo}/actions/runs/${run.id}/jobs`, 'jobs')) {
+              if (job.status === 'queued') this.add(repo, job);
+              else await this.end(job.id, job.status === 'completed');
+            }
+          }
+        }
+        for (const job of this.rows('SELECT id FROM jobs WHERE repo=?', repo)) {
+          const current = await this.data(`/repos/${repo}/actions/jobs/${job.id}`);
+          if (current.status !== 'queued') await this.end(job.id, current.status === 'completed');
+        }
+      } catch { errors++; }
+    }
+    this.rows('DELETE FROM ended WHERE seen<?', Date.now() - 172_800_000);
+    this.rows('DELETE FROM boxes WHERE seen<?', Date.now() - 172_800_000);
+    if (errors) throw new Error(`${errors} reconciliation failures`);
+    return { ok: true };
+  }
+}
