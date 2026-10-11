@@ -120,6 +120,8 @@ def parse(t):
 
 def tier(labels):
     l = labels.lower()
+    if any(label in ("boat", "boat-8") for label in l.split("|")): return "boat"
+    # Keep old Ubicloud runs in the cloud tier for comparison.
     if "ubicloud" in l: return "cloud"
     if "self-hosted" in l or "dell" in l: return "self-hosted"
     return "hosted"
