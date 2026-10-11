@@ -1,0 +1,31 @@
+{
+  "company_website": "https://beeloud.xyz",
+  "contact_role": "Founder",
+  "prerequisites": "None. The server is public and read-only; no account or API key is needed.",
+  "name": "MemoryCareHomes",
+  "slug": "memorycarehomes-fyi",
+  "mcp_url": "https://memorycarehomes.fyi/mcp",
+  "one_liner": "Memory care homes, checkable against the public register \u2014 search by place and compare providers.",
+  "description": "MemoryCareHomes lists memory care homes with public-register checks. Search homes, list places and categories, get one home's details, and see where the data comes from \u2014 every result carries its source and license.",
+  "categories": [
+    "Consumer Health",
+    "Data & Analytics"
+  ],
+  "docs_url": "https://memorycarehomes.fyi/developers",
+  "support": "support@memorycarehomes.fyi",
+  "privacy_url": "https://memorycarehomes.fyi/privacy",
+  "use_cases": [
+    {
+      "use_case": "Find memory care homes near a city",
+      "prompt": "Show me memory care homes in Sacramento"
+    },
+    {
+      "use_case": "Check a home's details",
+      "prompt": "What services does this memory care home offer?"
+    },
+    {
+      "use_case": "See data provenance",
+      "prompt": "Where does the memory care data come from?"
+    }
+  ]
+}
