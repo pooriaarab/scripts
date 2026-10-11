@@ -1,6 +1,7 @@
-interface Env { GITHUB_TOKEN: string; WEBHOOK_SECRET: string; POOL_TOKEN: string; BROKER: DurableObjectNamespace }
+interface Env { APP_ID: string; APP_INSTALLATION_ID: string; APP_PRIVATE_KEY: string; WEBHOOK_SECRET: string; POOL_TOKEN: string; BROKER: DurableObjectNamespace }
 const labels = ['boat', 'boat-8'];
 const json = (body: unknown, status = 200) => Response.json(body, { status });
+const b64url = (bytes: ArrayBuffer | Uint8Array) => btoa(String.fromCharCode(...new Uint8Array(bytes))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 const pause = (ms: number) => new Promise(r => setTimeout(r, ms));
 const repoPattern = /^pooriaarab\/[A-Za-z0-9_.-]+$/;
 async function signature(raw: string, header: string | null, secret: string) {
@@ -53,8 +54,24 @@ export class BrokerDO {
     this.sql.exec('CREATE TABLE IF NOT EXISTS boxes(box TEXT PRIMARY KEY, label TEXT, seen INTEGER)');
   }
   rows(query: string, ...args: any[]): Row[] { return this.sql.exec(query, ...args).toArray(); }
+  // GitHub App installation token. It has its own rate budget, so the owner's
+  // personal token budget running dry no longer stops runner minting.
+  app?: { token: string; expires: number };
+  async token(): Promise<string> {
+    if (this.app && this.app.expires - Date.now() > 300_000) return this.app.token;
+    const der = Uint8Array.from(atob(this.env.APP_PRIVATE_KEY.replace(/-----[^-]+-----|\s/g, '')), c => c.charCodeAt(0));
+    const key = await crypto.subtle.importKey('pkcs8', der, { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' }, false, ['sign']);
+    const now = Math.floor(Date.now() / 1000), enc = new TextEncoder();
+    const unsigned = b64url(enc.encode(JSON.stringify({ alg: 'RS256', typ: 'JWT' }))) + '.' + b64url(enc.encode(JSON.stringify({ iat: now - 60, exp: now + 540, iss: this.env.APP_ID })));
+    const jwt = unsigned + '.' + b64url(await crypto.subtle.sign('RSASSA-PKCS1-v1_5', key, enc.encode(unsigned)));
+    const r = await fetch(`https://api.github.com/app/installations/${this.env.APP_INSTALLATION_ID}/access_tokens`, { method: 'POST', headers: { Authorization: `Bearer ${jwt}`, Accept: 'application/vnd.github+json', 'User-Agent': 'boat-runners' }, signal: AbortSignal.timeout(20_000) });
+    if (!r.ok) throw new Error(`App token ${r.status}`);
+    const t: any = await r.json();
+    this.app = { token: t.token, expires: Date.parse(t.expires_at) };
+    return t.token;
+  }
   async gh(path: string, method = 'GET', body?: unknown) {
-    return fetch(`https://api.github.com${path}`, { method, headers: { Authorization: `Bearer ${this.env.GITHUB_TOKEN}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': 'boat-runners', 'Content-Type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(20_000) });
+    return fetch(`https://api.github.com${path}`, { method, headers: { Authorization: `Bearer ${await this.token()}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': 'boat-runners', 'Content-Type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(20_000) });
   }
   async data(path: string) {
     const r = await this.gh(path);
