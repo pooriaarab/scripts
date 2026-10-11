@@ -48,10 +48,14 @@ mapfile_compat() { while IFS= read -r l; do [[ -n "$l" ]] && printf '%s\n' "$l";
 UNBOUNDED="$(printf '%s' "$listing" | python3 -c '
 import sys, json
 try:
-    boxes = json.load(sys.stdin).get("boxes", [])
+    boxes = json.load(sys.stdin)["sandboxes"]
 except Exception:
     sys.exit(0)
 for b in boxes:
+    # The Boat CI runner pool runs without a deadline on purpose: an expired
+    # deadline stops CI on every private repo (2026-10-11 10:22Z).
+    if (b.get("environment") or "").startswith("boat-runner-"):
+        continue
     if not b.get("archiveAfter"):
         print("%s\t%s\t%s" % (b["id"], b.get("state","?"), b.get("environment","-")))
 ' | mapfile_compat)"
@@ -69,7 +73,7 @@ while IFS=$'\t' read -r id state env; do
     if "$BOX" extend "$id" --ttl "$TTL" >/dev/null 2>&1; then
       after="$("$BOX" info "$id" --json 2>/dev/null | python3 -c '
 import sys,json
-try: print(json.load(sys.stdin)["box"].get("archiveAfter") or "STILL NONE")
+try: print(json.load(sys.stdin)["sandbox"].get("archiveAfter") or "STILL NONE")
 except Exception: print("?")')"
       echo "  bounded $id ($state, env=$env) -> $after"
     else
