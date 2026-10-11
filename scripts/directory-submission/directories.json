@@ -45,10 +45,10 @@
     {"name": "Easy With AI", "url": "https://easywithai.com", "submit": "https://easywithai.com", "dr": 27, "link": "dofollow", "cost": "free", "method": "form-account", "gate": "None."}
   ],
   "web_longtail": [
-    {"name": "Uneed", "url": "https://www.uneed.best", "submit": "https://www.uneed.best", "dr": 32, "link": "dofollow", "cost": "free", "method": "form-account", "gate": "None."},
-    {"name": "Fazier", "url": "https://fazier.com", "submit": "https://fazier.com", "dr": 45, "link": "nofollow", "cost": "free", "method": "form-account", "gate": "Free + paid lanes."},
+    {"name": "Uneed", "url": "https://www.uneed.best", "submit": "https://www.uneed.best", "dr": 32, "link": "dofollow", "cost": "free", "method": "form-account", "gate": "Free waiting line: product needs a logo uploaded before Schedule enables; join-waiting-line 429s after a burst of clicks — space joins minutes apart. Free date queues ~13 months out."},
+    {"name": "Fazier", "url": "https://fazier.com", "submit": "https://fazier.com", "dr": 45, "link": "nofollow", "cost": "free", "method": "form-account", "gate": "Free launch gate: (1) post 3 approved comments on other products, (2) add product link, (3) embed the Fazier badge <a href=fazier.com><img launch_badges.svg></a> on the homepage — Verify Badge fetches the page. DR>0 required. OAuth popup needs a trusted click; email signup + Gmail verify link works."},
     {"name": "Launched.io", "url": "https://launched.io", "submit": "https://launched.io", "dr": 35, "link": "dofollow", "cost": "free", "method": "form-account", "gate": "Fetch fails as of 2026-10; recheck before submitting.", "automatable": "none"},
-    {"name": "MicroLaunch", "url": "https://microlaunch.net", "submit": "https://microlaunch.net", "dr": 30, "link": "dofollow", "cost": "free", "method": "form-account", "gate": "None."},
+    {"name": "MicroLaunch", "url": "https://microlaunch.net", "submit": "https://microlaunch.net", "dr": 30, "link": "dofollow", "cost": "paid", "method": "form-account", "gate": "Paid-only as of 2026-11: launch dialog offers Pro $39 and Plus $79, no free tier. Skip unless a free queue returns."},
     {"name": "Open Launch", "url": "https://openlaunch.ai", "submit": "https://openlaunch.ai", "dr": 30, "link": "nofollow", "cost": "free", "method": "form-account", "gate": "None."},
     {"name": "Launch Vault", "url": "https://www.launchvault.dev", "submit": "https://www.launchvault.dev", "dr": 30, "link": "nofollow", "cost": "free", "method": "form-account", "gate": "None."},
     {"name": "NextGen Tools", "url": "https://www.nxgntools.com", "submit": "https://www.nxgntools.com", "dr": 25, "link": "conditional-dofollow", "cost": "free", "method": "form-account", "gate": "None."},
@@ -79,7 +79,7 @@
   "web_engines": [
     {"name": "Internet Archive", "url": "https://web.archive.org", "submit": "https://web.archive.org/save/", "link": "nofollow", "cost": "free", "method": "api", "gate": "GET /save/<url> anonymous; instant snapshot feeds the largest public crawl archive."},
     {"name": "Mojeek", "url": "https://www.mojeek.com", "submit": "https://www.mojeek.com", "link": "crawl", "cost": "free", "method": "crawl", "gate": "Independent index; suggest a URL via their site contact; no public submit API."},
-    {"name": "Wiby", "url": "https://wiby.me", "submit": "https://wiby.me/submit/", "link": "crawl", "cost": "free", "method": "form-captcha", "gate": "Confirmed: image captcha read from browser screenshot; ~1-3 tries per site. Keep worksafe checked.", "automatable": "browser"},
+    {"name": "Wiby", "url": "https://wiby.me", "submit": "https://wiby.me/submit/", "link": "crawl", "cost": "free", "method": "form-captcha", "gate": "Image CAPTCHA (securimage) defeats OCR at this distortion — ~1 in 12 reads landed. Fresh page load per attempt; reload-image desyncs; worksafe checkbox required. Budget real retry time or skip.", "automatable": "browser"},
     {"name": "Marginalia", "url": "https://marginalia-search.com", "submit": "https://marginalia-search.com", "link": "crawl", "cost": "free", "method": "pitch", "gate": "Indie-web index; suggest through the site explorer."},
     {"name": "Entireweb", "url": "https://www.entireweb.com", "submit": "https://www.entireweb.com/free_submission/", "link": "crawl", "cost": "free", "method": "form-anon", "gate": "Free submission form; the site bot-blocks scripts, expect to do it by hand."}
   ],
