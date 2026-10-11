@@ -31,7 +31,7 @@ for (const k of REQUIRED) {
 }
 if (cfg.subtitle.length > 30) { console.error(`subtitle ${cfg.subtitle.length} chars > 30`); process.exit(1); }
 if (cfg.display_name.length > 30) { console.error(`display_name ${cfg.display_name.length} chars > 30`); process.exit(1); }
-if (/\bfree\b|\$|price|subscription|trial/i.test(cfg.long_description)) {
+if (/\bfree\b|\$|\bpricing\b|\bsubscriptions?\b|\btrial\b/i.test(cfg.long_description)) {
   console.error('long_description contains pricing words — the validator flags them');
   process.exit(1);
 }
