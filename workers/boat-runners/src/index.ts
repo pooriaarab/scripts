@@ -58,8 +58,14 @@ export class BrokerDO {
   // GitHub App installation token. It has its own rate budget, so the owner's
   // personal token budget running dry no longer stops runner minting.
   app?: { token: string; expires: number };
-  async token(): Promise<string> {
-    if (this.app && this.app.expires - Date.now() > 300_000) return this.app.token;
+  minting?: Promise<string>;
+  token(): Promise<string> {
+    if (this.app && this.app.expires - Date.now() > 300_000) return Promise.resolve(this.app.token);
+    // Concurrent requests share one exchange instead of minting a token each.
+    this.minting ??= this.newToken().finally(() => { this.minting = undefined; });
+    return this.minting;
+  }
+  async newToken(): Promise<string> {
     const der = Uint8Array.from(atob(this.env.APP_PRIVATE_KEY.replace(/-----[^-]+-----|\s/g, '')), c => c.charCodeAt(0));
     const key = await crypto.subtle.importKey('pkcs8', der, { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' }, false, ['sign']);
     const now = Math.floor(Date.now() / 1000), enc = new TextEncoder();
@@ -133,7 +139,10 @@ export class BrokerDO {
       // The sweep no longer re-checks privacy, so this is the gate: a repo that
       // went public after its job was queued must never get a runner.
       const repo = await this.data(`/repos/${l.repo}`);
-      const job = await this.data(`/repos/${l.repo}/actions/jobs/${l.job}`);
+      const jr = await this.gh(`/repos/${l.repo}/actions/jobs/${l.job}`);
+      // A deleted run or job never comes back: end it instead of retrying.
+      const job: any = jr.status === 404 ? { status: 'gone' } : jr.ok ? await jr.json() : null;
+      if (!job) throw new Error(`GitHub ${jr.status}`);
       if (repo.private !== true || job.status !== 'queued') {
         await this.end(l.job, job.status !== 'in_progress');
         this.rows('UPDATE leases SET closing=1 WHERE id=?', l.id);
