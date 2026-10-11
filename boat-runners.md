@@ -29,6 +29,14 @@ Inspect it with `systemctl status boat-runner-agent` and
 The agent persists each lease before launch. After a runner exits or a service
 restart it reports done before taking another lease. Failed reports retry every
 five seconds. An idle runner stops after 180 seconds; a job-start hook disables
-that idle timer. Cleanup removes `_work/<repo>` and retains `_work/_tool`, Bun,
-Playwright and tagged Docker images. Docker image pruning runs once a day.
+that idle timer. Cleanup removes `_work/<repo>`, force-removes containers created
+after the lease start, and uses noninteractive sudo to remove new `/tmp` entries
+with modification times after that start, owned by `user` or root. A persisted
+snapshot preserves pre-existing `/tmp` entries even when a job modifies them;
+symlinks are removed without following their targets. On these dedicated pool
+Boxes, new temporary entries and containers from the same users during a lease
+are treated as job resources. Cleanup errors are logged without blocking the
+next lease. Older lease files without cleanup metadata skip temporary/container
+cleanup. Cleanup retains `_work/_tool`, Bun, Playwright and Docker images.
+Docker image pruning runs once a day.
 Broker/GitHub outages delay work until lease cleanup is acknowledged.
