@@ -50,6 +50,7 @@ jobs:
         continue-on-error: true
         run: |
           set -euo pipefail
+          python3 gh-app.test.py
           python3 boat-ci.test.py
           python3 build-repo-prefixes.test.py
           python3 worker-preview-provision.test.py
