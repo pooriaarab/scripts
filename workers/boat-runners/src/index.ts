@@ -44,6 +44,7 @@ export class BrokerDO {
     this.sql.exec('CREATE TABLE IF NOT EXISTS leases(id TEXT PRIMARY KEY, job INTEGER, repo TEXT, name TEXT, runner INTEGER, created INTEGER, closing INTEGER DEFAULT 0, pending INTEGER DEFAULT 1)');
     this.sql.exec('CREATE TABLE IF NOT EXISTS ended(id INTEGER PRIMARY KEY, seen INTEGER)');
     this.sql.exec('CREATE TABLE IF NOT EXISTS repos(repo TEXT PRIMARY KEY, seen INTEGER)');
+    this.sql.exec('CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v INTEGER)');
     this.sql.exec('CREATE TABLE IF NOT EXISTS boxes(box TEXT PRIMARY KEY, label TEXT, seen INTEGER)');
   }
   rows(query: string, ...args: any[]): Row[] { return this.sql.exec(query, ...args).toArray(); }
@@ -187,13 +188,17 @@ export class BrokerDO {
         if (!await this.cleanup(l)) errors++;
       } catch { errors++; }
     }
-    for (const { repo } of this.rows('SELECT repo FROM repos WHERE seen>?', Date.now() - 172_800_000)) {
+    // The reconcile costs several API calls per repo and shares the owner's
+    // 5,000/h budget, so it runs every 10 minutes and only for repos active in
+    // the last 2 hours. Lease expiry above still runs on every 2-minute tick.
+    // Privacy is checked again when a lease is minted.
+    const now = Date.now();
+    const last = this.rows("SELECT v FROM meta WHERE k='reconciled'")[0]?.v ?? 0;
+    const due = now - last >= 600_000;
+    if (due) this.rows("INSERT OR REPLACE INTO meta VALUES('reconciled',?)", now);
+    const repos = due ? this.rows('SELECT repo FROM repos WHERE seen>?', now - 7_200_000) : [];
+    for (const { repo } of repos) {
       try {
-        if ((await this.data(`/repos/${repo}`)).private !== true) {
-          this.rows('DELETE FROM jobs WHERE repo=?', repo);
-          this.rows('DELETE FROM repos WHERE repo=?', repo);
-          continue;
-        }
         for (const status of ['queued', 'in_progress']) {
           for (const run of await this.list(`/repos/${repo}/actions/runs?status=${status}`, 'workflow_runs')) {
             for (const job of await this.list(`/repos/${repo}/actions/runs/${run.id}/jobs`, 'jobs')) {
