@@ -121,6 +121,7 @@ sudo install -m 600 /dev/stdin /etc/boat-runner.env <<'BOAT_ENV'
 {values}BOAT_ENV
 sudo install -m 644 /dev/stdin /etc/systemd/system/boat-runner-agent.service <<'BOAT_UNIT'
 {unit}BOAT_UNIT
+touch /home/user/.box-reap-keep
 sudo systemctl daemon-reload
 sudo systemctl enable boat-runner-agent
 sudo systemctl restart boat-runner-agent

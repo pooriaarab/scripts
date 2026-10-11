@@ -198,7 +198,7 @@ tmp_probe=$(mktemp)
 tmp_plan=$(mktemp)
 trap 'rm -f "$tmp_limits" "$tmp_boxes" "$tmp_probe" "$tmp_plan" 2>/dev/null; true' EXIT
 
-limits_json=$(box limits --json 2>&1 || true)
+limits_json=$(box limits --json 2>/dev/null || true)
 if ! echo "$limits_json" | python3 -c 'import sys,json; json.load(sys.stdin)["creditBalanceSeconds"]' >/dev/null 2>&1; then
   echo "error: box not authenticated, or 'box limits' failed. Run 'box login <api-key>'." >&2
   echo "$limits_json" | head -3 >&2
@@ -206,8 +206,8 @@ if ! echo "$limits_json" | python3 -c 'import sys,json; json.load(sys.stdin)["cr
 fi
 printf '%s' "$limits_json" > "$tmp_limits"
 
-list_json=$(box list --json --filter r 2>&1 || true)
-if ! echo "$list_json" | python3 -c 'import sys,json; json.load(sys.stdin)["boxes"]' >/dev/null 2>&1; then
+list_json=$(box list --json --filter r 2>/dev/null || true)
+if ! echo "$list_json" | python3 -c 'import sys,json; json.load(sys.stdin)["sandboxes"]' >/dev/null 2>&1; then
   echo "error: failed to list Boxes." >&2
   echo "$list_json" | head -3 >&2
   exit 1
@@ -220,7 +220,7 @@ printf '%s' "$list_json" > "$tmp_boxes"
 if [[ -n "$THRESHOLD" ]] && (( ! NO_PROBE )); then
   candidates=$(python3 - "$tmp_boxes" "$THRESHOLD" "$BOX_FILTER" <<'PY'
 import sys, json, datetime
-boxes = json.load(open(sys.argv[1]))["boxes"]
+boxes = json.load(open(sys.argv[1]))["sandboxes"]
 raw = sys.argv[2]
 unit = raw[-1] if raw[-1].isalpha() else "s"
 mult = {"s": 1, "m": 60, "h": 3600, "d": 86400}[unit]
@@ -229,6 +229,10 @@ only = set(sys.argv[3].split()) if sys.argv[3].strip() else None
 now = datetime.datetime.now(datetime.timezone.utc)
 for b in boxes:
     if only and b["id"] not in only:
+        continue
+    # The Boat CI runner pool must never be reaped: a busy runner Box can
+    # look quiet between jobs, and stopping it stops CI on every private repo.
+    if (b.get("environment") or "").startswith("boat-runner-"):
         continue
     if b.get("state") in ("running", "provisioning", "provisioned", "cloning", "archiving", "stopping"):
         continue
@@ -268,7 +272,7 @@ require_heartbeat = require_heartbeat == "1"
 load_threshold = float(load_threshold)
 cpu_threshold = float(cpu_threshold)
 
-boxes = json.load(open(boxes_path))["boxes"]
+boxes = json.load(open(boxes_path))["sandboxes"]
 limits = json.load(open(limits_path))
 only = set(box_filter.split()) if box_filter.strip() else None
 
@@ -332,6 +336,10 @@ BUSY_STATES = ("running", "provisioning", "provisioned", "cloning", "archiving",
 rows = []
 for b in boxes:
     if only and b["id"] not in only:
+        continue
+    # The Boat CI runner pool must never be reaped: a busy runner Box can
+    # look quiet between jobs, and stopping it stops CI on every private repo.
+    if (b.get("environment") or "").startswith("boat-runner-"):
         continue
     created = parse_ts(b.get("createdAt"))
     age = (now - created).total_seconds() if created else 0
@@ -423,8 +431,8 @@ period_end = parse_ts(limits.get("subscriptionCurrentPeriodEnd"))
 secs_left = (period_end - now).total_seconds() if period_end else None
 projected = burn_rate * secs_left if secs_left is not None else None
 
-active = limits.get("activeBoxes") or len(rows)
-max_active = limits.get("maxActiveBoxes") or 0
+active = limits.get("activeSandboxes") or len(rows)
+max_active = limits.get("maxActiveSandboxes") or 0
 starts = limits.get("starts") or {}
 per_min = starts.get("minute") or {}
 per_day = starts.get("day") or {}
@@ -460,7 +468,7 @@ with open(plan_path, "w") as fh:
         fh.write(bid + "\n")
 
 account = {
-    "plan": limits.get("boxPlanKey"),
+    "plan": limits.get("activeSandboxPlanKey"),
     "creditUsedSeconds": limits.get("creditUsedSeconds"),
     "creditBalanceSeconds": balance,
     "creditBalanceHours": limits.get("creditBalanceHours"),
