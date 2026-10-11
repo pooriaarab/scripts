@@ -56,7 +56,7 @@ for line in lines:
         blk.append(line)
 if cur is not None: jobs.append((cur, "\n".join(blk)))
 for n,b in jobs:
-    m=re.search(r'^\s+runs-on:\s*(.+?)\s*$', b, re.M)
+    m=re.search(r'^[ \t]+runs-on:[ \t]*(.+?)[ \t]*$', b, re.M)
     runs=m.group(1).strip() if m else ""
     if not runs:
         # block list form:
@@ -67,7 +67,7 @@ for n,b in jobs:
         #   runs-on:
         #     group: my-group
         #     labels: [self-hosted, linux]
-        lm=re.search(r'^\s+runs-on:\s*$', b, re.M)
+        lm=re.search(r'^[ \t]+runs-on:[ \t]*$', b, re.M)
         items=[]
         map_parts=[]
         if lm:
@@ -103,7 +103,8 @@ trap 'rm -f "$tmp_rows" "$_parse_py" 2>/dev/null; true' EXIT
 
 tier_of() {
   local r="$1"
-  if [[ "$r" == *"self-hosted"* ]]; then echo "self-hosted"
+  if [[ "$r" =~ (^|[^[:alnum:]_-])boat(-8)?($|[^[:alnum:]_-]) ]]; then echo "boat"
+  elif [[ "$r" == *"self-hosted"* ]]; then echo "self-hosted"
   elif [[ "$r" == *"ubicloud"* ]]; then echo "cloud"
   else echo "hosted"
   fi
@@ -155,6 +156,8 @@ for repo in $repos; do
       [[ -z "$job" ]] && continue
       tier=$(tier_of "$runs_on")
       warnings=()
+      # Compare legacy Ubicloud labels with the Boat tier.
+      if [[ "$runs_on" == *"ubicloud-"* ]]; then warnings+=("legacy Ubicloud runner: use Boat for private repos"); fi
       if [[ "$tier" == "self-hosted" && "$has_services" == "1" ]]; then warnings+=("services on self-hosted (fixed ports cannot be shared)"); fi
       if [[ "$tier" == "self-hosted" && "$has_cache" == "1" ]]; then warnings+=("actions/cache on self-hosted (round-trips to provider)"); fi
       warn_str=""

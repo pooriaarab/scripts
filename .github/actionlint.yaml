@@ -1,0 +1,1 @@
+self-hosted-runner: { labels: [boat, boat-8] }
