@@ -112,10 +112,11 @@ export class BrokerDO {
     if (!lease) return null;
     const l = lease;
     try {
-      // Only private-repo webhooks and the private-repo sweep add jobs, so the
-      // repo is not fetched again here.
+      // The sweep no longer re-checks privacy, so this is the gate: a repo that
+      // went public after its job was queued must never get a runner.
+      const repo = await this.data(`/repos/${l.repo}`);
       const job = await this.data(`/repos/${l.repo}/actions/jobs/${l.job}`);
-      if (job.status !== 'queued') {
+      if (repo.private !== true || job.status !== 'queued') {
         await this.end(l.job, job.status !== 'in_progress');
         this.rows('UPDATE leases SET closing=1 WHERE id=?', l.id);
         await this.cleanup(l);
@@ -199,7 +200,7 @@ export class BrokerDO {
     // The reconcile costs several API calls per repo and shares the owner's
     // 5,000/h budget, so it runs every 10 minutes and only for repos active in
     // the last 2 hours. Lease expiry above still runs on every 2-minute tick.
-    // Privacy is checked again when a lease is minted.
+    // Privacy is re-checked in mint() before any runner is issued.
     const now = Date.now();
     const last = this.rows("SELECT v FROM meta WHERE k='reconciled'")[0]?.v ?? 0;
     const due = now - last >= 600_000;
