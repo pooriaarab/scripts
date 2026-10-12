@@ -165,6 +165,12 @@ out=$(sync --open --issue 21 2>&1); rc=$?
   && grep -q 'Closes #21' "$GH_LOG" && ! git -C "$w" show-ref -q --verify refs/heads/abc-21-ship-sync \
   && ok "fast-forward reuses the supplied issue" || fail_msg "fast-forward reuse: $out"
 
+# A default branch not named main cannot be a head that pr-standards exempts: ours-merge path.
+git -C "$s" push -q origin "main:refs/heads/trunk"
+out=$(sync --main trunk --issue 22 2>&1); rc=$?
+[ "$rc" -eq 0 ] && echo "$out" | grep -q 'ours-merge path.*default branch trunk is not named main' && ! echo "$out" | grep -q 'fast-forward path' \
+  && ok "a default branch not named main takes the ours-merge path" || fail_msg "trunk path (rc $rc): $out"
+
 # 12: no merge path.
 if grep -qE 'pr merge|/merge' "$GH_LOG" || grep -qE 'gh pr merge|/merge' "$SCRIPT_DIR/ship-sync"; then
   fail_msg "a merge call exists"

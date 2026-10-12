@@ -72,13 +72,21 @@ fi
 
 read -r behind ahead < <(git rev-list --left-right --count "origin/$main...origin/$prod")
 [ -n "$behind" ] && [ -n "$ahead" ] || die "cannot compare branches"
-if [ "$ahead" -eq 0 ]; then
+# pr-standards exempts a head branch from the name rule only when it is called `main`,
+# so a default branch with another name (trunk, production) takes the ours-merge path.
+ff=0
+[ "$ahead" -eq 0 ] && [ "$main" = main ] && ff=1
+if [ "$ff" -eq 1 ]; then
   echo "ship-sync: fast-forward path: $prod behind $behind, ahead $ahead; use head $main without a push" >&2
   merge_rc=0
   git merge-tree --write-tree "origin/$prod" "origin/$main" >/dev/null || merge_rc=$?
   [ "$merge_rc" -eq 0 ] || die "merge-tree exited $merge_rc; nothing pushed; no alternate path"
 else
-  echo "ship-sync: diverged path: $prod behind $behind, ahead $ahead; use an ours-merge branch" >&2
+  if [ "$ahead" -eq 0 ]; then
+    echo "ship-sync: ours-merge path: $prod behind $behind, ahead $ahead, default branch $main is not named main; use an ours-merge branch" >&2
+  else
+    echo "ship-sync: diverged path: $prod behind $behind, ahead $ahead; use an ours-merge branch" >&2
+  fi
 fi
 
 name="${repo#*/}"; version=""
@@ -98,10 +106,10 @@ if [ -z "$issue" ]; then
     || die "issue creation failed; nothing pushed"
 fi
 
-if [ "$ahead" -eq 0 ]; then
+if [ "$ff" -eq 1 ]; then
   b="$main"
   sha=$(git rev-parse "origin/$main")
-  details="$prod has no commits that $main lacks. The PR uses $main directly as its head."
+  details="$prod has no commits that $main lacks. The PR uses $main directly as its head, so it follows main until it merges. The merge gate pins the checked commit with --match-head-commit."
   evidence=$(printf '`git rev-list --left-right --count origin/%s...origin/%s` -> behind %s, ahead %s\n`git merge-tree --write-tree origin/%s origin/%s` -> exit %s' \
     "$main" "$prod" "$behind" "$ahead" "$prod" "$main" "$merge_rc")
 else
@@ -138,7 +146,7 @@ EOF
 if [ -n "$bodyout" ]; then printf '%s\n' "$body" > "$bodyout"; else printf '%s\n' "$body"; fi
 
 if [ "$open" = 1 ]; then
-  if [ "$ahead" -gt 0 ]; then git push -q -u origin "$b"; fi
+  if [ "$ff" -eq 0 ]; then git push -q -u origin "$b"; fi
   P=$(printf '%s' "$prefix" | tr '[:lower:]' '[:upper:]')
   pr=$(gh api "repos/$repo/pulls" -f "title=[$P-$issue] $subject" -f "head=$b" -f "base=$prod" \
     -f "body=$body" --jq .number)
