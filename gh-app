@@ -1,0 +1,231 @@
+#!/usr/bin/env python3
+"""Create, install, and authenticate personal GitHub Apps."""
+import argparse
+import base64
+import html
+import json
+import os
+from pathlib import Path
+import re
+import secrets
+import shlex
+import subprocess
+import sys
+import time
+from urllib.parse import parse_qs, urlparse
+
+ROOT = Path.home() / 'Documents/Personal/.secrets'
+
+
+def fail(message):
+    raise RuntimeError(message)
+
+
+def command(args, data=None):
+    result = subprocess.run(args, input=data, capture_output=True, timeout=60)
+    if result.returncode:
+        fail(f'{Path(args[0]).name} failed (exit {result.returncode}); output withheld to protect secrets.')
+    return result.stdout
+
+
+def browser(*args):
+    return command(['zsh', '-ic', 'browser-personal "$@"', 'gh-app', *args])
+
+
+def tabs():
+    result = json.loads(browser('tab', 'list', '--json'))
+    if not result.get('success'):
+        fail('Cannot read browser tabs.')
+    return result['data']['tabs']
+
+
+def wait_url(match, target=None):
+    deadline = time.monotonic() + float(os.getenv('GH_APP_WAIT_SECONDS', '600'))
+    while True:
+        for tab in tabs():
+            if target is not None and tab.get('targetId') != target:
+                continue
+            found = match(urlparse(tab['url']))
+            if found:
+                return found
+        if time.monotonic() >= deadline:
+            fail('Browser wait expired. Check the App status before retrying.')
+        time.sleep(2)
+
+
+def api(path, method='POST', bearer=None):
+    # curl reads credentials from stdin, not the process argument list.
+    config = [f'url = "https://api.github.com{path}"', f'request = "{method}"',
+              'header = "Accept: application/vnd.github+json"',
+              'header = "X-GitHub-Api-Version: 2022-11-28"']
+    if bearer:
+        config.append(f'header = "Authorization: Bearer {bearer}"')
+    return json.loads(command(['curl', '--fail', '--silent', '--show-error',
+                              '--max-time', '30', '--config', '-'], '\n'.join(config).encode()))
+
+
+def write(path, text):
+    # Replace atomically; never follow an existing destination symlink.
+    temp = path.with_name(path.name + '.tmp-' + secrets.token_hex(6))
+    try:
+        with temp.open('x') as stream:
+            os.chmod(temp, 0o600)
+            stream.write(text)
+        temp.replace(path)
+    finally:
+        temp.unlink(missing_ok=True)
+
+
+def read_env(folder):
+    values = {}
+    for line in (folder / 'app.env').read_text().splitlines():
+        if line.strip() and not line.startswith('#'):
+            key, value = line.removeprefix('export ').split('=', 1)
+            parts = shlex.split(value)
+            values[key] = parts[0] if len(parts) == 1 else ''
+    return values
+
+
+def save_env(folder, values):
+    write(folder / 'app.env', ''.join(f'{k}={shlex.quote(str(v))}\n' for k, v in values.items()))
+
+
+def name(value):
+    if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,99}', value):
+        raise argparse.ArgumentTypeError('Use 1-100 letters, digits, hyphens, or underscores.')
+    return value
+
+
+def jwt(folder, values):
+    def b64(data):
+        return base64.urlsafe_b64encode(data).decode().rstrip('=')
+    now = int(time.time())
+    header = b64(b'{"alg":"RS256","typ":"JWT"}')
+    payload = b64(json.dumps(dict(iat=now - 60, exp=now + 540, iss=values['APP_ID'])).encode())
+    message = f'{header}.{payload}'.encode()
+    signature = command(['openssl', 'dgst', '-sha256', '-sign', str(folder / 'app.pem')], message)
+    return message.decode() + '.' + b64(signature)
+
+
+def create(args):
+    permissions = {}
+    for item in args.perm:
+        if not re.fullmatch(r'[a-z_]+=(read|write)', item):
+            fail('Each permission must use permission=read or permission=write.')
+        key, value = item.split('=')
+        permissions[key] = value
+    if args.event and not args.hook_url:
+        fail('--event requires --hook-url.')
+    if args.hook_url:
+        hook = urlparse(args.hook_url)
+        if hook.scheme != 'https' or not hook.hostname or hook.username or hook.password:
+            fail('The webhook URL must use HTTPS without credentials.')
+        if hook.hostname not in [host.lower() for host in args.allow_hook_host]:
+            fail('Approve the webhook host with --allow-hook-host.')
+        print(f'Webhook destination host: {hook.hostname}', file=sys.stderr)
+    folder = ROOT / args.name
+    folder.mkdir(mode=0o700, parents=True, exist_ok=False)
+    state = secrets.token_hex(24)
+    manifest = dict(name=args.name, url='https://github.com/', redirect_url='https://github.com/',
+                    hook_attributes={'url': args.hook_url or 'https://example.com/unused', 'active': bool(args.hook_url)},
+                    public=args.public, default_permissions=permissions, default_events=args.event)
+    page = folder / 'create.html'
+    write(page, '<!doctype html><meta charset="utf-8"><title>Create GitHub App</title>\n'
+          f'<form action="https://github.com/settings/apps/new?state={state}" method="post">\n'
+          f'<input type="hidden" name="manifest" value="{html.escape(json.dumps(manifest), quote=True)}">\n'
+          '<button type="submit">Create GitHub App</button></form>\n')
+    print('Complete the manifest form in Chrome.', file=sys.stderr)
+    browser('tab', 'new', page.as_uri())
+
+    def redirect(url):
+        query = parse_qs(url.query)
+        if (url.scheme == 'https' and url.netloc == 'github.com' and url.path == '/'
+                and query.get('state') == [state]):
+            code = query.get('code', [''])[0]
+            return code if re.fullmatch(r'[A-Za-z0-9_-]+', code) else None
+    code = wait_url(redirect)
+    result = api(f'/app-manifests/{code}/conversions')
+    # Keep the one-time response for recovery, including the webhook secret.
+    write(folder / 'conversion.json', json.dumps(result))
+    write(folder / 'app.pem', result['pem'])
+    key = command(['openssl', 'pkcs8', '-topk8', '-nocrypt', '-in', str(folder / 'app.pem')])
+    write(folder / 'app-pkcs8.pem', key.decode())
+    save_env(folder, dict(APP_ID=result['id'], APP_SLUG=result['slug'], APP_CLIENT_ID=result['client_id']))
+    print(f'Saved App files in {folder}.')
+
+
+def install(args):
+    matches = [(p.parent, read_env(p.parent)) for p in ROOT.glob('*/app.env')]
+    matches = [(p, v) for p, v in matches if v.get('APP_SLUG') == args.slug]
+    if len(matches) != 1:
+        fail('The slug must match exactly one saved App.')
+    folder, values = matches[0]
+    previous = {tab['targetId'] for tab in tabs()}
+    opened = json.loads(browser('tab', 'new', f'https://github.com/apps/{args.slug}/installations/new', '--json'))
+    target = opened.get('data', {}).get('targetId')
+    if not opened.get('success') or not target or target in previous:
+        fail('Cannot identify a new installation tab.')
+    print('Complete the installation in Chrome.', file=sys.stderr)
+
+    def installed(url):
+        if url.scheme != 'https' or url.netloc != 'github.com':
+            return None
+        query = parse_qs(url.query)
+        match = re.fullmatch(r'/(?:settings|organizations/[^/]+/settings)/installations/(\d+)', url.path)
+        ident = query.get('installation_id', [match[1] if match else ''])[0]
+        if not re.fullmatch(r'\d+', ident):
+            return None
+        # A different session can finish an installation at the same time.
+        try:
+            data = api(f'/app/installations/{ident}', 'GET', jwt(folder, values))
+        except RuntimeError:
+            return None
+        owner = data.get('account', {}).get('login', '')
+        return ident if (str(data.get('app_id')) == str(values['APP_ID'])
+                         and owner.lower() == args.owner.lower()) else None
+    values['APP_INSTALLATION_ID'] = wait_url(installed, target)
+    save_env(folder, values)
+    print(f'Saved installation ID in {folder / "app.env"}.')
+
+
+def main():
+    os.umask(0o077)
+    parser = argparse.ArgumentParser(description=__doc__)
+    sub = parser.add_subparsers(dest='action', required=True)
+    p = sub.add_parser('create', help='Create a personal App through Chrome.')
+    p.add_argument('--name', type=name, required=True)
+    p.add_argument('--perm', action='append', default=[])
+    p.add_argument('--hook-url')
+    p.add_argument('--allow-hook-host', action='append', default=[], help='Approved webhook hostname; repeat as needed.')
+    p.add_argument('--event', action='append', default=[])
+    p.add_argument('--public', action='store_true')
+    p = sub.add_parser('install', help='Install a saved App through Chrome.')
+    p.add_argument('slug', type=name)
+    p.add_argument('--owner', type=name, required=True, help='Expected installation account login.')
+    p = sub.add_parser('token', help='Print an installation token. Treat stdout as a secret.')
+    p.add_argument('name', type=name)
+    args = parser.parse_args()
+    if args.action == 'create':
+        create(args)
+    elif args.action == 'install':
+        install(args)
+    else:
+        folder = ROOT / args.name
+        values = read_env(folder)
+        ident = values.get('APP_INSTALLATION_ID', '')
+        if not re.fullmatch(r'\d+', ident):
+            fail('Run gh-app install first. APP_INSTALLATION_ID is missing or invalid.')
+        result = api(f'/app/installations/{ident}/access_tokens', bearer=jwt(folder, values))
+        print(result['token'])
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except (RuntimeError, OSError, ValueError, KeyError, subprocess.TimeoutExpired) as error:
+        message = str(error) if isinstance(error, RuntimeError) else type(error).__name__ + ': check saved files and dependencies.'
+        print('gh-app: ' + message, file=sys.stderr)
+        sys.exit(1)
+    except KeyboardInterrupt:
+        print('gh-app: Stopped. Check the App status before retrying.', file=sys.stderr)
+        sys.exit(130)
