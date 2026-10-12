@@ -154,9 +154,12 @@ if ! orphan_ids="$(printf '%s' "$box_json" | WORKTREE_SLUGS="$worktree_slugs" py
 import sys, json, os
 slugs = set(os.environ.get("WORKTREE_SLUGS", "").split())
 d = json.load(sys.stdin)
-for b in d["boxes"]:
+for b in d["sandboxes"]:
     # A Box a live worktree points at is in use, whichever namespace recorded it.
     if b.get("subdomain") in slugs or b.get("name") in slugs:
+        continue
+    # Never reap the Boat CI runner pool: a busy runner Box reports idle.
+    if (b.get("environment") or "").startswith("boat-runner-"):
         continue
     print(b["id"])
 ' 2>&1)"; then
