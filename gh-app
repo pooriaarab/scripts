@@ -32,18 +32,20 @@ def browser(*args):
     return command(['zsh', '-ic', 'browser-personal "$@"', 'gh-app', *args])
 
 
-def urls():
+def tabs():
     result = json.loads(browser('tab', 'list', '--json'))
     if not result.get('success'):
         fail('Cannot read browser tabs.')
-    return [tab['url'] for tab in result['data']['tabs']]
+    return result['data']['tabs']
 
 
-def wait_url(match):
+def wait_url(match, target=None):
     deadline = time.monotonic() + float(os.getenv('GH_APP_WAIT_SECONDS', '600'))
     while True:
-        for url in urls():
-            found = match(urlparse(url))
+        for tab in tabs():
+            if target is not None and tab.get('targetId') != target:
+                continue
+            found = match(urlparse(tab['url']))
             if found:
                 return found
         if time.monotonic() >= deadline:
@@ -114,8 +116,13 @@ def create(args):
         permissions[key] = value
     if args.event and not args.hook_url:
         fail('--event requires --hook-url.')
-    if args.hook_url and (urlparse(args.hook_url).scheme != 'https' or not urlparse(args.hook_url).netloc):
-        fail('The webhook URL must use HTTPS.')
+    if args.hook_url:
+        hook = urlparse(args.hook_url)
+        if hook.scheme != 'https' or not hook.hostname or hook.username or hook.password:
+            fail('The webhook URL must use HTTPS without credentials.')
+        if hook.hostname not in [host.lower() for host in args.allow_hook_host]:
+            fail('Approve the webhook host with --allow-hook-host.')
+        print(f'Webhook destination host: {hook.hostname}', file=sys.stderr)
     folder = ROOT / args.name
     folder.mkdir(mode=0o700, parents=True, exist_ok=False)
     state = secrets.token_hex(24)
@@ -153,12 +160,15 @@ def install(args):
     if len(matches) != 1:
         fail('The slug must match exactly one saved App.')
     folder, values = matches[0]
-    previous = set(urls())
-    browser('tab', 'new', f'https://github.com/apps/{args.slug}/installations/new')
+    previous = {tab['targetId'] for tab in tabs()}
+    opened = json.loads(browser('tab', 'new', f'https://github.com/apps/{args.slug}/installations/new', '--json'))
+    target = opened.get('data', {}).get('targetId')
+    if not opened.get('success') or not target or target in previous:
+        fail('Cannot identify a new installation tab.')
     print('Complete the installation in Chrome.', file=sys.stderr)
 
     def installed(url):
-        if url.geturl() in previous or url.scheme != 'https' or url.netloc != 'github.com':
+        if url.scheme != 'https' or url.netloc != 'github.com':
             return None
         query = parse_qs(url.query)
         match = re.fullmatch(r'/(?:settings|organizations/[^/]+/settings)/installations/(\d+)', url.path)
@@ -170,8 +180,10 @@ def install(args):
             data = api(f'/app/installations/{ident}', 'GET', jwt(folder, values))
         except RuntimeError:
             return None
-        return ident if str(data.get('app_id')) == str(values['APP_ID']) else None
-    values['APP_INSTALLATION_ID'] = wait_url(installed)
+        owner = data.get('account', {}).get('login', '')
+        return ident if (str(data.get('app_id')) == str(values['APP_ID'])
+                         and owner.lower() == args.owner.lower()) else None
+    values['APP_INSTALLATION_ID'] = wait_url(installed, target)
     save_env(folder, values)
     print(f'Saved installation ID in {folder / "app.env"}.')
 
@@ -184,10 +196,12 @@ def main():
     p.add_argument('--name', type=name, required=True)
     p.add_argument('--perm', action='append', default=[])
     p.add_argument('--hook-url')
+    p.add_argument('--allow-hook-host', action='append', default=[], help='Approved webhook hostname; repeat as needed.')
     p.add_argument('--event', action='append', default=[])
     p.add_argument('--public', action='store_true')
     p = sub.add_parser('install', help='Install a saved App through Chrome.')
     p.add_argument('slug', type=name)
+    p.add_argument('--owner', type=name, required=True, help='Expected installation account login.')
     p = sub.add_parser('token', help='Print an installation token. Treat stdout as a secret.')
     p.add_argument('name', type=name)
     args = parser.parse_args()

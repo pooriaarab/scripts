@@ -2,6 +2,8 @@
 """CLI E2E: fake browser/API, real files and OpenSSL. No real App mutations.
 Failure cases: wrong shared tab/state, existing folder, bad name/permission,
 missing installation, API failure, browser timeout, and secret output.
+Review failures: a foreign tab can win; an old URL blocks a new tab;
+an unapproved HTTPS host receives events; a wrong owner passes the App check.
 """
 import json
 import os
@@ -38,14 +40,19 @@ if Path(sys.argv[0]).name == 'zsh':
         else:
             assert url == 'https://github.com/apps/demo-app/installations/new'
             (root / 'redirect').write_text('https://github.com/settings/installations/42')
-        print('{}')
+        (root / 'opened').write_text('yes')
+        print(json.dumps({'success': True, 'data': {'targetId': 'ours'}}))
     else:
         assert args == ['tab', 'list', '--json'], args
-        urls = ['https://github.com/?code=wrong&state=foreign']
-        if (root / 'redirect').exists() and not os.getenv('TIMEOUT'):
+        tabs = [{'targetId': 'old', 'url': 'https://github.com/?code=wrong&state=foreign'}]
+        if os.getenv('OLD_URL'):
+            tabs.append({'targetId': 'old-settings', 'url': 'https://github.com/settings/installations/42'})
+        if (root / 'opened').exists() and not os.getenv('TIMEOUT'):
             redirect = (root / 'redirect').read_text()
-            urls.extend((['https://github.com/settings/installations/99'] if '/installations/' in redirect else []) + [redirect])
-        print(json.dumps({'success': True, 'data': {'tabs': [{'url': u} for u in urls]}}))
+            if '/installations/' in redirect and not os.getenv('OLD_URL'):
+                tabs.append({'targetId': 'foreign', 'url': 'https://github.com/settings/installations/99'})
+            tabs.append({'targetId': 'ours', 'url': redirect})
+        print(json.dumps({'success': True, 'data': {'tabs': tabs}}))
 else:
     config = sys.stdin.read()
     if os.getenv('API_FAIL'):
@@ -62,7 +69,7 @@ else:
         (root/'signature').write_bytes(base64.urlsafe_b64decode(s + '=' * (-len(s) % 4)))
         subprocess.run(['openssl', 'rsa', '-in', str(root/'fixture.pem'), '-pubout', '-out', str(root/'public.pem')], check=True, capture_output=True)
         subprocess.run(['openssl', 'dgst', '-sha256', '-verify', str(root/'public.pem'), '-signature', str(root/'signature')], input=(h+'.'+p).encode(), check=True, capture_output=True)
-        print(json.dumps({'token': 'fixture-token'} if '/access_tokens' in config else {'id': 42, 'app_id': 999 if '/installations/99' in config else 123}))
+        print(json.dumps({'token': 'fixture-token'} if '/access_tokens' in config else {'id': 42, 'app_id': 999 if os.getenv('WRONG_APP') else 123, 'account': {'login': 'other' if os.getenv('WRONG_OWNER') else 'expected'}}))
 '''
     for name in ['zsh', 'curl']:
         p = bin_dir / name
@@ -70,6 +77,7 @@ else:
         p.chmod(0o700)
 
     def run(*args, ok=True, extra=None):
+        (root / 'opened').unlink(missing_ok=True)
         p = subprocess.run([str(SCRIPT), *args], env=dict(env, **(extra or {})),
                            capture_output=True, text=True)
         assert (p.returncode == 0) == ok, (args, p.stderr)
@@ -77,12 +85,43 @@ else:
         assert 'private-response-must-not-leak' not in p.stdout + p.stderr
         return p
 
+    if os.getenv('REVIEW_CASE'):
+        folder = root / 'Documents/Personal/.secrets/demo'
+        folder.mkdir(parents=True)
+        (folder / 'app.env').write_text('APP_ID=123\nAPP_SLUG=demo-app\n')
+        (folder / 'app.pem').write_bytes((root / 'fixture.pem').read_bytes())
+        case = os.environ['REVIEW_CASE']
+        if case == 'unapproved_hook_host':
+            result = run('create', '--name', 'blocked', '--hook-url', 'https://example.com/hook',
+                         '--perm', 'administration=write', '--perm', 'actions=read', '--public',
+                         '--event', 'workflow_job', ok=False)
+            assert not (root / 'opened').exists(), 'Unapproved host reached browser'
+            assert not (folder.parent / 'blocked').exists(), 'Unapproved host wrote files'
+        else:
+            result = run('install', 'demo-app', '--owner', 'expected',
+                         ok=case not in ('wrong_owner', 'wrong_app'),
+                         extra={'GH_APP_WAIT_SECONDS': '0',
+                                **({'OLD_URL': '1'} if case == 'existing_settings_url' else {}),
+                                **({'WRONG_OWNER': '1'} if case == 'wrong_owner' else {}),
+                                **({'WRONG_APP': '1'} if case == 'wrong_app' else {})})
+            if case in ('foreign_installation_tab', 'existing_settings_url'):
+                assert 'APP_INSTALLATION_ID=42' in (folder / 'app.env').read_text(), 'Foreign installation saved'
+            else:
+                assert 'APP_INSTALLATION_ID' not in (folder / 'app.env').read_text()
+        print('PASS: ' + case)
+        raise SystemExit(0)
+
     run('create', '--name', '../escape', ok=False)
     run('create', '--name', 'bad', '--perm', 'actions=owner', ok=False)
     run('create', '--name', 'bad', '--event', 'push', ok=False)
-    run('create', '--name', 'bad', '--hook-url', 'http://example.com', ok=False)
-    for name, options in [('demo', []), ('hooks', ['--hook-url', 'https://example.com/hook', '--event', 'workflow_job', '--public'])]:
-        run('create', '--name', name, '--perm', 'administration=write', '--perm', 'actions=read', *options)
+    for url in ['http://example.com', 'https://other.example/hook', 'https://example.com.evil/hook']:
+        result = run('create', '--name', 'bad', '--hook-url', url,
+                     '--allow-hook-host', 'example.com', ok=False)
+        assert not (root / 'opened').exists()
+    for name, options in [('demo', []), ('hooks', ['--hook-url', 'https://example.com/hook', '--allow-hook-host', 'example.com', '--event', 'workflow_job', '--public'])]:
+        result = run('create', '--name', name, '--perm', 'administration=write', '--perm', 'actions=read', *options)
+        if options:
+            assert result.stderr.index('Webhook destination host: example.com') < result.stderr.index('Complete the manifest')
         folder = root / 'Documents/Personal/.secrets' / name
         assert folder.stat().st_mode & 0o777 == 0o700
         for filename in ['app.env', 'app.pem', 'app-pkcs8.pem', 'conversion.json', 'create.html']:
@@ -95,9 +134,12 @@ else:
     # Remove the second fixture, so the slug resolves to exactly one saved App.
     import shutil
     shutil.rmtree(root / 'Documents/Personal/.secrets/hooks')
-    run('install', 'demo-app')
+    run('install', 'demo-app', '--owner', 'expected')
     assert run('token', 'demo').stdout == 'fixture-token\n'
     run('token', 'demo', ok=False, extra={'API_FAIL': '1'})
     run('create', '--name', 'timeout', '--perm', 'administration=write', '--perm', 'actions=read',
         ok=False, extra={'TIMEOUT': '1', 'GH_APP_WAIT_SECONDS': '0'})
     print('PASS: create, install, token, shared tabs, file modes, JWT signature, and failure cases')
+
+for case in ['foreign_installation_tab', 'existing_settings_url', 'wrong_owner', 'wrong_app', 'unapproved_hook_host']:
+    subprocess.run([os.sys.executable, __file__], env=dict(os.environ, REVIEW_CASE=case), check=True)

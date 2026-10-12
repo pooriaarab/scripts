@@ -14,7 +14,7 @@ Run the helper from this repository, or put it on your `PATH`.
 ```sh
 ./gh-app create --name my-runner-app \
   --perm administration=write --perm actions=read
-./gh-app install my-runner-app
+./gh-app install my-runner-app --owner YOUR_GITHUB_LOGIN
 ```
 
 Creation opens a local form in a new Chrome tab.
@@ -23,9 +23,11 @@ The helper waits up to ten minutes for the redirect.
 Set `GH_APP_WAIT_SECONDS` to change that limit.
 Use the returned `APP_SLUG` for installation when it differs from the chosen name.
 Choose the repositories on GitHub and finish installation.
-The helper checks that the installation belongs to the saved App before recording its ID.
+The helper checks the saved App ID and expected account before recording the installation ID.
 
-Add `--hook-url https://example.com/webhook --event workflow_job` for an active webhook.
+Add `--hook-url https://example.com/webhook --allow-hook-host example.com --event workflow_job` for an active webhook.
+The helper prints the approved destination host before it opens Chrome.
+Use `--owner` to specify the expected installation account.
 Repeat `--perm` and `--event` as needed. Events require a webhook URL.
 Add `--public` only when other accounts must install the App.
 Without that flag, the App is private.
@@ -64,7 +66,8 @@ The token has only the permissions and repositories granted to the installation.
 
 The manifest redirect code expires after one hour.
 The browser tab list is shared with other sessions.
-The helper checks each URL and matches a random `state`; it never trusts the active tab.
+Creation matches a random `state` in the redirect URL.
+Installation follows only the new tab opened by this run.
 See GitHub's [manifest flow](https://docs.github.com/en/apps/sharing-github-apps/registering-a-github-app-from-a-manifest).
 
 GitHub returns a PKCS#1 key. WebCrypto imports the key as PKCS#8.
