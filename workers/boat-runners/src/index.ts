@@ -44,6 +44,12 @@ export class BrokerDO {
     this.sql.exec('CREATE TABLE IF NOT EXISTS leases(id TEXT PRIMARY KEY, job INTEGER, repo TEXT, name TEXT, runner INTEGER, created INTEGER, closing INTEGER DEFAULT 0, pending INTEGER DEFAULT 1)');
     this.sql.exec('CREATE TABLE IF NOT EXISTS ended(id INTEGER PRIMARY KEY, seen INTEGER)');
     this.sql.exec('CREATE TABLE IF NOT EXISTS repos(repo TEXT PRIMARY KEY, seen INTEGER)');
+    this.sql.exec('CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v INTEGER)');
+    // Backoff for jobs whose mint failed. Without it every Box retried the same
+    // job every few seconds and drained the API budget in minutes.
+    for (const col of ['tries INTEGER DEFAULT 0', 'next INTEGER DEFAULT 0']) {
+      try { this.sql.exec(`ALTER TABLE jobs ADD COLUMN ${col}`); } catch { /* column exists */ }
+    }
     this.sql.exec('CREATE TABLE IF NOT EXISTS boxes(box TEXT PRIMARY KEY, label TEXT, seen INTEGER)');
   }
   rows(query: string, ...args: any[]): Row[] { return this.sql.exec(query, ...args).toArray(); }
@@ -66,7 +72,7 @@ export class BrokerDO {
   add(repo: string, job: Row) {
     const label = job.labels?.find((l: string) => labels.includes(l));
     if (!label || this.rows('SELECT id FROM ended WHERE id=?', job.id).length) return;
-    this.rows('INSERT OR IGNORE INTO jobs VALUES(?,?,?,?,?,NULL)', job.id, repo, label, job.run_id, Date.now());
+    this.rows('INSERT OR IGNORE INTO jobs(id,repo,label,run_id,queued,lease) VALUES(?,?,?,?,?,NULL)', job.id, repo, label, job.run_id, Date.now());
   }
   async end(id: number, completed: boolean) {
     this.ctx.storage.transactionSync(() => {
@@ -92,10 +98,11 @@ export class BrokerDO {
       return true;
     } catch { return false; }
   }
+  tries(job: number): number { return this.rows('SELECT tries FROM jobs WHERE id=?', job)[0]?.tries ?? 0; }
   async mint(label: string, box: string): Promise<Response | null> {
     let lease: Row | undefined;
     this.ctx.storage.transactionSync(() => {
-      const job = this.rows('SELECT * FROM jobs WHERE label=? AND lease IS NULL ORDER BY queued,id LIMIT 1', label)[0];
+      const job = this.rows('SELECT * FROM jobs WHERE label=? AND lease IS NULL AND next<=? ORDER BY queued,id LIMIT 1', label, Date.now())[0];
       if (!job) return;
       const id = crypto.randomUUID();
       lease = { id, job: job.id, repo: job.repo, name: `boat-${box.slice(0, 16)}-${id}`, created: Date.now(), pending: 1 };
@@ -105,6 +112,8 @@ export class BrokerDO {
     if (!lease) return null;
     const l = lease;
     try {
+      // The sweep no longer re-checks privacy, so this is the gate: a repo that
+      // went public after its job was queued must never get a runner.
       const repo = await this.data(`/repos/${l.repo}`);
       const job = await this.data(`/repos/${l.repo}/actions/jobs/${l.job}`);
       if (repo.private !== true || job.status !== 'queued') {
@@ -126,9 +135,10 @@ export class BrokerDO {
     } catch {
       this.ctx.storage.transactionSync(() => {
         this.rows('UPDATE leases SET closing=1 WHERE id=?', l.id);
-        this.rows('UPDATE jobs SET lease=NULL WHERE lease=?', l.id);
+        this.rows('UPDATE jobs SET lease=NULL, tries=tries+1, next=? WHERE lease=?', Date.now() + Math.min(600_000, 30_000 * 2 ** this.tries(l.job)), l.id);
       });
       await this.cleanup(l);
+      if (this.tries(l.job) >= 6) await this.end(l.job, false);
       return json({ error: 'Mint failed; claim released' }, 502);
     }
   }
@@ -187,13 +197,17 @@ export class BrokerDO {
         if (!await this.cleanup(l)) errors++;
       } catch { errors++; }
     }
-    for (const { repo } of this.rows('SELECT repo FROM repos WHERE seen>?', Date.now() - 172_800_000)) {
+    // The reconcile costs several API calls per repo and shares the owner's
+    // 5,000/h budget, so it runs every 10 minutes and only for repos active in
+    // the last 2 hours. Lease expiry above still runs on every 2-minute tick.
+    // Privacy is re-checked in mint() before any runner is issued.
+    const now = Date.now();
+    const last = this.rows("SELECT v FROM meta WHERE k='reconciled'")[0]?.v ?? 0;
+    const due = now - last >= 600_000;
+    if (due) this.rows("INSERT OR REPLACE INTO meta VALUES('reconciled',?)", now);
+    const repos = due ? this.rows('SELECT repo FROM repos WHERE seen>?', now - 7_200_000) : [];
+    for (const { repo } of repos) {
       try {
-        if ((await this.data(`/repos/${repo}`)).private !== true) {
-          this.rows('DELETE FROM jobs WHERE repo=?', repo);
-          this.rows('DELETE FROM repos WHERE repo=?', repo);
-          continue;
-        }
         for (const status of ['queued', 'in_progress']) {
           for (const run of await this.list(`/repos/${repo}/actions/runs?status=${status}`, 'workflow_runs')) {
             for (const job of await this.list(`/repos/${repo}/actions/runs/${run.id}/jobs`, 'jobs')) {
