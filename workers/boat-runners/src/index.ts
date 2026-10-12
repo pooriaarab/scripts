@@ -1,6 +1,7 @@
-interface Env { GITHUB_TOKEN: string; WEBHOOK_SECRET: string; POOL_TOKEN: string; BROKER: DurableObjectNamespace }
+interface Env { APP_ID: string; APP_INSTALLATION_ID: string; APP_PRIVATE_KEY: string; WEBHOOK_SECRET: string; POOL_TOKEN: string; BROKER: DurableObjectNamespace }
 const labels = ['boat', 'boat-8'];
 const json = (body: unknown, status = 200) => Response.json(body, { status });
+const b64url = (bytes: ArrayBuffer | Uint8Array) => btoa(String.fromCharCode(...new Uint8Array(bytes))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 const pause = (ms: number) => new Promise(r => setTimeout(r, ms));
 const repoPattern = /^pooriaarab\/[A-Za-z0-9_.-]+$/;
 async function signature(raw: string, header: string | null, secret: string) {
@@ -46,15 +47,38 @@ export class BrokerDO {
     this.sql.exec('CREATE TABLE IF NOT EXISTS repos(repo TEXT PRIMARY KEY, seen INTEGER)');
     this.sql.exec('CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v INTEGER)');
     // Backoff for jobs whose mint failed. Without it every Box retried the same
-    // job every few seconds and drained the API budget in minutes.
+    // job every few seconds and drained the API budget in minutes. A job is
+    // never dropped for failing: GitHub would keep it queued with no runner.
     for (const col of ['tries INTEGER DEFAULT 0', 'next INTEGER DEFAULT 0']) {
       try { this.sql.exec(`ALTER TABLE jobs ADD COLUMN ${col}`); } catch { /* column exists */ }
     }
     this.sql.exec('CREATE TABLE IF NOT EXISTS boxes(box TEXT PRIMARY KEY, label TEXT, seen INTEGER)');
   }
   rows(query: string, ...args: any[]): Row[] { return this.sql.exec(query, ...args).toArray(); }
+  // GitHub App installation token. It has its own rate budget, so the owner's
+  // personal token budget running dry no longer stops runner minting.
+  app?: { token: string; expires: number };
+  minting?: Promise<string>;
+  token(): Promise<string> {
+    if (this.app && this.app.expires - Date.now() > 300_000) return Promise.resolve(this.app.token);
+    // Concurrent requests share one exchange instead of minting a token each.
+    this.minting ??= this.newToken().finally(() => { this.minting = undefined; });
+    return this.minting;
+  }
+  async newToken(): Promise<string> {
+    const der = Uint8Array.from(atob(this.env.APP_PRIVATE_KEY.replace(/-----[^-]+-----|\s/g, '')), c => c.charCodeAt(0));
+    const key = await crypto.subtle.importKey('pkcs8', der, { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' }, false, ['sign']);
+    const now = Math.floor(Date.now() / 1000), enc = new TextEncoder();
+    const unsigned = b64url(enc.encode(JSON.stringify({ alg: 'RS256', typ: 'JWT' }))) + '.' + b64url(enc.encode(JSON.stringify({ iat: now - 60, exp: now + 540, iss: this.env.APP_ID })));
+    const jwt = unsigned + '.' + b64url(await crypto.subtle.sign('RSASSA-PKCS1-v1_5', key, enc.encode(unsigned)));
+    const r = await fetch(`https://api.github.com/app/installations/${this.env.APP_INSTALLATION_ID}/access_tokens`, { method: 'POST', headers: { Authorization: `Bearer ${jwt}`, Accept: 'application/vnd.github+json', 'User-Agent': 'boat-runners' }, signal: AbortSignal.timeout(20_000) });
+    if (!r.ok) throw new Error(`App token ${r.status}`);
+    const t: any = await r.json();
+    this.app = { token: t.token, expires: Date.parse(t.expires_at) };
+    return t.token;
+  }
   async gh(path: string, method = 'GET', body?: unknown) {
-    return fetch(`https://api.github.com${path}`, { method, headers: { Authorization: `Bearer ${this.env.GITHUB_TOKEN}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': 'boat-runners', 'Content-Type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(20_000) });
+    return fetch(`https://api.github.com${path}`, { method, headers: { Authorization: `Bearer ${await this.token()}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': 'boat-runners', 'Content-Type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(20_000) });
   }
   async data(path: string) {
     const r = await this.gh(path);
@@ -115,7 +139,10 @@ export class BrokerDO {
       // The sweep no longer re-checks privacy, so this is the gate: a repo that
       // went public after its job was queued must never get a runner.
       const repo = await this.data(`/repos/${l.repo}`);
-      const job = await this.data(`/repos/${l.repo}/actions/jobs/${l.job}`);
+      const jr = await this.gh(`/repos/${l.repo}/actions/jobs/${l.job}`);
+      // A deleted run or job never comes back: end it instead of retrying.
+      const job: any = jr.status === 404 ? { status: 'gone' } : jr.ok ? await jr.json() : null;
+      if (!job) throw new Error(`GitHub ${jr.status}`);
       if (repo.private !== true || job.status !== 'queued') {
         await this.end(l.job, job.status !== 'in_progress');
         this.rows('UPDATE leases SET closing=1 WHERE id=?', l.id);
@@ -138,7 +165,6 @@ export class BrokerDO {
         this.rows('UPDATE jobs SET lease=NULL, tries=tries+1, next=? WHERE lease=?', Date.now() + Math.min(600_000, 30_000 * 2 ** this.tries(l.job)), l.id);
       });
       await this.cleanup(l);
-      if (this.tries(l.job) >= 6) await this.end(l.job, false);
       return json({ error: 'Mint failed; claim released' }, 502);
     }
   }
@@ -197,15 +223,15 @@ export class BrokerDO {
         if (!await this.cleanup(l)) errors++;
       } catch { errors++; }
     }
-    // The reconcile costs several API calls per repo and shares the owner's
-    // 5,000/h budget, so it runs every 10 minutes and only for repos active in
-    // the last 2 hours. Lease expiry above still runs on every 2-minute tick.
-    // Privacy is re-checked in mint() before any runner is issued.
+    // The reconcile costs several API calls per repo, so it runs every 10
+    // minutes and only for repos active in the last 24 hours. Lease expiry
+    // above still runs on every 2-minute tick. Privacy is re-checked in mint()
+    // before any runner is issued.
     const now = Date.now();
     const last = this.rows("SELECT v FROM meta WHERE k='reconciled'")[0]?.v ?? 0;
     const due = now - last >= 600_000;
     if (due) this.rows("INSERT OR REPLACE INTO meta VALUES('reconciled',?)", now);
-    const repos = due ? this.rows('SELECT repo FROM repos WHERE seen>?', now - 7_200_000) : [];
+    const repos = due ? this.rows('SELECT repo FROM repos WHERE seen>?', now - 86_400_000) : [];
     for (const { repo } of repos) {
       try {
         for (const status of ['queued', 'in_progress']) {
