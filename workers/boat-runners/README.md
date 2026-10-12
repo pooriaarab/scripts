@@ -1,6 +1,7 @@
 # Boat runner broker
 
-Run `npm ci && npm run typecheck` here. Set `GITHUB_TOKEN`, `WEBHOOK_SECRET`
+Run `npm ci && npm run typecheck` here. Set `APP_ID`, `APP_INSTALLATION_ID`, `APP_PRIVATE_KEY` (PKCS#8 PEM of the
+`pooriaarab-boat-runners` GitHub App), `WEBHOOK_SECRET`
 and `POOL_TOKEN` in an ignored `.dev.vars` for `npm run dev`. Production secrets
 use `wrangler secret put`; deployment is an operator action.
 
