@@ -134,6 +134,7 @@ needs both.
 | `box-guard` | Give every Box a deadline. `box new --no-auto-stop` leaves `archiveAfter: null` and nothing will ever stop it. Repairs state hourly with `box extend --ttl`; never stops anything |
 | `iphone-wda` | Drive a USB iPhone through WebDriverAgent: `up` builds and starts it with the go-ios tunnel, then open, tree, tap, find, drag and shot. Never unlocks the phone |
 | `box-reap-cron` + `com.pooriaarab.box-reap.plist` | Runs `box-reap` hourly under launchd. Installs to `~/.local/bin` because macOS TCC blocks a launchd agent from reading `~/Documents` |
+| `gpu-vm` | Run local LLMs on a rented spot GPU VM on Google Cloud. `up` builds llama.cpp with CUDA, copies GGUF files and serves them on loopback. `tunnel` reaches them through IAP. `stop` and `down` end the billing. `--dry-run` prints every command |
 | `turbo-remote-cache/` | Deployable Cloudflare Worker: a Turborepo remote cache backed by R2 |
 | `box-setup/` | Provision the personal agent-CLI roster (claude x3, codex, gemini, kimi, pi, muse) inside an ascii.dev Box |
 | `box-warm-shim` | Stand in for the `box` CLI so crabbox can start a Box from a named environment and a warm snapshot |
