@@ -39,8 +39,11 @@ die() { echo "iphone-wda: $*" >&2; exit 1; }
 udid() { ios list 2>/dev/null | python3 -I -c "import json,sys;l=json.load(sys.stdin)['deviceList'];print(l[0] if l else '')"; }
 sid() { [[ -s "$SID_FILE" ]] || die "no session; run: iphone-wda open <bundleId>"; cat "$SID_FILE"; }
 post() { local body='{}'; curl -s --max-time 60 -X POST "$B$1" -H 'Content-Type: application/json' -d "${2:-$body}"; }
-elem() {  # first element matching a predicate, or empty
-  post "/session/$(sid)/element" "{\"using\":\"predicate string\",\"value\":\"$1\"}" |
+elem() {  # first visible element with this exact label, or empty
+  # Build the predicate and the JSON in Python, so a label with ' or " (such
+  # as "Don't Allow") is escaped instead of breaking the query.
+  local body; body="$(python3 -I -c "import json,sys;l=sys.argv[1].replace(chr(92),chr(92)*2).replace(chr(39),chr(92)+chr(39));print(json.dumps({'using':'predicate string','value':\"label == '\"+l+\"' AND visible == 1\"}))" "$1")"
+  post "/session/$(sid)/element" "$body" |
     python3 -I -c "import json,sys;v=json.load(sys.stdin)['value'];print(v.get('ELEMENT','') if isinstance(v,dict) else '')"
 }
 drag() {
@@ -97,14 +100,14 @@ w(json.load(sys.stdin)['value'])"
 }
 
 cmd_tap() {
-  local e; e="$(elem "label == '${1:?label}' AND visible == 1")"
+  local e; e="$(elem "${1:?label}")"
   [[ -n "$e" ]] || die "no visible element: $1"
   post "/session/$(sid)/element/$e/click" >/dev/null && echo "tapped $1"
 }
 
 cmd_find() {
   for _ in $(seq 1 8); do
-    [[ -n "$(elem "label == '${1:?label}' AND visible == 1")" ]] && { cmd_tap "$1"; return; }
+    [[ -n "$(elem "${1:?label}")" ]] && { cmd_tap "$1"; return; }
     drag up; sleep 0.8
   done
   die "not found after 8 drags: $1"
