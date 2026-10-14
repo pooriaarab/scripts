@@ -1,0 +1,128 @@
+#!/usr/bin/env bash
+# Drive a USB iPhone from a Mac through WebDriverAgent. Never unlocks the phone.
+#
+# THE PROBLEM
+# WebDriverAgent (appium/WebDriverAgent) gives an agent taps, typing and the
+# screen's element tree, but only as raw HTTP on port 8100. Each session rebuilt
+# the same curl calls and hit the same traps:
+#   - `/wda/locked` reads false on the Lock Screen. It reports whether the screen
+#     is on, not whether the passcode was entered. The only reliable unlock test
+#     is that an app launch succeeds.
+#   - Settings builds its rows lazily. A row below the fold is not in the tree,
+#     and `/wda/swipe` did not scroll it. A coordinate drag does.
+#   - A system alert (an Exchange password prompt, for one) is not in the app's
+#     tree and `/alert/dismiss` says no alert is open. Tap it by point.
+#   - `App-prefs:` URLs land on Settings > Apps on iOS 27, not the page asked for.
+#
+#   iphone-wda up                   build, install and start WebDriverAgent
+#   iphone-wda wait                 block until the phone is really unlocked
+#   iphone-wda open <bundleId>      start a session on an app (relaunches it)
+#   iphone-wda tree                 print visible elements: type | label | value
+#   iphone-wda tap <label>          tap the first visible element with that label
+#   iphone-wda find <label>         drag up until <label> shows, then tap it
+#   iphone-wda tapxy <x> <y>        tap a point, in points (screenshot px / scale)
+#   iphone-wda drag up|down         one coordinate drag of the screen
+#   iphone-wda shot <file.png>      save a screenshot
+#   iphone-wda home                 go to the Home Screen
+#
+# `up` needs Xcode signed in to a developer account (Settings > Accounts). A
+# free account signs for 7 days, a paid one for a year. Set IPHONE_WDA_TEAM to
+# the team ID (the OU of your Apple Development certificate).
+set -uo pipefail
+
+DIR="${IPHONE_WDA_DIR:-$HOME/.cache/iphone-wda}"
+B="${WDA_URL:-http://localhost:8100}"
+SID_FILE="$DIR/session"
+mkdir -p "$DIR"
+
+die() { echo "iphone-wda: $*" >&2; exit 1; }
+udid() { ios list 2>/dev/null | python3 -I -c "import json,sys;l=json.load(sys.stdin)['deviceList'];print(l[0] if l else '')"; }
+sid() { [[ -s "$SID_FILE" ]] || die "no session; run: iphone-wda open <bundleId>"; cat "$SID_FILE"; }
+post() { local body='{}'; curl -s --max-time 60 -X POST "$B$1" -H 'Content-Type: application/json' -d "${2:-$body}"; }
+elem() {  # first visible element with this exact label, or empty
+  # Build the predicate and the JSON in Python, so a label with ' or " (such
+  # as "Don't Allow") is escaped instead of breaking the query.
+  local body; body="$(python3 -I -c "import json,sys;l=sys.argv[1].replace(chr(92),chr(92)*2).replace(chr(39),chr(92)+chr(39));print(json.dumps({'using':'predicate string','value':\"label == '\"+l+\"' AND visible == 1\"}))" "$1")"
+  post "/session/$(sid)/element" "$body" |
+    python3 -I -c "import json,sys;v=json.load(sys.stdin)['value'];print(v.get('ELEMENT','') if isinstance(v,dict) else '')"
+}
+drag() {
+  local from=650 to=250; [[ "${1:-up}" == down ]] && { from=250; to=650; }
+  post "/session/$(sid)/wda/dragfromtoforduration" \
+    "{\"fromX\":187,\"fromY\":$from,\"toX\":187,\"toY\":$to,\"duration\":0.3}" >/dev/null
+}
+
+cmd_up() {
+  command -v ios >/dev/null || die "go-ios missing: npm install -g go-ios"
+  command -v xcodebuild >/dev/null || die "Xcode missing"
+  local team="${IPHONE_WDA_TEAM:?set IPHONE_WDA_TEAM to your Apple team ID}"
+  local u; u="$(udid)"; [[ -n "$u" ]] || die "no iPhone on USB"
+  [[ -d "$DIR/WebDriverAgent" ]] || git clone -q --depth 1 https://github.com/appium/WebDriverAgent.git "$DIR/WebDriverAgent"
+  # The stock bundle ID belongs to another team; signing needs one you own.
+  xcodebuild build-for-testing -project "$DIR/WebDriverAgent/WebDriverAgent.xcodeproj" \
+    -scheme WebDriverAgentRunner -destination "id=$u" -derivedDataPath "$DIR/dd" \
+    -allowProvisioningUpdates DEVELOPMENT_TEAM="$team" CODE_SIGN_STYLE=Automatic \
+    PRODUCT_BUNDLE_IDENTIFIER="${IPHONE_WDA_BUNDLE:-com.$USER.WebDriverAgentRunner}" \
+    > "$DIR/build.log" 2>&1 || { grep 'error:' "$DIR/build.log" | head -3 >&2; die "build failed; see $DIR/build.log"; }
+  # iOS 17+ reaches developer services only through a tunnel.
+  ios tunnel ls 2>/dev/null | grep -q "$u" || { nohup ios tunnel start --userspace > "$DIR/tunnel.log" 2>&1 & sleep 5; }
+  pgrep -f "xcodebuild test-without-building.*$u" >/dev/null ||
+    nohup xcodebuild test-without-building -xctestrun "$(ls "$DIR"/dd/Build/Products/*.xctestrun | head -1)" \
+      -destination "id=$u" > "$DIR/wda.log" 2>&1 &
+  pgrep -f "ios forward 8100" >/dev/null || { nohup ios forward 8100 8100 > "$DIR/forward.log" 2>&1 & }
+  echo "waiting for WebDriverAgent (unlock the phone if it is locked)..." >&2
+  for _ in $(seq 1 100); do
+    curl -s --max-time 3 "$B/status" | grep -q '"ready" : true' && { echo "ready on $B"; return 0; }
+    grep -q 'Unlock .* to Continue' "$DIR/wda.log" 2>/dev/null && echo "phone is locked; unlock it" >&2
+    sleep 3
+  done
+  die "WebDriverAgent did not start; see $DIR/wda.log"
+}
+
+cmd_open() {
+  local id="${1:?bundle id}" out
+  out="$(post /session "{\"capabilities\":{\"alwaysMatch\":{\"bundleId\":\"$id\"}}}")"
+  python3 -I -c "import json,sys;v=json.loads(sys.argv[1]);s=v.get('sessionId') or v['value'].get('sessionId');print(s) if s else sys.exit(v['value'].get('message','no session')[:300])" "$out" > "$SID_FILE" || return 1
+  post "/session/$(sid)/wda/apps/terminate" "{\"bundleId\":\"$id\"}" >/dev/null
+  post "/session/$(sid)/wda/apps/launch" "{\"bundleId\":\"$id\"}" >/dev/null
+  echo "opened $id"
+}
+
+cmd_tree() {
+  curl -s --max-time 60 "$B/session/$(sid)/source?format=json" | python3 -I -c "
+import json,sys
+def w(n):
+    l=n.get('label') or n.get('name')
+    if l and n.get('isVisible') in (True,'1',1,None) and not n.get('type','').endswith('Key'):
+        print(n.get('type','').replace('XCUIElementType',''),'|',l,'|',n.get('value') or '')
+    for c in n.get('children') or []: w(c)
+w(json.load(sys.stdin)['value'])"
+}
+
+cmd_tap() {
+  local e; e="$(elem "${1:?label}")"
+  [[ -n "$e" ]] || die "no visible element: $1"
+  post "/session/$(sid)/element/$e/click" >/dev/null && echo "tapped $1"
+}
+
+cmd_find() {
+  for _ in $(seq 1 8); do
+    [[ -n "$(elem "${1:?label}")" ]] && { cmd_tap "$1"; return; }
+    drag up; sleep 0.8
+  done
+  die "not found after 8 drags: $1"
+}
+
+case "${1:-}" in
+  up) cmd_up ;;
+  wait) until cmd_open com.apple.Preferences >/dev/null 2>&1; do sleep 5; done; echo unlocked ;;
+  open) cmd_open "${2:-}" ;;
+  tree) cmd_tree ;;
+  tap) cmd_tap "${2:-}" ;;
+  find) cmd_find "${2:-}" ;;
+  tapxy) post "/session/$(sid)/wda/tap" "{\"x\":${2:?x},\"y\":${3:?y}}" >/dev/null && echo "tapped $2,$3" ;;
+  drag) drag "${2:-up}" && echo "dragged ${2:-up}" ;;
+  shot) curl -s --max-time 60 "$B/screenshot" | python3 -I -c "import json,sys,base64;open(sys.argv[1],'wb').write(base64.b64decode(json.load(sys.stdin)['value']))" "${2:?file}" && echo "saved $2" ;;
+  home) post /wda/homescreen >/dev/null && echo home ;;
+  *) sed -n '17,26p' "$0"; exit 2 ;;
+esac
