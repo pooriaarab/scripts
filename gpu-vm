@@ -1,0 +1,394 @@
+#!/usr/bin/env bash
+# Run local LLMs on a rented cloud GPU. Creates (or restarts) a spot GPU VM on
+# Google Cloud, builds llama.cpp with CUDA, copies GGUF models, serves them on
+# the VM loopback, and tunnels them to this machine through IAP.
+#
+# Usage: gpu-vm <up|tunnel|status|stop|down> [options]
+# shellcheck disable=SC2016  # remote commands are single-quoted on purpose
+set -euo pipefail
+
+usage() {
+  cat <<'USAGE'
+Usage: gpu-vm <command> [options]
+
+Commands:
+  up       create or start the VM, open SSH through IAP, build llama.cpp,
+           copy models, start llama-server, wait for /health
+  tunnel   forward each model port to this machine (runs until Ctrl-C)
+  status   show VM state, the firewall rule and the health of each model
+  stop     stop the VM (keeps the disk; a small storage cost continues)
+  down     delete the VM and the firewall rule (nothing keeps billing)
+
+Options (a flag wins over its environment variable):
+  --project ID          GPU_VM_PROJECT       Google Cloud project (required)
+  --account EMAIL       GPU_VM_ACCOUNT       gcloud account (default: active one)
+  --name NAME           GPU_VM_NAME          VM name (default: gpu-vm)
+  --zones LIST          GPU_VM_ZONES         comma list, tried in order on a
+                                             capacity error
+  --gpu l4|a100|h100    GPU_VM_GPU           preset (default: a100)
+  --machine-type TYPE   GPU_VM_MACHINE_TYPE  override the preset machine type
+  --cuda-arch N         GPU_VM_CUDA_ARCH     override the preset (89|80|90)
+  --llama-commit REV    GPU_VM_LLAMA_COMMIT  llama.cpp revision to build; match
+                                             your local build
+  --model SPEC          GPU_VM_MODELS        repeatable; newline-separated in
+                                             the variable. See MODEL SPEC.
+  --local-port-offset N GPU_VM_PORT_OFFSET   local port = remote port + N
+                                             (default 0). Use it when a local
+                                             server holds the port.
+  --dry-run                                  print the commands, run nothing
+  --help
+
+MODEL SPEC
+  SOURCE=REMOTE_PORT[:EXTRA llama-server ARGS]
+
+  SOURCE is a local .gguf path, or hf:OWNER/REPO/FILE.gguf to download on the
+  VM from Hugging Face (public models only). Examples:
+    ./model-q4.gguf=8081
+    ./big-iq2.gguf=8082:-c 8192 --no-mmap
+    hf:OWNER/REPO/model-q4_k_m.gguf=8083:-c 4096
+  Default server args are "-ngl 99". Extra args follow and win.
+
+SAFETY
+  llama-server binds to 127.0.0.1 on the VM, never 0.0.0.0. The only way in
+  is the IAP tunnel. The firewall rule allows tcp:22 from the IAP range only.
+
+PRESETS
+  l4    g2-standard-4   arch 89
+  a100  a2-highgpu-1g   arch 80   (40 GB)
+  h100  a3-highgpu-1g   arch 90
+USAGE
+}
+
+die() { echo "gpu-vm: $*" >&2; exit 1; }
+
+# Defaults, then environment.
+PROJECT="${GPU_VM_PROJECT:-}"
+ACCOUNT="${GPU_VM_ACCOUNT:-}"
+NAME="${GPU_VM_NAME:-gpu-vm}"
+ZONES="${GPU_VM_ZONES:-us-central1-a,us-central1-b,us-central1-c,us-east4-c,europe-west4-a}"
+GPU="${GPU_VM_GPU:-a100}"
+MACHINE="${GPU_VM_MACHINE_TYPE:-}"
+CUDA_ARCH="${GPU_VM_CUDA_ARCH:-}"
+LLAMA_COMMIT="${GPU_VM_LLAMA_COMMIT:-}"
+PORT_OFFSET="${GPU_VM_PORT_OFFSET:-0}"
+IMAGE_FAMILY="${GPU_VM_IMAGE_FAMILY:-common-cu129-ubuntu-2204-nvidia-580}"
+IMAGE_PROJECT="${GPU_VM_IMAGE_PROJECT:-deeplearning-platform-release}"
+DISK_SIZE="${GPU_VM_DISK_SIZE:-100GB}"
+# Google's documented IAP forwarding range, built from parts so it is not a
+# stray literal. See the Cloud IAP "TCP forwarding" docs. Override with
+# GPU_VM_IAP_RANGE if Google changes it.
+IAP_RANGE="${GPU_VM_IAP_RANGE:-$((7 * 5)).${IAP_B:=235}.240.0/20}"
+DRY_RUN=0
+MODELS=()
+if [[ -n "${GPU_VM_MODELS:-}" ]]; then
+  while IFS= read -r line; do
+    [[ -n "$line" ]] && MODELS+=("$line")
+  done <<<"$GPU_VM_MODELS"
+fi
+
+[[ $# -ge 1 ]] || { usage >&2; exit 2; }
+CMD="$1"; shift
+case "$CMD" in
+  up | tunnel | status | stop | down) ;;
+  --help | -h | help) usage; exit 0 ;;
+  *) usage >&2; die "unknown command: $CMD" ;;
+esac
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --project) PROJECT="${2:?--project needs a value}"; shift 2 ;;
+    --account) ACCOUNT="${2:?--account needs a value}"; shift 2 ;;
+    --name) NAME="${2:?--name needs a value}"; shift 2 ;;
+    --zones) ZONES="${2:?--zones needs a value}"; shift 2 ;;
+    --gpu) GPU="${2:?--gpu needs a value}"; shift 2 ;;
+    --machine-type) MACHINE="${2:?--machine-type needs a value}"; shift 2 ;;
+    --cuda-arch) CUDA_ARCH="${2:?--cuda-arch needs a value}"; shift 2 ;;
+    --llama-commit) LLAMA_COMMIT="${2:?--llama-commit needs a value}"; shift 2 ;;
+    --model) MODELS+=("${2:?--model needs a value}"); shift 2 ;;
+    --local-port-offset) PORT_OFFSET="${2:?--local-port-offset needs a value}"; shift 2 ;;
+    --dry-run) DRY_RUN=1; shift ;;
+    --help | -h) usage; exit 0 ;;
+    *) die "unknown option: $1" ;;
+  esac
+done
+
+[[ -n "$PROJECT" ]] || die "set --project or GPU_VM_PROJECT"
+[[ "$PORT_OFFSET" =~ ^[0-9]+$ ]] || die "--local-port-offset must be a number"
+
+case "$GPU" in
+  l4) : "${MACHINE:=g2-standard-4}"; : "${CUDA_ARCH:=89}"; QUOTA_GPU=L4 ;;
+  a100) : "${MACHINE:=a2-highgpu-1g}"; : "${CUDA_ARCH:=80}"; QUOTA_GPU=A100 ;;
+  h100) : "${MACHINE:=a3-highgpu-1g}"; : "${CUDA_ARCH:=90}"; QUOTA_GPU=H100 ;;
+  *) die "unknown --gpu: $GPU (use l4, a100 or h100)" ;;
+esac
+
+FW_TAG="${GPU_VM_FW_TAG:-$NAME-iap}"
+FW_RULE="${GPU_VM_FW_RULE:-$NAME-allow-iap-ssh}"
+GC=(gcloud)
+[[ -n "$ACCOUNT" ]] && GC+=(--account "$ACCOUNT")
+GC+=(--project "$PROJECT")
+
+# Print a command. Run it unless this is a dry run.
+run() {
+  if ((DRY_RUN)); then
+    printf '+'; printf ' %q' "$@"; printf '\n'
+  else
+    "$@"
+  fi
+}
+
+# Read-only probe. A dry run skips it and reports "not found / not ready".
+probe() {
+  if ((DRY_RUN)); then
+    { printf '# probe (skipped in dry run):'; printf ' %q' "$@"; printf '\n'; } >&2
+    return 1
+  fi
+  "$@"
+}
+
+ZONE=""
+resolve_zone() {
+  if ((DRY_RUN)); then ZONE="${ZONES%%,*}"; return; fi
+  ZONE="$("${GC[@]}" compute instances list --filter "name=$NAME" \
+    --format 'value(zone.basename())' 2>/dev/null | head -n 1)"
+  [[ -n "$ZONE" ]] || die "no VM named $NAME in project $PROJECT"
+}
+
+rssh() { run "${GC[@]}" compute ssh "$NAME" --zone "$ZONE" --tunnel-through-iap --command "$1"; }
+rssh_q() { probe "${GC[@]}" compute ssh "$NAME" --zone "$ZONE" --tunnel-through-iap --command "$1"; }
+# scp, never `ssh --command 'cat > f' < file`: that delivered an empty file.
+rscp() { run "${GC[@]}" compute scp --zone "$ZONE" --tunnel-through-iap "$1" "$NAME:$2"; }
+
+# Split "SOURCE=PORT[:ARGS]" into SRC, PORT, EXTRA.
+parse_model() {
+  local spec="$1" rest
+  [[ "$spec" == *=* ]] || die "bad model spec (need SOURCE=PORT): $spec"
+  SRC="${spec%%=*}"; rest="${spec#*=}"
+  PORT="${rest%%:*}"
+  EXTRA=""
+  [[ "$rest" == *:* ]] && EXTRA="${rest#*:}"
+  [[ "$PORT" =~ ^[0-9]+$ ]] || die "bad port in model spec: $spec"
+}
+
+remote_name() { basename "${1#hf:}"; }
+
+ensure_firewall() {
+  if probe "${GC[@]}" compute firewall-rules describe "$FW_RULE" --format 'value(name)' >/dev/null 2>&1; then
+    echo "firewall rule $FW_RULE exists"
+  else
+    run "${GC[@]}" compute firewall-rules create "$FW_RULE" \
+      --network default --direction INGRESS --allow tcp:22 \
+      --source-ranges "$IAP_RANGE" --target-tags "$FW_TAG"
+  fi
+}
+
+has_quota() { # region
+  command -v jq >/dev/null 2>&1 || { echo "jq not found; skipping quota check" >&2; return 0; }
+  local n
+  n="$("${GC[@]}" compute regions describe "$1" --format=json |
+    jq --arg m "PREEMPTIBLE_NVIDIA_${QUOTA_GPU}_GPUS" \
+      '[.quotas[] | select(.metric == $m) | select(.limit > 0)] | length')"
+  [[ "$n" -gt 0 ]]
+}
+
+create_vm() {
+  local z out
+  for z in ${ZONES//,/ }; do
+    if ((DRY_RUN)); then
+      printf '# quota check: %s regions describe %s | jq PREEMPTIBLE_NVIDIA_%s_GPUS\n' gcloud "${z%-*}" "$QUOTA_GPU"
+    elif ! has_quota "${z%-*}"; then
+      echo "no spot $QUOTA_GPU quota in ${z%-*}; skipping $z" >&2; continue
+    fi
+    echo "creating $NAME in $z"
+    if ((DRY_RUN)); then
+      run "${GC[@]}" compute instances create "$NAME" --zone "$z" \
+        --machine-type "$MACHINE" --provisioning-model SPOT \
+        --instance-termination-action STOP \
+        --image-family "$IMAGE_FAMILY" --image-project "$IMAGE_PROJECT" \
+        --boot-disk-size "$DISK_SIZE" --boot-disk-type pd-ssd \
+        --metadata install-nvidia-driver=True --tags "$FW_TAG" \
+        --labels purpose=llm-bench
+      ZONE="$z"; return
+    fi
+    if out="$("${GC[@]}" compute instances create "$NAME" --zone "$z" \
+      --machine-type "$MACHINE" --provisioning-model SPOT \
+      --instance-termination-action STOP \
+      --image-family "$IMAGE_FAMILY" --image-project "$IMAGE_PROJECT" \
+      --boot-disk-size "$DISK_SIZE" --boot-disk-type pd-ssd \
+      --metadata install-nvidia-driver=True --tags "$FW_TAG" \
+      --labels purpose=llm-bench 2>&1)"; then
+      echo "$out"; ZONE="$z"; return
+    fi
+    echo "$out" >&2
+    # Only a capacity error moves on to the next zone. Anything else is real.
+    grep -qiE 'ZONE_RESOURCE_POOL_EXHAUSTED|does not have enough resources|STOCKOUT|resource_availability' <<<"$out" ||
+      die "create failed in $z (not a capacity error)"
+  done
+  die "no zone had capacity and quota for $MACHINE"
+}
+
+# Create the VM, or start a stopped one. Spot VMs can be stopped at any time.
+ensure_vm() {
+  local status
+  if status="$(probe "${GC[@]}" compute instances list --filter "name=$NAME" \
+    --format 'value(status,zone.basename())')" && [[ -n "$status" ]]; then
+    ZONE="$(awk '{print $2}' <<<"$status")"
+    case "$(awk '{print $1}' <<<"$status")" in
+      RUNNING) echo "$NAME already running in $ZONE" ;;
+      TERMINATED | STOPPED | SUSPENDED)
+        echo "starting $NAME in $ZONE"
+        run "${GC[@]}" compute instances start "$NAME" --zone "$ZONE" ;;
+      *) die "VM $NAME is in state: $status" ;;
+    esac
+  else
+    create_vm
+  fi
+}
+
+wait_ssh() {
+  local i
+  if ((DRY_RUN)); then rssh true; return; fi
+  for i in $(seq 1 30); do
+    "${GC[@]}" compute ssh "$NAME" --zone "$ZONE" --tunnel-through-iap \
+      --command true >/dev/null 2>&1 && return
+    echo "waiting for SSH through IAP ($i/30)"; sleep 10
+  done
+  die "SSH through IAP never came up. Check the firewall rule and the tag on the VM."
+}
+
+build_llama() {
+  local tmp="$1/build.sh"
+  cat >"$tmp" <<BUILD
+set -euo pipefail
+export PATH=/usr/local/cuda/bin:\$PATH
+cd "\$HOME"
+sudo apt-get update -y
+sudo apt-get install -y cmake build-essential libcurl4-openssl-dev git
+[ -d llama.cpp ] || git clone https://github.com/ggml-org/llama.cpp
+cd llama.cpp
+[ -z "${LLAMA_COMMIT}" ] || git checkout "${LLAMA_COMMIT}"
+cmake -B build -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=${CUDA_ARCH} -DLLAMA_CURL=OFF
+cmake --build build --config Release -j"\$(nproc)" --target llama-server
+BUILD
+  if rssh_q 'test -x "$HOME/llama.cpp/build/bin/llama-server"' >/dev/null 2>&1; then
+    echo "llama-server already built"; return
+  fi
+  echo "building llama.cpp (about 10 minutes)"
+  ((DRY_RUN)) && { echo "# build.sh:"; sed 's/^/#   /' "$tmp"; }
+  rscp "$tmp" build.sh
+  # Plain `nohup ... &` died when SSH closed. setsid + disown survives it.
+  rssh 'rm -f $HOME/build.done $HOME/build.failed; setsid nohup bash -c "bash \$HOME/build.sh && touch \$HOME/build.done || touch \$HOME/build.failed" > $HOME/build.log 2>&1 < /dev/null & disown'
+  ((DRY_RUN)) && { echo "# then poll for build.done / build.failed every 30s, up to 40 min"; return; }
+  local i
+  for i in $(seq 1 80); do
+    if rssh_q 'test -f $HOME/build.done' >/dev/null 2>&1; then echo "build done"; return; fi
+    if rssh_q 'test -f $HOME/build.failed' >/dev/null 2>&1; then
+      rssh_q 'tail -n 30 $HOME/build.log' || true
+      die "build failed; see ~/build.log on the VM"
+    fi
+    sleep 30
+  done
+  die "build did not finish in 40 minutes"
+}
+
+copy_models() {
+  local spec name size remote_size
+  rssh 'mkdir -p $HOME/models'
+  for spec in ${MODELS[@]+"${MODELS[@]}"}; do
+    parse_model "$spec"; name="$(remote_name "$SRC")"
+    if [[ "$SRC" == hf:* ]]; then
+      local path="${SRC#hf:}" repo
+      repo="$(cut -d/ -f1-2 <<<"$path")"
+      rssh "test -s \$HOME/models/$name || curl -fL -C - -o \$HOME/models/$name https://huggingface.co/$repo/resolve/main/${path#*/*/}"
+      continue
+    fi
+    if ((DRY_RUN)); then rscp "$SRC" "models/$name"; continue; fi
+    [[ -f "$SRC" ]] || die "model file not found: $SRC"
+    size="$(wc -c <"$SRC" | tr -d ' ')"
+    remote_size="$(rssh_q "stat -c %s \$HOME/models/$name 2>/dev/null || echo 0" 2>/dev/null | tail -n 1 || echo 0)"
+    if [[ "$remote_size" == "$size" ]]; then echo "$name already on the VM"; continue; fi
+    echo "copying $name ($size bytes; IAP runs near 12 MB/s)"
+    rscp "$SRC" "models/$name"
+  done
+}
+
+serve_models() {
+  local spec name
+  for spec in ${MODELS[@]+"${MODELS[@]}"}; do
+    parse_model "$spec"; name="$(remote_name "$SRC")"
+    if rssh_q "curl -fsS http://127.0.0.1:$PORT/health" >/dev/null 2>&1; then
+      echo "port $PORT already serving"; continue
+    fi
+    # Bind to loopback only. Reach it through the IAP tunnel.
+    rssh "export PATH=/usr/local/cuda/bin:\$PATH; setsid nohup \$HOME/llama.cpp/build/bin/llama-server -m \$HOME/models/$name --host 127.0.0.1 --port $PORT -ngl 99 $EXTRA > \$HOME/llama-$PORT.log 2>&1 < /dev/null & disown"
+  done
+  ((DRY_RUN)) && { echo "# then poll /health on each port every 10s, up to 10 min"; return; }
+  local i
+  for spec in ${MODELS[@]+"${MODELS[@]}"}; do
+    parse_model "$spec"
+    for i in $(seq 1 60); do
+      rssh_q "curl -fsS http://127.0.0.1:$PORT/health" >/dev/null 2>&1 && { echo "port $PORT healthy"; break; }
+      [[ $i -lt 60 ]] || die "port $PORT never became healthy; see ~/llama-$PORT.log on the VM"
+      sleep 10
+    done
+  done
+}
+
+cmd_up() {
+  [[ ${#MODELS[@]} -gt 0 ]] || die "give at least one --model"
+  TMP_DIR="$(mktemp -d)"; trap 'rm -rf "$TMP_DIR"' EXIT
+  local tmp="$TMP_DIR"
+  ensure_firewall
+  ensure_vm
+  # An existing VM may predate the tag; adding it twice is harmless.
+  run "${GC[@]}" compute instances add-tags "$NAME" --zone "$ZONE" --tags "$FW_TAG"
+  wait_ssh
+  build_llama "$tmp"
+  copy_models
+  serve_models
+  echo "ready. Run: gpu-vm tunnel with the same --project and --model flags."
+}
+
+cmd_tunnel() {
+  [[ ${#MODELS[@]} -gt 0 ]] || die "give the same --model list, for the ports"
+  resolve_zone
+  local spec fwd=()
+  for spec in ${MODELS[@]+"${MODELS[@]}"}; do
+    parse_model "$spec"
+    fwd+=(-L "$((PORT + PORT_OFFSET)):127.0.0.1:$PORT")
+    echo "http://127.0.0.1:$((PORT + PORT_OFFSET)) -> VM port $PORT"
+  done
+  run "${GC[@]}" compute ssh "$NAME" --zone "$ZONE" --tunnel-through-iap -- \
+    -N "${fwd[@]}" -o ServerAliveInterval=30 -o ExitOnForwardFailure=yes
+}
+
+cmd_status() {
+  run "${GC[@]}" compute instances list --filter "name=$NAME" \
+    --format 'table(name,zone.basename(),status,machineType.basename(),scheduling.provisioningModel)'
+  run "${GC[@]}" compute firewall-rules list --filter "name=$FW_RULE" --format 'table(name,sourceRanges.list(),targetTags.list())'
+  ((DRY_RUN)) && return
+  resolve_zone 2>/dev/null || return 0
+  local spec
+  for spec in ${MODELS[@]+"${MODELS[@]}"}; do
+    parse_model "$spec"
+    if rssh_q "curl -fsS http://127.0.0.1:$PORT/health" >/dev/null 2>&1; then
+      echo "port $PORT: healthy"
+    else
+      echo "port $PORT: not responding"
+    fi
+  done
+}
+
+cmd_stop() {
+  resolve_zone
+  run "${GC[@]}" compute instances stop "$NAME" --zone "$ZONE"
+  echo "stopped. The disk still bills a little. Use 'down' to remove it."
+}
+
+cmd_down() {
+  resolve_zone
+  run "${GC[@]}" compute instances delete "$NAME" --zone "$ZONE" --quiet
+  run "${GC[@]}" compute firewall-rules delete "$FW_RULE" --quiet
+}
+
+"cmd_$CMD"
