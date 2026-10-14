@@ -74,10 +74,9 @@ PORT_OFFSET="${GPU_VM_PORT_OFFSET:-0}"
 IMAGE_FAMILY="${GPU_VM_IMAGE_FAMILY:-common-cu129-ubuntu-2204-nvidia-580}"
 IMAGE_PROJECT="${GPU_VM_IMAGE_PROJECT:-deeplearning-platform-release}"
 DISK_SIZE="${GPU_VM_DISK_SIZE:-100GB}"
-# Google's documented IAP forwarding range, built from parts so it is not a
-# stray literal. See the Cloud IAP "TCP forwarding" docs. Override with
+# Google's documented IAP TCP forwarding range. Override with
 # GPU_VM_IAP_RANGE if Google changes it.
-IAP_RANGE="${GPU_VM_IAP_RANGE:-$((7 * 5)).${IAP_B:=235}.240.0/20}"
+IAP_RANGE="${GPU_VM_IAP_RANGE:-35.235.240.0/20}"
 DRY_RUN=0
 MODELS=()
 if [[ -n "${GPU_VM_MODELS:-}" ]]; then
