@@ -134,7 +134,6 @@ attempted=0
 failed=0
 while IFS=$'\t' read -r id wfname created <&3; do
   [[ -z "$id" ]] && continue
-  [[ -n "$WORKFLOW" && "$wfname" != "$WORKFLOW" ]] && continue
   [[ -n "$SINCE" && "${created%%T*}" < "$SINCE" ]] && continue
   attempted=$((attempted + 1))
   # RUNID must be exported for gh itself -- jq reads it via env.RUNID. Setting it
