@@ -442,7 +442,9 @@ const PROOF_NA_LINE = /^\s*(?:Proof:\s*n\/a\s*[—–-]\s*(\S.*)|Operator:\s*n\/
 // cannot state that evidence at all — live as PR #205, whose body recorded
 // `bash worker-run.test.sh` and failed this check. `docker`, `curl`, and
 // `terraform` are the other runners in that same table that the list skipped.
-const PROOF_COMMAND_RE = /^(?:[$>`]\s*|\*\s*)?(?:bunx|bun|npm|pnpm|yarn|node|deno|cargo|go|pytest|python3|python|make|git|gh|npx|bash|sh|docker|curl|terraform|box|\.\/)\b[^\n]*/i;
+// A list marker and inline-code/prompt marker are separate Markdown layers.
+// Accept both in order so `- ` plus a backtick does not hide a real command.
+const PROOF_COMMAND_RE = /^(?:[-*+]\s+)?(?:[$>`]\s*)?(?:bunx|bun|npm|pnpm|yarn|node|deno|cargo|go|pytest|python3|python|make|git|gh|npx|bash|sh|docker|curl|terraform|box|\.\/)\b[^\n]*/i;
 
 // Real tools do not all print "passed". oxlint prints "Found 0 warnings",
 // tsc prints "0 errors", docker prints "Successfully built", terraform
@@ -451,7 +453,7 @@ const PROOF_COMMAND_RE = /^(?:[$>`]\s*|\*\s*)?(?:bunx|bun|npm|pnpm|yarn|node|den
 // warnings or errors as success would let a red run through, so the counts
 // that mean clean are zero, not `\d+`. "Successfully" needs the adverb
 // form so the word boundary sits after the `y`, not inside the word.
-const PROOF_RESULT_RE = /(?:->|\b(?:pass(?:ed)?|success(?:ful(?:ly)?)?|clean|green|ok|verified|complete|no issues|no changes|exit(?:ed)?\s+0)\b|\d+\s+(?:tests?|checks?)\s+(?:pass|passed|successful)|\b0\s+(?:warnings?|errors?)\b|\bfailed\s*=\s*0\b)/i;
+const PROOF_RESULT_RE = /(?:->|\b(?:pass(?:ed)?|success(?:ful(?:ly)?)?|clean|green|ok|verified|complete|no issues|no changes|exit(?:ed|s)?\s+0)\b|\d+\s+(?:tests?|checks?)\s+(?:pass|passed|successful)|\b0\s+(?:warnings?|errors?)\b|\bfailed\s*=\s*0\b)/i;
 
 // oxlint's actual output is "Found N warnings and M errors", both counts in
 // one line. `\b0\s+(?:warnings?|errors?)\b` alone would let a nonzero
@@ -478,7 +480,8 @@ const PROOF_RESULT_RE = /(?:->|\b(?:pass(?:ed)?|success(?:ful(?:ly)?)?|clean|gre
 // zero: "02 failed" still means two failures. `0*` before the required
 // nonzero digit absorbs the leading zero without letting an all-zero count
 // like "00" or "0" through, since `[1-9]` still demands one nonzero digit.
-const PROOF_NONZERO_RE = /(?<![=\d])0*[1-9]\d*\s+(?:(?:tests?|checks?|cases?)\s+)?(?:warnings?|errors?|failed)\b|\bfailed\s*=\s*0*[1-9]\d*\b/i;
+// An arrow records a result but cannot make a nonzero exit successful.
+const PROOF_NONZERO_RE = /\bexit(?:ed|s)?\s+0*[1-9]\d*\b|(?<![=\d])0*[1-9]\d*\s+(?:(?:tests?|checks?|cases?)\s+)?(?:warnings?|errors?|failed)\b|\bfailed\s*=\s*0*[1-9]\d*\b/i;
 
 function proofCommand(text) {
   const lines = String(text).split('\n').map((line) => line.trim()).filter(Boolean);
