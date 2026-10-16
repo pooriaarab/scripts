@@ -31,6 +31,15 @@ class Parser(argparse.ArgumentParser):
     def error(self, message):  # argparse repeats unknown arguments, and one may be a token
         die("bad arguments, not repeated here. Run with --help." if "unrecognized" in message else message)
 
+class SameOrigin(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        new = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new is not None and urllib.parse.urlsplit(newurl)[:2] != urllib.parse.urlsplit(req.full_url)[:2]:
+            new.remove_header("Authorization")  # never hand the bearer token to another origin
+        return new
+
+OPENER = urllib.request.build_opener(SameOrigin)
+
 def http(method, url, token="", body=None):
     h = {"Accept": "application/json", "User-Agent": "paper-publish"}
     if token:
@@ -42,7 +51,7 @@ def http(method, url, token="", body=None):
     req = urllib.request.Request(url, data=body, method=method, headers=h)
     for tries in range(6):  # a 429 means wait for Retry-After, then send the same call again
         try:
-            r = urllib.request.urlopen(req, timeout=120)
+            r = OPENER.open(req, timeout=120)
         except urllib.error.HTTPError as e:
             r = e
         except (urllib.error.URLError, OSError) as e:
