@@ -1,0 +1,164 @@
+#!/usr/bin/env python3
+"""paper-venues - build and query the paper venue database.
+
+  paper-venues build <references-dir> [out.json]   Markdown tables -> JSON
+  paper-venues check <references-dir> [data.json]  exit 1 when the JSON is stale
+  paper-venues list [--kind listed|avoid|shortlist] [--file F] [--grep TEXT] [--data data.json]
+  paper-venues show NAME [--data data.json]
+  paper-venues stats [--data data.json]
+
+Reads the Markdown tables in pooriaarab/skills paper-submission/references.
+Never uses the network. Never submits anything. See paper-venues.failure-modes.md.
+"""
+import json, os, re, sys
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+DEFAULT_DATA = os.path.join(HERE, "paper-venues.json")
+NAME_KEYS = ("name", "venue", "item", "best fit")
+AVOID_KEYS = ("reason", "why avoid")
+
+
+def die(msg, code=2):
+    print(f"paper-venues: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def parse_file(path):
+    base = os.path.basename(path)
+    text = open(path, encoding="utf-8").read().split("\n")
+    checked = ""
+    for l in text[:12]:
+        m = re.search(r"(?:Checked|Date:?)\s+(\d{4}-\d{2}-\d{2})", l)
+        if m:
+            checked = m.group(1)
+            break
+    recs, skipped, heading, i = [], {"width": 0, "noname": 0}, "", 0
+    while i < len(text):
+        line = text[i]
+        if line.startswith("#"):
+            heading = line.lstrip("# ").strip()
+        if line.startswith("|") and i + 1 < len(text) and re.match(r"^\|[\s:|-]+\|?$", text[i + 1]):
+            hdr = [h.strip().lower() for h in line.strip().strip("|").split("|")]
+            i += 2
+            while i < len(text) and text[i].startswith("|"):
+                cells = [c.strip() for c in re.split(r"(?<!\\)\|", text[i].strip().strip("|"))]
+                i += 1
+                if len(cells) != len(hdr):
+                    skipped["width"] += 1
+                    continue
+                fields = dict(zip(hdr, cells))
+                name = next((fields[k] for k in NAME_KEYS if k in fields and fields[k]), "")
+                name = re.sub(r"[`*]", "", name).strip()
+                if not name:
+                    skipped["noname"] += 1
+                    continue
+                kind = "avoid" if any(k in fields for k in AVOID_KEYS) or "avoid" in heading.lower() else ("shortlist" if "need" in fields else "listed")
+                url = fields.get("url", "")
+                recs.append({"name": name, "kind": kind, "url": url, "source_file": base, "section": heading, "checked": checked, "fields": fields})
+            continue
+        i += 1
+    return recs, skipped
+
+
+def build(refdir):
+    if not os.path.isdir(refdir):
+        die(f"not a directory: {refdir}")
+    files = sorted(f for f in os.listdir(refdir) if f.startswith("venues") or f == "free-venues.md")
+    if not files:
+        die(f"no venue files in {refdir}")
+    out, skipped = [], {"width": 0, "noname": 0}
+    for f in files:
+        r, s = parse_file(os.path.join(refdir, f))
+        out += r
+        for k in skipped:
+            skipped[k] += s[k]
+    if skipped["width"] or skipped["noname"]:
+        print(f"paper-venues: skipped {skipped['width']} rows with the wrong width and {skipped['noname']} rows without a name", file=sys.stderr)
+    return out
+
+
+def dumps(recs):
+    rows = ",\n".join(json.dumps(r, ensure_ascii=False) for r in recs)
+    return "[\n" + rows + "\n]\n"
+
+
+def load(path):
+    if not os.path.isfile(path):
+        die(f"no data file: {path}")
+    return json.load(open(path, encoding="utf-8"))
+
+
+def opt(args, flag, default=None):
+    if flag in args:
+        i = args.index(flag)
+        return args[i + 1] if i + 1 < len(args) else default
+    return default
+
+
+def unverified(r):
+    return any("UNVERIFIED" in str(v) for v in r["fields"].values())
+
+
+def main():
+    a = sys.argv[1:]
+    if not a:
+        print(__doc__)
+        sys.exit(2)
+    cmd = a[0]
+    data_path = opt(a, "--data", DEFAULT_DATA)
+    if cmd == "build":
+        if len(a) < 2:
+            die("build needs a references directory")
+        out = dumps(build(a[1]))
+        if len(a) > 2 and not a[2].startswith("--"):
+            open(a[2], "w", encoding="utf-8").write(out)
+        else:
+            sys.stdout.write(out)
+    elif cmd == "check":
+        if len(a) < 2:
+            die("check needs a references directory")
+        path = a[2] if len(a) > 2 and not a[2].startswith("--") else DEFAULT_DATA
+        fresh = dumps(build(a[1]))
+        cur = open(path, encoding="utf-8").read() if os.path.isfile(path) else ""
+        if fresh != cur:
+            print("paper-venues: the JSON is stale; run build", file=sys.stderr)
+            sys.exit(1)
+        print("paper-venues: JSON is current")
+    elif cmd == "list":
+        recs = load(data_path)
+        kind, fil, g = opt(a, "--kind"), opt(a, "--file"), opt(a, "--grep")
+        for r in recs:
+            if kind and r["kind"] != kind:
+                continue
+            if fil and r["source_file"] != fil:
+                continue
+            if g and g.lower() not in json.dumps(r, ensure_ascii=False).lower():
+                continue
+            print(f"{r['kind']:9} {r['name']}  [{r['source_file']}, checked {r['checked']}]")
+    elif cmd == "show":
+        if len(a) < 2:
+            die("show needs a name")
+        q = a[1].lower()
+        hits = [r for r in load(data_path) if q in r["name"].lower()]
+        if not hits:
+            print("paper-venues: no venue matches", file=sys.stderr)
+            sys.exit(1)
+        for r in hits:
+            print(f"== {r['name']} ({r['kind']}) from {r['source_file']}, checked {r['checked']}. Re-open the source before you act.")
+            for k, v in r["fields"].items():
+                print(f"  {k}: {v}")
+    elif cmd == "stats":
+        recs = load(data_path)
+        by = {}
+        for r in recs:
+            by[r["kind"]] = by.get(r["kind"], 0) + 1
+        print(f"records: {len(recs)}")
+        for k in sorted(by):
+            print(f"  {k}: {by[k]}")
+        print(f"rows with an UNVERIFIED cell: {sum(1 for r in recs if unverified(r))}")
+    else:
+        die(f"unknown command: {cmd}")
+
+
+if __name__ == "__main__":
+    main()
