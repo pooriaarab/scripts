@@ -1,0 +1,199 @@
+#!/usr/bin/env python3
+"""eval-matrix - run a grid of benchmark package versions against models, one report per cell.
+
+  eval-matrix run PLAN.json OUTDIR [--workers 4]
+  eval-matrix ledger OUTDIR            rebuild OUTDIR/ledger.csv from the report files
+
+PLAN.json:
+{
+  "packages": ["benchmark-sycophancy"], "versions": ["0.1.0", "0.2.0"],
+  "seed": 1,
+  "bin": "optional path template with {pkg} and {ver}; when set, no npm install is done",
+  "cap_usd": 3.5,
+  "groups": [
+    {"name": "trivial", "provider": "openai", "base_url": "http://127.0.0.1:8777/v1", "key": "x",
+     "models": ["trivial-empty", "trivial-yes"]},
+    {"name": "hosted", "provider": "openrouter", "key_env": "OPENROUTER_API_KEY",
+     "models": ["mistralai/mistral-nemo"]}
+  ]
+}
+Cells run model by model, in the plan order. A report is OUTDIR/<pkg>@<ver>/<model-slug>.json.
+Keys come from the environment (key_env) and are never written. See eval-matrix.failure-modes.md.
+"""
+import concurrent.futures as cf, csv, datetime, json, os, re, subprocess, sys, tempfile, threading
+
+LOCK = threading.Lock()
+
+
+def die(msg, code=2):
+    print(f"eval-matrix: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def slug(s):
+    return re.sub(r"[^A-Za-z0-9._-]+", "_", s)
+
+
+def install(pkg, ver, cache):
+    d = os.path.join(cache, f"{pkg}@{ver}")
+    binp = os.path.join(d, "node_modules", ".bin", pkg)
+    if os.path.isfile(binp):
+        return binp, None
+    os.makedirs(d, exist_ok=True)
+    p = subprocess.run(["npm", "install", "--no-audit", "--no-fund", "--prefix", d, f"{pkg}@{ver}"], capture_output=True, text=True)
+    if p.returncode or not os.path.isfile(binp):
+        return None, (p.stderr or p.stdout)[-400:]
+    return binp, None
+
+
+def run_cell(binp, group, model, seed, timeout=1800):
+    env = dict(os.environ)
+    if group.get("provider") == "openai":
+        env["OPENAI_BASE_URL"] = group["base_url"]
+        env["OPENAI_API_KEY"] = group.get("key") or env.get(group.get("key_env", ""), "x")
+    elif group.get("key_env"):
+        if not env.get(group["key_env"]):
+            return None, f"environment variable {group['key_env']} is not set"
+    cmd = [binp, "run", "--provider", group["provider"], "--model", model, "--seed", str(seed), "--json"]
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return None, "timeout"
+    if p.returncode:
+        return None, f"exit {p.returncode}: {(p.stderr or p.stdout)[-300:]}"
+    try:
+        rep = json.loads(p.stdout)
+        float(rep["mean"])
+    except Exception as e:
+        return None, f"bad report: {e}"
+    return rep, None
+
+
+def write_atomic(path, text):
+    d = os.path.dirname(path)
+    fd, tmp = tempfile.mkstemp(dir=d, suffix=".tmp")
+    with os.fdopen(fd, "w") as f:
+        f.write(text)
+    os.replace(tmp, path)
+
+
+def ledger(outdir):
+    rows = []
+    for d in sorted(os.listdir(outdir)):
+        pd = os.path.join(outdir, d)
+        if not os.path.isdir(pd) or "@" not in d:
+            continue
+        pkg, ver = d.rsplit("@", 1)
+        for f in sorted(os.listdir(pd)):
+            if f.endswith(".json"):
+                r = json.load(open(os.path.join(pd, f)))
+                t = r.get("totals", {})
+                rows.append([pkg, ver, r.get("model", ""), r.get("mean"), t.get("tasks"), t.get("costUsd", 0), t.get("latencyMs"), r.get("startedAt"), r.get("completedAt"), "ok"])
+            elif f.endswith(".fail"):
+                rows.append([pkg, ver, f[:-5], "", "", 0, "", "", "", "fail: " + open(os.path.join(pd, f)).read().strip()[:120].replace("\n", " ")])
+    with open(os.path.join(outdir, "ledger.csv"), "w", newline="") as fh:
+        w = csv.writer(fh)
+        w.writerow(["package", "version", "model", "mean", "tasks", "cost_usd", "latency_ms", "started_at", "completed_at", "status"])
+        w.writerows(rows)
+    return len(rows)
+
+
+def spent(outdir):
+    total = 0.0
+    for d in os.listdir(outdir):
+        pd = os.path.join(outdir, d)
+        if os.path.isdir(pd) and "@" in d:
+            for f in os.listdir(pd):
+                if f.endswith(".json"):
+                    try:
+                        total += float(json.load(open(os.path.join(pd, f))).get("totals", {}).get("costUsd") or 0)
+                    except Exception:
+                        pass
+    return total
+
+
+def run(planp, outdir, workers):
+    if not os.path.isfile(planp):
+        die(f"no plan file: {planp}")
+    plan = json.load(open(planp))
+    if not plan.get("packages"):
+        die("the plan has no packages")
+    os.makedirs(outdir, exist_ok=True)
+    cache = os.path.join(outdir, ".cache")
+    cap = float(plan.get("cap_usd") or 1e9)
+    bins = {}
+    for pkg in plan["packages"]:
+        for ver in plan["versions"]:
+            os.makedirs(os.path.join(outdir, f"{pkg}@{ver}"), exist_ok=True)
+            if plan.get("bin"):
+                bins[(pkg, ver)] = (plan["bin"].format(pkg=pkg, ver=ver), None)
+            else:
+                bins[(pkg, ver)] = install(pkg, ver, cache)
+    jobs_by_model = []
+    for g in plan["groups"]:
+        for m in g["models"]:
+            jobs_by_model.append((g, m))
+    seed = plan.get("seed", 1)
+    for g, m in jobs_by_model:
+        if spent(outdir) >= cap:
+            write_atomic(os.path.join(outdir, "STOPPED"), f"cap {cap} reached before model {m}; spent {spent(outdir):.4f}\n")
+            print(f"eval-matrix: cap reached before {m}", file=sys.stderr)
+            break
+        cells = []
+        for (pkg, ver), (binp, err) in bins.items():
+            path = os.path.join(outdir, f"{pkg}@{ver}", slug(m) + ".json")
+            fail = path[:-5] + ".fail"
+            if os.path.isfile(path):
+                continue
+            cells.append((pkg, ver, binp, err, path, fail))
+
+        def one(c):
+            pkg, ver, binp, err, path, fail = c
+            if binp is None:
+                write_atomic(fail, f"install failed: {err}")
+                return
+            if g.get("name") != "trivial" and spent(outdir) >= cap:
+                return "capped"
+            rep, e = run_cell(binp, g, m, seed)
+            if rep is None:
+                rep, e = run_cell(binp, g, m, seed)
+            if rep is None:
+                write_atomic(fail, e or "unknown")
+                return
+            if os.path.isfile(fail):
+                os.remove(fail)
+            write_atomic(path, json.dumps(rep))
+
+        capped = False
+        with cf.ThreadPoolExecutor(max_workers=workers) as ex:
+            for res in ex.map(one, cells):
+                if res == "capped":
+                    capped = True
+        if capped:
+            write_atomic(os.path.join(outdir, "STOPPED"), f"cap {cap} reached during model {m}; spent {spent(outdir):.4f}\n")
+            print(f"eval-matrix: cap reached during {m}", file=sys.stderr)
+            break
+    n = ledger(outdir)
+    print(f"eval-matrix: ledger has {n} rows; spent {spent(outdir):.4f} USD")
+
+
+def main():
+    a = sys.argv[1:]
+    if not a:
+        print(__doc__)
+        sys.exit(2)
+    if a[0] == "run":
+        if len(a) < 3:
+            die("run needs PLAN.json and OUTDIR")
+        w = int(a[a.index("--workers") + 1]) if "--workers" in a else 4
+        run(a[1], a[2], w)
+    elif a[0] == "ledger":
+        if len(a) < 2 or not os.path.isdir(a[1]):
+            die("ledger needs an existing OUTDIR")
+        print(f"eval-matrix: ledger has {ledger(a[1])} rows")
+    else:
+        die(f"unknown command {a[0]}")
+
+
+if __name__ == "__main__":
+    main()
