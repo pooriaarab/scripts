@@ -2742,3 +2742,70 @@ test('a promotion from a default branch that is not named main still fails a bad
   assert.equal(result.failures.some((f) => f.check.startsWith('PR title')), true);
   assert.equal(result.failures.some((f) => f.check === 'PR size'), false);
 });
+
+// Exercise the full PR command with GitHub fixtures. Markdown list syntax must
+// not change whether a real command and its result satisfy verification.
+for (const [name, evidence, accepted] of [
+  ['dash inline code', '- `bun run ci:local` -> exit 0', true],
+  ['dash original incident', '- `bun run ci:local` exits 0 on the final source.', true],
+  ['star inline code', '* `bun test` -> 3 passed', true],
+  ['plus inline code', '+ `bun test` -> 3 passed', true],
+  ['dash plain command', '- bun test -> 3 passed', true],
+  ['dash prompt', '- $ bun test -> 3 passed', true],
+  ['plain command', 'bun test -> 3 passed', true],
+  ['exit spelling', '- `bun test` exit 0', true],
+  ['exited spelling', '- `bun test` exited 0', true],
+  ['exits spelling', '- `bun test` exits 0', true],
+  ['nonzero exit', '- `bun test` exits 1', false],
+  ['nonzero exit prefix', '- `bun test` exits 10', false],
+  ['arrow nonzero exit', '- `bun test` -> exit 1', false],
+  ['arrow nonzero exits', '- `bun test` -> exits 1', false],
+  ['arrow nonzero exited', '- `bun test` -> exited 2', false],
+  ['arrow leading zero exit', '- `bun test` -> exit 01', false],
+  ...[
+    'exit code ', 'exit status ', 'exited with ',
+    'exited with code ', 'exited with status ',
+    'exit code: ', 'exit status:', 'exited with: ',
+    'exited with code:', 'exited with status: ',
+  ].flatMap((format) => [
+    ['0', true], ['00', true], ['1', false], ['01', false],
+  ].flatMap(([status, accepted]) => ['', '-> '].map((arrow) => [
+    `${arrow}${format}${status}`,
+    `- \`bun test\` ${arrow}${format}${status}`,
+    accepted,
+  ]))),
+  ['inline code', '`bun test` -> 3 passed', true],
+  ['dollar prompt', '$ bun test -> 3 passed', true],
+  ['quote prompt', '> bun test -> 3 passed', true],
+  ['star plain command', '* bun test -> 3 passed', true],
+  ['prose', '- All checks passed.', false],
+  ['command mentioned in prose', '- We ran `bun test` -> 3 passed', false],
+  ['unknown command', '- `imaginary-check` -> 3 passed', false],
+  ['tool name prefix', '- `bunfake test` -> 3 passed', false],
+  ['missing bullet space', '-bun test -> 3 passed', false],
+  ['no result', '- `bun test`', false],
+  ['failed tests', '- `bun test` -> 3 passed, 2 failed', false],
+  ['failed key value', '- `bun test` -> passed; failed=2', false],
+  ['nonzero errors', '- `bun test` -> 1 error', false],
+  ['nonzero warnings', '- `bun test` -> 1 warning and 0 errors', false],
+  ['refusal beside command', '- `bun test` -> 3 passed\nTODO: verify the rest', false],
+]) {
+  test(`PR command proof: ${name}`, async () => {
+    const number = 142;
+    const routes = promotionRoutes(number, {
+      head: 'pc-142-check-command-evidence', base: 'main',
+      title: '[PC-142] Check command evidence',
+      commitMessage: 'Check command evidence',
+    });
+    routes[`issues/${number}`] = { state: 'open' };
+    routes[`pulls/${number}/files`] = [{ filename: 'src/api.js', additions: 1, deletions: 0 }];
+    routes[`pulls/${number}`].body = [
+      `Closes #${number}`, '## What', 'Check command evidence in a pull request.',
+      '## Why', 'Keep real verification results readable in Markdown lists.',
+      '## How I verified', evidence, 'Assisted-by: agent:model',
+    ].join('\n\n');
+    const { exitCode, result } = await runPrWithRoutes(number, routes);
+    assert.equal(exitCode, accepted ? 0 : 1, JSON.stringify(result.failures));
+    assert.equal(result.failures.some((f) => f.check === '## How I verified'), !accepted);
+  });
+}
