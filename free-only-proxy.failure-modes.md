@@ -12,7 +12,7 @@ The tests in `free-only-proxy.test.sh` cover each row marked "tested". They use 
 | 4 | A `:free` model answers with a nonzero `usage.cost`. | Write the `STOP` file, answer 503 to this and every later request, and say so on stderr. The run must not go on spending. | yes |
 | 5 | The daily request count is reached. | Answer 429 with `Retry-After` and write `DAILY_LIMIT`. Counting survives a restart (state file, UTC date). | yes |
 | 6 | The upstream answers 429 or 5xx. | Retry up to three times with growing waits, honoring `Retry-After`. After that pass the error through. | yes |
-| 7 | Two workers call at once. | Upstream calls are serialized and spaced by the minimum interval. | yes |
+| 7 | Two workers call at once. | Call START times are serialized and spaced by the minimum interval. The calls themselves run in parallel, so slow models do not block each other. | yes |
 | 8 | A key or a prompt is logged. | The log holds time, model id, status and token counts only. The test greps for the test key and for a prompt marker. | yes |
 | 9 | The key is missing. | Exit 2 at start. | yes |
 | 10 | A route other than chat completions or models. | Answer 404. | yes |

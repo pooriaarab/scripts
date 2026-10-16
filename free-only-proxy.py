@@ -103,7 +103,7 @@ class H(BaseHTTPRequestHandler):
                 time.sleep(wait)
             LAST[0] = time.time()
             write_count(read_count() + 1)
-            status, resp, hdrs = self.upstream(body)
+        status, resp, hdrs = self.upstream(body)
         cost = 0
         try:
             cost = float((resp.get("usage") or {}).get("cost") or 0)
