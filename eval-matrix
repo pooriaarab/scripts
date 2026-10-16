@@ -13,12 +13,12 @@ PLAN.json:
   "groups": [
     {"name": "trivial", "provider": "openai", "base_url": "http://127.0.0.1:8777/v1", "key": "x",
      "models": ["trivial-empty", "trivial-yes"]},
-    {"name": "hosted", "provider": "openrouter", "key_env": "OPENROUTER_API_KEY",
+    {"name": "hosted", "provider": "openrouter", "key_env": "OPENROUTER_API_KEY", "args": ["--concurrency", "8"],
      "models": ["mistralai/mistral-nemo"]}
   ]
 }
 Cells run model by model, in the plan order. A report is OUTDIR/<pkg>@<ver>/<model-slug>.json.
-Keys come from the environment (key_env) and are never written. See eval-matrix.failure-modes.md.
+A group may add CLI flags with "args" (for example --concurrency 8). Keys come from the environment (key_env) and are never written. See eval-matrix.failure-modes.md.
 """
 import concurrent.futures as cf, csv, datetime, json, os, re, subprocess, sys, tempfile, threading
 
@@ -54,7 +54,7 @@ def run_cell(binp, group, model, seed, timeout=1800):
     elif group.get("key_env"):
         if not env.get(group["key_env"]):
             return None, f"environment variable {group['key_env']} is not set"
-    cmd = [binp, "run", "--provider", group["provider"], "--model", model, "--seed", str(seed), "--json"]
+    cmd = [binp, "run", "--provider", group["provider"], "--model", model, "--seed", str(seed), "--json"] + [str(x) for x in group.get("args", [])]
     try:
         p = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=timeout)
     except subprocess.TimeoutExpired:
