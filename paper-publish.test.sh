@@ -136,8 +136,9 @@ run c19b "title mismatch" $TOOL check "$T/title.json" --pdf "$T/paper.pdf" --cff
 has c19b "not on the PDF first page"; has c19b "not in $T/CITATION.cff"; [ $RC = 1 ] || fail 19; ok "a title mismatch lists the PDF and CITATION.cff"
 mm orc.json 'm["authors"][0]["orcid"] = "0000-0002-1825-0098"'
 run c20 "bad ORCID checksum" $TOOL check "$T/orc.json" --offline; has c20 "bad ORCID"; [ $RC = 1 ] || fail "20 check"
+mm orc2.json 'm["authors"][0]["orcid"] = "abc"'; run c20c "non-numeric ORCID" $TOOL check "$T/orc2.json" --offline; has c20c "bad ORCID"; ! grep -q Traceback "$T/out/c20c" || fail "20 traceback"
 run c20b "bad ORCID in zenodo-draft" $TOOL zenodo-draft --pdf "$T/paper.pdf" --tarball "$T/paper.tar.gz" --meta "$T/orc.json"
-has c20b "bad ORCID"; quiet 20; [ $RC = 2 ] || fail "20 draft"; ok "a bad ORCID checksum fails both commands"
+has c20b "bad ORCID"; quiet 20; [ $RC = 2 ] || fail "20 draft"; ok "a bad ORCID, by checksum or by shape, fails both commands without a traceback"
 mm multi.json 'm["abstract"] = "Short XXXX — see '$B'/missing"; del m["license"]'
 run c21 "many problems at once" $TOOL check "$T/multi.json"
 has c21 "abstract has"; has c21 "XXXX"; has c21 "em dash"; has c21 "does not return 200"; has c21 "needs a title and a license"; [ $RC = 1 ] || fail 21; ok "every problem is listed, not only the first"
