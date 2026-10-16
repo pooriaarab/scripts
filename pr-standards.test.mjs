@@ -2762,6 +2762,18 @@ for (const [name, evidence, accepted] of [
   ['arrow nonzero exits', '- `bun test` -> exits 1', false],
   ['arrow nonzero exited', '- `bun test` -> exited 2', false],
   ['arrow leading zero exit', '- `bun test` -> exit 01', false],
+  ...[
+    'exit code ', 'exit status ', 'exited with ',
+    'exited with code ', 'exited with status ',
+    'exit code: ', 'exit status:', 'exited with: ',
+    'exited with code:', 'exited with status: ',
+  ].flatMap((format) => [
+    ['0', true], ['00', true], ['1', false], ['01', false],
+  ].flatMap(([status, accepted]) => ['', '-> '].map((arrow) => [
+    `${arrow}${format}${status}`,
+    `- \`bun test\` ${arrow}${format}${status}`,
+    accepted,
+  ]))),
   ['inline code', '`bun test` -> 3 passed', true],
   ['dollar prompt', '$ bun test -> 3 passed', true],
   ['quote prompt', '> bun test -> 3 passed', true],
