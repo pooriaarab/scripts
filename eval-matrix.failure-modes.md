@@ -21,3 +21,4 @@ The tests in `eval-matrix.test.sh` and `eval-analyze.test.sh` cover each row mar
 | 13 | The same input gives different bootstrap output. | The bootstrap uses a fixed seed from the plan. Same input, same output. | yes |
 | 14 | A secret ends up in a file. | Keys come from the environment only. A report and the ledger never hold a key. The test greps for the test key. | yes |
 | 15 | Hosted model behavior changes between runs. | The tool records the date, the model id and the version in the ledger. It cannot freeze the provider. The paper says so. | no, a human rule |
+| 16 | A cell takes longer than the machine stays up. | The plan can pass flags such as `--concurrency 8` through a group's `args`, so a cell finishes in minutes. The flag is an operational setting and is recorded in the plan. | yes |
