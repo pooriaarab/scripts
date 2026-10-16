@@ -18,8 +18,7 @@ SECRET = ""
 
 class Fail(Exception):
     def __init__(self, msg, code=1):
-        super().__init__(msg)
-        self.code = code
+        super().__init__(msg); self.code = code
 
 def die(msg):
     raise Fail(msg, 2)
@@ -38,8 +37,6 @@ class SameOrigin(urllib.request.HTTPRedirectHandler):
             new.remove_header("Authorization")  # never hand the bearer token to another origin
         return new
 
-OPENER = urllib.request.build_opener(SameOrigin)
-
 def http(method, url, token="", body=None):
     h = {"Accept": "application/json", "User-Agent": "paper-publish"}
     if token:
@@ -51,7 +48,7 @@ def http(method, url, token="", body=None):
     req = urllib.request.Request(url, data=body, method=method, headers=h)
     for tries in range(6):  # a 429 means wait for Retry-After, then send the same call again
         try:
-            r = OPENER.open(req, timeout=120)
+            r = urllib.request.build_opener(SameOrigin).open(req, timeout=120)
         except urllib.error.HTTPError as e:
             r = e
         except (urllib.error.URLError, OSError) as e:

@@ -7,7 +7,7 @@ The tests in `paper-publish.test.sh` run against a fake local server. They use n
 | # | Failure | Wanted behavior | Tested |
 |---|---|---|---|
 | 1 | `ZENODO_TOKEN` is not set, or a person passes the token in argv, for example `--token X`. | Exit 2. Send no request. No such option exists, and the error does not repeat the value. | yes |
-| 2 | An upstream error body repeats the Authorization header. | Replace the token with `***` in every message. The token never reaches a file. | yes |
+| 2 | An upstream error body repeats the Authorization header, or an upstream redirects to another host. | Replace the token with `***` in every message. Drop the header on a cross-host redirect. The token never reaches a file. | yes |
 | 3 | `--publish` without `--i-confirm-permanent`. | Print the exact title and file list. Exit 2. Send no request, not even the draft call. | yes |
 | 4 | `--publish` with both flags. | Build the draft. Then send one publish call. | yes |
 | 5 | A plain run. | Stop at a draft. The upstream never sees a publish call. Print the draft id and the preview URL. | yes |
