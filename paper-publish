@@ -86,9 +86,11 @@ def orcid(o):
 
 def orcid_ok(o):
     o, t = orcid(o), 0
+    if not re.fullmatch(r"\d{4}-\d{4}-\d{4}-\d{3}[\dX]", o):
+        return False
     for c in o.replace("-", "")[:15]:
         t = (t + int(c)) * 2
-    return bool(re.fullmatch(r"\d{4}-\d{4}-\d{4}-\d{3}[\dX]", o)) and o[-1] == ("X" if (12 - t % 11) % 11 == 10 else str((12 - t % 11) % 11))
+    return o[-1] == ("X" if (12 - t % 11) % 11 == 10 else str((12 - t % 11) % 11))
 
 
 def zen(step, method, url, body=None):
