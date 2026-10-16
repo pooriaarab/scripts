@@ -78,13 +78,20 @@ perpage=30; [[ "$ep" =~ per_page=([0-9]+) ]] && perpage="${BASH_REMATCH[1]}"
 page=1; [[ "$ep" =~ [\?\&]page=([0-9]+) ]] && page="${BASH_REMATCH[1]}"
 wf="$DATA/workflows.json"
 [[ "${AMBIGUOUS_WORKFLOWS:-0}" == "1" ]] && wf="$DATA/workflows_ambiguous.json"
+runs="$DATA/runs.json"
+if [[ -n "${LITERAL_WORKFLOW_NAME:-}" ]]; then
+  jq --arg n "$LITERAL_WORKFLOW_NAME" '(.workflows[] | select(.id==13) | .name)=$n' "$wf" > "$DATA/workflows_literal.json"
+  wf="$DATA/workflows_literal.json"
+  jq --arg n "$LITERAL_WORKFLOW_NAME" '(.workflow_runs[] | select(.name=="unit-tests") | .name)=$n' "$runs" > "$DATA/runs_literal.json"
+  runs="$DATA/runs_literal.json"
+fi
 out=""
 if [[ "$ep" =~ actions/workflows/([0-9]+)/runs ]]; then
   wid="${BASH_REMATCH[1]}"
   wname=$(jq -r --argjson id "$wid" '.workflows[] | select(.id==$id) | .name' "$wf")
   out=$(jq --arg wname "$wname" --argjson cap "$perpage" \
     '{total_count: ([.workflow_runs[] | select(.name==$wname)] | length),
-      workflow_runs: ([.workflow_runs[] | select(.name==$wname)] | .[0:$cap])}' "$DATA/runs.json")
+      workflow_runs: ([.workflow_runs[] | select(.name==$wname)] | .[0:$cap])}' "$runs")
 elif [[ "$ep" == *"actions/workflows"* ]]; then
   start=$(( (page-1)*2 ))
   out=$(jq --argjson s "$start" '{total_count: .total_count, workflows: (.workflows | .[$s:$s+2])}' "$wf")
@@ -198,6 +205,14 @@ if (( rc == 0 )) && echo "$out" | grep -q "(8 runs sampled)" \
   ok "unfiltered mode keeps the old endpoint and no workflow lookup"
 else
   fail_msg "unfiltered mode — rc=$rc out: $out log: $(cat "$GH_LOG")"
+fi
+
+# Literal names must survive the JSON transport without escape conversion.
+out=$(LITERAL_WORKFLOW_NAME='build\tools' "$SCRIPT" Yaya/test --limit 8 --workflow 'build\tools' --json 2>/dev/null); rc=$?
+if (( rc == 0 )) && echo "$out" | python3 -c 'import json,sys; assert json.load(sys.stdin)["runs_sampled"] == 3'; then
+  ok "literal backslashes survive workflow lookup"
+else
+  fail_msg "literal workflow name — rc=$rc out: $out"
 fi
 
 echo "---"

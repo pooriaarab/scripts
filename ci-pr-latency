@@ -75,7 +75,7 @@ if [[ -n "$WORKFLOW" ]]; then
   wf_list=""; page=1; collected=0
   while (( page <= 10 )); do
     wf_page=$(gh api "repos/$REPO/actions/workflows?per_page=100&page=$page" \
-      --jq '.workflows[] | [.id, (.name // ""), (.path // "")] | @tsv' 2>/dev/null </dev/null) || {
+      --jq '.workflows[] | @json' 2>/dev/null </dev/null) || {
       echo "error: cannot list workflows for $REPO (page $page)" >&2; exit 4; }
     [[ -z "$wf_page" ]] && break
     wf_list+="$wf_page"$'\n'
@@ -83,24 +83,27 @@ if [[ -n "$WORKFLOW" ]]; then
     (( collected >= wf_total )) && break
     page=$((page + 1))
   done
-  # Exact match, compared with awk so a name containing glob or regex
-  # characters cannot match something it should not.
-  matches=$(printf '%s' "$wf_list" | awk -F'\t' -v n="$WORKFLOW" '$2 == n')
-  nmatches=0
-  [[ -n "$matches" ]] && nmatches=$(printf '%s\n' "$matches" | wc -l)
+  # Decode JSON before comparing. TSV and awk -v both transform escapes in
+  # valid display names such as build\tools.
+  matches=$(printf '%s' "$wf_list" | python3 -c '
+import json, sys
+rows = [json.loads(line) for line in sys.stdin if line.strip()]
+print(json.dumps([row for row in rows if row.get("name") == sys.argv[1]]))
+' "$WORKFLOW") || { echo "error: cannot parse workflows for $REPO" >&2; exit 4; }
+  nmatches=$(printf '%s' "$matches" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')
   if (( nmatches == 0 )); then
     echo "error: no workflow named '$WORKFLOW' for $REPO" >&2
     if [[ -n "$wf_list" ]]; then
       echo "available workflows:" >&2
-      printf '%s\n' "$wf_list" | awk -F'\t' '{print "  " $2}' | sort -u | head -20 >&2
+      printf '%s' "$wf_list" | python3 -c 'import json,sys; print("\n".join("  " + name for name in sorted({json.loads(line).get("name", "") for line in sys.stdin if line.strip()})[:20]))' >&2
     fi
     exit 4
   elif (( nmatches > 1 )); then
     echo "error: ambiguous workflow name '$WORKFLOW' matches $nmatches workflows:" >&2
-    printf '%s\n' "$matches" | awk -F'\t' '{print "  id " $1 " " $3}' >&2
+    printf '%s' "$matches" | python3 -c 'import json,sys; [print("  id", row["id"], row.get("path", "")) for row in json.load(sys.stdin)]' >&2
     exit 4
   fi
-  WFID=$(printf '%s\n' "$matches" | head -1 | cut -f1)
+  WFID=$(printf '%s' "$matches" | python3 -c 'import json,sys; print(json.load(sys.stdin)[0]["id"])')
 fi
 
 if [[ -n "$WFID" ]]; then
