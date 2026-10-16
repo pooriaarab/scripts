@@ -24,7 +24,7 @@ class H(BaseHTTPRequestHandler):
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers["content-length"])))
         m = body.get("model", "")
-        open(LOG, "a").write(json.dumps({"t": time.time(), "model": m}) + "\n")
+        open(LOG, "a").write(json.dumps({"t": time.time(), "model": m, "max_tokens": body.get("max_tokens"), "reasoning": body.get("reasoning")}) + "\n")
         if m == "flaky:free" and flaky["n"] < 2:
             flaky["n"] += 1
             self.send_response(429); self.send_header("content-length", "2"); self.end_headers(); self.wfile.write(b"{}"); return
@@ -36,8 +36,8 @@ EOF
 python3 "$T/upstream.py" $UP "$T/up.log" & pids+=($!)
 sleep 0.5
 
-start_proxy() { # state daily interval
-  OPENROUTER_API_KEY=TESTKEY999 UPSTREAM_BASE_URL=http://127.0.0.1:$UP/v1 FREE_PROXY_RETRY_DELAY=0.05 python3 $P --port $PX --state "$1" --daily "$2" --interval "$3" 2>"$T/proxy.err" &
+start_proxy() { # state daily interval [extra flags]
+  OPENROUTER_API_KEY=TESTKEY999 UPSTREAM_BASE_URL=http://127.0.0.1:$UP/v1 FREE_PROXY_RETRY_DELAY=0.05 python3 $P --port $PX --state "$1" --daily "$2" --interval "$3" ${4:-} 2>"$T/proxy.err" &
   PXPID=$!; pids+=($PXPID); sleep 0.6
 }
 stop_proxy() { kill "$PXPID" 2>/dev/null || true; wait "$PXPID" 2>/dev/null || true; }
@@ -105,6 +105,21 @@ stop_proxy
 start_proxy "$T/s4" 3 0.05
 [ "$(post '{"model":"x/y:free","messages":[]}')" = 429 ] || fail "5 the count was lost on restart"
 ok "the daily limit answers 429, writes DAILY_LIMIT and survives a restart"
+stop_proxy
+
+# 12. output cap and reasoning effort are applied to every request
+start_proxy "$T/s5" 100 0.05 "--max-tokens 512 --reasoning-effort low"
+: > "$T/up.log"
+post '{"model":"x/y:free","messages":[]}' >/dev/null
+post '{"model":"x/y:free","messages":[],"max_tokens":100}' >/dev/null
+post '{"model":"x/y:free","messages":[],"max_completion_tokens":9000}' >/dev/null
+python3 - "$T/up.log" <<'EOF'
+import json, sys
+r = [json.loads(l) for l in open(sys.argv[1])]
+assert [x["max_tokens"] for x in r] == [512, 100, 512], r
+assert all(x["reasoning"] == {"effort": "low"} for x in r), r
+EOF
+ok "the output cap keeps a smaller request limit, lowers a larger one, and sets the reasoning effort"
 stop_proxy
 
 # 8. no key and no prompt in any file

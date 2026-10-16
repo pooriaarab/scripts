@@ -17,3 +17,4 @@ The tests in `free-only-proxy.test.sh` cover each row marked "tested". They use 
 | 9 | The key is missing. | Exit 2 at start. | yes |
 | 10 | A route other than chat completions or models. | Answer 404. | yes |
 | 11 | OpenRouter swaps or drops a free model. | The upstream error is passed through. The runner records the failed cell. The paper says the study is a dated snapshot. | no, an upstream fact |
+| 12 | A free reasoning model writes 10,000 tokens per answer and the run takes weeks. | `--max-tokens` and `--reasoning-effort` apply one output cap and one effort to every request. A request that asks for less keeps its own limit. The paper reports both settings. | yes |

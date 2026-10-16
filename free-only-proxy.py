@@ -2,11 +2,14 @@
 """free-only-proxy - an OpenAI-compatible proxy that can only reach free OpenRouter models.
 
   OPENROUTER_API_KEY=... free-only-proxy.py [--port 8790] [--state DIR] [--daily 900] [--interval 3.5]
+                                            [--max-tokens N] [--reasoning-effort low|medium|high]
 
 Point a benchmark package at it: OPENAI_BASE_URL=http://127.0.0.1:8790/v1, any API key.
 Refuses every model id that does not end in ":free". Spaces upstream calls by --interval seconds.
 Counts requests per UTC day in DIR/count.json; at --daily it answers 429 and writes DIR/DAILY_LIMIT.
 If a response reports a nonzero usage.cost, it writes DIR/STOP and answers 503 from then on.
+--max-tokens caps the output length of every request (a request asking for less keeps its own limit).
+--reasoning-effort sets the reasoning effort of every request, so all models share one setting.
 Env for tests: UPSTREAM_BASE_URL (default https://openrouter.ai/api/v1).
 """
 import argparse, datetime, json, os, sys, threading, time, urllib.error, urllib.request
@@ -85,6 +88,11 @@ class H(BaseHTTPRequestHandler):
         if bad:
             log({"model": bad[0], "status": 403, "note": "paid model blocked"})
             return self.send(403, {"error": {"message": f"paid model blocked: {bad[0]!r}; only ids ending in ':free' are allowed"}})
+        if CFG.get("max_tokens"):
+            asked = body.pop("max_completion_tokens", None) or body.get("max_tokens")
+            body["max_tokens"] = min(int(asked), CFG["max_tokens"]) if asked else CFG["max_tokens"]
+        if CFG.get("effort"):
+            body["reasoning"] = {"effort": CFG["effort"]}
         with LOCK:
             if read_count() >= CFG["daily"]:
                 open(os.path.join(CFG["state"], "DAILY_LIMIT"), "w").write(day() + "\n")
@@ -145,13 +153,15 @@ def main():
     ap.add_argument("--state", default="free-proxy-state")
     ap.add_argument("--daily", type=int, default=900)
     ap.add_argument("--interval", type=float, default=3.5)
+    ap.add_argument("--max-tokens", type=int, default=0)
+    ap.add_argument("--reasoning-effort", default="")
     a = ap.parse_args()
     key = os.environ.get("OPENROUTER_API_KEY")
     if not key:
         print("free-only-proxy: OPENROUTER_API_KEY is not set", file=sys.stderr)
         sys.exit(2)
     os.makedirs(a.state, exist_ok=True)
-    CFG.update({"key": key, "state": a.state, "daily": a.daily, "interval": a.interval, "upstream": os.environ.get("UPSTREAM_BASE_URL", "https://openrouter.ai/api/v1")})
+    CFG.update({"key": key, "state": a.state, "daily": a.daily, "interval": a.interval, "max_tokens": a.max_tokens, "effort": a.reasoning_effort, "upstream": os.environ.get("UPSTREAM_BASE_URL", "https://openrouter.ai/api/v1")})
     srv = ThreadingHTTPServer(("127.0.0.1", a.port), H)
     print(f"free-only-proxy on http://127.0.0.1:{a.port}/v1 (daily {a.daily}, interval {a.interval}s)", file=sys.stderr, flush=True)
     srv.serve_forever()
