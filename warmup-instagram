@@ -1,0 +1,212 @@
+#!/usr/bin/env bash
+# warmup-instagram — Instagram account warmup on iPhone via ESP32
+#
+# Simulates human browsing: scrolls feed, likes posts, reads/leaves comments,
+# checks stories, explores hashtags, checks DMs. Every session is randomized
+# — different patterns, pauses, and engagement levels.
+#
+# Usage:
+#   warmup-instagram [--dry-run] [--auto] [--rounds N] [--duration M]
+#   warmup-instagram --open     # just open IG and scroll a bit
+#   warmup-instagram --full     # full warmup: stories, feed, explore, DMs
+#   warmup-instagram --help
+#
+# Env: ESP32=http://127.0.0.1:8890
+# ============================================================================
+set -uo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/warmup-lib.sh"
+
+# ---- App icon position from recipes ----
+# Instagram at (0.74, 0.36) on Social folder page 1
+INSTA_X="0.74"; INSTA_Y="0.36"
+
+# ---- Chrome positions (approximate, from 500x1080 frame) ----
+# Feed area
+FEED_X="0.5"; FEED_Y="0.5"
+# Like button (heart) — below post
+LIKE_X="0.45"; LIKE_Y="0.55"
+# Comment field
+COMMENT_X="0.3"; COMMENT_Y="0.5"
+# Send/share button
+SHARE_X="0.55"; SHARE_Y="0.55"
+# Story at top
+STORY_X="0.15"; STORY_Y="0.15"
+# DM paper plane (top right) — from recipes: "plus and a heart"
+DM_BUTTON_X="0.85"; DM_BUTTON_Y="0.08"
+# Search/explore (bottom bar center)
+EXPLORE_X="0.5"; EXPLORE_Y="0.92"
+# Profile tab (bottom bar right)
+PROFILE_X="0.85"; PROFILE_Y="0.92"
+# Home tab (bottom bar left)
+HOME_TAB_X="0.15"; HOME_TAB_Y="0.92"
+
+# ---- Behaviour profile for Instagram ----
+LIKE_PROBABILITY=0.4     # chance of liking a post when scrolling
+COMMENT_PROBABILITY=0.15  # chance of commenting
+STORY_PROBABILITY=0.3    # chance of tapping through stories
+
+instagram_open() {
+  log_action instagram open
+  social_open
+  app_open_instagram
+}
+
+instagram_leave() {
+  log_action instagram leave
+  app_leave
+}
+
+instagram_scroll_feed() {
+  local count="${1:-8}"
+  log_action instagram scroll "feed ${count}x"
+  warmup_scroll "$FEED_X" "$FEED_Y" "$count"
+}
+
+instagram_like_random() {
+  # Like a post at a random position in the visible area
+  local like_x like_y
+  like_x=$(random_range 0.30 0.60)
+  like_y=$(random_range 0.30 0.60)
+  log_action instagram like
+  warmup_like "$like_x" "$like_y"
+}
+
+instagram_comment_random() {
+  # Leave a short, natural comment
+  local comments=(
+    "This is so cool!"
+    "Love this 🔥"
+    "Amazing work!"
+    "Totally agree"
+    "Great perspective"
+    "Needed this today"
+    "This is gold"
+    "100% this"
+    "Couldn't agree more"
+    "So well said"
+    "Beautiful!"
+    "Really appreciate this"
+    "Where can I learn more?"
+    "Thanks for sharing"
+    "This is so helpful"
+    "Saving this for later"
+  )
+  local text="${comments[$((RANDOM % ${#comments[@]}))]}"
+  log_action instagram comment "$text"
+  warmup_comment "$text" "$COMMENT_X" "$COMMENT_Y" 0.85 0.80
+}
+
+instagram_watch_stories() {
+  local count="${1:-4}"
+  log_action instagram stories "${count}x"
+  # Tap the first story at top of feed
+  local i=0
+  while [[ $i -lt $count ]]; do
+    local story_x
+    story_x=$(random_range 0.10 0.40)
+    esp32_tap "$story_x" 0.12  # top area where stories live
+    human_pause 1.5 4.0        # watch the story
+    # Tap right side to advance to next story
+    esp32_tap "$(random_range 0.65 0.85)" "$(random_range 0.4 0.6)"
+    human_pause 0.5 1.0
+    i=$(( i + 1 ))
+  done
+  # Tap to return to feed
+  esp32_tap 0.1 0.05
+  human_pause 0.5 1.0
+}
+
+instagram_check_dms() {
+  log_action instagram dms
+  # Tap the paper plane (DM icon) in top right
+  esp32_tap "$DM_BUTTON_X" "$DM_BUTTON_Y"
+  human_pause 1.0 2.5
+  # Scroll through DMs
+  warmup_read_dms 0.5 4
+  # Tap back to feed
+  esp32_tap 0.1 0.05
+  human_pause 0.5 1.0
+}
+
+instagram_explore() {
+  log_action instagram explore
+  # Tap search/explore in bottom bar
+  esp32_tap "$EXPLORE_X" "$EXPLORE_Y"
+  human_pause 1.0 2.0
+  # Scroll explore grid
+  warmup_scroll 0.5 0.5 4
+  # Tap back
+  esp32_back
+  human_pause 0.5 1.0
+}
+
+instagram_run_round() {
+  # One full warmup round — randomized actions
+  local actions
+  actions=$(random_session_plan 10)
+  log_action instagram round "plan: $actions"
+  for action in $actions; do
+    case $action in
+      scroll)  instagram_scroll_feed $(random_int 3 6) ;;
+      like)    [[ $(random_float) < $LIKE_PROBABILITY ]] && instagram_like_random ;;
+      read)    human_read ;;
+      comment) [[ $(random_float) < $COMMENT_PROBABILITY ]] && instagram_comment_random ;;
+      dm)      [[ $(random_float) < 0.2 ]] && instagram_check_dms ;;
+    esac
+  done
+  # Stories at end of round
+  [[ $(random_float) < $STORY_PROBABILITY ]] && instagram_watch_stories $(random_int 2 5)
+}
+
+# ---- Main ----
+main() {
+  local rounds=3
+  local mode="full"
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --dry-run) DRY_RUN=1; shift ;;
+      --auto)    HUMAN_PAUSE_MIN=0.2; HUMAN_PAUSE_MAX=1.0; shift ;;
+      --rounds)  rounds="$2"; shift 2 ;;
+      --duration) rounds=99; log_action instagram "duration mode: $2"; shift 2 ;;
+      --open)    rounds=0; mode="open"; shift ;;
+      --full)    mode="full"; shift ;;
+      --help|-h) echo "Usage: warmup-instagram [--rounds N] [--dry-run] [--auto] [--full] [--open]"; exit 0 ;;
+      *) echo "warmup-instagram: unknown flag $1"; exit 1 ;;
+    esac
+  done
+
+  # Health check
+  esp32_health || die "ESP32 not reachable at $ESP32. Is the agent on?"
+
+  log_action instagram start "rounds=$rounds mode=$mode"
+
+  if [[ "$mode" == "open" ]] || [[ $rounds -gt 0 ]]; then
+    instagram_open
+  fi
+
+  if [[ "$mode" == "full" ]] || [[ "$mode" == "open" ]]; then
+    # Initial feed scroll
+    instagram_scroll_feed 5
+    human_read
+
+    if [[ "$mode" == "full" ]]; then
+      local r=0
+      while [[ $r -lt $rounds ]]; do
+        log_action instagram "round-start" "$((r+1))/$rounds"
+        instagram_run_round
+        r=$(( r + 1 ))
+      done
+
+      # Final explore
+      instagram_explore
+    fi
+  fi
+
+  instagram_leave
+  log_action instagram done
+  echo "Instagram warmup complete ✓"
+}
+
+main "$@"

@@ -1,0 +1,207 @@
+#!/usr/bin/env bash
+# warmup-youtube — YouTube account warmup on iPhone via ESP32
+#
+# YouTube accessed through Safari browser (no dedicated YouTube app found on
+# this phone). Opens Safari, navigates to youtube.com, signs in, then scrolls
+# Shorts, watches/search for videos, likes, comments, subscribes.
+#
+# Usage:
+#   warmup-youtube [--dry-run] [--auto] [--rounds N]
+#   warmup-youtube --open     # just open and scroll
+#   warmup-youtube --help
+#
+# Env: ESP32=http://127.0.0.1:8890
+# ============================================================================
+set -uo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/warmup-lib.sh"
+
+# Safari dock position from recipes: (0.62, 0.93)
+SAFARI_X="0.62"; SAFARI_Y="0.93"
+
+# YouTube chrome
+SEARCH_X="0.3"; SEARCH_Y="0.07"     # search bar
+HOME_X="0.15"; HOME_Y="0.92"        # home tab
+SHORTS_X="0.35"; SHORTS_Y="0.92"    # shorts tab
+SUB_X="0.55"; SUB_Y="0.92"          # subscriptions
+LIBRARY_X="0.70"; LIBRARY_Y="0.92"  # library
+
+LIKE_PROBABILITY=0.3
+SUBSCRIBE_PROBABILITY=0.05
+COMMENT_PROBABILITY=0.05
+
+youtube_open() {
+  log_action youtube open
+  # Open Safari from dock
+  esp32_tap "$SAFARI_X" "$SAFARI_Y"
+  wait_for_frame "" 5 2>/dev/null || true
+  human_pause 1.5 3.0
+
+  # Navigate to YouTube
+  # Tap the address bar
+  esp32_tap 0.3 0.07
+  human_pause 0.5 1.0
+  esp32_type "https://m.youtube.com\n"
+  human_pause 1.0 2.0
+
+  # The .com TLD cookie or redirect should sign us in
+  human_pause 2.0 3.0
+
+  # Accept cookies if shown
+  esp32_tap 0.5 0.6
+  human_pause 1.0 2.0
+}
+
+youtube_leave() {
+  log_action youtube leave
+  # Close Safari via the app switcher
+  esp32_post /api/raw '{"text":"press"}' >/dev/null; human_pause 0.1 0.3
+  esp32_post /api/raw '{"text":"move 0 -900"}' >/dev/null; human_pause 0.2 0.4
+  esp32_post /api/raw '{"text":"release"}' >/dev/null; human_pause 0.5 1.0
+  esp32_tap 0.18 0.06
+  esp32_home
+}
+
+youtube_scroll_shorts() {
+  local count="${1:-8}"
+  log_action youtube shorts "${count}x"
+  # Shorts are full-screen swipe up
+  warmup_scroll_shorts 0.5 0.5 "$count"
+}
+
+youtube_scroll_feed() {
+  local count="${1:-5}"
+  log_action youtube scroll "feed ${count}x"
+  warmup_scroll 0.5 0.5 "$count"
+}
+
+youtube_like() {
+  log_action youtube like
+  warmup_like "$(random_range 0.45 0.55)" "$(random_range 0.75 0.85)"
+}
+
+youtube_comment() {
+  local comments=(
+    "Amazing video, thanks for making this!"
+    "This is so well explained, subbed!"
+    "Underrated channel, keep it up!"
+    "Found this through a recommendation, glad I did!"
+    "This deserves way more views"
+    "The production quality is incredible"
+    "Saved this to my watch later"
+    "Been looking for this exact tutorial"
+  )
+  local text="${comments[$((RANDOM % ${#comments[@]}))]}"
+  log_action youtube comment "$text"
+  human_commit
+  # Scroll down to comments
+  esp32_scroll 0.5 0.5 -3
+  human_pause 0.5 1.0
+  # Tap comment field
+  esp32_tap 0.3 0.75
+  human_pause 0.5 1.0
+  esp32_type "$text"
+  human_pause 0.3 0.8
+  esp32_tap 0.8 0.3  # submit
+  human_pause 0.5 1.5
+}
+
+youtube_search() {
+  local topics=(
+    "tech news today"
+    "programming tutorial"
+    "music playlist"
+    "podcast clips"
+    "documentary"
+    "travel vlog"
+    "cooking recipes"
+    "fitness routine"
+  )
+  local topic="${topics[$((RANDOM % ${#topics[@]}))]}"
+  log_action youtube search "$topic"
+  # Tap search
+  esp32_tap 0.3 0.07
+  human_pause 0.5 1.0
+  esp32_type "$topic"
+  human_pause 0.3 0.8
+  # Tap search result (top result)
+  esp32_tap 0.3 0.2
+  human_pause 1.0 2.0
+  # Watch video
+  human_read
+  human_pause 3.0 8.0
+  # Like if good
+  [[ $(random_float) < 0.3 ]] && youtube_like
+  # Back to home
+  esp32_tap 0.1 0.05  # back button
+  human_pause 0.5 1.0
+}
+
+youtube_subscriptions() {
+  log_action youtube subscriptions
+  esp32_tap "$SUB_X" "$SUB_Y"
+  human_pause 1.0 2.0
+  warmup_scroll 0.5 0.5 4
+  human_read
+  esp32_tap "$HOME_X" "$HOME_Y"
+  human_pause 0.5 1.0
+}
+
+youtube_run_round() {
+  local actions
+  actions=$(random_session_plan 6)
+  log_action youtube round "plan: $actions"
+  for action in $actions; do
+    case $action in
+      scroll)  youtube_scroll_feed $(random_int 3 5) ;;
+      like)    [[ $(random_float) < $LIKE_PROBABILITY ]] && youtube_like ;;
+      read)    human_read ;;
+      comment) [[ $(random_float) < $COMMENT_PROBABILITY ]] && youtube_comment ;;
+      dm)      youtube_search ;;
+    esac
+  done
+}
+
+# ---- Main ----
+main() {
+  local rounds=2
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --dry-run) DRY_RUN=1; shift ;;
+      --auto)    HUMAN_PAUSE_MIN=0.3; HUMAN_PAUSE_MAX=1.0; shift ;;
+      --rounds)  rounds="$2"; shift 2 ;;
+      --open)    rounds=0; shift ;;
+      --help|-h) echo "Usage: warmup-youtube [--rounds N] [--dry-run] [--auto]"; exit 0 ;;
+      *) echo "warmup-youtube: unknown flag $1"; exit 1 ;;
+    esac
+  done
+
+  esp32_health || die "ESP32 not reachable"
+
+  log_action youtube start "rounds=$rounds"
+  youtube_open
+
+  # Scroll shorts first
+  youtube_scroll_shorts 6
+  human_read
+
+  # Home feed
+  youtube_scroll_feed 4
+  human_read
+
+  local r=0
+  while [[ $r -lt $rounds ]]; do
+    log_action youtube "round-start" "$((r+1))/$rounds"
+    youtube_run_round
+    r=$(( r + 1 ))
+  done
+
+  youtube_subscriptions
+
+  youtube_leave
+  log_action youtube done
+  echo "YouTube warmup complete ✓"
+}
+
+main "$@"

@@ -1,0 +1,171 @@
+#!/usr/bin/env bash
+# warmup-linkedin — LinkedIn account warmup on iPhone via ESP32
+#
+# Human-like browsing: scrolls feed, likes posts, leaves comments,
+# checks notifications, views profiles, sends connection requests.
+# Randomized patterns with professional tone.
+#
+# Usage:
+#   warmup-linkedin [--dry-run] [--auto] [--rounds N]
+#   warmup-linkedin --open     # just open and scroll
+#   warmup-linkedin --help
+#
+# Env: ESP32=http://127.0.0.1:8890
+# ============================================================================
+set -uo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/warmup-lib.sh"
+
+LINKEDIN_X="0.27"; LINKEDIN_Y="0.48"
+
+# Chrome — from ref: Home, Network, Notifications, Video, Jobs
+FEED_X="0.5"; FEED_Y="0.5"
+LIKE_X="0.50"; LIKE_Y="0.60"       # thumbs up
+COMMENT_X="0.55"; COMMENT_Y="0.60"  # comment icon
+SHARE_X="0.65"; SHARE_Y="0.60"      # share
+HOME_X="0.15"; HOME_Y="0.92"
+NETWORK_X="0.30"; NETWORK_Y="0.92"
+NOTIF_X="0.45"; NOTIF_Y="0.92"
+JOBS_X="0.75"; JOBS_Y="0.92"
+
+LIKE_PROBABILITY=0.4
+COMMENT_PROBABILITY=0.12
+CONNECT_PROBABILITY=0.08
+
+linkedin_open() {
+  log_action linkedin open
+  social_open
+  app_open_linkedin
+}
+
+linkedin_leave() {
+  log_action linkedin leave
+  app_leave
+}
+
+linkedin_scroll_feed() {
+  local count="${1:-8}"
+  log_action linkedin scroll "feed ${count}x"
+  warmup_scroll "$FEED_X" "$FEED_Y" "$count"
+}
+
+linkedin_like() {
+  log_action linkedin like
+  warmup_like "$(random_range 0.45 0.60)" "$(random_range 0.50 0.65)"
+}
+
+linkedin_comment() {
+  local comments=(
+    "Great insights, thanks for sharing!"
+    "Really valuable perspective on this."
+    "This is such a helpful breakdown."
+    "Thanks for putting this together."
+    "Interesting take — appreciate the thought leadership."
+    "This resonates with my experience."
+    "Well said. Sharing this with my team."
+    "Important conversation to be having."
+    "This is exactly what I've been looking for."
+    "Excellent analysis. Added to my reading list."
+  )
+  local text="${comments[$((RANDOM % ${#comments[@]}))]}"
+  log_action linkedin comment "$text"
+  warmup_comment "$text" \
+    "$(random_range 0.3 0.4)" "$(random_range 0.5 0.6)" \
+    "$(random_range 0.7 0.8)" "$(random_range 0.4 0.5)"
+}
+
+linkedin_check_notifications() {
+  log_action linkedin notifications
+  esp32_tap "$NOTIF_X" "$NOTIF_Y"
+  human_pause 1.0 2.0
+  warmup_scroll 0.5 0.5 4
+  human_read
+  # Back to feed
+  esp32_tap "$HOME_X" "$HOME_Y"
+  human_pause 0.5 1.0
+}
+
+linkedin_view_network() {
+  log_action linkedin network
+  esp32_tap "$NETWORK_X" "$NETWORK_Y"
+  human_pause 1.0 2.0
+  warmup_scroll 0.5 0.5 3
+  human_read
+  esp32_tap "$HOME_X" "$HOME_Y"
+  human_pause 0.5 1.0
+}
+
+linkedin_send_request() {
+  # Send connection request from profile view
+  log_action linkedin "connection-request"
+  human_commit
+  # Tap on someone's name in feed
+  esp32_tap "$(random_range 0.2 0.4)" "$(random_range 0.2 0.4)"
+  human_pause 1.0 2.5
+  # Connect button
+  esp32_tap "$(random_range 0.7 0.9)" "$(random_range 0.1 0.2)"
+  human_pause 0.5 1.0
+  # Confirm
+  esp32_tap "$(random_range 0.5 0.7)" "$(random_range 0.3 0.5)"
+  human_pause 0.5 1.0
+  # Back to feed
+  esp32_back
+  human_pause 0.5 1.0
+}
+
+linkedin_run_round() {
+  local actions
+  actions=$(random_session_plan 10)
+  log_action linkedin round "plan: $actions"
+  for action in $actions; do
+    case $action in
+      scroll)  linkedin_scroll_feed $(random_int 3 6) ;;
+      like)    [[ $(random_float) < $LIKE_PROBABILITY ]] && linkedin_like ;;
+      read)    human_read ;;
+      comment) [[ $(random_float) < $COMMENT_PROBABILITY ]] && linkedin_comment ;;
+      dm)      [[ $(random_float) < $CONNECT_PROBABILITY ]] && linkedin_send_request ;;
+    esac
+  done
+}
+
+# ---- Main ----
+main() {
+  local rounds=3
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --dry-run) DRY_RUN=1; shift ;;
+      --auto)    HUMAN_PAUSE_MIN=0.3; HUMAN_PAUSE_MAX=1.2; shift ;;
+      --rounds)  rounds="$2"; shift 2 ;;
+      --open)    rounds=0; shift ;;
+      --help|-h) echo "Usage: warmup-linkedin [--rounds N] [--dry-run] [--auto]"; exit 0 ;;
+      *) echo "warmup-linkedin: unknown flag $1"; exit 1 ;;
+    esac
+  done
+
+  esp32_health || die "ESP32 not reachable"
+
+  log_action linkedin start "rounds=$rounds"
+  linkedin_open
+
+  linkedin_scroll_feed 5
+  human_read
+  linkedin_like
+  linkedin_scroll_feed 3
+
+  local r=0
+  while [[ $r -lt $rounds ]]; do
+    log_action linkedin "round-start" "$((r+1))/$rounds"
+    linkedin_run_round
+    r=$(( r + 1 ))
+  done
+
+  linkedin_check_notifications
+  linkedin_view_network
+
+  linkedin_leave
+  log_action linkedin done
+  echo "LinkedIn warmup complete ✓"
+}
+
+main "$@"

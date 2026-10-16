@@ -1,0 +1,245 @@
+#!/usr/bin/env bash
+# warmup — Orchestrator for social media warmup on ESP32 iPhone agent
+#
+# Runs randomized human-like warmup sessions across platforms.
+# Every session is unique — different patterns, pauses, engagement levels.
+#
+# Usage:
+#   warmup                           # run all platforms in sequence
+#   warmup instagram                 # just Instagram
+#   warmup tiktok linkedin           # specific platforms
+#   warmup --rounds 5                # 5 rounds per platform
+#   warmup --duration 15m            # run for 15 minutes total
+#   warmup --auto                    # faster, less human delay
+#   warmup --dry-run                 # no actual taps, prints what it'd do
+#   warmup --list                    # list available platforms
+#   warmup --status                  # check ESP32 + session health
+#   warmup --help
+#
+# Platforms: instagram, tiktok, linkedin, x, youtube
+#
+# Env:
+#   ESP32=http://127.0.0.1:8890
+#   WARMUP_ORDER="tiktok instagram x linkedin youtube"  # custom order
+# ============================================================================
+set -uo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/warmup-lib.sh"
+
+# Platform setup — indexed arrays (macOS bash 3.x compat)
+PLATFORM_NAMES=(instagram tiktok linkedin x youtube)
+PLATFORM_SCRIPTS=(
+  "$SCRIPT_DIR/warmup-instagram"
+  "$SCRIPT_DIR/warmup-tiktok"
+  "$SCRIPT_DIR/warmup-linkedin"
+  "$SCRIPT_DIR/warmup-x"
+  "$SCRIPT_DIR/warmup-youtube"
+)
+PLATFORM_WEIGHTS=(3 2 2 2 1)
+
+_platform_index() {
+  local name="$1"
+  for i in "${!PLATFORM_NAMES[@]}"; do
+    [[ "${PLATFORM_NAMES[$i]}" == "$name" ]] && { echo "$i"; return 0; }
+  done
+  return 1
+}
+
+_platform_script() {
+  local idx; idx=$(_platform_index "$1") || return 1
+  echo "${PLATFORM_SCRIPTS[$idx]}"
+}
+
+_platform_weight() {
+  local idx; idx=$(_platform_index "$1") || { echo 1; return 0; }
+  echo "${PLATFORM_WEIGHTS[$idx]}"
+}
+
+warmup_list() {
+  echo "Available warmup platforms:"
+  for i in "${!PLATFORM_NAMES[@]}"; do
+    local p="${PLATFORM_NAMES[$i]}" s="${PLATFORM_SCRIPTS[$i]}"
+    if [[ -x "$s" ]]; then echo "  ✓ $p"; else echo "  - $p (not installed)"; fi
+  done
+}
+
+warmup_status() {
+  echo "=== Warmup Status ==="
+  echo "ESP32 endpoint: $ESP32"
+  esp32_health || echo "  ⚠ NOT REACHABLE"
+  echo ""
+  echo "Log: $WARMUP_STATE/warmup.log"
+  [[ -f "$WARMUP_STATE/warmup.log" ]] && tail -5 "$WARMUP_STATE/warmup.log"
+  echo ""
+  echo "Last frame: $WARMUP_STATE/last-frame.jpg"
+  [[ -f "$WARMUP_STATE/last-frame.jpg" ]] && ls -la "$WARMUP_STATE/last-frame.jpg"
+}
+
+run_platform() {
+  local platform="$1" extra_args="${2:-}"
+  local script; script=$(_platform_script "$platform") || {
+    echo "warmup: unknown platform '$platform'" >&2
+    return 1
+  }
+
+  if [[ ! -x "$script" ]]; then
+    echo "warmup: no executable script for '$platform' (tried $script)" >&2
+    return 1
+  fi
+
+  log_action warmup "launch" "$platform"
+  echo ""
+  echo "═══════════════════════════════════════════"
+  echo "  Starting $platform warmup..."
+  echo "═══════════════════════════════════════════"
+  echo ""
+
+  if [[ -n "${DRY_RUN:-}" ]]; then
+    echo "[dry-run] would run: $script $extra_args"
+  else
+    "$script" $extra_args
+    local rc=$?
+    if [[ $rc -ne 0 ]]; then
+      echo "warmup: $platform exited with code $rc" >&2
+      return $rc
+    fi
+  fi
+
+  echo ""
+  log_action warmup "complete" "$platform"
+  human_pause 2 4
+  return 0
+}
+
+run_all() {
+  local extra_args="$1"
+  local order=("${PLATFORM_NAMES[@]}")
+
+  if [[ -n "${WARMUP_ORDER:-}" ]]; then
+    IFS=' ' read -ra order <<< "$WARMUP_ORDER"
+  fi
+
+  echo "═══════════════════════════════════════════"
+  echo "  Full Warmup Session"
+  echo "  Platforms: ${order[*]}"
+  echo "  Extra args: ${extra_args:-none}"
+  echo "═══════════════════════════════════════════"
+  echo ""
+  log_action warmup "session-start" "${order[*]}"
+
+  local failed=()
+  local platform
+  for platform in "${order[@]}"; do
+    run_platform "$platform" "$extra_args" || failed+=("$platform")
+  done
+
+  echo ""
+  echo "═══════════════════════════════════════════"
+  if [[ ${#failed[@]} -eq 0 ]]; then
+    echo "  All warmup sessions complete ✓"
+  else
+    echo "  Complete with failures: ${failed[*]}"
+  fi
+  echo "═══════════════════════════════════════════"
+  log_action warmup "session-end" "failed=${#failed[@]}"
+}
+
+run_duration() {
+  local duration_sec="$1" extra_args="${2:-}"
+  echo "═══ Running warmup for ${duration_sec}s ═══"
+  log_action warmup "duration-start" "${duration_sec}s"
+
+  # Build weighted pool from indexed arrays
+  local pool=()
+  for pi in "${!PLATFORM_NAMES[@]}"; do
+    local w="${PLATFORM_WEIGHTS[$pi]}" p="${PLATFORM_NAMES[$pi]}"
+    local wi=0
+    while [[ $wi -lt $w ]]; do pool+=("$p"); wi=$(( wi + 1 )); done
+  done
+
+  local end_time=$(( $(date +%s) + duration_sec ))
+  local round=0
+  while [[ $(date +%s) -lt $end_time ]]; do
+    local idx=$(( RANDOM % ${#pool[@]} ))
+    local platform="${pool[$idx]}"
+    echo ""
+    echo "── Round $round: $platform ──"
+    run_platform "$platform" "--rounds 1 $extra_args"
+    round=$(( round + 1 ))
+
+    local remaining=$(( end_time - $(date +%s) ))
+    if [[ $remaining -lt 10 ]]; then
+      echo "══ Last round (${remaining}s left) ══"
+      break
+    fi
+  done
+
+  log_action warmup "duration-end" "rounds=$round"
+  echo "══ Duration warmup complete ($round rounds) ══"
+}
+
+# ---- Main ----
+main() {
+  local mode="all"
+  local extra_args=""
+  local duration=""
+  local args=()
+
+  # If no args, run all
+  [[ $# -eq 0 ]] && set -- "--all"
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --list|-l)    warmup_list; exit 0 ;;
+      --status|-s)  warmup_status; exit 0 ;;
+      --dry-run)    DRY_RUN=1; shift ;;
+      --auto)       extra_args="$extra_args --auto"; shift ;;
+      --rounds)     extra_args="$extra_args --rounds $2"; shift 2 ;;
+      --duration)   duration="$2"; shift 2 ;;
+      --all|-a)     mode="all"; shift ;;
+      --help|-h)
+        echo "Usage: warmup [platform...] [options]"
+        echo "  Platforms: $(echo ${PLATFORM_NAMES[*]})"
+        echo "  Options: --dry-run, --auto, --rounds N, --duration M, --list, --status"
+        exit 0 ;;
+      -*)
+        echo "warmup: unknown flag $1" >&2; exit 1 ;;
+      *)
+        args+=("$1"); shift ;;
+    esac
+  done
+
+  # Health check
+  if [[ -z "${DRY_RUN:-}" ]]; then
+    esp32_health || {
+      echo "⚠ ESP32 not reachable at $ESP32" >&2
+      echo "  Use --dry-run to test without hardware" >&2
+      exit 1
+    }
+  fi
+
+  if [[ -n "$duration" ]]; then
+    local dur_sec=0
+    case "$duration" in
+      *m) dur_sec=$(( ${duration%m} * 60 )) ;;
+      *s) dur_sec=$(( ${duration%s} )) ;;
+      *)  dur_sec=$duration ;;
+    esac
+    run_duration "$dur_sec" "$extra_args"
+  elif [[ "$mode" == "all" && ${#args[@]} -eq 0 ]]; then
+    run_all "$extra_args"
+  else
+    local failed=()
+    local platform
+    for platform in "${args[@]}"; do
+      run_platform "$platform" "$extra_args" || failed+=("$platform")
+    done
+    if [[ ${#failed[@]} -gt 0 ]]; then
+      echo "warmup: failures: ${failed[*]}" >&2
+    fi
+  fi
+
+  echo "Log: $WARMUP_STATE/warmup.log"
+}
+
+main "$@"
