@@ -1,0 +1,172 @@
+#!/usr/bin/env python3
+"""eval-analyze - the preregistered comparisons for a before/after benchmark study.
+
+  eval-analyze OUTDIR --old 0.1.0 --new 0.2.0 [--trivial-prefix trivial-] [--boot 10000] [--seed 20261016] [--tables DIR]
+
+Reads OUTDIR/<pkg>@<ver>/<model>.json (written by eval-matrix) and prints:
+  T table   per package: best trivial-policy mean at the old and the new version
+  H1        exact one-sided sign test on T(old) > T(new), ties left out
+  H2        per real model: mean over packages of score(old) - score(new), bootstrap 95% interval over packages
+  H3        per package with >= 4 complete models: Kendall tau between model orders at the two versions
+A model with a missing cell is dropped from every comparison and listed. Stdlib only.
+"""
+import json, math, os, random, sys
+
+
+def slug_of(model):
+    return model
+
+
+def load(outdir):
+    cells = {}  # (pkg, ver) -> {model_file_stem: mean}
+    fails = set()
+    for d in sorted(os.listdir(outdir)):
+        pd = os.path.join(outdir, d)
+        if not os.path.isdir(pd) or "@" not in d:
+            continue
+        pkg, ver = d.rsplit("@", 1)
+        for f in sorted(os.listdir(pd)):
+            if f.endswith(".json"):
+                r = json.load(open(os.path.join(pd, f)))
+                cells.setdefault((pkg, ver), {})[f[:-5]] = float(r["mean"])
+            elif f.endswith(".fail"):
+                fails.add((pkg, ver, f[:-5]))
+    return cells, fails
+
+
+def sign_test_one_sided(wins, n):
+    # P(X >= wins) for X ~ Binomial(n, 0.5)
+    return sum(math.comb(n, k) for k in range(wins, n + 1)) / (2 ** n)
+
+
+def kendall_tau(a, b):
+    ks = list(a)
+    n = len(ks)
+    conc = disc = 0
+    for i in range(n):
+        for j in range(i + 1, n):
+            da = a[ks[i]] - a[ks[j]]
+            db = b[ks[i]] - b[ks[j]]
+            if da * db > 0:
+                conc += 1
+            elif da * db < 0:
+                disc += 1
+    tot = conc + disc
+    return None if tot == 0 else (conc - disc) / tot
+
+
+def boot_ci(diffs, rng, reps):
+    n = len(diffs)
+    means = sorted(sum(rng.choice(diffs) for _ in range(n)) / n for _ in range(reps))
+    return means[int(0.025 * reps)], means[int(0.975 * reps) - 1]
+
+
+def main():
+    a = sys.argv[1:]
+    if not a or not os.path.isdir(a[0]):
+        print(__doc__)
+        sys.exit(2)
+    outdir = a[0]
+    opt = lambda f, d=None: a[a.index(f) + 1] if f in a else d
+    old, new = opt("--old"), opt("--new")
+    if not old or not new:
+        print("eval-analyze: --old and --new are required", file=sys.stderr)
+        sys.exit(2)
+    tp = opt("--trivial-prefix", "trivial-")
+    reps = int(opt("--boot", 10000))
+    rng = random.Random(int(opt("--seed", 20261016)))
+    tables = opt("--tables")
+    cells, fails = load(outdir)
+    pkgs = sorted({p for (p, v) in cells if v == old} & {p for (p, v) in cells if v == new})
+    only_one = sorted({p for (p, v) in cells} - set(pkgs))
+    stopped = os.path.isfile(os.path.join(outdir, "STOPPED"))
+    # model completeness: a model counts only if present for every analysed package at both versions
+    models = sorted({m for k, v in cells.items() for m in v if not m.startswith(tp)})
+    complete = [m for m in models if all(m in cells.get((p, old), {}) and m in cells.get((p, new), {}) for p in pkgs)]
+    dropped = [m for m in models if m not in complete]
+    print(f"packages with both versions ({len(pkgs)}): {', '.join(pkgs)}")
+    if only_one:
+        print(f"left out (one version only): {', '.join(only_one)}")
+    if fails:
+        print(f"failed cells: {len(fails)}")
+    if stopped:
+        print("STOPPED file present: " + open(os.path.join(outdir, 'STOPPED')).read().strip())
+    print(f"models complete: {complete or 'none'}; dropped: {dropped or 'none'}")
+
+    # T table and H1
+    print("\nT(p,v) = best trivial-policy mean")
+    print(f"{'package':28} {old:>8} {new:>8}  best policy at {old}")
+    rows, wins, losses, ties = [], 0, 0, 0
+    for p in pkgs:
+        def best(v):
+            ts = {m: s for m, s in cells[(p, v)].items() if m.startswith(tp)}
+            if not ts:
+                return None, None
+            m = max(ts, key=ts.get)
+            return ts[m], m
+        t_old, m_old = best(old)
+        t_new, _ = best(new)
+        if t_old is None or t_new is None:
+            print(f"{p:28} {'missing':>8}")
+            continue
+        rows.append((p, t_old, t_new, m_old))
+        print(f"{p:28} {t_old:8.3f} {t_new:8.3f}  {m_old}")
+        if t_old > t_new:
+            wins += 1
+        elif t_old < t_new:
+            losses += 1
+        else:
+            ties += 1
+    n = wins + losses
+    print(f"\nH1: old larger in {wins}, new larger in {losses}, tied {ties}")
+    if n == 0:
+        print("H1: sign test not computable (all tied)")
+    else:
+        print(f"H1: one-sided exact sign test p = {sign_test_one_sided(wins, n):.4f} (n = {n})")
+    big = [p for p, t0, t1, _ in rows if t0 - t1 >= 0.10]
+    print(f"packages with T(old) - T(new) >= 0.10: {len(big)} of {len(rows)}")
+
+    # H2
+    print("\nH2: mean over packages of score(old) - score(new), 95% bootstrap interval over packages")
+    h2 = []
+    for m in complete:
+        d = [cells[(p, old)][m] - cells[(p, new)][m] for p in pkgs]
+        if not d:
+            continue
+        lo, hi = boot_ci(d, rng, reps)
+        mean = sum(d) / len(d)
+        h2.append((m, mean, lo, hi))
+        print(f"{m:40} {mean:+.3f}  [{lo:+.3f}, {hi:+.3f}]  n={len(d)}")
+    if not h2:
+        print("none")
+
+    # H3
+    print("\nH3: Kendall tau of model order, old vs new, per package")
+    taus = []
+    if len(complete) >= 4:
+        for p in pkgs:
+            t = kendall_tau({m: cells[(p, old)][m] for m in complete}, {m: cells[(p, new)][m] for m in complete})
+            if t is not None:
+                taus.append((p, t))
+                print(f"{p:28} {t:+.2f}")
+        if taus:
+            vals = sorted(t for _, t in taus)
+            print(f"median {vals[len(vals)//2]:+.2f}, range {vals[0]:+.2f} to {vals[-1]:+.2f}")
+    else:
+        print("fewer than 4 complete models; not computed")
+
+    if tables:
+        os.makedirs(tables, exist_ok=True)
+        with open(os.path.join(tables, "trivial.csv"), "w") as f:
+            f.write("package,old,new,best_policy_old\n")
+            for r in rows:
+                f.write(f"{r[0]},{r[1]:.4f},{r[2]:.4f},{r[3]}\n")
+        with open(os.path.join(tables, "h2.csv"), "w") as f:
+            f.write("model,mean_diff,ci_low,ci_high\n")
+            for r in h2:
+                f.write(f"{r[0]},{r[1]:.4f},{r[2]:.4f},{r[3]:.4f}\n")
+        print(f"\nwrote {tables}/trivial.csv and h2.csv")
+
+
+if __name__ == "__main__":
+    main()
