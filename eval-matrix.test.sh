@@ -21,6 +21,7 @@ a = sys.argv[1:]
 model = a[a.index("--model") + 1]
 ver = "$ver"
 open(os.environ.get("COUNTER", "/dev/null"), "a").write(model + "\n")
+open(os.environ.get("ARGLOG", "/dev/null"), "a").write(" ".join(a) + "\n")
 if model == "boom": sys.exit(1)
 if model == "nojson": print("hello"); sys.exit(0)
 if model == "nomean": print("{}"); sys.exit(0)
@@ -87,6 +88,16 @@ $M run "$T/p5.json" "$T/o5" --workers 1 >/dev/null 2>&1
 [ -f "$T/o5/STOPPED" ] || fail "5 no STOPPED file"
 [ ! -f "$T/o5/alpha@0.1.0/low.json" ] || fail "5 a later model ran after the cap"
 ok "the spending cap stops the run and writes STOPPED"
+
+# 15. group args reach the program
+G_ARGS='[{"name":"hosted","provider":"openrouter","key_env":"TESTKEY","args":["--concurrency","8"],"models":["good"]}]'
+plan p15 "$G_ARGS"
+export ARGLOG="$T/arglog"
+: > "$ARGLOG"
+$M run "$T/p15.json" "$T/o15" >/dev/null
+grep -q -- "--concurrency 8" "$ARGLOG" || fail "15 group args were not passed: $(cat "$ARGLOG" | head -2)"
+unset ARGLOG
+ok "a group's args are passed to the benchmark program"
 
 # 7. no temp files left; 8. ledger rebuild
 find "$T/o2" -name '*.tmp' | grep -q . && fail "7 temp files left" || true
