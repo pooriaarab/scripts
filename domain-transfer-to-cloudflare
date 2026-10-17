@@ -1,0 +1,132 @@
+#!/usr/bin/env bash
+# Transfer domains from Namecheap to Cloudflare Registrar, end to end.
+#
+# The flow has six steps and each one fails silently when you skip it:
+# the zone must be active on Cloudflare first, DNSSEC must be off, privacy
+# must be off at the losing registrar, the domain must be unlocked, the
+# EPP code comes from a dashboard (there is no API for it), and the
+# confirmation mail needs an approve click or the transfer waits 5 days.
+#
+# Usage: domain-transfer-to-cloudflare [--execute] [--approve-mail] DOMAIN...
+set -euo pipefail
+
+usage() {
+  cat <<'USAGE'
+Usage: domain-transfer-to-cloudflare [--execute] [--approve-mail] DOMAIN...
+
+Transfer each DOMAIN from Namecheap to Cloudflare Registrar.
+
+Default is a dry run: print the plan, change nothing. Add --execute to run.
+Add --approve-mail to approve the Namecheap confirmation mail through the
+Gmail CLI (gog) after each transfer starts; without it, approve by hand.
+
+Environment (never commit these values):
+  NAMECHEAP_API_USER, NAMECHEAP_API_KEY, NAMECHEAP_USERNAME,
+  NAMECHEAP_CLIENT_IP   Namecheap API. The client IP must be allow-listed
+                        in Namecheap Profile > Tools > API Access.
+  CLOUDFLARE_API_TOKEN  Token with Registrar write on the account.
+  CLOUDFLARE_ACCOUNT_ID Account that holds the zones.
+  GOG_ACCOUNT           Gmail account for --approve-mail (gog CLI).
+
+The EPP code for each domain is read at a prompt. It is never written to
+disk and never printed. Get it in Namecheap: Domain List > Manage >
+Sharing & Transfer > Transfer Out > Get Auth Code.
+
+A transfer charges the Cloudflare default payment method at completion,
+adds one year to the expiry, and is not refundable. Auto-renew is on.
+USAGE
+}
+
+EXECUTE=0 APPROVE_MAIL=0 DOMAINS=()
+while (($#)); do
+  case "$1" in
+    --execute) EXECUTE=1 ;;
+    --approve-mail) APPROVE_MAIL=1 ;;
+    -h|--help) usage; exit 0 ;;
+    --) shift; DOMAINS+=("$@"); break ;;
+    -*) echo "unknown flag: $1" >&2; usage >&2; exit 2 ;;
+    *) DOMAINS+=("$1") ;;
+  esac
+  shift
+done
+((${#DOMAINS[@]})) || { echo "no domains given" >&2; usage >&2; exit 2; }
+# Reject anything that is not a plain domain. A value with &, ?, or a
+# space would smuggle extra parameters into the registrar API calls.
+for d in "${DOMAINS[@]}"; do
+  [[ "$d" =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+$ ]] \
+    || { echo "invalid domain: $d" >&2; exit 2; }
+done
+
+need() { [[ -n "${!1:-}" ]] || { echo "missing env: $1" >&2; exit 2; }; }
+for v in NAMECHEAP_API_USER NAMECHEAP_API_KEY NAMECHEAP_USERNAME \
+         NAMECHEAP_CLIENT_IP CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID; do
+  need "$v"
+done
+((APPROVE_MAIL)) && need GOG_ACCOUNT
+
+NC="https://api.namecheap.com/xml.response?ApiUser=$NAMECHEAP_API_USER&ApiKey=$NAMECHEAP_API_KEY&UserName=$NAMECHEAP_USERNAME&ClientIp=$NAMECHEAP_CLIENT_IP"
+CF="https://api.cloudflare.com/client/v4"
+
+nc() { curl -fsS "$NC&Command=$1&$2"; }
+cf() { curl -fsS -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" -H 'Content-Type: application/json' "$@"; }
+field() { python3 -c "import sys,json;d=json.load(sys.stdin);print(eval(sys.argv[1]))" "$1"; }
+
+approve_mail() { # $1 = domain; find its confirmation mail and click Approve
+  local mid html approve_url
+  mid=$(gog gmail search "namecheap transfer confirmation $1" -a "$GOG_ACCOUNT" -j --results-only \
+        | python3 -c "import sys,json;d=json.load(sys.stdin);print(d[0]['id'] if d else '')")
+  [[ -n "$mid" ]] || { echo "  no confirmation mail found for $1 yet" >&2; return 1; }
+  html=$(gog gmail raw "$mid" -a "$GOG_ACCOUNT" -j --results-only | python3 -c "
+import sys, json, base64, re
+d = json.load(sys.stdin)
+for part in d['payload'].get('parts', []):
+    if part.get('mimeType') == 'text/html':
+        t = base64.urlsafe_b64decode(part['body']['data']).decode('utf-8', 'replace')
+        m = re.search(r\"ProcessOutgoingTransfer/([0-9a-fA-F-]{36})\", t)
+        if m: print(m.group(1))
+")
+  [[ -n "$html" ]] || { echo "  no approval link in mail for $1" >&2; return 1; }
+  approve_url="https://transfer.registrar-servers.com/OutgoingTransfer/Approve?id=$html"
+  curl -fsSL "$approve_url" | grep -q "Approve completed successfully" \
+    && echo "  mail approved for $1" || { echo "  approve click failed for $1" >&2; return 1; }
+  gog gmail mark-read "$mid" -a "$GOG_ACCOUNT" >/dev/null
+}
+
+for domain in "${DOMAINS[@]}"; do
+  echo "== $domain =="
+  zone_id=$(cf "$CF/zones?name=$domain" | field "d['result'][0]['id'] if d['result'] else ''")
+  [[ -n "$zone_id" ]] || { echo "  no Cloudflare zone; add the domain first" >&2; exit 1; }
+  dnssec=$(cf "$CF/zones/$zone_id/dnssec" | field "d['result']['status']")
+  [[ "$dnssec" == "disabled" ]] || { echo "  DNSSEC is $dnssec; turn it off first" >&2; exit 1; }
+  echo "  zone ok, DNSSEC off"
+  if (( ! EXECUTE )); then echo "  dry run: privacy off, unlock, transfer-in, poll"; continue; fi
+
+  wg_id=$(nc namecheap.domains.getInfo "DomainName=$domain" | grep -o '<ID>[0-9]*</ID>' | head -1 | tr -dc 0-9)
+  if [[ -n "$wg_id" ]]; then
+    nc namecheap.whoisguard.disable "WhoisguardId=$wg_id" | grep -q 'Status="OK"' \
+      && echo "  privacy off" || { echo "  privacy disable failed" >&2; exit 1; }
+  else
+    echo "  privacy already off"
+  fi
+  # The lock call takes LockAction=UNLOCK. RegistrarLockStatus is rejected
+  # with error 2015278 and the domain stays locked.
+  nc namecheap.domains.setRegistrarLock "DomainName=$domain&LockAction=UNLOCK" \
+    | grep -q 'IsRegistrarLockStatusUpdated="true"' \
+    && echo "  unlocked" || { echo "  unlock failed" >&2; exit 1; }
+
+  read -rsp "  EPP code for $domain: " epp; echo
+  b64=$(printf %s "$epp" | base64); unset epp
+  out=$(mktemp)
+  code=$(printf '{"auth_code":"%s","auto_renew":true}' "$b64" | curl -s -o "$out" -w '%{http_code}' -X POST \
+    "$CF/accounts/$CLOUDFLARE_ACCOUNT_ID/registrar/registrations/$domain/transfer-in" \
+    -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" -H 'Content-Type: application/json' \
+    -d @-); unset b64
+  [[ "$code" == "202" ]] || { echo "  transfer-in HTTP $code" >&2; cat "$out" >&2; rm -f "$out"; echo "  recovery: $domain is unlocked with privacy off. Re-run to retry, or re-lock with LockAction=LOCK." >&2; exit 1; }
+  rm -f "$out"
+  echo "  transfer started (HTTP 202)"
+  ((APPROVE_MAIL)) && approve_mail "$domain" || true
+  cf "$CF/accounts/$CLOUDFLARE_ACCOUNT_ID/registrar/registrations/$domain/transfer-in-status" \
+    | field "d['result']['context']['transfer_status']" \
+    | sed 's/^/  status: /'
+done
+echo "Approve in mail or wait about 5 days. Poll transfer-in-status to confirm."
