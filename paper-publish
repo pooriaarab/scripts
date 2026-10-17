@@ -5,10 +5,12 @@
                 [--new-version-of CONCEPT_ID] [--publish --i-confirm-permanent]
   paper-publish swh-save URL... [--interval S] [--timeout S]
   paper-publish packet meta.json --out DIR [--allow-second-review-venue]
+  paper-publish check meta.json [--pdf P] [--cff CITATION.cff] [--offline]
 Env: ZENODO_TOKEN (never from argv), ZENODO_BASE (default https://zenodo.org/api), SWH_BASE.
 Exit: 0 ok, 1 work failed, 2 usage or refused. See paper-publish.failure-modes.md.
 """
-import argparse, json, math, os, re, sys, time
+import argparse, json, math, os, re, subprocess, sys, time, unicodedata
+import xml.etree.ElementTree as ET
 import urllib.error, urllib.parse, urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -203,7 +205,7 @@ The tool does not click Submit, solve a CAPTCHA, or accept an agreement.
 Dual submission: send one manuscript to at most ONE peer-reviewed venue at a time. A preprint
 server or an archive is not peer review. Two review venues at once is dual submission.
 {venues}{warn}
-- [ ] Re-open each venue page. Dates and rules change.
+- [ ] Run `paper-publish check meta.json --pdf paper.pdf` and fix every line. Re-open each venue page: rules change.
 - [ ] Log in, solve every CAPTCHA, and tick every agreement box yourself. An arXiv licence is irrevocable.
 - [ ] Press the final Submit or Publish button yourself. A posted draft cannot be unsaid.
 - [ ] Save the submission id or DOI in your notes.
@@ -261,10 +263,81 @@ def cmd_packet(a):
     print("wrote %d venue files and CHECKLIST.md to %s" % (len(chosen), a.out))
     return 0
 
+DASH = str.maketrans({"‐": "-", "‑": "-", "−": "-", "­": "-", "–": "-", "—": "-", "‘": "'", "’": "'", "“": '"', "”": '"'})
+SYMS = "∗⋆*†‡§¶‖"  # footnote marks after a title
+
+def N(s, loose=False):  # comparable form: unicode, quotes, dashes, spaces. Loose also drops every hyphen and space. Case stays.
+    s = re.sub(r"\s+", " ", unicodedata.normalize("NFKC", s).translate(DASH)).strip()
+    return re.sub(r"[\s-]", "", s) if loose else s
+
+def title_block(pdf):  # the tallest lines of page 1, from the first one on, while they stay within 10% of the tallest
+    try:
+        out = subprocess.run(["pdftotext", "-bbox-layout", "-f", "1", "-l", "1", pdf, "-"], capture_output=True).stdout
+        lines = [(float(l.get("yMax")) - float(l.get("yMin")), " ".join(w.text or "" for w in l if w.tag.endswith("word"))) for l in ET.fromstring(out).iter() if l.tag.endswith("line")]
+    except (ET.ParseError, TypeError, ValueError):
+        return None
+    top = max([h for h, _ in lines] or [0])
+    if top <= 0: return None
+    i = next(i for i, (h, _) in enumerate(lines) if h >= 0.9 * top)
+    blk = []
+    for h, t in lines[i:]:
+        if h < 0.9 * top: break
+        blk.append(t)
+    return " ".join(blk)
+
+def cff_title(text):  # the top-level title: key only
+    L = text.lstrip("﻿").split("\n")
+    for i, l in enumerate(L):
+        m = re.match(r"title:[ \t]*(.*?)[ \t]*$", l)
+        if not m: continue
+        v = m.group(1)
+        if re.fullmatch(r"[>|][+-]?\d?(\s+#.*)?", v):  # folded or literal block: the indented lines that follow
+            blk = []
+            for x in L[i + 1:]:
+                if x.strip() and not x[0].isspace(): break
+                blk.append(x.strip())
+            return " ".join(blk)
+        q = re.match(r"([\"'])(.*?)\1", v)
+        return q.group(2) if q else re.sub(r"\s+#.*$", "", v)
+    return None
+
+def cmd_check(a):
+    m = load_meta(a.meta)
+    title, abstract, bad = m.get("title", "").strip(), m.get("abstract", ""), []
+    if a.pdf:
+        try:
+            blk = title_block(a.pdf)
+        except FileNotFoundError:
+            die("pdftotext is not installed. Install poppler-utils.")
+        c0 = (blk or "").rstrip(SYMS + " \t")  # a footnote mark, then a digit that touches a letter
+        want = N(title, True)
+        if blk is None: bad.append("cannot find the title block: PDF page 1 has no text layout")
+        elif not any(N(c, True) == (want.upper() if c.isupper() else want) for c in (c0, re.sub(r"(?<=[^\W\d_])\d+$", "", c0))):
+            bad.append("title is not the title block of PDF page 1. meta.json: %r. PDF block: %r" % (title, blk))
+    if a.cff:
+        t = cff_title(open(a.cff, encoding="utf-8").read())
+        if t is None or N(t) != N(title): bad.append("top-level title in %s is %r. meta.json: %r" % (a.cff, t, title))
+    if not title or not m.get("license"): bad.append("meta.json needs a title and a license")
+    if not 100 <= len(abstract) <= 1920: bad.append("abstract has %d characters. Use 100 to 1920 (the arXiv limit)." % len(abstract))
+    for x in [title, abstract, m.get("comments") or ""] + list(m.get("keywords", [])):
+        bad += ["meta.json has %s: %r" % (w, x[:60]) for n, w in (("XXXX", "XXXX"), ("—", "an em dash")) if n in x]
+    bad += ["bad ORCID (shape or checksum) for %s: %s" % (x.get("name"), x["orcid"]) for x in m.get("authors", []) if x.get("orcid") and not orcid_ok(x["orcid"])]
+    blob = " ".join(str(m.get(k) or "") for k in ("abstract", "comments", "code_url", "data_url"))
+    for u in [] if a.offline else dict.fromkeys(u.rstrip(".,;:") for u in re.findall(r"https?://[^\s)\]>\"']+", blob)):
+        try:
+            code = http("HEAD", u)[0]
+            if code != 200: code = http("GET", u, cap=1)[0]  # some servers refuse HEAD
+        except Exception as e:  # a bad URL is a problem to report, not a reason to stop
+            code = e
+        if code != 200: bad.append("URL does not return 200: %s (%s)" % (u, code))
+    sys.stderr.write("".join("FAIL: %s\n" % b for b in bad))
+    print("check %s: %d problem(s)" % ("failed" if bad else "passed", len(bad)))
+    return 1 if bad else 0
+
 def main(argv):
     p = Parser(prog="paper-publish", allow_abbrev=False, description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
-    z, w, k = (sub.add_parser(n, allow_abbrev=False) for n in ("zenodo-draft", "swh-save", "packet"))
+    z, w, k, c = (sub.add_parser(n, allow_abbrev=False) for n in ("zenodo-draft", "swh-save", "packet", "check"))
     for o in ("--pdf", "--tarball", "--meta"):
         z.add_argument(o, required=True)
     for o in ("--community", "--new-version-of"):
@@ -277,9 +350,13 @@ def main(argv):
     k.add_argument("meta")
     k.add_argument("--out", required=True)
     k.add_argument("--allow-second-review-venue", action="store_true")
+    c.add_argument("meta")
+    for o in ("--pdf", "--cff"):
+        c.add_argument(o)
+    c.add_argument("--offline", action="store_true")
     try:
         a = p.parse_args(argv)
-        return {"zenodo-draft": cmd_zenodo, "swh-save": cmd_swh, "packet": cmd_packet}[a.cmd](a)
+        return {"zenodo-draft": cmd_zenodo, "swh-save": cmd_swh, "packet": cmd_packet, "check": cmd_check}[a.cmd](a)
     except Fail as e:
         print("paper-publish: " + scrub(str(e)), file=sys.stderr)
         return e.code
