@@ -5,11 +5,10 @@
                 [--new-version-of CONCEPT_ID] [--publish --i-confirm-permanent]
   paper-publish swh-save URL... [--interval S] [--timeout S]
   paper-publish packet meta.json --out DIR [--allow-second-review-venue]
-  paper-publish check meta.json [--pdf P] [--cff CITATION.cff] [--offline]
 Env: ZENODO_TOKEN (never from argv), ZENODO_BASE (default https://zenodo.org/api), SWH_BASE.
 Exit: 0 ok, 1 work failed, 2 usage or refused. See paper-publish.failure-modes.md.
 """
-import argparse, json, os, re, shutil, subprocess, sys, time, unicodedata
+import argparse, json, math, os, re, sys, time
 import urllib.error, urllib.parse, urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -57,7 +56,8 @@ def http(method, url, token="", body=None, cap=1 << 20):
         if r.getcode() != 429 or tries == 5:
             break
         try:
-            wait = min(max(float(r.headers.get("Retry-After")), 0), 60.0)  # at most 60 s
+            wait = float(r.headers.get("Retry-After"))
+            wait = min(max(wait, 0), 60.0) if math.isfinite(wait) else 0.0  # at most 60 s. nan and inf wait 0
         except (TypeError, ValueError):
             wait = 60.0
         print("rate limited, waiting %gs" % wait, file=sys.stderr)
@@ -77,6 +77,9 @@ def load_meta(path, need=()):
         assert isinstance(m, dict)
     except (OSError, ValueError, AssertionError) as e:
         die("cannot read %s as a JSON object: %s" % (path, e))
+    if not (all(isinstance(m.get(k, ""), str) for k in ("title", "abstract", "license")) and all(isinstance(m.get(k, []), list) for k in ("authors", "venues", "keywords"))
+            and all(isinstance(x, dict) and isinstance(x.get("name"), str) for x in m.get("authors", [])) and all(isinstance(x, str) for x in m.get("venues", []) + m.get("keywords", []))):
+        die("%s has a wrong type: title, abstract and license are strings; authors is a list of objects with a name; venues and keywords are lists of strings" % path)
     if [k for k in need if not m.get(k)]:
         die("%s lacks: %s" % (path, ", ".join(k for k in need if not m.get(k))))
     return m
@@ -155,10 +158,10 @@ def cmd_zenodo(a):
         if dep.get("id"):
             raise Fail("%s\nDraft %s exists and is NOT published. Discard it on Zenodo, or fix and retry." % (e, dep["id"]), e.code)
         raise
-    print("draft id: %s\nconcept id: %s\npreview: %s" % (dep["id"], dep.get("conceptrecid"), dep["links"]["html"]))
+    print(scrub("draft id: %s\nconcept id: %s\npreview: %s" % (dep["id"], dep.get("conceptrecid"), dep["links"]["html"])))
     if not a.publish:
         return print("Not published. A person checks the draft, then publishes it.") or 0
-    print("PUBLISHED. doi: %s" % zen("publish", "POST", "%s/deposit/depositions/%s/actions/publish" % (base, dep["id"]), want=(202,)).get("doi"))
+    print(scrub("PUBLISHED. doi: %s" % zen("publish", "POST", "%s/deposit/depositions/%s/actions/publish" % (base, dep["id"]), want=(202,)).get("doi")))
     return 0
 
 def save_one(ep, a):
@@ -198,7 +201,7 @@ The tool does not click Submit, solve a CAPTCHA, or accept an agreement.
 Dual submission: send one manuscript to at most ONE peer-reviewed venue at a time. A preprint
 server or an archive is not peer review. Two review venues at once is dual submission.
 {venues}{warn}
-- [ ] Run `paper-publish check meta.json --pdf paper.pdf` and fix every line. Re-open each venue page: rules change.
+- [ ] Re-open each venue page. Dates and rules change.
 - [ ] Log in, solve every CAPTCHA, and tick every agreement box yourself. An arXiv licence is irrevocable.
 - [ ] Press the final Submit or Publish button yourself. A posted draft cannot be unsaid.
 - [ ] Save the submission id or DOI in your notes.
@@ -214,15 +217,18 @@ def resolve(q, recs):
     if len(names) != 1:
         die("no venue in paper-venues.json matches %r. The tool does not invent venues, and skips the avoid list." % q if not names else
             "%r matches %d venues: %s. Use one full name." % (q, len(names), "; ".join(names[:12])))
-    for r in ok:  # the first record with a type says whether this is peer review
+    for r in ok:  # the first record with a type says whether this is peer review: only a journal, conference, workshop, track or review pool is, and Peer Community In
         if "type" in r["fields"]:
-            return ok, not re.search(r"not peer.review|\b(?:preprint|archive|repository|server|search|index|social network|discovery)\b", r["fields"]["type"], re.I)
+            return ok, bool(re.match(r"(journal|conference|workshop|track|review pool)", r["fields"]["type"], re.I)) or r["name"].startswith("Peer Community In")
     return ok, not all(r["source_file"] == "free-venues.md" and r["section"].startswith("A") for r in ok)
 
 def cmd_packet(a):
     m = load_meta(a.meta, ("title", "abstract", "authors", "license", "venues"))
     recs = json.load(open(os.path.join(HERE, "paper-venues.json"), encoding="utf-8"))
-    chosen = list({slug(q): (q,) + resolve(q, recs) for q in m["venues"]}.values())  # one entry for each file
+    chosen = [(q,) + resolve(q, recs) for q in m["venues"]]
+    names = [ok[0]["name"] for _, ok, _ in chosen]
+    if len(set(names)) < len(names):
+        die("the same venue is listed twice: %s. Name each venue once." % next(n for n in names if names.count(n) > 1))
     revs = [q for q, _, rv in chosen if rv]
     if len(revs) > 1 and not a.allow_second_review_venue:
         die("refused: %s are all peer-reviewed. Send a manuscript to ONE peer-reviewed venue at a time. Two at once is dual "
@@ -236,62 +242,22 @@ def cmd_packet(a):
                 ("Authors", "; ".join("%s (%s)" % (x["name"], x.get("affiliation", "no affiliation")) for x in m["authors"])),
                 ("ORCID", "; ".join("%s: %s" % (x["name"], x.get("orcid", "MISSING")) for x in m["authors"])),
                 ("Comments line", m.get("comments")), ("Code link", m.get("code_url")), ("Data link", m.get("data_url"))]
-        out = ["# " + q, "", "Kind: " + ("peer-reviewed venue" if review else "preprint or archive, not peer review"),
+        out = ["# " + q, "", "Kind: " + ("peer-reviewed venue" if review else "not peer review"),
                "Review mode: %s. Hide the authors and use anonymous links when it says blind or anonymous." % (f.get("review") or "see the source file"),
                "Source: %s, checked %s. Re-open the venue page before you act." % (
                    ", ".join(sorted({r["source_file"] for r in ok})), max(r["checked"] for r in ok)), ""]
         out += ["## %s\n\n%s\n" % (k, v or "MISSING in meta.json") for k, v in rows]
         open(os.path.join(a.out, slug(q) + ".md"), "w", encoding="utf-8").write("\n".join(out))
-    vlist = "\n".join("- %s: %s" % (q, "peer-reviewed" if rv else "preprint or archive") for q, _, rv in chosen) + "\n"
+    vlist = "\n".join("- %s: %s" % (q, "peer-reviewed" if rv else "not peer review") for q, _, rv in chosen) + "\n"
     warn = "\nWARNING: this packet has %d peer-reviewed venues. A person chose to allow it.\n" % len(revs) if len(revs) > 1 else ""
     open(os.path.join(a.out, "CHECKLIST.md"), "w", encoding="utf-8").write(CHECKLIST.format(venues=vlist, warn=warn))
     print("wrote %d venue files and CHECKLIST.md to %s" % (len(chosen), a.out))
     return 0
 
-DASH = str.maketrans({"\u2010": "-", "\u2011": "-", "\u2212": "-", "\u00ad": "-", "\u2013": "-", "\u2014": "-", "\u2018": "'", "\u2019": "'", "\u201c": '"', "\u201d": '"'})
-
-def N(s, loose=False):  # comparable form: unicode, quotes, dashes, spaces. Loose also drops every hyphen and space. Case stays.
-    s = re.sub(r"\s+", " ", unicodedata.normalize("NFKC", s).translate(DASH)).strip()
-    return re.sub(r"[\s-]", "", s) if loose else s
-
-def cmd_check(a):
-    m = load_meta(a.meta)
-    title, abstract, bad = m.get("title", "").strip(), m.get("abstract", ""), []
-    if a.pdf:
-        if not shutil.which("pdftotext"):
-            die("pdftotext is not installed. Install poppler-utils.")
-        pdf = subprocess.run(["pdftotext", a.pdf, "-"], capture_output=True).stdout.decode("utf-8", "replace")
-        lines = [l for l in pdf.split("\f")[0].split("\n") if l.strip()][:12]
-        cands = {N("".join(lines[i:i + n]), True) for i in range(len(lines)) for n in range(1, 6)}  # 1 to 5 consecutive lines of the first 12
-        cands |= {c.rstrip("*\u2020\u2021" + "0123456789") for c in cands}  # a footnote mark or number after the title
-        if not any(c == (N(title, True).upper() if c.isupper() else N(title, True)) for c in cands):  # an all-caps line matches upper(title)
-            bad.append("title is not 1 to 5 consecutive lines among the first 12 of PDF page 1. meta.json: %r. PDF starts: %r" % (title, N(" ".join(lines[:3]))[:100]))
-    if a.cff:
-        t = re.search(r"^title:[ \t]*(.+?)[ \t]*$", open(a.cff, encoding="utf-8").read(), re.M)  # top-level key only
-        if not t or N(t.group(1).strip("\"' ")) != N(title):
-            bad.append("top-level title in %s is %r. meta.json: %r" % (a.cff, t and t.group(1), title))
-    if not title or not m.get("license"): bad.append("meta.json needs a title and a license")
-    if not 100 <= len(abstract) <= 1920:
-        bad.append("abstract has %d characters. Use 100 to 1920 (the arXiv limit)." % len(abstract))
-    for s in [title, abstract, m.get("comments") or ""] + list(m.get("keywords", [])):
-        bad += ["meta.json has %s: %r" % (w, s[:60]) for n, w in (("XXXX", "XXXX"), ("—", "an em dash")) if n in s]
-    bad += ["bad ORCID (shape or checksum) for %s: %s" % (x.get("name"), x["orcid"]) for x in m.get("authors", []) if x.get("orcid") and not orcid_ok(x["orcid"])]
-    blob = " ".join(str(m.get(k) or "") for k in ("abstract", "comments", "code_url", "data_url"))
-    for u in [] if a.offline else dict.fromkeys(u.rstrip(".,;:") for u in re.findall(r"https?://[^\s)\]>\"']+", blob)):
-        try:
-            code = http("GET", u, cap=1)[0]
-        except Exception as e:  # a bad URL is a problem to report, not a reason to stop
-            code = e
-        if code != 200:
-            bad.append("URL does not return 200: %s (%s)" % (u, code))
-    sys.stderr.write("".join("FAIL: %s\n" % b for b in bad))
-    print("check %s: %d problem(s)" % ("failed" if bad else "passed", len(bad)))
-    return 1 if bad else 0
-
 def main(argv):
     p = Parser(prog="paper-publish", allow_abbrev=False, description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
-    z, w, k, c = (sub.add_parser(n, allow_abbrev=False) for n in ("zenodo-draft", "swh-save", "packet", "check"))
+    z, w, k = (sub.add_parser(n, allow_abbrev=False) for n in ("zenodo-draft", "swh-save", "packet"))
     for o in ("--pdf", "--tarball", "--meta"):
         z.add_argument(o, required=True)
     for o in ("--community", "--new-version-of"):
@@ -304,13 +270,9 @@ def main(argv):
     k.add_argument("meta")
     k.add_argument("--out", required=True)
     k.add_argument("--allow-second-review-venue", action="store_true")
-    c.add_argument("meta")
-    for o in ("--pdf", "--cff"):
-        c.add_argument(o)
-    c.add_argument("--offline", action="store_true")
     try:
         a = p.parse_args(argv)
-        return {"zenodo-draft": cmd_zenodo, "swh-save": cmd_swh, "packet": cmd_packet, "check": cmd_check}[a.cmd](a)
+        return {"zenodo-draft": cmd_zenodo, "swh-save": cmd_swh, "packet": cmd_packet}[a.cmd](a)
     except Fail as e:
         print("paper-publish: " + scrub(str(e)), file=sys.stderr)
         return e.code
