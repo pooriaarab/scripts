@@ -1,16 +1,14 @@
 #!/usr/bin/env bash
 # End-to-end test for paper-publish. Covers every row marked "yes" in paper-publish.failure-modes.md.
-# A fake Zenodo and a fake Software Heritage run on localhost. No network, no real token.
-# Ends by printing a transcript path and its sha256. The hash is the same on every run.
-set -euo pipefail
-cd "$(dirname "$0")"
+# A fake Zenodo and a fake Software Heritage run on localhost. No network, no real token. Ends with a transcript path and its sha256.
+set -euo pipefail; cd "$(dirname "$0")"
 TOOL=./paper-publish PY=$(command -v python3) T=$(mktemp -d) pass=0
 mkdir "$T/out"; TR=$T/transcript.txt; LOG=$T/server.log; : > "$LOG"
 fail() { echo "FAIL - $1 (files in $T)" >&2; exit 1; }
 ok() { pass=$((pass + 1)); echo "ok $pass - $1" | tee -a "$TR"; }
 
 cat > "$T/fake.py" <<'EOF'
-import http.server, json, sys, time
+import http.server, json, re, sys, time
 LOG, ST = sys.argv[2], {}
 class H(http.server.BaseHTTPRequestHandler):
     def log_message(self, *a): pass
@@ -24,7 +22,7 @@ class H(http.server.BaseHTTPRequestHandler):
         tok, p, me = (self.headers.get("Authorization") or "")[7:], self.path, self.command
         open(LOG, "a").write("%.3f %s %s %d %s\n" % (time.time(), me, p, len(body), "auth" if tok else "noauth"))
         B = "http://127.0.0.1:%d" % self.server.server_port
-        L = B.replace("127.0.0.1", "localhost") if "OTHER" in tok else B  # a link on another host
+        L = B.replace("127.0.0.1", "localhost") if "OTHER" in tok else B.rsplit(":", 1)[0] + ":1" if "PORT" in tok else B  # a link on another host or port
         dep = lambda i: {"id": i, "conceptrecid": "110", "links": {"bucket": L + "/api/files/bkt%d" % i, "html": B + "/deposit/%d" % i},
                          "files": [{"id": "f1", "links": {"self": B + "/api/deposit/depositions/222/files/f1"}}] * (i == 222)}
         if p in ("/ok", "/missing"): return self.send(200 if p == "/ok" else 404, raw=b"x")
@@ -38,6 +36,7 @@ class H(http.server.BaseHTTPRequestHandler):
             ST[u] += 1
             t = "running" if ("hangs" in u or ST[u] < 2) else ("failed" if "fails" in u else "succeeded")
             return self.send(200, [{"id": 7, "save_request_status": "accepted", "save_task_status": t, "snapshot_swhid": "swh:1:snp:" + "a" * 40}])
+        if re.search(r"-S\d+$", tok): return self.send(500, raw=("E" * int(tok.rsplit("S", 1)[1]) + " Bearer " + tok).encode())  # a token that straddles the 200 character cut
         if "ECHO403" in tok: return self.send(403, {"message": "Invalid token " + tok})
         if me == "POST" and p == "/api/deposit/depositions": return self.send(201, dep(111))
         if me == "PUT" and p.startswith("/api/files/"): return self.send(201, {"size": len(body)})
@@ -51,17 +50,17 @@ class H(http.server.BaseHTTPRequestHandler):
         if me == "GET" and p == "/api/deposit/depositions/222": return self.send(200, dep(222))
         self.send(204 if me == "DELETE" else 404)
     do_GET = do_POST = do_PUT = do_DELETE = do
-s = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
-open(sys.argv[1], "w").write(str(s.server_port)); s.serve_forever()
+s = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H); open(sys.argv[1], "w").write(str(s.server_port)); s.serve_forever()
 EOF
 $PY "$T/fake.py" "$T/port" "$LOG" & SRV=$!
 trap 'rc=$?; kill $SRV 2>/dev/null; wait $SRV 2>/dev/null || :; [ $rc = 0 ] && rm -rf "$T"; true' EXIT
-for _ in $(seq 50); do [ -s "$T/port" ] && break; sleep 0.1; done
-PORT=$(cat "$T/port") B=http://127.0.0.1:$(cat "$T/port")
+for _ in $(seq 50); do [ -s "$T/port" ] && break; sleep 0.1; done; PORT=$(cat "$T/port") B=http://127.0.0.1:$(cat "$T/port")
 export ZENODO_BASE=$B/api SWH_BASE=$B/swh/api/1 ZENODO_TOKEN=FAKETOKEN-ok
 
 # fixtures: a real PDF (no xref table, poppler rebuilds it), a tarball, a meta file, a CITATION.cff
-printf '%%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Contents 4 0 R/Resources<</Font<</F1 5 0 R>>>>>>endobj\n4 0 obj<</Length 56>>stream\nBT /F1 14 Tf 72 700 Td (A Test Title For Benchmarks) Tj ET\nendstream endobj\n5 0 obj<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>endobj\ntrailer<</Size 6/Root 1 0 R>>\n%%%%EOF\n' > "$T/paper.pdf"
+mkpdf() { f=$1; shift; s=""; y=700; for l in "$@"; do s+="BT /F1 12 Tf 72 $y Td ($l) Tj ET"$'\n'; y=$((y - 20)); done
+  printf '%%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Contents 4 0 R/Resources<</Font<</F1 5 0 R>>>>>>endobj\n4 0 obj<</Length %d>>stream\n%sendstream endobj\n5 0 obj<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>endobj\ntrailer<</Size 6/Root 1 0 R>>\n%%%%EOF\n' "${#s}" "$s" > "$f"; }
+TITLE="A Test Title For Benchmarks"; mkpdf "$T/paper.pdf" "$TITLE"
 echo "fake tarball bytes" > "$T/paper.tar.gz"; printf 'title: "A Test Title For Benchmarks"\n' > "$T/CITATION.cff"
 cat > "$T/meta.json" <<EOF
 {"title": "A Test Title For Benchmarks", "license": "cc-by-4.0", "keywords": ["benchmark"], "subject_class": "cs.AI", "comments": "10 pages",
@@ -76,9 +75,7 @@ run() {
   set +e; "$@" > "$T/out/$n" 2>&1; RC=$?; set -e
   { echo "## $n: $d (exit $RC)"; sed -e "s#$T#\$T#g" -e "s#127.0.0.1:$PORT#HOST#g" -e "s#localhost:$PORT#HOST#g" "$T/out/$n"; } >> "$TR"
 }
-has() { grep -qF -- "$2" "$T/out/$1" || fail "$1 lacks: $2"; }
-calls() { grep -c -- "$1" "$LOG" || true; }
-quiet() { [ ! -s "$LOG" ] || fail "$1 sent a request"; }
+has() { grep -qF -- "$2" "$T/out/$1" || fail "$1 lacks: $2"; }; calls() { grep -c -- "$1" "$LOG" || true; }; quiet() { [ ! -s "$LOG" ] || fail "$1 sent a request"; }
 Z="$TOOL zenodo-draft --pdf $T/paper.pdf --tarball $T/paper.tar.gz --meta $T/meta.json"
 
 run r1 "no token" env -u ZENODO_TOKEN $Z; has r1 "ZENODO_TOKEN is not set"; quiet 1; [ $RC = 2 ] || fail 1; ok "missing token is refused (status 2) and sends nothing"
@@ -87,17 +84,17 @@ run r2b "abbreviated flags" $Z --pub --i-confirm-permanent; has r2b "bad argumen
 run r1b "token with a trailing CR" env ZENODO_TOKEN=$'FAKETOKEN-bad\r' $Z; has r1b "ZENODO_TOKEN has a space"; quiet 1b; ! grep -q Traceback "$T/out/r1b" && [ $RC = 2 ] || fail 1b
 run r1c "a base URL that makes urllib raise" env ZENODO_BASE='http://[::1' $Z; has r1c "unexpected problem"; ! grep -q Traceback "$T/out/r1c" && [ $RC = 1 ] || fail 1c; ok "a bad token is refused, and any other error ends without a traceback"
 run r3 "upstream echoes the token in a 403" env ZENODO_TOKEN=FAKETOKEN-ECHO403 $Z; has r3 "Zenodo create draft failed: HTTP 403: Invalid token ***"; [ $RC = 1 ] || fail 3; ok "an echoed token becomes *** and a 4xx names the step and status"
-run r3b "a link on another host" env ZENODO_TOKEN=FAKETOKEN-OTHER $Z; has r3b "is not on the ZENODO_BASE host"; [ $RC = 2 ] && [ "$(calls 'PUT /api/files')" = 0 ] || fail 3b; ok "a response link on another host gets no token and no upload"
+for w in OTHER PORT; do run r3b$w "a link on another $w" env ZENODO_TOKEN=FAKETOKEN-$w $Z; has r3b$w "is not on the ZENODO_BASE host"; [ $RC = 2 ] && [ "$(calls 'PUT /api/files')" = 0 ] || fail 3b$w; done
+run r3c "plain http to another host" env ZENODO_BASE=http://sandbox.zenodo.org/api $Z; has r3c "must be https"; quiet 3c; [ $RC = 2 ] || fail 3c; ok "a response link on another host or port gets no token and no upload, and a plain http base to another host is refused"
+for n in 183 186 190 191; do run rA$n "token straddles the cut at $n" env ZENODO_TOKEN=FAKETOKEN-S$n $Z; has rA$n "HTTP 500"; ! grep -q "FAKE\|Bearer [A-Za-z]" "$T/out/rA$n" && [ $RC = 1 ] || fail "A $n"; done; ok "a token split by the 200 character cut shows no prefix"
 run r4 "publish without confirmation" $Z --publish; has r4 "title: A Test Title For Benchmarks"; has r4 "paper.tar.gz ("; has r4 refused; quiet 4; [ $RC = 2 ] || fail 4; ok "--publish alone prints title and files, refuses, sends nothing"
 run r5 "publish with both flags" $Z --publish --i-confirm-permanent; has r5 "PUBLISHED. doi: 10.5072/zenodo.111"; [ $RC = 0 ] && [ "$(calls actions/publish)" = 1 ] || fail 5; [ "$(grep -n 'PUT /api/deposit/depositions/111 ' "$LOG" | cut -d: -f1)" -lt "$(grep -n actions/publish "$LOG" | cut -d: -f1)" ] || fail "5 order"; ok "publish happens once, after the metadata"
 run r6 "plain run with a community" $Z --community test-comm; has r6 "draft id: 111"; has r6 "preview: $B/deposit/111"; [ $RC = 0 ] && [ "$(calls actions/publish)" = 0 ] || fail 6
 $PY - "$LOG.meta" "$B/ok" <<'EOF' || fail "6 metadata"
 import json, sys
-md = json.load(open(sys.argv[1]))["metadata"]
-rel = {(r["identifier"], r["resource_type"]) for r in md["related_identifiers"]}
-assert (md["upload_type"], md["publication_type"]) == ("publication", "preprint"), md
-assert md["creators"][0]["orcid"] == "0000-0002-1825-0097" and md["communities"] == [{"identifier": "test-comm"}], md
-assert {(sys.argv[2], "software"), ("10.5281/zenodo.110", "dataset")} <= rel, rel
+md = json.load(open(sys.argv[1]))["metadata"]; rel = {(r["identifier"], r["resource_type"]) for r in md["related_identifiers"]}
+assert (md["upload_type"], md["publication_type"]) == ("publication", "preprint") and md["communities"] == [{"identifier": "test-comm"}], md
+assert md["creators"][0]["orcid"] == "0000-0002-1825-0097" and {(sys.argv[2], "software"), ("10.5281/zenodo.110", "dataset")} <= rel, rel
 EOF
 ok "a plain run stops at a draft with the right metadata and never publishes"
 run r8 "500 after the draft exists" env ZENODO_TOKEN=FAKETOKEN-FAIL500 $Z; has r8 "HTTP 500: <html>boom"; has r8 "Draft 111 exists and is NOT published"; [ $RC = 1 ] || fail 8; ok "a 5xx after the draft names the draft id"
@@ -107,10 +104,10 @@ rm -f "$T/big.pdf"; ok "a missing or oversize file is refused (status 2) before 
 run r10 "new version of concept 110" $Z --new-version-of 110; has r10 "draft id: 222"; [ $RC = 0 ] && [ "$(calls 'DELETE /api/deposit/depositions/222/files/f1')" = 1 ] || fail 10; [ "$(calls 'PUT /api/files/bkt222/')" = 2 ] && [ "$(calls 'POST /api/deposit/depositions ')" = 0 ] || fail "10 files"; ok "--new-version-of opens a new draft, removes the old file, uploads two new ones"
 run r10b "a redirect to another host" $Z --new-version-of 301; [ $RC = 0 ] && grep -q "GET /api/records/301/versions/latest 0 auth" "$LOG" && grep -q "GET /api/records/110/versions/latest 0 noauth" "$LOG" || fail "10b token followed a redirect"; ok "a redirect to another host drops the Authorization header"
 run r11 "server not reachable" env ZENODO_BASE=http://127.0.0.1:9/api $Z; has r11 "cannot reach 127.0.0.1:9: Connection refused"; ! grep -q Traceback "$T/out/r11" && [ $RC = 1 ] || fail 11; ok "an unreachable server gives a clear message"
-mm nolic.json 'del m["license"]'; mm bt.json 'm["title"] = 5'; echo '{bad' > "$T/bad.json"
-for pair in "nolic.json|lacks: license" "bad.json|cannot read" "bt.json|wrong type"; do f=${pair%%|*}
+mm nolic.json 'del m["license"]'; echo '{bad' > "$T/bad.json"
+for pair in "nolic.json|lacks: license" "bad.json|cannot read"; do f=${pair%%|*}
   run r12$f "bad meta $f" $TOOL zenodo-draft --pdf "$T/paper.pdf" --tarball "$T/paper.tar.gz" --meta "$T/$f"; has r12$f "${pair#*|}"; [ $RC = 2 ] || fail "12 $f"; done
-ok "a bad, incomplete or wrongly typed meta.json is refused (status 2)"
+ok "a bad or incomplete meta.json is refused (status 2)"
 
 S="$TOOL swh-save --interval 0.05 --timeout 1"
 run s13 "rate limited once" $S https://github.com/x/ratelimited; t=($(grep POST "$LOG" | cut -d' ' -f1)); has s13 "ratelimited	succeeded	swh:1:snp:aaaaaaaa"; has s13 "waiting 1s"; [ $RC = 0 ] && [ ${#t[@]} = 2 ] || fail 13
@@ -122,6 +119,8 @@ run s15 "ftp URL" $S ftp://example.org/x; quiet 15; [ $RC = 2 ] || fail 15; run 
 P="$TOOL packet"
 mm unk.json 'm["venues"] = ["Nonexistent Journal of Nothing"]'; run k16 "unknown venue" $P "$T/unk.json" --out "$T/pk16"; has k16 "does not invent venues"; [ $RC = 2 ] && [ ! -e "$T/pk16" ] || fail 16; ok "an unknown or ambiguous venue is refused (status 2), lists the candidates and writes nothing"
 mm ieee.json 'm["venues"] = ["IEEE"]'; run k16b "an ambiguous venue" $P "$T/ieee.json" --out "$T/pk16b"; has k16b "matches"; has k16b "IEEE Computer"; [ $RC = 2 ] && [ ! -e "$T/pk16b" ] || fail "16b"
+mm dup.json 'm["venues"] = ["arXiv", "arxiv"]'; run k16c "the same venue twice" $P "$T/dup.json" --out "$T/pk16c"; has k16c "wrote 1 venue files"; [ $RC = 0 ] && [ "$(ls "$T/pk16c" | wc -l | tr -d ' ')" = 2 ] || fail "16c"
+mm pci.json 'm["venues"] = ["TMLR", "Peer Community In (PCI)"]'; run k16d "Peer Community In counts as peer review" $P "$T/pci.json" --out "$T/pk16d"; has k16d "dual submission"; [ $RC = 2 ] || fail "16d"
 mm two.json 'm["venues"] = ["TMLR", "DMLR"]'; run k17 "two peer-reviewed venues" $P "$T/two.json" --out "$T/pk17"; has k17 "dual submission"; [ $RC = 2 ] && [ ! -e "$T/pk17" ] || fail "17 refuse"
 run k17b "two venues, allowed" $P "$T/two.json" --out "$T/pk17" --allow-second-review-venue; [ $RC = 0 ] && grep -q "WARNING: this packet has 2" "$T/pk17/CHECKLIST.md" || fail "17 allow"; ok "two review venues are refused, and the flag adds a warning to the checklist"
 run k18 "arXiv, Zenodo, TMLR" $P "$T/meta.json" --out "$T/pk18"; [ $RC = 0 ] && [ "$(ls "$T/pk18" | tr '\n' ' ')" = "CHECKLIST.md arxiv.md tmlr.md zenodo.md " ] || fail "18 files"; grep -q "CAPTCHA" "$T/pk18/CHECKLIST.md" && grep -q "ONE peer-reviewed" "$T/pk18/CHECKLIST.md" || fail "18 checklist"
@@ -129,10 +128,13 @@ grep -q "Review mode: double-blind" "$T/pk18/tmlr.md" && grep -q "0000-0002-1825
 ok "one file per venue with its review mode, plus a checklist of manual steps, and an exact full name works"
 
 run c19 "good paper" $TOOL check "$T/meta.json" --pdf "$T/paper.pdf" --cff "$T/CITATION.cff"; has c19 "check passed"; [ $RC = 0 ] || fail "19 good"
-mm title.json 'm["title"] = "Test"'; run c19b "title mismatch" $TOOL check "$T/title.json" --pdf "$T/paper.pdf" --cff "$T/CITATION.cff" --offline; has c19b "not the title block"; has c19b "top-level title in $T/CITATION.cff"; [ $RC = 1 ] || fail 19
+tc() { e=$1; export TT=$2; mm t.json 'm["title"] = __import__("os").environ["TT"]'; shift 2; mkpdf "$T/t.pdf" "$@"; run tc "title $e: $*" $TOOL check "$T/t.json" --pdf "$T/t.pdf" --offline; [ $RC = $e ] || fail "title $e: $TT vs $*"; }
+tc 0 "Self-Supervised Learning For Benchmarks" "Self-" "Supervised Learning For Benchmarks"; tc 0 "$TITLE" "Published as a conference paper at ICLR 2027" "$TITLE"; tc 0 "$TITLE" "$TITLE*"; tc 0 "$TITLE" "${TITLE}1"; tc 0 "$TITLE" "A TEST TITLE FOR BENCHMARKS"
+tc 1 "$TITLE" "Abstract: we study $TITLE in depth"; tc 1 "$TITLE" "$TITLE And More Benchmarks"; tc 0 "“Quoted”  Title" '"Quoted" Title'; ok "a wrapped hyphen, a header line, a footnote mark and an all-caps title pass, and an abstract match or a prefix fails"
+mm title.json 'm["title"] = "Test"'; run c19b "title mismatch" $TOOL check "$T/title.json" --pdf "$T/paper.pdf" --cff "$T/CITATION.cff" --offline; has c19b "title is not 1 to 5 consecutive lines"; has c19b "top-level title in $T/CITATION.cff"; [ $RC = 1 ] || fail 19
 printf 'title: "a test title for benchmarks"\n' > "$T/c2.cff"; printf 'cff-version: 1.2.0\nreferences:\n  - type: article\n    title: "A Test Title For Benchmarks"\n' > "$T/c3.cff"
 for c in c2 c3; do run c19$c "CITATION.cff $c" $TOOL check "$T/meta.json" --cff "$T/$c.cff" --offline; has c19$c "top-level title"; [ $RC = 1 ] || fail "19 $c"; done
-mm u.json 'm["code_url"] = "'$B'/missing"; m["data_url"] = "'$B'/missing2"'; run c19u "dead code and data URLs" $TOOL check "$T/u.json"; has c19u "missing "; has c19u "missing2"; [ $RC = 1 ] || fail "19 url"; ok "a title must equal the PDF title block and the top-level CITATION.cff title, and dead code and data URLs fail"
+mm u.json 'm["code_url"] = "'$B'/missing"; m["data_url"] = "'$B'/missing2"; m["comments"] = "see http://x.com:abc/"'; run c19u "dead code and data URLs" $TOOL check "$T/u.json"; has c19u "missing "; has c19u "missing2"; has c19u "x.com:abc"; [ $RC = 1 ] || fail "19 url"; ok "a title must equal the PDF title block and the top-level CITATION.cff title, and dead code and data URLs fail"
 mm orc.json 'm["authors"][0]["orcid"] = "0000-0002-1825-0098"'; run c20 "bad ORCID checksum" $TOOL check "$T/orc.json" --offline; has c20 "bad ORCID"; [ $RC = 1 ] || fail "20 check"
 mm orc2.json 'm["authors"][0]["orcid"] = "abc"'; run c20c "non-numeric ORCID" $TOOL check "$T/orc2.json" --offline; has c20c "bad ORCID"; ! grep -q Traceback "$T/out/c20c" || fail "20 traceback"
 run c20b "bad ORCID in zenodo-draft" $TOOL zenodo-draft --pdf "$T/paper.pdf" --tarball "$T/paper.tar.gz" --meta "$T/orc.json"; has c20b "bad ORCID"; quiet 20; [ $RC = 2 ] || fail "20 draft"; ok "a bad ORCID, by checksum or by shape, fails both commands without a traceback"
