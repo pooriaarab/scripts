@@ -1,0 +1,154 @@
+#!/usr/bin/env bash
+# End-to-end test for paper-publish. Covers every row marked "yes" in paper-publish.failure-modes.md.
+# A fake Zenodo and a fake Software Heritage run on localhost. No network, no real token. Ends with a transcript path and its sha256.
+set -euo pipefail; cd "$(dirname "$0")"
+TOOL=./paper-publish PY=$(command -v python3) T=$(mktemp -d) pass=0
+mkdir "$T/out"; TR=$T/transcript.txt; LOG=$T/server.log; : > "$LOG"
+fail() { echo "FAIL - $1 (files in $T)" >&2; exit 1; }
+ok() { pass=$((pass + 1)); echo "ok $pass - $1" | tee -a "$TR"; }
+
+cat > "$T/fake.py" <<'EOF'
+import http.server, json, re, sys, time
+LOG, ST = sys.argv[2], {}
+class H(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *a): pass
+    def send(self, code, obj=None, raw=None, hdr=()):
+        b = raw if raw is not None else (json.dumps(obj).encode() if obj is not None else b"")
+        self.send_response(code)
+        for k, v in hdr: self.send_header(k, v)
+        self.send_header("Content-Length", str(len(b))); self.end_headers(); self.wfile.write(b)
+    def do(self):
+        body = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+        tok, p, me = (self.headers.get("Authorization") or "")[7:], self.path, self.command
+        open(LOG, "a").write("%.3f %s %s %d %s\n" % (time.time(), me, p, len(body), "auth" if tok else "noauth"))
+        B = "http://127.0.0.1:%d" % self.server.server_port
+        L = B.replace("127.0.0.1", "localhost") if "OTHER" in tok else B.rsplit(":", 1)[0] + ":1" if "PORT" in tok else B  # a link on another host or port
+        dep = lambda i: {"id": i, "conceptrecid": "110", "links": {"bucket": L + "/api/files/bkt%d" % i, "html": B + "/deposit/%d" % i + ("?t=" + tok if "ECHOOUT" in tok else "")},
+                         "files": [{"id": "f1", "links": {"self": B + "/api/deposit/depositions/222/files/f1"}}] * (i == 222)}
+        if "/swh/" in p:
+            u = p.split("/url/", 1)[1]
+            if me == "POST":
+                if "ratelimited" in u and not ST.get("rl"): ST["rl"] = 1; return self.send(429, {}, hdr=[("Retry-After", "1")])
+                if ("nanrl" in u or "infrl" in u) and not ST.get(u + "429"): ST[u + "429"] = 1; return self.send(429, {}, hdr=[("Retry-After", "nan" if "nanrl" in u else "inf")])
+                if "noid" in u: return self.send(201, {})
+                if "rejected" in u: return self.send(200, {"id": 9, "save_request_status": "rejected"})
+                ST[u] = 0; return self.send(201, {"id": 7, "save_request_status": "accepted", "save_task_status": "pending"})
+            ST[u] += 1
+            t = "running" if ("hangs" in u or ST[u] < 2) else ("failed" if "fails" in u else "succeeded")
+            return self.send(200, [{"id": 7, "save_request_status": "accepted", "save_task_status": t, "snapshot_swhid": "swh:1:snp:" + "a" * 40}])
+        if re.search(r"-S\d+$", tok): return self.send(500, raw=("E" * int(tok.rsplit("S", 1)[1]) + " Bearer " + tok).encode())  # a token that straddles the 200 character cut
+        if "ESC" in tok: return self.send(400, {"message": "bad", "errors": [{"field": "x", "message": tok}]})  # a token that JSON re-encodes
+        if "NOLINKS" in tok and me == "POST": return self.send(201, {"id": 111})
+        if "ECHO403" in tok: return self.send(403, {"message": "Invalid token " + tok})
+        if me == "POST" and p == "/api/deposit/depositions": return self.send(201, dep(111))
+        if me == "PUT" and p.startswith("/api/files/"): return self.send(201, {"size": len(body)})
+        if me == "PUT" and p.startswith("/api/deposit/depositions/"):
+            if "FAIL500" in tok: return self.send(500, raw=b"<html>boom</html>")
+            open(LOG + ".meta", "wb").write(body); return self.send(200, json.loads(body))
+        if p.endswith("/actions/publish"): return self.send(202, {"doi": "10.5072/zenodo.111"})
+        if p == "/api/records/301/versions/latest": return self.send(301, hdr=[("Location", "http://localhost:%d/api/records/110/versions/latest" % self.server.server_port)])
+        if p == "/api/records/110/versions/latest": return self.send(200, {"id": 105})
+        if p.endswith("/105/actions/newversion"): return self.send(201, {"id": 105, "links": {"latest_draft": B + "/api/deposit/depositions/222"}})
+        if me == "GET" and p == "/api/deposit/depositions/222": return self.send(200, dep(222))
+        self.send(204 if me == "DELETE" else 404)
+    do_GET = do_POST = do_PUT = do_DELETE = do
+s = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H); open(sys.argv[1], "w").write(str(s.server_port)); s.serve_forever()
+EOF
+$PY "$T/fake.py" "$T/port" "$LOG" & SRV=$!
+trap 'rc=$?; kill $SRV 2>/dev/null; wait $SRV 2>/dev/null || :; [ $rc = 0 ] && rm -rf "$T"; true' EXIT
+for _ in $(seq 50); do [ -s "$T/port" ] && break; sleep 0.1; done; PORT=$(cat "$T/port") B=http://127.0.0.1:$(cat "$T/port")
+export ZENODO_BASE=$B/api SWH_BASE=$B/swh/api/1 ZENODO_TOKEN=FAKETOKEN-ok
+
+# fixtures: a PDF and a tarball (fake bytes), and a meta file
+echo "fake pdf bytes" > "$T/paper.pdf"; echo "fake tarball bytes" > "$T/paper.tar.gz"
+cat > "$T/meta.json" <<EOF
+{"title": "A Test Title For Benchmarks", "license": "cc-by-4.0", "keywords": ["benchmark"], "subject_class": "cs.AI", "comments": "10 pages",
+ "abstract": "A test abstract for the paper. It has one sentence about the paper and one about the data.",
+ "authors": [{"name": "Arab, Pooria", "affiliation": "Independent", "orcid": "0000-0002-1825-0097"}], "venues": ["arXiv", "Zenodo", "TMLR"],
+ "code_url": "https://github.com/o/r", "data_concept_dois": ["10.5281/zenodo.110"]}
+EOF
+mm() { $PY -c 'import json,sys; m = json.load(open(sys.argv[1])); exec(sys.argv[3]); json.dump(m, open(sys.argv[2], "w"))' "$T/meta.json" "$T/$1" "$2"; }
+# run NAME "what it does" CMD...  sets RC, saves the output, appends a normalised copy to the transcript
+run() {
+  local n=$1 d=$2; shift 2; : > "$LOG"
+  set +e; "$@" > "$T/out/$n" 2>&1; RC=$?; set -e
+  { echo "## $n: $d (exit $RC)"; sed -e "s#$T#\$T#g" -e "s#127.0.0.1:$PORT#HOST#g" -e "s#localhost:$PORT#HOST#g" "$T/out/$n"; } >> "$TR"
+}
+has() { grep -qF -- "$2" "$T/out/$1" || fail "$1 lacks: $2"; }; calls() { grep -c -- "$1" "$LOG" || true; }; quiet() { [ ! -s "$LOG" ] || fail "$1 sent a request"; }
+Z="$TOOL zenodo-draft --pdf $T/paper.pdf --tarball $T/paper.tar.gz --meta $T/meta.json"
+
+run r1 "no token" env -u ZENODO_TOKEN $Z; has r1 "ZENODO_TOKEN is not set"; quiet 1; [ $RC = 2 ] || fail 1; ok "missing token is refused (status 2) and sends nothing"
+run r2 "token in argv" $Z --token FAKETOKEN-argv; has r2 "bad arguments"; quiet 2; [ $RC = 2 ] || fail 2; ok "a token in argv is refused and not repeated"
+run r2b "abbreviated flags" $Z --pub --i-confirm-permanent; has r2b "bad arguments"; quiet 2b; [ $RC = 2 ] || fail 2b; ok "an abbreviated --publish cannot pass the gate"
+run r1b "token with a trailing CR" env ZENODO_TOKEN=$'FAKETOKEN-bad\r' $Z; has r1b "ZENODO_TOKEN has a space"; quiet 1b; ! grep -q Traceback "$T/out/r1b" && [ $RC = 2 ] || fail 1b
+run r1c "a base URL that makes urllib raise" env ZENODO_BASE='http://[::1' $Z; has r1c "unexpected problem"; ! grep -q Traceback "$T/out/r1c" && [ $RC = 1 ] || fail 1c; ok "a bad token is refused, and any other error ends without a traceback"
+run r3 "upstream echoes the token in a 403" env ZENODO_TOKEN=FAKETOKEN-ECHO403 $Z; has r3 "Zenodo create draft failed: HTTP 403: Invalid token ***"; [ $RC = 1 ] || fail 3; ok "an echoed token becomes *** and a 4xx names the step and status"
+for w in OTHER PORT; do run r3b$w "a link on another $w" env ZENODO_TOKEN=FAKETOKEN-$w $Z; has r3b$w "is not on the ZENODO_BASE host"; [ $RC = 2 ] && [ "$(calls 'PUT /api/files')" = 0 ] || fail 3b$w; done
+run r3c "plain http to another host" env ZENODO_BASE=http://sandbox.zenodo.org/api $Z; has r3c "must be https"; quiet 3c; [ $RC = 2 ] || fail 3c; ok "a response link on another host or port gets no token and no upload, and a plain http base to another host is refused"
+for n in 183 186 190 191; do run rA$n "token straddles the cut at $n" env ZENODO_TOKEN=FAKETOKEN-S$n $Z; has rA$n "HTTP 500"; ! grep -q "FAKE\|Bearer [A-Za-z]" "$T/out/rA$n" && [ $RC = 1 ] || fail "A $n"; done; ok "a token split by the 200 character cut shows no prefix"
+run r4 "publish without confirmation" $Z --publish; has r4 "title: A Test Title For Benchmarks"; has r4 "paper.tar.gz ("; has r4 refused; quiet 4; [ $RC = 2 ] || fail 4; ok "--publish alone prints title and files, refuses, sends nothing"
+run r5 "publish with both flags" $Z --publish --i-confirm-permanent; has r5 "PUBLISHED. doi: 10.5072/zenodo.111"; [ $RC = 0 ] && [ "$(calls actions/publish)" = 1 ] || fail 5; [ "$(grep -n 'PUT /api/deposit/depositions/111 ' "$LOG" | cut -d: -f1)" -lt "$(grep -n actions/publish "$LOG" | cut -d: -f1)" ] || fail "5 order"; ok "publish happens once, after the metadata"
+run r6 "plain run with a community" $Z --community test-comm; has r6 "draft id: 111"; has r6 "preview: $B/deposit/111"; [ $RC = 0 ] && [ "$(calls actions/publish)" = 0 ] || fail 6
+$PY - "$LOG.meta" "https://github.com/o/r" <<'EOF' || fail "6 metadata"
+import json, sys
+md = json.load(open(sys.argv[1]))["metadata"]; rel = {(r["identifier"], r["resource_type"]) for r in md["related_identifiers"]}
+assert (md["upload_type"], md["publication_type"]) == ("publication", "preprint") and md["communities"] == [{"identifier": "test-comm"}], md
+assert md["creators"][0]["orcid"] == "0000-0002-1825-0097" and {(sys.argv[2], "software"), ("10.5281/zenodo.110", "dataset")} <= rel, rel
+EOF
+ok "a plain run stops at a draft with the right metadata and never publishes"
+run r7b "stdout echoes the token" env ZENODO_TOKEN=FAKETOKEN-ECHOOUT $Z; has r7b "preview: $B/deposit/111?t=***"; [ $RC = 0 ] || fail 7b; ok "the printed preview URL is scrubbed too"
+run r7c "a token with a quote and a backslash in a JSON error" env ZENODO_TOKEN='FAKETOKEN-ESC"q\z' $Z; has r7c "HTTP 400"; ! grep -q FAKE "$T/out/r7c" && [ $RC = 1 ] || fail 7c; ok "a token that a JSON message re-encodes is scrubbed too"
+run r7d "a 201 with no links" env ZENODO_TOKEN=FAKETOKEN-NOLINKS $Z; has r7d "Draft 111 exists and is NOT published"; ! grep -q Traceback "$T/out/r7d" && [ $RC = 1 ] || fail 7d; ok "any error after the draft exists names the draft"
+run r8 "500 after the draft exists" env ZENODO_TOKEN=FAKETOKEN-FAIL500 $Z; has r8 "HTTP 500: <html>boom"; has r8 "Draft 111 exists and is NOT published"; [ $RC = 1 ] || fail 8; ok "a 5xx after the draft names the draft id"
+$PY -c "open('$T/big.pdf','wb').truncate(51*1024**3)"
+for f in none big; do run r9$f "unusable PDF $f" $TOOL zenodo-draft --pdf "$T/$f.pdf" --tarball "$T/paper.tar.gz" --meta "$T/meta.json"; has r9$f "missing or larger than the 50 GB"; quiet 9$f; [ $RC = 2 ] || fail 9$f; done
+rm -f "$T/big.pdf"; ok "a missing or oversize file is refused (status 2) before any request"
+run r10 "new version of concept 110" $Z --new-version-of 110; has r10 "draft id: 222"; [ $RC = 0 ] && [ "$(calls 'DELETE /api/deposit/depositions/222/files/f1')" = 1 ] || fail 10; [ "$(calls 'PUT /api/files/bkt222/')" = 2 ] && [ "$(calls 'POST /api/deposit/depositions ')" = 0 ] || fail "10 files"; ok "--new-version-of opens a new draft, removes the old file, uploads two new ones"
+run r10b "a redirect to another host" $Z --new-version-of 301; [ $RC = 0 ] && grep -q "GET /api/records/301/versions/latest 0 auth" "$LOG" && grep -q "GET /api/records/110/versions/latest 0 noauth" "$LOG" || fail "10b token followed a redirect"; ok "a redirect to another host drops the Authorization header"
+run r11 "server not reachable" env ZENODO_BASE=http://127.0.0.1:9/api $Z; has r11 "cannot reach 127.0.0.1:9: Connection refused"; ! grep -q Traceback "$T/out/r11" && [ $RC = 1 ] || fail 11; ok "an unreachable server gives a clear message"
+mm nolic.json 'del m["license"]'; mm bt.json 'm["title"] = 5'; mm dc.json 'm["data_concept_dois"] = "10.5281/zenodo.1"'; mm ri.json 'm["related_identifiers"] = None'; echo '[1]' > "$T/arr.json"; $PY -c 'print("[" * 100000)' > "$T/deep.json"; echo '{bad' > "$T/bad.json"
+for pair in "nolic.json|lacks: license" "bad.json|cannot read" "bt.json|wrong type" "dc.json|wrong type" "ri.json|wrong type" "arr.json|the top level is not an object" "deep.json|recursion"; do f=${pair%%|*}
+  run r12$f "bad meta $f" $TOOL zenodo-draft --pdf "$T/paper.pdf" --tarball "$T/paper.tar.gz" --meta "$T/$f"; has r12$f "${pair#*|}"; [ $RC = 2 ] || fail "12 $f"; done
+mm bs.json 'm["venues"] = "TMLR"'; run r12p "venues as a string" $TOOL packet "$T/bs.json" --out "$T/pk12"; has r12p "wrong type"; [ $RC = 2 ] || fail 12p; ok "a bad, incomplete or wrongly typed meta.json is refused (status 2)"
+
+S="$TOOL swh-save --interval 0.05 --timeout 1"
+run s13 "rate limited once" $S https://github.com/x/ratelimited; t=($(grep POST "$LOG" | cut -d' ' -f1)); has s13 "ratelimited	succeeded	swh:1:snp:aaaaaaaa"; has s13 "waiting 1s"; [ $RC = 0 ] && [ ${#t[@]} = 2 ] || fail 13
+$PY -c "import sys; sys.exit(0 if ${t[1]} - ${t[0]} >= 1 else 1)" || fail "waited less than Retry-After"; ok "a 429 waits for Retry-After and retries"
+run s13b "Retry-After nan and inf" $S https://github.com/x/nanrl https://github.com/x/infrl; has s13b "nanrl	succeeded"; has s13b "infrl	succeeded"; has s13b "waiting 0s"; ! grep -q Traceback "$T/out/s13b" && [ $RC = 0 ] || fail "13b"; ok "a Retry-After of nan or inf waits 0 and does not raise"
+run s14 "failed, rejected, timeout, success" $S https://github.com/x/fails https://github.com/x/rejected https://github.com/x/hangs https://github.com/x/fine https://github.com/x/noid
+has s14 "no usable request id"; has s14 "fails	failed"; has s14 "rejected	rejected"; has s14 "hangs	timeout (still running)"; has s14 "fine	succeeded"; [ $RC = 1 ] || fail 14; ok "each URL gets a status and the run ends with status 1"
+run s15 "ftp URL" $S ftp://example.org/x; quiet 15; [ $RC = 2 ] || fail 15; run s15b "negative interval" $TOOL swh-save --interval -1 https://github.com/x/fine; quiet 15b; [ $RC = 2 ] || fail 15b; ok "a non-http URL is refused (status 2) before any request"
+
+P="$TOOL packet"
+mm unk.json 'm["venues"] = ["Nonexistent Journal of Nothing"]'; run k16 "unknown venue" $P "$T/unk.json" --out "$T/pk16"; has k16 "does not invent venues"; [ $RC = 2 ] && [ ! -e "$T/pk16" ] || fail 16; ok "an unknown, ambiguous or repeated venue is refused (status 2) and writes nothing, and only a journal or conference counts as peer review, not a forum"
+mm ieee.json 'm["venues"] = ["IEEE"]'; run k16b "an ambiguous venue" $P "$T/ieee.json" --out "$T/pk16b"; has k16b "matches"; has k16b "IEEE Computer"; [ $RC = 2 ] && [ ! -e "$T/pk16b" ] || fail "16b"
+mm dup.json 'm["venues"] = ["arXiv", "arXiv (cs.AI, cs.CL, cs.LG)"]'; run k16c "the same venue under two names" $P "$T/dup.json" --out "$T/pk16c"; has k16c "listed twice"; [ $RC = 2 ] && [ ! -e "$T/pk16c" ] || fail "16c"
+mm mix.json 'm["venues"] = ["arXiv", "NeurIPS 2026 Evaluations & Datasets", "Alignment Forum"]'; run k16e "one review venue, a preprint server and a forum" $P "$T/mix.json" --out "$T/pk16e"; [ $RC = 0 ] && grep -q "Alignment Forum: not peer review" "$T/pk16e/CHECKLIST.md" && grep -q "NeurIPS 2026 Evaluations & Datasets: peer-reviewed" "$T/pk16e/CHECKLIST.md" || fail "16e"
+mm pci.json 'm["venues"] = ["TMLR", "Peer Community In (PCI)"]'; run k16d "Peer Community In counts as peer review" $P "$T/pci.json" --out "$T/pk16d"; has k16d "dual submission"; [ $RC = 2 ] || fail "16d"
+mm ims.json 'm["venues"] = ["TMLR", "IEEE Intelligent Systems"]'; run k16f "TMLR and a peer-reviewed society magazine" $P "$T/ims.json" --out "$T/pk16f"; has k16f "dual submission"; [ $RC = 2 ] || fail 16f
+mm isw.json 'm["venues"] = ["ICLR 2027", "IEEE Software"]'; run k16g "ICLR and a peer-reviewed society magazine" $P "$T/isw.json" --out "$T/pk16g"; has k16g "dual submission"; [ $RC = 2 ] || fail 16g
+mm two.json 'm["venues"] = ["TMLR", "DMLR"]'; run k17 "two peer-reviewed venues" $P "$T/two.json" --out "$T/pk17"; has k17 "dual submission"; [ $RC = 2 ] && [ ! -e "$T/pk17" ] || fail "17 refuse"
+run k17b "two venues, allowed" $P "$T/two.json" --out "$T/pk17" --allow-second-review-venue; [ $RC = 0 ] && grep -q "WARNING: this packet has 2" "$T/pk17/CHECKLIST.md" || fail "17 allow"; ok "two review venues are refused, and the flag adds a warning to the checklist"
+run k18 "arXiv, Zenodo, TMLR" $P "$T/meta.json" --out "$T/pk18"; [ $RC = 0 ] && [ "$(ls "$T/pk18" | tr '\n' ' ')" = "CHECKLIST.md arxiv.md tmlr.md zenodo.md " ] || fail "18 files"; grep -q "CAPTCHA" "$T/pk18/CHECKLIST.md" && grep -q "ONE peer-reviewed" "$T/pk18/CHECKLIST.md" || fail "18 checklist"
+grep -q "Review mode: double-blind" "$T/pk18/tmlr.md" && grep -q "0000-0002-1825-0097" "$T/pk18/arxiv.md" || fail "18 review mode"; mm ex.json 'm["venues"] = ["arXiv (cs.AI, cs.CL, cs.LG)"]'; run k18b "an exact venue name" $P "$T/ex.json" --out "$T/pk18b"; [ $RC = 0 ] && [ -e "$T/pk18b/arxiv-cs-ai-cs-cl-cs-lg.md" ] || fail "18b"
+ok "one file per venue with its review mode, plus a checklist of manual steps, and an exact full name works"
+
+mm orc.json 'm["authors"][0]["orcid"] = "0000-0002-1825-0098"'; mm orc2.json 'm["authors"][0]["orcid"] = "abc"'
+for f in orc orc2; do run o$f "bad ORCID $f" $TOOL zenodo-draft --pdf "$T/paper.pdf" --tarball "$T/paper.tar.gz" --meta "$T/$f.json"; has o$f "bad ORCID"; quiet $f; ! grep -q Traceback "$T/out/o$f" && [ $RC = 2 ] || fail "orcid $f"; done
+ok "a bad ORCID, by checksum or by shape, is refused (status 2) before any request and without a traceback"
+# the verdict of every venue in paper-venues.json (printed for a person to read, kept out of the transcript), and the twelve the review named
+$PY - <<'EOF' || fail "venue verdicts"
+import importlib.machinery, json
+pp = importlib.machinery.SourceFileLoader("pp", "./paper-publish").load_module(); recs = json.load(open("paper-venues.json")); v = {}
+for r in recs:
+    if r["kind"] != "avoid": v.setdefault(r["name"], pp.resolve(r["name"], recs)[1])
+print("venue verdicts: %d venues, %d peer-reviewed" % (len(v), sum(v.values())))
+for n in sorted(v): print("  %-14s %s" % ("PEER-REVIEWED" if v[n] else "no", n[:100]))
+want = {"IEEE Computer": 1, "IEEE Software": 1, "IEEE Intelligent Systems": 1, "IEEE Security & Privacy": 1, "IEEE Computing in Science": 1, "MSR 2027 Mining Challenge (papers)": 1, "Communications of the ACM (CACM)": 1,
+        "Substack (self-publish)": 0, "LessWrong": 0, "Hugging Face community blog": 0, "IEEE Spectrum (Expert Authors)": 0, "MIT Technology Review": 0, "TMLR": 1, "arXiv": 0, "Peer Community In": 1, "Alignment Forum": 0}
+bad = {q: pp.resolve(q, recs)[1] for q, e in want.items() if pp.resolve(q, recs)[1] != bool(e)}
+assert not bad, bad
+EOF
+ok "a venue counts as peer-reviewed from its own words: the society magazines, the mining challenge and CACM count, and the forums, blogs, newsletters and news magazines do not"
+! grep -rqF FAKETOKEN "$T/out" "$TR" "$T"/pk* || fail "a token leaked into an output, packet or transcript"; ok "no output, packet or transcript holds the fake token"
+OUT=$(mktemp "${TMPDIR:-/tmp}/paper-publish-transcript.XXXXXX"); cp "$TR" "$OUT"; echo "transcript: $OUT"; echo "sha256: $(shasum -a 256 "$OUT" | cut -d' ' -f1)"
