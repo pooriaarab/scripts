@@ -103,6 +103,7 @@ secret_fingerprint() {
   for f in "${SECRET_PATHS[@]:-}"; do
     [[ -f "$f" ]] && printf '%s %s\n' "$(shasum "$f" | cut -d' ' -f1)" "$f"
   done
+  return 0
 }
 
 # `cat` on a lockfile that does not exist returns non-zero, and with
@@ -139,6 +140,7 @@ all_files() {   # everything we would ship
   git ls-files
   local s
   for s in "${SECRET_PATHS[@]:-}"; do [[ -f "$s" ]] && printf '%s\n' "$s"; done
+  return 0   # an empty SECRET_PATHS leaves the last test false; pipefail would fail the seed
 }
 
 # macOS bsdtar exits 1 on warnings even when the archive is fine, and with
