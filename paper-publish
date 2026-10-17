@@ -25,9 +25,23 @@ def die(msg):
     raise Fail(msg, 2)
 
 def scrub(s):
-    for v in (SECRET, json.dumps(SECRET)[1:-1], json.dumps(SECRET)[1:-1].replace("/", "\\/")):  # the token, and the forms a JSON text writes
+    j = json.dumps(SECRET)[1:-1]
+    for v in (SECRET, j, j.replace("/", "\\/"), "".join("\\u%04x" % ord(c) for c in SECRET), "".join("\\u%04X" % ord(c) for c in SECRET), urllib.parse.quote(SECRET, safe="")):  # the token, and the forms a text writes
         s = s.replace(v, "***") if v else s
     return s
+
+def leaves(o):  # every string and key of a decoded response
+    if isinstance(o, str): yield o
+    elif isinstance(o, list):
+        for x in o: yield from leaves(x)
+    elif isinstance(o, dict):
+        for k, v in o.items():
+            yield k
+            yield from leaves(v)
+
+def origin(u):  # scheme, lower-case host and port, with a default port made explicit
+    u = urllib.parse.urlsplit(u)
+    return u.scheme.lower(), u.hostname, u.port or {"http": 80, "https": 443}.get(u.scheme.lower())
 
 def clean(o):  # scrub every string and key of a decoded response
     if isinstance(o, str): return scrub(o)
@@ -41,7 +55,7 @@ class Parser(argparse.ArgumentParser):
 class SameOrigin(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         new = super().redirect_request(req, fp, code, msg, headers, newurl)
-        if new is not None and urllib.parse.urlsplit(newurl)[:2] != urllib.parse.urlsplit(req.full_url)[:2]:
+        if new is not None and origin(newurl) != origin(req.full_url):
             new.remove_header("Authorization")  # never hand the bearer token to another origin
         return new
 
@@ -73,17 +87,22 @@ def http(method, url, token="", body=None, cap=1 << 20):
         time.sleep(wait)
         if hasattr(body, "seek"):
             body.seek(0)
-    raw = r.read(cap).decode("utf-8", "replace")
+    raw = scrub(r.read(cap + (4096 if SECRET else 0)).decode("utf-8", "replace"))[:cap]  # read past the cap, scrub the whole body, then cut, so the cap cannot split a token
     try:
         obj = clean(json.loads(raw))  # decode first, then scrub every string
+        if SECRET and SECRET in "".join(leaves(obj)): obj, raw = None, "(response hidden: the token is split across its fields)"  # only a split token survives
     except (ValueError, RecursionError):  # not JSON, or nested too deep: show the text
         obj = None
-    text = json.dumps(obj, ensure_ascii=False) if obj is not None else scrub(re.sub(r"\\u([0-9a-fA-F]{4})", lambda m: chr(int(m.group(1), 16)), raw))
-    return r.getcode(), obj, r.headers, text.strip()[:200]  # scrub the whole body, then cut
+    text = (json.dumps(obj, ensure_ascii=False) if obj is not None else scrub(re.sub(r"\\u([0-9a-fA-F]{4})", lambda m: chr(int(m.group(1), 16)), raw))).strip()[:200]
+    for k in range(min(len(SECRET), len(text)), 2, -1):  # never end with the start of the token
+        if text.endswith(SECRET[:k]):
+            text = text[:-k]
+            break
+    return r.getcode(), obj, r.headers, text
 
 def load_meta(path, need=()):
     try:
-        m = json.load(open(path, encoding="utf-8"))
+        m = json.load(open(path, encoding="utf-8-sig"))
         assert isinstance(m, dict), "the top level is not an object"
     except (OSError, ValueError, AssertionError, RecursionError) as e:
         die("cannot read %s as a JSON object: %s" % (path, e))
@@ -105,7 +124,7 @@ def orcid_ok(o):
     return o[-1] == ("X" if (12 - t % 11) % 11 == 10 else str((12 - t % 11) % 11))
 
 def zen(step, method, url, body=None, want=(200,)):
-    if urllib.parse.urlsplit(url)[:2] != BASE[:2]: die(  # the token goes only to the ZENODO_BASE origin
+    if origin(url) != origin(BASE.geturl()): die(  # the token goes only to the ZENODO_BASE origin
         "refused: %s is not on the ZENODO_BASE host" % urllib.parse.urlsplit(url).netloc)
     code, obj, _, text = http(method, url, SECRET, body)
     if code not in want:
@@ -193,12 +212,12 @@ def save_one(ep, a):
             return "timeout (still %s)" % st, "-"
         time.sleep(a.interval)
         lst = http("GET", ep)[1]
-        obj = next((x for x in lst if x.get("id") == rid), obj) if isinstance(lst, list) else obj
+        obj = next((x for x in lst if isinstance(x, dict) and x.get("id") == rid), obj) if isinstance(lst, list) else obj
 
 def cmd_swh(a):
     base = os.environ.get("SWH_BASE", "https://archive.softwareheritage.org/api/1").rstrip("/")
-    if a.interval < 0 or a.timeout < 0 or [u for u in a.urls if not re.match(r"https?://\S+$", u)]:
-        die("every URL must be http or https, and --interval and --timeout must not be negative")
+    if not all(math.isfinite(x) and x >= 0 for x in (a.interval, a.timeout)) or [u for u in a.urls if not re.fullmatch(r"https?://\S+", u)]:
+        die("every URL must be http or https on one line, and --interval and --timeout must be numbers that are not negative")
     bad = 0
     for u in a.urls:
         try:
