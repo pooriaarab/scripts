@@ -25,6 +25,8 @@ class H(http.server.BaseHTTPRequestHandler):
         L = B.replace("127.0.0.1", "localhost") if "OTHER" in tok else B.rsplit(":", 1)[0] + ":1" if "PORT" in tok else B  # a link on another host or port
         dep = lambda i: {"id": i, "conceptrecid": "110", "links": {"bucket": L + "/api/files/bkt%d" % i, "html": B + "/deposit/%d" % i + ("?t=" + tok if "ECHOOUT" in tok else "")},
                          "files": [{"id": "f1", "links": {"self": B + "/api/deposit/depositions/222/files/f1"}}] * (i == 222)}
+        if p == "/headno": return self.send(405 if me == "HEAD" else 200, raw=b"x")  # a server that refuses HEAD
+        if p in ("/ok", "/missing"): return self.send(200 if p == "/ok" else 404, raw=b"x")
         if "/swh/" in p:
             u = p.split("/url/", 1)[1]
             if me == "POST":
@@ -51,7 +53,7 @@ class H(http.server.BaseHTTPRequestHandler):
         if p.endswith("/105/actions/newversion"): return self.send(201, {"id": 105, "links": {"latest_draft": B + "/api/deposit/depositions/222"}})
         if me == "GET" and p == "/api/deposit/depositions/222": return self.send(200, dep(222))
         self.send(204 if me == "DELETE" else 404)
-    do_GET = do_POST = do_PUT = do_DELETE = do
+    do_GET = do_HEAD = do_POST = do_PUT = do_DELETE = do
 s = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H); open(sys.argv[1], "w").write(str(s.server_port)); s.serve_forever()
 EOF
 $PY "$T/fake.py" "$T/port" "$LOG" & SRV=$!
@@ -136,6 +138,33 @@ ok "one file per venue with its review mode, plus a checklist of manual steps, a
 mm orc.json 'm["authors"][0]["orcid"] = "0000-0002-1825-0098"'; mm orc2.json 'm["authors"][0]["orcid"] = "abc"'
 for f in orc orc2; do run o$f "bad ORCID $f" $TOOL zenodo-draft --pdf "$T/paper.pdf" --tarball "$T/paper.tar.gz" --meta "$T/$f.json"; has o$f "bad ORCID"; quiet $f; ! grep -q Traceback "$T/out/o$f" && [ $RC = 2 ] || fail "orcid $f"; done
 ok "a bad ORCID, by checksum or by shape, is refused (status 2) before any request and without a traceback"
+# check needs an abstract of 100 characters or more and a code_url that answers, so it gets its own meta file
+mm ck.json 'm["abstract"] = "A test abstract for the paper. It is long enough to pass the length check and links to '$B'/ok for the code."; m["code_url"] = "'$B'/ok"'; cp "$T/ck.json" "$T/meta.json"
+# check: the title block comes from the text layout of real PDFs (a tectonic-built paper with a two-line title, a \thanks title, and the real paper when it is here), plus hand-made PDFs for sizes
+mkpdf() { f=$1; shift; s="BT /F1 20 Tf 72 700 Td ($1) Tj ET"$'\n'; shift; y=660; for l in "$@"; do s+="BT /F1 10 Tf 72 $y Td ($l) Tj ET"$'\n'; y=$((y - 14)); done
+  printf '%%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Contents 4 0 R/Resources<</Font<</F1 5 0 R>>>>>>endobj\n4 0 obj<</Length %d>>stream\n%sendstream endobj\n5 0 obj<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>endobj\ntrailer<</Size 6/Root 1 0 R>>\n%%%%EOF\n' "${#s}" "$s" > "$f"; }
+REAL=$PWD/paper-publish.fixture.pdf THX=$PWD/paper-publish.thanks.pdf TITLE="A Test Title For Benchmarks"; W="Agents Can Build Benchmarks. Approvals Missed What Probing Found: 22 Cases"
+tc() { e=$1; export TT=$3; mm t.json 'm["title"] = __import__("os").environ["TT"]'; run tc "title $e: $3" $TOOL check "$T/t.json" --pdf "$2" --offline; [ $RC = $e ] || fail "title $e: [$3] vs $2"; }
+cases() { tc 0 "$1" "$W"; tc 0 "$1" "Agents Can Build Benchmarks.   Approvals Missed What Probing Found: 22 Cases"
+  for x in "${W/22 Cases/23 Cases}" "$W Today" "${W% Cases}" "Approvals Missed Agents Can Build Benchmarks. What Probing Found: 22 Cases" "We report 22 agent benchmarks built by AI coding agents on one shared TypeScript engine." Agents "22 Cases" "" "   " "Agents Can Build Benchmarks. Approvals Missed" "What Probing Found: 22 Cases" "Pooria Arab" Abstract; do tc 1 "$1" "$x"; done; }
+cases "$REAL"; BFP=${BFP:-/tmp/benchmark-family-paper.pdf}  # the same cases on the real paper PDF when it is here, kept out of the transcript so the hash stays the same
+if [ -f "$BFP" ]; then cp "$TR" "$TR.keep"; cases "$BFP"; mv "$TR.keep" "$TR"; else echo "notice: $BFP is absent, so the real paper cases are skipped" >&2; fi
+tc 0 "$THX" "Robust Agents for Benchmark Probing"; tc 1 "$THX" "Robust Agents for Benchmark Probing Today"
+mkpdf "$T/caps.pdf" "A TEST TITLE FOR BENCHMARKS" "Pooria Arab" Abstract; mkpdf "$T/llama.pdf" "A Study Of Models vs. Llama 3" "Pooria Arab"; mkpdf "$T/sup.pdf" "${TITLE}1" "Pooria Arab"; mkpdf "$T/star.pdf" "$TITLE*" "Pooria Arab"
+tc 0 "$T/caps.pdf" "$TITLE"; tc 1 "$T/llama.pdf" "A Study Of Models vs. Llama"; tc 0 "$T/llama.pdf" "A Study Of Models vs. Llama 3"; tc 0 "$T/sup.pdf" "$TITLE"; tc 0 "$T/star.pdf" "$TITLE"
+echo "not a pdf" > "$T/bad.pdf"; run cb "no text layout" $TOOL check "$T/meta.json" --pdf "$T/bad.pdf" --offline; has cb "cannot find the title block"; [ $RC = 1 ] || fail cb
+run cn "no pdftotext" env PATH="$T/none" "$PY" "$TOOL" check "$T/meta.json" --pdf "$REAL" --offline; has cn "pdftotext is not installed"; [ $RC = 2 ] || fail cn
+ok "the title must equal the title block of a real PDF: the true title passes, and a changed, extra, missing, reordered, abstract, partial, author, empty or blank title fails; a footnote mark, a superscript digit and an all-caps block pass; Llama 3 is not Llama"
+cc() { run cff$2 "CITATION.cff $2" $TOOL check "$T/meta.json" --cff "$T/c$2.cff" --offline; [ $RC = $1 ] || fail "cff $2"; }
+printf 'title: "A Test Title For Benchmarks"  # note\nversion: 1\n' > "$T/c1.cff"; printf '\xef\xbb\xbftitle: A Test Title For Benchmarks # note\n' > "$T/c2.cff"; printf 'title: >-\n  A Test Title\n  For Benchmarks\nversion: 1\n' > "$T/c3.cff"
+printf 'title: |\n  A Test Title For Benchmarks\n' > "$T/c4.cff"; printf 'title: "a test title for benchmarks"\n' > "$T/c5.cff"; printf 'cff-version: 1.2.0\nreferences:\n  - type: article\n    title: "A Test Title For Benchmarks"\n' > "$T/c6.cff"
+for c in 1 2 3 4; do cc 0 $c; done; for c in 5 6; do cc 1 $c; done; ok "a CITATION.cff title is read when quoted, folded, literal, with a comment or a BOM, and fails on a different case or a nested title"
+mm u.json 'm["code_url"] = "'$B'/missing"; m["data_url"] = "'$B'/missing2"; m["comments"] = "see http://x.com:abc/ and '$B'/headno"'; run cu "dead, malformed and HEAD-refusing URLs" $TOOL check "$T/u.json"
+has cu "missing "; has cu "missing2"; has cu "x.com:abc"; ! grep -q "headno" "$T/out/cu" && [ $RC = 1 ] || fail cu; run co "offline" $TOOL check "$T/u.json" --offline; quiet co; [ $RC = 0 ] || fail co
+ok "a dead or malformed URL is one problem and the run goes on, a server that refuses HEAD gets a GET, and --offline sends nothing"
+mm multi.json 'm["abstract"] = "Short XXXX \u2014 see x"; del m["license"]'; run cm "many problems" $TOOL check "$T/multi.json" --offline; has cm "abstract has"; has cm "XXXX"; has cm "em dash"; has cm "needs a title and a license"; [ $RC = 1 ] || fail cm
+for f in orc orc2; do run co$f "bad ORCID $f" $TOOL check "$T/$f.json" --offline; has co$f "bad ORCID"; ! grep -q Traceback "$T/out/co$f" && [ $RC = 1 ] || fail "check $f"; done
+run ct "title as a number" $TOOL check "$T/bt.json" --offline; has ct "wrong type"; [ $RC = 2 ] || fail ct; ok "every text problem is listed, a bad ORCID is a problem, and a title that is not a string is refused"
 # the verdict of every venue in paper-venues.json (printed for a person to read, kept out of the transcript), and the twelve the review named
 $PY - <<'EOF' || fail "venue verdicts"
 import importlib.machinery, json
