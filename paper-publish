@@ -23,7 +23,9 @@ def die(msg):
     raise Fail(msg, 2)
 
 def scrub(s):
-    return s.replace(SECRET, "***") if SECRET else s
+    for v in (SECRET, json.dumps(SECRET)[1:-1]):  # the token, and the form a JSON message re-encodes
+        s = s.replace(v, "***") if v else s
+    return s
 
 class Parser(argparse.ArgumentParser):
     def error(self, message):  # argparse repeats bad values, and one may be a token
@@ -74,12 +76,12 @@ def http(method, url, token="", body=None, cap=1 << 20):
 def load_meta(path, need=()):
     try:
         m = json.load(open(path, encoding="utf-8"))
-        assert isinstance(m, dict)
-    except (OSError, ValueError, AssertionError) as e:
+        assert isinstance(m, dict), "the top level is not an object"
+    except (OSError, ValueError, AssertionError, RecursionError) as e:
         die("cannot read %s as a JSON object: %s" % (path, e))
-    if not (all(isinstance(m.get(k, ""), str) for k in ("title", "abstract", "license")) and all(isinstance(m.get(k, []), list) for k in ("authors", "venues", "keywords"))
-            and all(isinstance(x, dict) and isinstance(x.get("name"), str) for x in m.get("authors", [])) and all(isinstance(x, str) for x in m.get("venues", []) + m.get("keywords", []))):
-        die("%s has a wrong type: title, abstract and license are strings; authors is a list of objects with a name; venues and keywords are lists of strings" % path)
+    if not (all(isinstance(m.get(k, ""), str) for k in ("title", "abstract", "license")) and all(isinstance(m.get(k, []), list) for k in ("authors", "venues", "keywords", "related_identifiers", "data_concept_dois"))
+            and all(isinstance(x, dict) and isinstance(x.get("name"), str) for x in m.get("authors", [])) and all(isinstance(x, str) for x in m.get("venues", []) + m.get("keywords", []) + m.get("data_concept_dois", []))):
+        die("%s has a wrong type: title, abstract and license are strings; authors is a list of objects with a name; venues, keywords and data_concept_dois are lists of strings; related_identifiers is a list" % path)
     if [k for k in need if not m.get(k)]:
         die("%s lacks: %s" % (path, ", ".join(k for k in need if not m.get(k))))
     return m
@@ -154,9 +156,9 @@ def cmd_zenodo(a):
             with open(f, "rb") as fh:
                 zen("upload " + os.path.basename(f), "PUT", "%s/%s" % (dep["links"]["bucket"], urllib.parse.quote(os.path.basename(f))), fh, (200, 201))
         zen("set metadata", "PUT", "%s/deposit/depositions/%s" % (base, dep["id"]), {"metadata": md})
-    except Fail as e:
+    except Exception as e:
         if dep.get("id"):
-            raise Fail("%s\nDraft %s exists and is NOT published. Discard it on Zenodo, or fix and retry." % (e, dep["id"]), e.code)
+            raise Fail("%s\nDraft %s exists and is NOT published. Discard it on Zenodo, or fix and retry." % (e if isinstance(e, Fail) else "%s: %s" % (type(e).__name__, e), dep["id"]), getattr(e, "code", 1))
         raise
     print(scrub("draft id: %s\nconcept id: %s\npreview: %s" % (dep["id"], dep.get("conceptrecid"), dep["links"]["html"])))
     if not a.publish:
@@ -209,6 +211,14 @@ server or an archive is not peer review. Two review venues at once is dual submi
 
 slug = lambda q: re.sub(r"[^a-z0-9]+", "-", q.lower()).strip("-")[:40]
 
+def is_review(r):  # peer review from the venue's own words in paper-venues.json
+    f, name = r["fields"], r["name"]
+    text = " ".join(str(f.get(k, "")) for k in ("type", "review", "review model and typical time"))
+    if re.search(r"not peer.review", text, re.I): return False
+    if "type" not in f: return bool(re.search(r"journal|conference", r["section"], re.I))  # no type: only a journal or conference section counts
+    return bool(re.match(r"(journal|conference|workshop|track|challenge track|route into main track|review pool)", f["type"], re.I)
+                or re.search(r"peer.review|refereed|outside reviewers|external reviewers|referees", text, re.I) or name.startswith("Peer Community In"))
+
 def resolve(q, recs):
     norm = lambda s: re.sub(r"[^a-z0-9]+", " ", s.lower()).strip()
     live = [r for r in recs if r["kind"] != "avoid"]
@@ -217,10 +227,7 @@ def resolve(q, recs):
     if len(names) != 1:
         die("no venue in paper-venues.json matches %r. The tool does not invent venues, and skips the avoid list." % q if not names else
             "%r matches %d venues: %s. Use one full name." % (q, len(names), "; ".join(names[:12])))
-    for r in ok:  # the first record with a type says whether this is peer review: only a journal, conference, workshop, track, review pool or society magazine is, and Peer Community In
-        if "type" in r["fields"]:
-            return ok, bool(re.match(r"(journal|conference|workshop|track|review pool|society (flagship )?magazine)", r["fields"]["type"], re.I)) or r["name"].startswith("Peer Community In")
-    return ok, not all(r["source_file"] == "free-venues.md" and r["section"].startswith("A") for r in ok)
+    return ok, is_review(([r for r in ok if "type" in r["fields"]] or ok)[0])  # the first record with a type decides
 
 def cmd_packet(a):
     m = load_meta(a.meta, ("title", "abstract", "authors", "license", "venues"))
