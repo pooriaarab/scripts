@@ -133,7 +133,7 @@ has s14 "no usable request id"; has s14 "fails	failed"; has s14 "rejected	reject
 run s15 "ftp URL" $S ftp://example.org/x; quiet 15; [ $RC = 2 ] || fail 15; run s15b "negative interval" $TOOL swh-save --interval -1 https://github.com/x/fine; quiet 15b; [ $RC = 2 ] || fail 15b; ok "a non-http URL is refused (status 2) before any request"
 
 P="$TOOL packet"
-mm unk.json 'm["venues"] = ["Nonexistent Journal of Nothing"]'; run k16 "unknown venue" $P "$T/unk.json" --out "$T/pk16"; has k16 "does not invent venues"; [ $RC = 2 ] && [ ! -e "$T/pk16" ] || fail 16; ok "a shortlist name for a journal counts, a row that cannot be told is refused beside a peer-reviewed venue, and an unknown, ambiguous or repeated venue is refused (status 2) and writes nothing, and only a journal or conference counts as peer review, not a forum"
+mm unk.json 'm["venues"] = ["Nonexistent Journal of Nothing"]'; run k16 "unknown venue" $P "$T/unk.json" --out "$T/pk16"; has k16 "does not invent venues"; [ $RC = 2 ] && [ ! -e "$T/pk16" ] || fail 16; ok "a journal under two names, a venue under two spellings, a note row and a group row are refused, and a shortlist name for a journal counts, a row that cannot be told is refused beside a peer-reviewed venue, and an unknown, ambiguous or repeated venue is refused (status 2) and writes nothing, and only a journal or conference counts as peer review, not a forum"
 mm ieee.json 'm["venues"] = ["IEEE"]'; run k16b "an ambiguous venue" $P "$T/ieee.json" --out "$T/pk16b"; has k16b "matches"; has k16b "IEEE Computer"; [ $RC = 2 ] && [ ! -e "$T/pk16b" ] || fail "16b"
 mm dup.json 'm["venues"] = ["arXiv", "arXiv (cs.AI, cs.CL, cs.LG)"]'; run k16c "the same venue under two names" $P "$T/dup.json" --out "$T/pk16c"; has k16c "listed twice"; [ $RC = 2 ] && [ ! -e "$T/pk16c" ] || fail "16c"
 mm mix.json 'm["venues"] = ["arXiv", "NeurIPS 2026 Evaluations & Datasets", "Alignment Forum"]'; run k16e "one review venue, a preprint server and a forum" $P "$T/mix.json" --out "$T/pk16e"; [ $RC = 0 ] && grep -q "Alignment Forum: not peer review" "$T/pk16e/CHECKLIST.md" && grep -q "NeurIPS 2026 Evaluations & Datasets: peer-reviewed" "$T/pk16e/CHECKLIST.md" || fail "16e"
@@ -145,6 +145,8 @@ printf '[{"name":"TMLR","kind":"listed","source_file":"a","section":"s","checked
 mm my.json 'm["venues"] = ["TMLR", "Mystery"]'; mm my1.json 'm["venues"] = ["Prep", "Mystery"]'; export PAPER_VENUES=$T/pv.json
 run k16i "a row that cannot be told, with a journal" $P "$T/my.json" --out "$T/pk16i"; has k16i "cannot tell if Mystery is peer reviewed"; [ $RC = 2 ] && [ ! -e "$T/pk16i" ] || fail 16i
 run k16j "the same, allowed" $P "$T/my.json" --out "$T/pk16j" --allow-second-review-venue; [ $RC = 0 ] || fail 16j; run k16k "a row that cannot be told, alone with a preprint server" $P "$T/my1.json" --out "$T/pk16k"; grep -q "Mystery: peer review unknown" "$T/pk16k/CHECKLIST.md" && [ $RC = 0 ] || fail 16k; unset PAPER_VENUES
+for pair in "TMLR|Communications of the ACM, Practice or Viewpoints|dual submission" "TMLR|New journal, no charge for the first three years|dual submission" "TMLR|Empirical Software Engineering, Machine Learning (Springer)|names several venues" "Zenodo|Zenodo (paper copy)|listed twice" "SSRN|SSRN (Computer Science Research Network)|listed twice" "Computational Linguistics (MIT Press, for the ACL)|Computational Linguistics (MIT Press for ACL)|listed twice" "arXiv|How a community works|is a note" "TMLR|All ACM journals are now open access with an APC|names several venues"; do
+  IFS='|' read -r v1 v2 want <<< "$pair"; export V1=$v1 V2=$v2; mm pr.json 'm["venues"] = [__import__("os").environ["V1"], __import__("os").environ["V2"]]'; run k16m "two names: $v2" $P "$T/pr.json" --out "$T/pk16m"; has k16m "$want"; [ $RC = 2 ] && [ ! -e "$T/pk16m" ] || fail "16m $v2"; done
 mm two.json 'm["venues"] = ["TMLR", "DMLR"]'; run k17 "two peer-reviewed venues" $P "$T/two.json" --out "$T/pk17"; has k17 "dual submission"; [ $RC = 2 ] && [ ! -e "$T/pk17" ] || fail "17 refuse"
 run k17b "two venues, allowed" $P "$T/two.json" --out "$T/pk17" --allow-second-review-venue; [ $RC = 0 ] && grep -q "WARNING: this packet has 2" "$T/pk17/CHECKLIST.md" || fail "17 allow"; ok "two review venues are refused, and the flag adds a warning to the checklist"
 run k18 "arXiv, Zenodo, TMLR" $P "$T/meta.json" --out "$T/pk18"; [ $RC = 0 ] && [ "$(ls "$T/pk18" | tr '\n' ' ')" = "CHECKLIST.md arxiv.md tmlr.md zenodo.md " ] || fail "18 files"; grep -q "CAPTCHA" "$T/pk18/CHECKLIST.md" && grep -q "ONE peer-reviewed" "$T/pk18/CHECKLIST.md" || fail "18 checklist"
@@ -167,7 +169,10 @@ cases "$REAL"; BFP=${BFP:-/tmp/benchmark-family-paper.pdf}  # the same cases on 
 if [ -f "$BFP" ]; then cp "$TR" "$TR.keep"; cases "$BFP"; mv "$TR.keep" "$TR"; else echo "notice: $BFP is absent, so the real paper cases are skipped" >&2; fi
 tc 0 "$THX" "Robust Agents for Benchmark Probing"; tc 1 "$THX" "Robust Agents for Benchmark Probing Today"
 mkpdf "$T/caps.pdf" "A TEST TITLE FOR BENCHMARKS" "Pooria Arab" Abstract; mkpdf "$T/llama.pdf" "A Study Of Models vs. Llama 3" "Pooria Arab"; mkpdf "$T/sup.pdf" "${TITLE}1" "Pooria Arab"; mkpdf "$T/star.pdf" "$TITLE*" "Pooria Arab"
-tc 0 "$T/caps.pdf" "$TITLE"; tc 1 "$T/llama.pdf" "A Study Of Models vs. Llama"; tc 0 "$T/llama.pdf" "A Study Of Models vs. Llama 3"; tc 0 "$T/sup.pdf" "$TITLE"; tc 0 "$T/star.pdf" "$TITLE"
+tc 0 "$T/caps.pdf" "$TITLE"; tc 1 "$T/llama.pdf" "A Study Of Models vs. Llama"; tc 0 "$T/llama.pdf" "A Study Of Models vs. Llama 3"; tc 1 "$T/sup.pdf" "$TITLE"; tc 0 "$T/star.pdf" "$TITLE"
+tc 0 "$PWD/paper-publish.sup.pdf" "Decentralised Ledgers in Web"; tc 1 "$PWD/paper-publish.sup.pdf" "Decentralised Ledgers in Web3"; tc 0 "$PWD/paper-publish.web3.pdf" "Decentralised Ledgers in Web3"; tc 1 "$PWD/paper-publish.web3.pdf" "Decentralised Ledgers in Web"
+tc 1 "$PWD/paper-publish.sub.pdf" "Main Title Here"; tc 0 "$PWD/paper-publish.sub.pdf" "Main Title Here: A Smaller Subtitle Line"; tc 0 "$PWD/paper-publish.sub.pdf" "Main Title Here A Smaller Subtitle Line"; tc 1 "$PWD/paper-publish.sub.pdf" "A Smaller Subtitle Line"
+tc 0 "$PWD/paper-publish.teaser.pdf" "A Paper With a Teaser Figure"; tc 1 "$PWD/paper-publish.teaser.pdf" "Accuracy"
 echo "not a pdf" > "$T/bad.pdf"; run cb "no text layout" $TOOL check "$T/meta.json" --pdf "$T/bad.pdf" --offline; has cb "cannot find the title block"; [ $RC = 1 ] || fail cb
 run cn "no pdftotext" env PATH="$T/none" "$PY" "$TOOL" check "$T/meta.json" --pdf "$REAL" --offline; has cn "pdftotext is not installed"; [ $RC = 2 ] || fail cn
 ok "the title must equal the title block of a real PDF: the true title passes, and a changed, extra, missing, reordered, abstract, partial, author, empty or blank title fails; a footnote mark, a superscript digit and an all-caps block pass; Llama 3 is not Llama"
@@ -188,9 +193,11 @@ $PY - <<'EOF' | tee -a "$TR" || fail "venue verdicts"
 import importlib.machinery, json
 pp = importlib.machinery.SourceFileLoader("pp", "./paper-publish").load_module(); recs = json.load(open("paper-venues.json")); v = {}
 for r in recs:
-    if r["kind"] != "avoid": v.setdefault(r["name"], pp.resolve(r["name"], recs)[1])
-print("venue verdicts: %d venues, %d peer-reviewed" % (len(v), sum(bool(x) for x in v.values())))
-for n in sorted(v): print("  %-14s %s" % ({True: "PEER-REVIEWED", False: "no", None: "UNKNOWN"}[v[n]], n[:100]))
+    if r["kind"] != "avoid" and r["name"] not in v:
+        try: v[r["name"]] = pp.resolve(r["name"], recs)[1]
+        except pp.Fail: v[r["name"]] = "refused"  # a note or a group row
+print("venue verdicts: %d venues, %d peer-reviewed" % (len(v), sum(x is True for x in v.values())))
+for n in sorted(v): print("  %-14s %s" % ({True: "PEER-REVIEWED", False: "no", None: "UNKNOWN", "refused": "REFUSED"}[v[n]], n[:100]))
 want = {"IEEE Computer": 1, "IEEE Software": 1, "IEEE Intelligent Systems": 1, "IEEE Security & Privacy": 1, "IEEE Computing in Science": 1, "MSR 2027 Mining Challenge (papers)": 1, "Communications of the ACM (CACM)": 1, "TMLR": 1, "Peer Community In": 1,
         "Substack (self-publish)": 0, "LessWrong": 0, "Hugging Face community blog": 0, "IEEE Spectrum (Expert Authors)": 0, "MIT Technology Review": 0, "arXiv": 0, "Alignment Forum": 0, "InfoQ": 0}
 assert not {q: pp.resolve(q, recs)[1] for q, e in want.items() if pp.resolve(q, recs)[1] != bool(e)}, "named venues"
