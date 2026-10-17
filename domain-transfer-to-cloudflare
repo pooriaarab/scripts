@@ -106,11 +106,13 @@ for domain in "${DOMAINS[@]}"; do
 
   read -rsp "  EPP code for $domain: " epp; echo
   b64=$(printf %s "$epp" | base64); unset epp
-  code=$(curl -s -o /tmp/cf-transfer.json -w '%{http_code}' -X POST \
+  out=$(mktemp)
+  code=$(printf '{"auth_code":"%s","auto_renew":true}' "$b64" | curl -s -o "$out" -w '%{http_code}' -X POST \
     "$CF/accounts/$CLOUDFLARE_ACCOUNT_ID/registrar/registrations/$domain/transfer-in" \
     -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" -H 'Content-Type: application/json' \
-    -d "{\"auth_code\":\"$b64\",\"auto_renew\":true}"); unset b64
-  [[ "$code" == "202" ]] || { echo "  transfer-in HTTP $code" >&2; cat /tmp/cf-transfer.json >&2; exit 1; }
+    -d @-); unset b64
+  [[ "$code" == "202" ]] || { echo "  transfer-in HTTP $code" >&2; cat "$out" >&2; rm -f "$out"; exit 1; }
+  rm -f "$out"
   echo "  transfer started (HTTP 202)"
   ((APPROVE_MAIL)) && approve_mail "$domain" || true
   cf "$CF/accounts/$CLOUDFLARE_ACCOUNT_ID/registrar/registrations/$domain/transfer-in-status" \
