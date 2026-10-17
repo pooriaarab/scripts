@@ -217,9 +217,9 @@ def resolve(q, recs):
     if len(names) != 1:
         die("no venue in paper-venues.json matches %r. The tool does not invent venues, and skips the avoid list." % q if not names else
             "%r matches %d venues: %s. Use one full name." % (q, len(names), "; ".join(names[:12])))
-    for r in ok:  # the first record with a type says whether this is peer review: only a journal, conference, workshop, track or review pool is, and Peer Community In
+    for r in ok:  # the first record with a type says whether this is peer review: only a journal, conference, workshop, track, review pool or society magazine is, and Peer Community In
         if "type" in r["fields"]:
-            return ok, bool(re.match(r"(journal|conference|workshop|track|review pool)", r["fields"]["type"], re.I)) or r["name"].startswith("Peer Community In")
+            return ok, bool(re.match(r"(journal|conference|workshop|track|review pool|society (flagship )?magazine)", r["fields"]["type"], re.I)) or r["name"].startswith("Peer Community In")
     return ok, not all(r["source_file"] == "free-venues.md" and r["section"].startswith("A") for r in ok)
 
 def cmd_packet(a):

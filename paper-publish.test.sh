@@ -25,7 +25,6 @@ class H(http.server.BaseHTTPRequestHandler):
         L = B.replace("127.0.0.1", "localhost") if "OTHER" in tok else B.rsplit(":", 1)[0] + ":1" if "PORT" in tok else B  # a link on another host or port
         dep = lambda i: {"id": i, "conceptrecid": "110", "links": {"bucket": L + "/api/files/bkt%d" % i, "html": B + "/deposit/%d" % i + ("?t=" + tok if "ECHOOUT" in tok else "")},
                          "files": [{"id": "f1", "links": {"self": B + "/api/deposit/depositions/222/files/f1"}}] * (i == 222)}
-        if p in ("/ok", "/missing"): return self.send(200 if p == "/ok" else 404, raw=b"x")
         if "/swh/" in p:
             u = p.split("/url/", 1)[1]
             if me == "POST":
@@ -62,7 +61,7 @@ export ZENODO_BASE=$B/api SWH_BASE=$B/swh/api/1 ZENODO_TOKEN=FAKETOKEN-ok
 echo "fake pdf bytes" > "$T/paper.pdf"; echo "fake tarball bytes" > "$T/paper.tar.gz"
 cat > "$T/meta.json" <<EOF
 {"title": "A Test Title For Benchmarks", "license": "cc-by-4.0", "keywords": ["benchmark"], "subject_class": "cs.AI", "comments": "10 pages",
- "abstract": "A test abstract for the paper. It is long enough to pass the length check and links to $B/ok for the code.",
+ "abstract": "A test abstract for the paper. It links to $B/ok for the code.",
  "authors": [{"name": "Arab, Pooria", "affiliation": "Independent", "orcid": "0000-0002-1825-0097"}], "venues": ["arXiv", "Zenodo", "TMLR"],
  "code_url": "$B/ok", "data_concept_dois": ["10.5281/zenodo.110"]}
 EOF
@@ -122,6 +121,7 @@ mm ieee.json 'm["venues"] = ["IEEE"]'; run k16b "an ambiguous venue" $P "$T/ieee
 mm dup.json 'm["venues"] = ["arXiv", "arXiv (cs.AI, cs.CL, cs.LG)"]'; run k16c "the same venue under two names" $P "$T/dup.json" --out "$T/pk16c"; has k16c "listed twice"; [ $RC = 2 ] && [ ! -e "$T/pk16c" ] || fail "16c"
 mm mix.json 'm["venues"] = ["arXiv", "NeurIPS 2026 Evaluations & Datasets", "Alignment Forum"]'; run k16e "one review venue, a preprint server and a forum" $P "$T/mix.json" --out "$T/pk16e"; [ $RC = 0 ] && grep -q "Alignment Forum: not peer review" "$T/pk16e/CHECKLIST.md" && grep -q "NeurIPS 2026 Evaluations & Datasets: peer-reviewed" "$T/pk16e/CHECKLIST.md" || fail "16e"
 mm pci.json 'm["venues"] = ["TMLR", "Peer Community In (PCI)"]'; run k16d "Peer Community In counts as peer review" $P "$T/pci.json" --out "$T/pk16d"; has k16d "dual submission"; [ $RC = 2 ] || fail "16d"
+mm mag.json 'm["venues"] = ["TMLR", "IEEE Software"]'; run k16f "a peer-reviewed society magazine counts as peer review" $P "$T/mag.json" --out "$T/pk16f"; has k16f "dual submission"; [ $RC = 2 ] || fail "16f"
 mm two.json 'm["venues"] = ["TMLR", "DMLR"]'; run k17 "two peer-reviewed venues" $P "$T/two.json" --out "$T/pk17"; has k17 "dual submission"; [ $RC = 2 ] && [ ! -e "$T/pk17" ] || fail "17 refuse"
 run k17b "two venues, allowed" $P "$T/two.json" --out "$T/pk17" --allow-second-review-venue; [ $RC = 0 ] && grep -q "WARNING: this packet has 2" "$T/pk17/CHECKLIST.md" || fail "17 allow"; ok "two review venues are refused, and the flag adds a warning to the checklist"
 run k18 "arXiv, Zenodo, TMLR" $P "$T/meta.json" --out "$T/pk18"; [ $RC = 0 ] && [ "$(ls "$T/pk18" | tr '\n' ' ')" = "CHECKLIST.md arxiv.md tmlr.md zenodo.md " ] || fail "18 files"; grep -q "CAPTCHA" "$T/pk18/CHECKLIST.md" && grep -q "ONE peer-reviewed" "$T/pk18/CHECKLIST.md" || fail "18 checklist"
