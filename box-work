@@ -372,7 +372,9 @@ case "$AGENT" in
     # nothing while the call still reports success.
     brief_file="\$(mktemp)"
     printf '%s' "\$1" > "\$brief_file"
-    muse exec --yolo --json --model muse-spark-1.3-contributor --workspace "/home/user/$NAME" --prompt-file "\$brief_file"
+    # Meta lists Muse models per region; a Box in France sees none. Muse reaches Meta
+    # through the laptop (scripts/muse-geo-proxy box <box-id>), so the proxy must be up.
+    HTTPS_PROXY=http://127.0.0.1:18899 muse exec --yolo --json --model muse-spark-1.3-contributor --workspace "/home/user/$NAME" --prompt-file "\$brief_file"
     rc=\$?
     rm -f "\$brief_file"
     exit \$rc ;;
