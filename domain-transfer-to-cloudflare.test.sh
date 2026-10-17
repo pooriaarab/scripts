@@ -19,6 +19,10 @@ grep -q "transfer-in" "$SCRIPT" \
   && pass "uses transfer-in endpoint" || fail "uses transfer-in endpoint"
 grep -q "OutgoingTransfer/Approve" "$SCRIPT" \
   && pass "approve path present" || fail "approve path present"
+NAMECHEAP_API_USER=x NAMECHEAP_API_KEY=x NAMECHEAP_USERNAME=x \
+  NAMECHEAP_CLIENT_IP=127.0.0.1 CLOUDFLARE_API_TOKEN=x CLOUDFLARE_ACCOUNT_ID=x \
+  "$SCRIPT" 'bad&Command=pwn' >/dev/null 2>&1
+[[ $? -eq 2 ]] && pass "rejects smuggled parameter" || fail "rejects smuggled parameter"
 if grep -Eq "BEGIN [A-Z ]*PRIVATE KEY|ApiKey=[0-9a-f]{32}" "$SCRIPT"; then
   fail "no key material in script"
 else

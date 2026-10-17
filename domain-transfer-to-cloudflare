@@ -50,6 +50,12 @@ while (($#)); do
   shift
 done
 ((${#DOMAINS[@]})) || { echo "no domains given" >&2; usage >&2; exit 2; }
+# Reject anything that is not a plain domain. A value with &, ?, or a
+# space would smuggle extra parameters into the registrar API calls.
+for d in "${DOMAINS[@]}"; do
+  [[ "$d" =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+$ ]] \
+    || { echo "invalid domain: $d" >&2; exit 2; }
+done
 
 need() { [[ -n "${!1:-}" ]] || { echo "missing env: $1" >&2; exit 2; }; }
 for v in NAMECHEAP_API_USER NAMECHEAP_API_KEY NAMECHEAP_USERNAME \
@@ -96,8 +102,12 @@ for domain in "${DOMAINS[@]}"; do
   if (( ! EXECUTE )); then echo "  dry run: privacy off, unlock, transfer-in, poll"; continue; fi
 
   wg_id=$(nc namecheap.domains.getInfo "DomainName=$domain" | grep -o '<ID>[0-9]*</ID>' | head -1 | tr -dc 0-9)
-  nc namecheap.whoisguard.disable "WhoisguardId=$wg_id" | grep -q 'Status="OK"' \
-    && echo "  privacy off" || { echo "  privacy disable failed" >&2; exit 1; }
+  if [[ -n "$wg_id" ]]; then
+    nc namecheap.whoisguard.disable "WhoisguardId=$wg_id" | grep -q 'Status="OK"' \
+      && echo "  privacy off" || { echo "  privacy disable failed" >&2; exit 1; }
+  else
+    echo "  privacy already off"
+  fi
   # The lock call takes LockAction=UNLOCK. RegistrarLockStatus is rejected
   # with error 2015278 and the domain stays locked.
   nc namecheap.domains.setRegistrarLock "DomainName=$domain&LockAction=UNLOCK" \
