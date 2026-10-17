@@ -23,7 +23,7 @@ class H(http.server.BaseHTTPRequestHandler):
         open(LOG, "a").write("%.3f %s %s %d %s\n" % (time.time(), me, p, len(body), "auth" if tok else "noauth"))
         B = "http://127.0.0.1:%d" % self.server.server_port
         L = B.replace("127.0.0.1", "localhost") if "OTHER" in tok else B.rsplit(":", 1)[0] + ":1" if "PORT" in tok else B  # a link on another host or port
-        dep = lambda i: {"id": i, "conceptrecid": "110", "links": {"bucket": L + "/api/files/bkt%d" % i, "html": B + "/deposit/%d" % i + ("?t=" + tok if "ECHOOUT" in tok else "")},
+        dep = lambda i: {"id": i, "conceptrecid": {"t": tok} if "OBJ" in tok else "110", "links": {"bucket": L + "/api/files/bkt%d" % i, "html": B + "/deposit/%d" % i + ("?t=" + tok if "ECHOOUT" in tok else "")},
                          "files": [{"id": "f1", "links": {"self": B + "/api/deposit/depositions/222/files/f1"}}] * (i == 222)}
         if p == "/headno": return self.send(405 if me == "HEAD" else 200, raw=b"x")  # a server that refuses HEAD
         if p in ("/ok", "/missing"): return self.send(200 if p == "/ok" else 404, raw=b"x")
@@ -42,6 +42,12 @@ class H(http.server.BaseHTTPRequestHandler):
         if "ESC" in tok: return self.send(400, {"message": "bad", "errors": [{"field": "x", "message": tok}]})  # a token that JSON re-encodes
         if "NOLINKS" in tok and me == "POST": return self.send(201, {"id": 111})
         if "ECHO403" in tok: return self.send(403, {"message": "Invalid token " + tok})
+        LK = {"UNI": lambda: ('["' + "".join("\\u%04x" % ord(c) for c in tok) + '"]').encode(), "SLASH": lambda: ('{"message": "bad %s"}' % tok.replace("/", "\\/")).encode(),
+              "DQ": lambda: json.dumps({"message": "bad", "errors": [json.dumps({"m": tok})]}).encode(), "NSM": lambda: b'{"message": {"a": 1}}', "DEEP": lambda: b"[" * 100000}
+        if re.search(r"-(UNI|SLASH|DQ|NSM|DEEP)", tok): return self.send(400, raw=LK[re.search(r"-(UNI|SLASH|DQ|NSM|DEEP)", tok).group(1)]())
+        if "NOHTML" in tok and me == "POST" and p == "/api/deposit/depositions": d = dep(111); del d["links"]["html"]; return self.send(201, d)
+        if "PUB500" in tok and p.endswith("/actions/publish"): return self.send(500, raw=b"boom")
+        if "NV500" in tok and me == "GET" and p == "/api/deposit/depositions/222": return self.send(500, raw=b"boom")
         if me == "POST" and p == "/api/deposit/depositions": return self.send(201, dep(111))
         if me == "PUT" and p.startswith("/api/files/"): return self.send(201, {"size": len(body)})
         if me == "PUT" and p.startswith("/api/deposit/depositions/"):
@@ -101,6 +107,11 @@ ok "a plain run stops at a draft with the right metadata and never publishes"
 run r7b "stdout echoes the token" env ZENODO_TOKEN=FAKETOKEN-ECHOOUT $Z; has r7b "preview: $B/deposit/111?t=***"; [ $RC = 0 ] || fail 7b; ok "the printed preview URL is scrubbed too"
 run r7c "a token with a quote and a backslash in a JSON error" env ZENODO_TOKEN='FAKETOKEN-ESC"q\z' $Z; has r7c "HTTP 400"; ! grep -q FAKE "$T/out/r7c" && [ $RC = 1 ] || fail 7c; ok "a token that a JSON message re-encodes is scrubbed too"
 run r7d "a 201 with no links" env ZENODO_TOKEN=FAKETOKEN-NOLINKS $Z; has r7d "Draft 111 exists and is NOT published"; ! grep -q Traceback "$T/out/r7d" && [ $RC = 1 ] || fail 7d; ok "any error after the draft exists names the draft"
+i=0; for tk in 'FAKETOKEN-UNI' 'FAKETOKEN-SLASH/x' 'FAKETOKEN-DQ"x' FAKETOKEN-NSM FAKETOKEN-DEEP; do i=$((i + 1)); run lk$i "a hostile error body, form $i" env ZENODO_TOKEN="$tk" $Z; has lk$i "HTTP 400"; ! grep -q "FAKE\|unexpected problem\|Traceback" "$T/out/lk$i" && [ $RC = 1 ] || fail "leak form $i"; done
+run ob "an object concept id" env ZENODO_TOKEN=FAKETOKEN-OBJ $Z; has ob "concept id: {'t': '***'}"; [ $RC = 0 ] || fail ob; ok "a token is hidden when a body is not an object, is escaped, nests JSON, or is the concept id, and an odd message or a deep body still gives HTTP 400"
+run d1 "new-version draft fetch fails" env ZENODO_TOKEN=FAKETOKEN-NV500 $Z --new-version-of 110; has d1 "Draft 222 exists and is NOT published"; [ $RC = 1 ] || fail d1
+run d2 "a draft without html" env ZENODO_TOKEN=FAKETOKEN-NOHTML $Z; has d2 "Draft 111 exists and is NOT published"; [ $RC = 1 ] || fail d2
+run d3 "the publish call fails" env ZENODO_TOKEN=FAKETOKEN-PUB500 $Z --publish --i-confirm-permanent; has d3 "Draft 111 exists. The publish call failed"; [ $RC = 1 ] || fail d3; ok "a draft that exists is named after a failed draft fetch, a missing html, and a failed publish call"
 run r8 "500 after the draft exists" env ZENODO_TOKEN=FAKETOKEN-FAIL500 $Z; has r8 "HTTP 500: <html>boom"; has r8 "Draft 111 exists and is NOT published"; [ $RC = 1 ] || fail 8; ok "a 5xx after the draft names the draft id"
 $PY -c "open('$T/big.pdf','wb').truncate(51*1024**3)"
 for f in none big; do run r9$f "unusable PDF $f" $TOOL zenodo-draft --pdf "$T/$f.pdf" --tarball "$T/paper.tar.gz" --meta "$T/meta.json"; has r9$f "missing or larger than the 50 GB"; quiet 9$f; [ $RC = 2 ] || fail 9$f; done
@@ -122,13 +133,18 @@ has s14 "no usable request id"; has s14 "fails	failed"; has s14 "rejected	reject
 run s15 "ftp URL" $S ftp://example.org/x; quiet 15; [ $RC = 2 ] || fail 15; run s15b "negative interval" $TOOL swh-save --interval -1 https://github.com/x/fine; quiet 15b; [ $RC = 2 ] || fail 15b; ok "a non-http URL is refused (status 2) before any request"
 
 P="$TOOL packet"
-mm unk.json 'm["venues"] = ["Nonexistent Journal of Nothing"]'; run k16 "unknown venue" $P "$T/unk.json" --out "$T/pk16"; has k16 "does not invent venues"; [ $RC = 2 ] && [ ! -e "$T/pk16" ] || fail 16; ok "an unknown, ambiguous or repeated venue is refused (status 2) and writes nothing, and only a journal or conference counts as peer review, not a forum"
+mm unk.json 'm["venues"] = ["Nonexistent Journal of Nothing"]'; run k16 "unknown venue" $P "$T/unk.json" --out "$T/pk16"; has k16 "does not invent venues"; [ $RC = 2 ] && [ ! -e "$T/pk16" ] || fail 16; ok "a shortlist name for a journal counts, a row that cannot be told is refused beside a peer-reviewed venue, and an unknown, ambiguous or repeated venue is refused (status 2) and writes nothing, and only a journal or conference counts as peer review, not a forum"
 mm ieee.json 'm["venues"] = ["IEEE"]'; run k16b "an ambiguous venue" $P "$T/ieee.json" --out "$T/pk16b"; has k16b "matches"; has k16b "IEEE Computer"; [ $RC = 2 ] && [ ! -e "$T/pk16b" ] || fail "16b"
 mm dup.json 'm["venues"] = ["arXiv", "arXiv (cs.AI, cs.CL, cs.LG)"]'; run k16c "the same venue under two names" $P "$T/dup.json" --out "$T/pk16c"; has k16c "listed twice"; [ $RC = 2 ] && [ ! -e "$T/pk16c" ] || fail "16c"
 mm mix.json 'm["venues"] = ["arXiv", "NeurIPS 2026 Evaluations & Datasets", "Alignment Forum"]'; run k16e "one review venue, a preprint server and a forum" $P "$T/mix.json" --out "$T/pk16e"; [ $RC = 0 ] && grep -q "Alignment Forum: not peer review" "$T/pk16e/CHECKLIST.md" && grep -q "NeurIPS 2026 Evaluations & Datasets: peer-reviewed" "$T/pk16e/CHECKLIST.md" || fail "16e"
 mm pci.json 'm["venues"] = ["TMLR", "Peer Community In (PCI)"]'; run k16d "Peer Community In counts as peer review" $P "$T/pci.json" --out "$T/pk16d"; has k16d "dual submission"; [ $RC = 2 ] || fail "16d"
 mm ims.json 'm["venues"] = ["TMLR", "IEEE Intelligent Systems"]'; run k16f "TMLR and a peer-reviewed society magazine" $P "$T/ims.json" --out "$T/pk16f"; has k16f "dual submission"; [ $RC = 2 ] || fail 16f
 mm isw.json 'm["venues"] = ["ICLR 2027", "IEEE Software"]'; run k16g "ICLR and a peer-reviewed society magazine" $P "$T/isw.json" --out "$T/pk16g"; has k16g "dual submission"; [ $RC = 2 ] || fail 16g
+mm cl.json 'm["venues"] = ["TMLR", "Computational Linguistics (MIT Press for ACL)"]'; run k16h "TMLR and the shortlist row for a journal" $P "$T/cl.json" --out "$T/pk16h"; has k16h "dual submission"; [ $RC = 2 ] || fail 16h
+printf '[{"name":"TMLR","kind":"listed","source_file":"a","section":"s","checked":"1","fields":{"type":"journal"}},{"name":"Mystery","kind":"listed","source_file":"a","section":"s","checked":"1","fields":{"need":"x"}},{"name":"Prep","kind":"listed","source_file":"a","section":"s","checked":"1","fields":{"type":"preprint"}}]' > "$T/pv.json"
+mm my.json 'm["venues"] = ["TMLR", "Mystery"]'; mm my1.json 'm["venues"] = ["Prep", "Mystery"]'; export PAPER_VENUES=$T/pv.json
+run k16i "a row that cannot be told, with a journal" $P "$T/my.json" --out "$T/pk16i"; has k16i "cannot tell if Mystery is peer reviewed"; [ $RC = 2 ] && [ ! -e "$T/pk16i" ] || fail 16i
+run k16j "the same, allowed" $P "$T/my.json" --out "$T/pk16j" --allow-second-review-venue; [ $RC = 0 ] || fail 16j; run k16k "a row that cannot be told, alone with a preprint server" $P "$T/my1.json" --out "$T/pk16k"; grep -q "Mystery: peer review unknown" "$T/pk16k/CHECKLIST.md" && [ $RC = 0 ] || fail 16k; unset PAPER_VENUES
 mm two.json 'm["venues"] = ["TMLR", "DMLR"]'; run k17 "two peer-reviewed venues" $P "$T/two.json" --out "$T/pk17"; has k17 "dual submission"; [ $RC = 2 ] && [ ! -e "$T/pk17" ] || fail "17 refuse"
 run k17b "two venues, allowed" $P "$T/two.json" --out "$T/pk17" --allow-second-review-venue; [ $RC = 0 ] && grep -q "WARNING: this packet has 2" "$T/pk17/CHECKLIST.md" || fail "17 allow"; ok "two review venues are refused, and the flag adds a warning to the checklist"
 run k18 "arXiv, Zenodo, TMLR" $P "$T/meta.json" --out "$T/pk18"; [ $RC = 0 ] && [ "$(ls "$T/pk18" | tr '\n' ' ')" = "CHECKLIST.md arxiv.md tmlr.md zenodo.md " ] || fail "18 files"; grep -q "CAPTCHA" "$T/pk18/CHECKLIST.md" && grep -q "ONE peer-reviewed" "$T/pk18/CHECKLIST.md" || fail "18 checklist"
@@ -158,26 +174,37 @@ ok "the title must equal the title block of a real PDF: the true title passes, a
 cc() { run cff$2 "CITATION.cff $2" $TOOL check "$T/meta.json" --cff "$T/c$2.cff" --offline; [ $RC = $1 ] || fail "cff $2"; }
 printf 'title: "A Test Title For Benchmarks"  # note\nversion: 1\n' > "$T/c1.cff"; printf '\xef\xbb\xbftitle: A Test Title For Benchmarks # note\n' > "$T/c2.cff"; printf 'title: >-\n  A Test Title\n  For Benchmarks\nversion: 1\n' > "$T/c3.cff"
 printf 'title: |\n  A Test Title For Benchmarks\n' > "$T/c4.cff"; printf 'title: "a test title for benchmarks"\n' > "$T/c5.cff"; printf 'cff-version: 1.2.0\nreferences:\n  - type: article\n    title: "A Test Title For Benchmarks"\n' > "$T/c6.cff"
-for c in 1 2 3 4; do cc 0 $c; done; for c in 5 6; do cc 1 $c; done; ok "a CITATION.cff title is read when quoted, folded, literal, with a comment or a BOM, and fails on a different case or a nested title"
+printf 'cff-version: 1.2.0\ntitle: "benchmark-family-paper"\ntype: software\npreferred-citation:\n  type: article\n  title: "A Test Title For Benchmarks"\n  authors:\n    - family-names: Arab\n' > "$T/c7.cff"; printf 'preferred-citation:\n  type: article\ntitle: "A Test Title For Benchmarks"\n' > "$T/c8.cff"; mm bf.json 'm["title"] = "benchmark-family-paper"'
+run c7b "the software name is not the paper title" $TOOL check "$T/bf.json" --cff "$T/c7.cff" --offline; has c7b "CITATION.cff title"; [ $RC = 1 ] || fail c7b
+for c in 1 2 3 4 7 8; do cc 0 $c; done; for c in 5 6; do cc 1 $c; done; ok "a CITATION.cff preferred-citation title is the one compared, as in benchmark-family-paper, else the top-level title; a title is read when quoted, folded, literal, with a comment or a BOM, and fails on a different case or a nested title"
 mm u.json 'm["code_url"] = "'$B'/missing"; m["data_url"] = "'$B'/missing2"; m["comments"] = "see http://x.com:abc/ and '$B'/headno"'; run cu "dead, malformed and HEAD-refusing URLs" $TOOL check "$T/u.json"
 has cu "missing "; has cu "missing2"; has cu "x.com:abc"; ! grep -q "headno" "$T/out/cu" && [ $RC = 1 ] || fail cu; run co "offline" $TOOL check "$T/u.json" --offline; quiet co; [ $RC = 0 ] || fail co
 ok "a dead or malformed URL is one problem and the run goes on, a server that refuses HEAD gets a GET, and --offline sends nothing"
 mm multi.json 'm["abstract"] = "Short XXXX \u2014 see x"; del m["license"]'; run cm "many problems" $TOOL check "$T/multi.json" --offline; has cm "abstract has"; has cm "XXXX"; has cm "em dash"; has cm "needs a title and a license"; [ $RC = 1 ] || fail cm
 for f in orc orc2; do run co$f "bad ORCID $f" $TOOL check "$T/$f.json" --offline; has co$f "bad ORCID"; ! grep -q Traceback "$T/out/co$f" && [ $RC = 1 ] || fail "check $f"; done
 run ct "title as a number" $TOOL check "$T/bt.json" --offline; has ct "wrong type"; [ $RC = 2 ] || fail ct; ok "every text problem is listed, a bad ORCID is a problem, and a title that is not a string is refused"
-# the verdict of every venue in paper-venues.json (printed for a person to read, kept out of the transcript), and the twelve the review named
-$PY - <<'EOF' || fail "venue verdicts"
+# the verdict of every venue and of every row with no type goes into the transcript, so the hash covers it
+$PY - <<'EOF' | tee -a "$TR" || fail "venue verdicts"
 import importlib.machinery, json
 pp = importlib.machinery.SourceFileLoader("pp", "./paper-publish").load_module(); recs = json.load(open("paper-venues.json")); v = {}
 for r in recs:
     if r["kind"] != "avoid": v.setdefault(r["name"], pp.resolve(r["name"], recs)[1])
-print("venue verdicts: %d venues, %d peer-reviewed" % (len(v), sum(v.values())))
-for n in sorted(v): print("  %-14s %s" % ("PEER-REVIEWED" if v[n] else "no", n[:100]))
-want = {"IEEE Computer": 1, "IEEE Software": 1, "IEEE Intelligent Systems": 1, "IEEE Security & Privacy": 1, "IEEE Computing in Science": 1, "MSR 2027 Mining Challenge (papers)": 1, "Communications of the ACM (CACM)": 1,
-        "Substack (self-publish)": 0, "LessWrong": 0, "Hugging Face community blog": 0, "IEEE Spectrum (Expert Authors)": 0, "MIT Technology Review": 0, "TMLR": 1, "arXiv": 0, "Peer Community In": 1, "Alignment Forum": 0}
-bad = {q: pp.resolve(q, recs)[1] for q, e in want.items() if pp.resolve(q, recs)[1] != bool(e)}
-assert not bad, bad
+print("venue verdicts: %d venues, %d peer-reviewed" % (len(v), sum(bool(x) for x in v.values())))
+for n in sorted(v): print("  %-14s %s" % ({True: "PEER-REVIEWED", False: "no", None: "UNKNOWN"}[v[n]], n[:100]))
+want = {"IEEE Computer": 1, "IEEE Software": 1, "IEEE Intelligent Systems": 1, "IEEE Security & Privacy": 1, "IEEE Computing in Science": 1, "MSR 2027 Mining Challenge (papers)": 1, "Communications of the ACM (CACM)": 1, "TMLR": 1, "Peer Community In": 1,
+        "Substack (self-publish)": 0, "LessWrong": 0, "Hugging Face community blog": 0, "IEEE Spectrum (Expert Authors)": 0, "MIT Technology Review": 0, "arXiv": 0, "Alignment Forum": 0, "InfoQ": 0}
+assert not {q: pp.resolve(q, recs)[1] for q, e in want.items() if pp.resolve(q, recs)[1] != bool(e)}, "named venues"
+T = ["TMLR", "DMLR", "JMLR MLOSS", "JOSS", "JAIR", "TACL", "ReScience C", "Journal of Open Research Software", "Computational Linguistics (MIT", "Computo", "Communications of the ACM, Practice", "AI Magazine (AAAI)", "Empirical Software Engineering, Machine", "All ACM journals", "New journal, no charge"]
+F = ["Research Square", "SSRN (Computer", "Cambridge Open", "Preprints.org", "Wiley Research", "Zenodo (paper copy)", "Figshare", "Hugging Face dataset", "Software Heritage", "How a community", "A community for", "Put a record", "IEEE Spectrum (freelance", "Substack, LessWrong"]
+nt = {r["name"]: pp.is_review(r, recs) for r in recs if r["kind"] != "avoid" and "type" not in r["fields"]}
+print("rows with no type: %d" % len(nt))
+for n in sorted(nt): print("  %-14s %s" % (nt[n], n[:90]))
+assert len(nt) == len(T) + len(F) and all((sum(n.startswith(w) for w in T) == 1 and nt[n] is True) or (sum(n.startswith(w) for w in F) == 1 and nt[n] is False) for n in nt), "no-type rows"
+mk = lambda s: {"name": "X", "kind": "listed", "section": "s", "source_file": "f", "fields": {"type": "journal", "review": s}}
+for s in ["no peer review", "non-peer-reviewed", "without peer review", "unrefereed", "non-refereed", "Peer review: none", "Not peer reviewed"]: assert pp.is_review(mk(s)) is False, s
+assert pp.is_review(mk("peer-reviewed")) is True
+print("words that deny peer review: 7 checked")
 EOF
-ok "a venue counts as peer-reviewed from its own words: the society magazines, the mining challenge and CACM count, and the forums, blogs, newsletters and news magazines do not"
+ok "every venue has a verdict from its own words, every row with no type is asserted, and words that deny peer review count as not peer-reviewed"
 ! grep -rqF FAKETOKEN "$T/out" "$TR" "$T"/pk* || fail "a token leaked into an output, packet or transcript"; ok "no output, packet or transcript holds the fake token"
 OUT=$(mktemp "${TMPDIR:-/tmp}/paper-publish-transcript.XXXXXX"); cp "$TR" "$OUT"; echo "transcript: $OUT"; echo "sha256: $(shasum -a 256 "$OUT" | cut -d' ' -f1)"
