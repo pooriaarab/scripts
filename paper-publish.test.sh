@@ -45,7 +45,7 @@ class H(http.server.BaseHTTPRequestHandler):
         if me == "PUT" and p.startswith("/api/deposit/depositions/"):
             if "FAIL500" in tok: return self.send(500, raw=b"<html>boom</html>")
             open(LOG + ".meta", "wb").write(body); return self.send(200, json.loads(body))
-        if p.endswith("/actions/publish"): return self.send(202, {"doi": "10.5072/zenodo.111"})
+        if p.endswith("/actions/publish"): return self.send(202, {"doi": "10.5072/zenodo.111" + ("?t=" + tok if "ECHOOUT" in tok else "")})
         if p == "/api/records/301/versions/latest": return self.send(301, hdr=[("Location", "http://localhost:%d/api/records/110/versions/latest" % self.server.server_port)])
         if p == "/api/records/110/versions/latest": return self.send(200, {"id": 105})
         if p.endswith("/105/actions/newversion"): return self.send(201, {"id": 105, "links": {"latest_draft": B + "/api/deposit/depositions/222"}})
@@ -99,6 +99,7 @@ ok "a plain run stops at a draft with the right metadata and never publishes"
 run r7b "stdout echoes the token" env ZENODO_TOKEN=FAKETOKEN-ECHOOUT $Z; has r7b "preview: $B/deposit/111?t=***"; [ $RC = 0 ] || fail 7b; ok "the printed preview URL is scrubbed too"
 run r7c "a token with a quote and a backslash in a JSON error" env ZENODO_TOKEN='FAKETOKEN-ESC"q\z' $Z; has r7c "HTTP 400"; ! grep -q FAKE "$T/out/r7c" && [ $RC = 1 ] || fail 7c; ok "a token that a JSON message re-encodes is scrubbed too"
 run r7d "a 201 with no links" env ZENODO_TOKEN=FAKETOKEN-NOLINKS $Z; has r7d "Draft 111 exists and is NOT published"; ! grep -q Traceback "$T/out/r7d" && [ $RC = 1 ] || fail 7d; ok "any error after the draft exists names the draft"
+run r7c "the DOI line echoes the token" env ZENODO_TOKEN=FAKETOKEN-ECHOOUT $Z --publish --i-confirm-permanent; has r7c "PUBLISHED. doi: 10.5072/zenodo.111?t=***"; [ $RC = 0 ] || fail 7c; ok "the printed DOI line is scrubbed too"
 run r8 "500 after the draft exists" env ZENODO_TOKEN=FAKETOKEN-FAIL500 $Z; has r8 "HTTP 500: <html>boom"; has r8 "Draft 111 exists and is NOT published"; [ $RC = 1 ] || fail 8; ok "a 5xx after the draft names the draft id"
 $PY -c "open('$T/big.pdf','wb').truncate(51*1024**3)"
 for f in none big; do run r9$f "unusable PDF $f" $TOOL zenodo-draft --pdf "$T/$f.pdf" --tarball "$T/paper.tar.gz" --meta "$T/meta.json"; has r9$f "missing or larger than the 50 GB"; quiet 9$f; [ $RC = 2 ] || fail 9$f; done
