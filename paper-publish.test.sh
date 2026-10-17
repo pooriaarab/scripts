@@ -42,7 +42,7 @@ class H(http.server.BaseHTTPRequestHandler):
         if "ESC" in tok: return self.send(400, {"message": "bad", "errors": [{"field": "x", "message": tok}]})  # a token that JSON re-encodes
         if "NOLINKS" in tok and me == "POST": return self.send(201, {"id": 111})
         if "ECHO403" in tok: return self.send(403, {"message": "Invalid token " + tok})
-        LK = {"UNI": lambda: ('["' + "".join("\\u%04x" % ord(c) for c in tok) + '"]').encode(), "SLASH": lambda: ('{"message": "bad %s"}' % tok.replace("/", "\\/")).encode(),
+        LK = {"UNI": lambda: ('["' + "".join("\\u%04x" % ord(c) for c in tok) + '"]').encode(), "SLASH": lambda: ('bad %s' % tok.replace("/", "\\/")).encode(),
               "DQ": lambda: json.dumps({"message": "bad", "errors": [json.dumps({"m": tok})]}).encode(), "NSM": lambda: b'{"message": {"a": 1}}', "DEEP": lambda: b"[" * 100000}
         if re.search(r"-(UNI|SLASH|DQ|NSM|DEEP)", tok): return self.send(400, raw=LK[re.search(r"-(UNI|SLASH|DQ|NSM|DEEP)", tok).group(1)]())
         if "NOHTML" in tok and me == "POST" and p == "/api/deposit/depositions": d = dep(111); del d["links"]["html"]; return self.send(201, d)
@@ -107,7 +107,7 @@ ok "a plain run stops at a draft with the right metadata and never publishes"
 run r7b "stdout echoes the token" env ZENODO_TOKEN=FAKETOKEN-ECHOOUT $Z; has r7b "preview: $B/deposit/111?t=***"; [ $RC = 0 ] || fail 7b; ok "the printed preview URL is scrubbed too"
 run r7c "a token with a quote and a backslash in a JSON error" env ZENODO_TOKEN='FAKETOKEN-ESC"q\z' $Z; has r7c "HTTP 400"; ! grep -q FAKE "$T/out/r7c" && [ $RC = 1 ] || fail 7c; ok "a token that a JSON message re-encodes is scrubbed too"
 run r7d "a 201 with no links" env ZENODO_TOKEN=FAKETOKEN-NOLINKS $Z; has r7d "Draft 111 exists and is NOT published"; ! grep -q Traceback "$T/out/r7d" && [ $RC = 1 ] || fail 7d; ok "any error after the draft exists names the draft"
-i=0; for tk in 'FAKETOKEN-UNI' 'FAKETOKEN-SLASH/x' 'FAKETOKEN-DQ"x' FAKETOKEN-NSM FAKETOKEN-DEEP; do i=$((i + 1)); run lk$i "a hostile error body, form $i" env ZENODO_TOKEN="$tk" $Z; has lk$i "HTTP 400"; ! grep -q "FAKE\|unexpected problem\|Traceback" "$T/out/lk$i" && [ $RC = 1 ] || fail "leak form $i"; done
+i=0; for tk in 'FAKETOKEN-UNI' 'FAKETOKEN-SLASH/x' 'FAKETOKEN-DQ"x' FAKETOKEN-NSM FAKETOKEN-DEEP; do i=$((i + 1)); run lk$i "a hostile error body, form $i" env ZENODO_TOKEN="$tk" $Z; has lk$i "HTTP 400"; ! grep -q "FAKE\|unexpected problem\|Traceback" "$T/out/lk$i" && ! grep -qF '\u00' "$T/out/lk$i" && [ $RC = 1 ] || fail "leak form $i"; done
 run ob "an object concept id" env ZENODO_TOKEN=FAKETOKEN-OBJ $Z; has ob "concept id: {'t': '***'}"; [ $RC = 0 ] || fail ob; ok "a token is hidden when a body is not an object, is escaped, nests JSON, or is the concept id, and an odd message or a deep body still gives HTTP 400"
 run d1 "new-version draft fetch fails" env ZENODO_TOKEN=FAKETOKEN-NV500 $Z --new-version-of 110; has d1 "Draft 222 exists and is NOT published"; [ $RC = 1 ] || fail d1
 run d2 "a draft without html" env ZENODO_TOKEN=FAKETOKEN-NOHTML $Z; has d2 "Draft 111 exists and is NOT published"; [ $RC = 1 ] || fail d2
