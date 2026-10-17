@@ -8,7 +8,7 @@ fail() { echo "FAIL - $1 (files in $T)" >&2; exit 1; }
 ok() { pass=$((pass + 1)); echo "ok $pass - $1" | tee -a "$TR"; }
 
 cat > "$T/fake.py" <<'EOF'
-import http.server, json, re, sys, time
+import http.server, json, re, sys, time, urllib.parse
 LOG, ST = sys.argv[2], {}
 class H(http.server.BaseHTTPRequestHandler):
     def log_message(self, *a): pass
@@ -22,7 +22,7 @@ class H(http.server.BaseHTTPRequestHandler):
         tok, p, me = (self.headers.get("Authorization") or "")[7:], self.path, self.command
         open(LOG, "a").write("%.3f %s %s %d %s\n" % (time.time(), me, p, len(body), "auth" if tok else "noauth"))
         B = "http://127.0.0.1:%d" % self.server.server_port
-        L = B.replace("127.0.0.1", "localhost") if "OTHER" in tok else B.rsplit(":", 1)[0] + ":1" if "PORT" in tok else B  # a link on another host or port
+        L = B.replace("127.0.0.1", "localhost") if "OTHER" in tok or "LOW" in tok else B.rsplit(":", 1)[0] + ":1" if "PORT" in tok else B  # a link on another host or port
         dep = lambda i: {"id": i, "conceptrecid": {"t": tok} if "OBJ" in tok else "110", "links": {"bucket": L + "/api/files/bkt%d" % i, "html": B + "/deposit/%d" % i + ("?t=" + tok if "ECHOOUT" in tok else "")},
                          "files": [{"id": "f1", "links": {"self": B + "/api/deposit/depositions/222/files/f1"}}] * (i == 222)}
         if p == "/headno": return self.send(405 if me == "HEAD" else 200, raw=b"x")  # a server that refuses HEAD
@@ -35,6 +35,7 @@ class H(http.server.BaseHTTPRequestHandler):
                 if "noid" in u: return self.send(201, {})
                 if "rejected" in u: return self.send(200, {"id": 9, "save_request_status": "rejected"})
                 ST[u] = 0; return self.send(201, {"id": 7, "save_request_status": "accepted", "save_task_status": "pending"})
+            if "junk" in u: return self.send(200, [1, 2, 3])
             ST[u] += 1
             t = "running" if ("hangs" in u or ST[u] < 2) else ("failed" if "fails" in u else "succeeded")
             return self.send(200, [{"id": 7, "save_request_status": "accepted", "save_task_status": t, "snapshot_swhid": "swh:1:snp:" + "a" * 40}])
@@ -43,8 +44,10 @@ class H(http.server.BaseHTTPRequestHandler):
         if "NOLINKS" in tok and me == "POST": return self.send(201, {"id": 111})
         if "ECHO403" in tok: return self.send(403, {"message": "Invalid token " + tok})
         LK = {"UNI": lambda: ('["' + "".join("\\u%04x" % ord(c) for c in tok) + '"]').encode(), "SLASH": lambda: ('bad %s' % tok.replace("/", "\\/")).encode(),
-              "DQ": lambda: json.dumps({"message": "bad", "errors": [json.dumps({"m": tok})]}).encode(), "NSM": lambda: b'{"message": {"a": 1}}', "DEEP": lambda: b"[" * 100000}
-        if re.search(r"-(UNI|SLASH|DQ|NSM|DEEP)", tok): return self.send(400, raw=LK[re.search(r"-(UNI|SLASH|DQ|NSM|DEEP)", tok).group(1)]())
+              "DQ": lambda: json.dumps({"message": "bad", "errors": [json.dumps({"m": tok})]}).encode(), "NSM": lambda: b'{"message": {"a": 1}}', "DEEP": lambda: b"[" * 100000,
+              "URL": lambda: ("bad " + urllib.parse.quote(tok, safe="")).encode(), "SPLIT": lambda: json.dumps({"message": tok[:10], "errors": [tok[10:]]}).encode(),
+              "BIG": lambda: b" " * (1048576 - 12) + b"Bearer " + tok.encode(), "PFX": lambda: ("boom " + tok[:-2]).encode()}
+        if re.search(r"-(UNI|SLASH|DQ|NSM|DEEP|URL|SPLIT|BIG|PFX)", tok): return self.send(400, raw=LK[re.search(r"-(UNI|SLASH|DQ|NSM|DEEP|URL|SPLIT|BIG|PFX)", tok).group(1)]())
         if "NOHTML" in tok and me == "POST" and p == "/api/deposit/depositions": d = dep(111); del d["links"]["html"]; return self.send(201, d)
         if "PUB500" in tok and p.endswith("/actions/publish"): return self.send(500, raw=b"boom")
         if "NV500" in tok and me == "GET" and p == "/api/deposit/depositions/222": return self.send(500, raw=b"boom")
@@ -107,7 +110,8 @@ ok "a plain run stops at a draft with the right metadata and never publishes"
 run r7b "stdout echoes the token" env ZENODO_TOKEN=FAKETOKEN-ECHOOUT $Z; has r7b "preview: $B/deposit/111?t=***"; [ $RC = 0 ] || fail 7b; ok "the printed preview URL is scrubbed too"
 run r7c "a token with a quote and a backslash in a JSON error" env ZENODO_TOKEN='FAKETOKEN-ESC"q\z' $Z; has r7c "HTTP 400"; ! grep -q FAKE "$T/out/r7c" && [ $RC = 1 ] || fail 7c; ok "a token that a JSON message re-encodes is scrubbed too"
 run r7d "a 201 with no links" env ZENODO_TOKEN=FAKETOKEN-NOLINKS $Z; has r7d "Draft 111 exists and is NOT published"; ! grep -q Traceback "$T/out/r7d" && [ $RC = 1 ] || fail 7d; ok "any error after the draft exists names the draft"
-i=0; for tk in 'FAKETOKEN-UNI' 'FAKETOKEN-SLASH/x' 'FAKETOKEN-DQ"x' FAKETOKEN-NSM FAKETOKEN-DEEP; do i=$((i + 1)); run lk$i "a hostile error body, form $i" env ZENODO_TOKEN="$tk" $Z; has lk$i "HTTP 400"; ! grep -q "FAKE\|unexpected problem\|Traceback" "$T/out/lk$i" && ! grep -qF '\u00' "$T/out/lk$i" && [ $RC = 1 ] || fail "leak form $i"; done
+i=0; for tk in 'FAKETOKEN-UNI' 'FAKETOKEN-SLASH/x' 'FAKETOKEN-DQ"x' FAKETOKEN-NSM FAKETOKEN-DEEP 'FAKETOKEN-URL+/=' FAKETOKEN-SPLIT FAKETOKEN-BIG FAKETOKEN-PFX; do i=$((i + 1)); run lk$i "a hostile error body, form $i" env ZENODO_TOKEN="$tk" $Z; has lk$i "HTTP 400"; ! grep -q "FAKE\|unexpected problem\|Traceback" "$T/out/lk$i" && ! grep -qF '\u00' "$T/out/lk$i" && [ $RC = 1 ] || fail "leak form $i"; done
+run lw "a link in lower case, a base in upper case" env ZENODO_BASE=http://LOCALHOST:$PORT/api ZENODO_TOKEN=FAKETOKEN-LOW $Z; has lw "draft id: 111"; [ $RC = 0 ] || fail lw
 run ob "an object concept id" env ZENODO_TOKEN=FAKETOKEN-OBJ $Z; has ob "concept id: {'t': '***'}"; [ $RC = 0 ] || fail ob; ok "a token is hidden when a body is not an object, is escaped, nests JSON, or is the concept id, and an odd message or a deep body still gives HTTP 400"
 run d1 "new-version draft fetch fails" env ZENODO_TOKEN=FAKETOKEN-NV500 $Z --new-version-of 110; has d1 "Draft 222 exists and is NOT published"; [ $RC = 1 ] || fail d1
 run d2 "a draft without html" env ZENODO_TOKEN=FAKETOKEN-NOHTML $Z; has d2 "Draft 111 exists and is NOT published"; [ $RC = 1 ] || fail d2
@@ -130,7 +134,9 @@ $PY -c "import sys; sys.exit(0 if ${t[1]} - ${t[0]} >= 1 else 1)" || fail "waite
 run s13b "Retry-After nan and inf" $S https://github.com/x/nanrl https://github.com/x/infrl; has s13b "nanrl	succeeded"; has s13b "infrl	succeeded"; has s13b "waiting 0s"; ! grep -q Traceback "$T/out/s13b" && [ $RC = 0 ] || fail "13b"; ok "a Retry-After of nan or inf waits 0 and does not raise"
 run s14 "failed, rejected, timeout, success" $S https://github.com/x/fails https://github.com/x/rejected https://github.com/x/hangs https://github.com/x/fine https://github.com/x/noid
 has s14 "no usable request id"; has s14 "fails	failed"; has s14 "rejected	rejected"; has s14 "hangs	timeout (still running)"; has s14 "fine	succeeded"; [ $RC = 1 ] || fail 14; ok "each URL gets a status and the run ends with status 1"
-run s15 "ftp URL" $S ftp://example.org/x; quiet 15; [ $RC = 2 ] || fail 15; run s15b "negative interval" $TOOL swh-save --interval -1 https://github.com/x/fine; quiet 15b; [ $RC = 2 ] || fail 15b; ok "a non-http URL is refused (status 2) before any request"
+run s15 "ftp URL" $S ftp://example.org/x; quiet 15; [ $RC = 2 ] || fail 15; run s15b "negative interval" $TOOL swh-save --interval -1 https://github.com/x/fine; quiet 15b; [ $RC = 2 ] || fail 15b; for x in nan inf; do run s15$x "$x timeout" $TOOL swh-save --timeout $x https://github.com/x/fine; quiet 15$x; [ $RC = 2 ] || fail "15 $x"; done; run s15n "newline in a URL" $S $'https://github.com/x/fine\n'; quiet 15n; [ $RC = 2 ] || fail 15n
+run s15j "a poll answer that is a list of numbers" $S https://github.com/x/junk https://github.com/x/fine; has s15j "junk	timeout (still pending)"; has s15j "fine	succeeded"; [ $RC = 1 ] || fail 15j
+ok "a non-http URL, a newline, and a nan or inf time are refused (status 2) before any request, and a list of numbers for an answer does not stop the run"
 
 P="$TOOL packet"
 mm unk.json 'm["venues"] = ["Nonexistent Journal of Nothing"]'; run k16 "unknown venue" $P "$T/unk.json" --out "$T/pk16"; has k16 "does not invent venues"; [ $RC = 2 ] && [ ! -e "$T/pk16" ] || fail 16; ok "a journal under two names, a venue under two spellings, a note row and a group row are refused, and a shortlist name for a journal counts, a row that cannot be told is refused beside a peer-reviewed venue, and an unknown, ambiguous or repeated venue is refused (status 2) and writes nothing, and only a journal or conference counts as peer review, not a forum"
@@ -181,6 +187,10 @@ printf 'title: "A Test Title For Benchmarks"  # note\nversion: 1\n' > "$T/c1.cff
 printf 'title: |\n  A Test Title For Benchmarks\n' > "$T/c4.cff"; printf 'title: "a test title for benchmarks"\n' > "$T/c5.cff"; printf 'cff-version: 1.2.0\nreferences:\n  - type: article\n    title: "A Test Title For Benchmarks"\n' > "$T/c6.cff"
 printf 'cff-version: 1.2.0\ntitle: "benchmark-family-paper"\ntype: software\npreferred-citation:\n  type: article\n  title: "A Test Title For Benchmarks"\n  authors:\n    - family-names: Arab\n' > "$T/c7.cff"; printf 'preferred-citation:\n  type: article\ntitle: "A Test Title For Benchmarks"\n' > "$T/c8.cff"; mm bf.json 'm["title"] = "benchmark-family-paper"'
 run c7b "the software name is not the paper title" $TOOL check "$T/bf.json" --cff "$T/c7.cff" --offline; has c7b "CITATION.cff title"; [ $RC = 1 ] || fail c7b
+cq() { printf '%s' "$1" > "$T/cq.cff"; export TT=$2; mm t.json 'm["title"] = __import__("os").environ["TT"]'; run cq "CITATION.cff title $2" $TOOL check "$T/t.json" --cff "$T/cq.cff" --offline; [ $RC = 0 ] || fail "cff: $2"; }
+cq $'title: \'Don\'\'t Trust Agents\'\n' "Don't Trust Agents"; cq $'title: "The \\"Agent\\" Problem"\n' 'The "Agent" Problem'; cq $'title: A Test Title\n  For Benchmarks\nversion: 1\n' "A Test Title For Benchmarks"
+run cm "a missing CITATION.cff" $TOOL check "$T/meta.json" --cff "$T/none.cff" --offline; has cm "cannot read"; [ $RC = 2 ] || fail cm
+printf '\xef\xbb\xbf' > "$T/bom.json"; cat "$T/meta.json" >> "$T/bom.json"; run bm "a BOM in meta.json" $TOOL zenodo-draft --pdf "$T/paper.pdf" --tarball "$T/paper.tar.gz" --meta "$T/bom.json"; has bm "draft id: 111"; [ $RC = 0 ] || fail bm
 for c in 1 2 3 4 7 8; do cc 0 $c; done; for c in 5 6; do cc 1 $c; done; ok "a CITATION.cff preferred-citation title is the one compared, as in benchmark-family-paper, else the top-level title; a title is read when quoted, folded, literal, with a comment or a BOM, and fails on a different case or a nested title"
 mm u.json 'm["code_url"] = "'$B'/missing"; m["data_url"] = "'$B'/missing2"; m["comments"] = "see http://x.com:abc/ and '$B'/headno"'; run cu "dead, malformed and HEAD-refusing URLs" $TOOL check "$T/u.json"
 has cu "missing "; has cu "missing2"; has cu "x.com:abc"; ! grep -q "headno" "$T/out/cu" && [ $RC = 1 ] || fail cu; run co "offline" $TOOL check "$T/u.json" --offline; quiet co; [ $RC = 0 ] || fail co

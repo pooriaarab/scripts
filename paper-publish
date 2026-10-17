@@ -30,14 +30,12 @@ def scrub(s):
         s = s.replace(v, "***") if v else s
     return s
 
-def leaves(o):  # every string and key of a decoded response
+def leaves(o):  # every string value of a decoded response
     if isinstance(o, str): yield o
     elif isinstance(o, list):
         for x in o: yield from leaves(x)
     elif isinstance(o, dict):
-        for k, v in o.items():
-            yield k
-            yield from leaves(v)
+        for v in o.values(): yield from leaves(v)
 
 def origin(u):  # scheme, lower-case host and port, with a default port made explicit
     u = urllib.parse.urlsplit(u)
