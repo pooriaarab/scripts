@@ -46,7 +46,15 @@ run() {
 
 need_farm() { [[ -f "$FARM_DIR/package.json" ]] || die "no farm at $FARM_DIR (set PHONE_FARM_DIR)"; }
 
-pid_of() { pgrep -f "$1" | head -1 || true; }
+# pid_of <pattern>: the first matching process whose working directory is this
+# checkout. Another farm checkout on the same Mac matches the same pattern.
+pid_of() {
+  local pid cwd
+  for pid in $(pgrep -f "$1" || true); do
+    cwd="$(lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p')"
+    if [[ "$cwd" == "$(cd "$FARM_DIR" && pwd -P)" ]]; then echo "$pid"; return 0; fi
+  done
+}
 
 docker_ready() { docker info >/dev/null 2>&1; }
 
@@ -116,7 +124,7 @@ cmd_down() {
     IFS='|' read -r name script pattern <<<"${SERVICES[$i]}"
     pid="$(pid_of "$pattern")"
     if [[ -z "$pid" ]]; then echo "$name: not running"; continue; fi
-    if [[ $DRY_RUN -eq 1 ]]; then echo "+ pkill -f '$pattern'   # $name pid $pid"; else pkill -f "$pattern" || true; echo "$name: stopped"; fi
+    if [[ $DRY_RUN -eq 1 ]]; then echo "+ kill $pid   # $name"; else kill "$pid" || true; echo "$name: stopped"; fi
   done
   if [[ $with_db -eq 1 ]]; then
     (cd "$FARM_DIR" && run docker compose stop postgres)
@@ -142,13 +150,15 @@ cmd_status() {
 }
 
 # api <METHOD> <path> [json-body]. Origin equals the base URL, so the CSRF guard passes.
+# A status of 400 or more prints the body to stderr and returns 1.
 api() {
-  local method=$1 path=$2 body=${3:-}
-  if [[ -n "$body" ]]; then
-    curl -s -X "$method" "$BASE_URL$path" -H "Origin: $BASE_URL" -H 'content-type: application/json' -d "$body"
-  else
-    curl -s -X "$method" "$BASE_URL$path" -H "Origin: $BASE_URL" -H 'content-type: application/json' -d '{}'
-  fi
+  local method=$1 path=$2 body=${3:-'{}'} out code
+  out="$(curl -s -w '\n%{http_code}' -X "$method" "$BASE_URL$path" \
+    -H "Origin: $BASE_URL" -H 'content-type: application/json' -d "$body")" || die "cannot reach $BASE_URL"
+  code="${out##*$'\n'}"
+  out="${out%$'\n'*}"
+  if [[ "$code" -ge 400 ]]; then echo "phone-farm: $method $path -> HTTP $code: $out" >&2; return 1; fi
+  printf '%s\n' "$out"
 }
 
 json() { /usr/bin/python3 -I -c "import sys,json; d=json.load(sys.stdin); $1"; }
@@ -163,8 +173,11 @@ wait_idle() { # wait_idle <udid>
   die "registration still busy after 300s"
 }
 
+check_udid() { [[ "$1" =~ ^[0-9A-Fa-f-]+$ ]] || die "invalid udid: $1"; }
+
 cmd_register() {
   local udid=${1:?usage: phone-farm register <udid>}
+  check_udid "$udid"
   need_farm
   echo "Unlock the phone and keep it awake."
   api POST /api/device-registrations "{\"udid\":\"$udid\"}" >/dev/null
@@ -185,6 +198,7 @@ sys.exit(0 if d.get("canFinalize") else 3)' \
 
 cmd_run_now() {
   local udid=${1:?usage: phone-farm run-now <udid> <pluginId> <taskType> <json-payload>}
+  check_udid "$udid"
   local plugin=${2:?missing pluginId} task=${3:?missing taskType} payload=${4:?missing json payload}
   local body
   body="$(/usr/bin/python3 -I -c '
@@ -194,13 +208,11 @@ print(json.dumps({"deviceUdid": udid, "timing": {"kind": "now"},
   "task": {"pluginId": plugin, "taskType": task, "taskVersion": 1, "payload": json.loads(payload)}}))' \
     "$udid" "$plugin" "$task" "$payload" 2>/dev/null)" || die "payload is not valid JSON"
   api POST /api/schedules "$body"
-  echo
 }
 
 cmd_stop() {
   local id=${1:?usage: phone-farm stop <executionId>}
   api POST "/api/executions/$id/stop"
-  echo
 }
 
 main() {
@@ -210,6 +222,9 @@ main() {
   for arg in "$@"; do
     if [[ $arg == --dry-run ]]; then DRY_RUN=1; else rest+=("$arg"); fi
   done
+  if [[ $DRY_RUN -eq 1 && "$sub" != up && "$sub" != down ]]; then
+    die "--dry-run works only with up and down. $sub would change the phone."
+  fi
   case "$sub" in
     up) cmd_up ;;
     down) cmd_down "${rest[@]+"${rest[@]}"}" ;;
