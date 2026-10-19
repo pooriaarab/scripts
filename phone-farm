@@ -1,0 +1,239 @@
+#!/usr/bin/env bash
+# phone-farm - run the Phone Farm iOS stack (kevs-ios-agents) from one command.
+#
+#   phone-farm up [--dry-run]            start OrbStack, Postgres, Appium, WDA service, worker, web
+#   phone-farm down [--dry-run] [--db]   stop the four processes (and Postgres with --db)
+#   phone-farm status                    show processes, Postgres, web and WDA
+#   phone-farm register <udid>           walk the registration wizard through the REST API
+#   phone-farm run-now <udid> <pluginId> <taskType> <json-payload>
+#   phone-farm stop <executionId>        stop a running execution
+#
+# Environment:
+#   PHONE_FARM_DIR   checkout of the farm   (default ~/Documents/Personal/phone-farm/kevs-ios-agents)
+#   PHONE_FARM_URL   dashboard base URL     (default http://127.0.0.1:3000)
+#   WDA_PORT         WDA port to probe      (default 8100)
+#
+# Traps this script encodes. Each one cost a real debugging round:
+#   - The API rejects a write when Origin differs from Host. We send Origin == base URL.
+#   - A second registration action fails with "A registration action is already running"
+#     while one is busy. We wait for busy=false between steps.
+#   - A local Postgres on 5432 shadows the container. Set POSTGRES_PORT=5433 in .env.
+#   - OrbStack can quit on its own. That kills Postgres, then the web server and worker die.
+#   - `iphone-wda up` leaves `ios forward 8100` running. It holds the WDA port. `up` removes it.
+#   - macOS has no setsid. Use nohup plus disown.
+#   - Never pipe an endless stream (idevicesyslog) into head. It never exits.
+set -euo pipefail
+
+FARM_DIR="${PHONE_FARM_DIR:-$HOME/Documents/Personal/phone-farm/kevs-ios-agents}"
+BASE_URL="${PHONE_FARM_URL:-http://127.0.0.1:3000}"
+WDA_PORT="${WDA_PORT:-8100}"
+LOG_DIR="$FARM_DIR/logs"
+DRY_RUN=0
+
+# name|npm script|process pattern. Start order is top to bottom; stop order is reversed.
+SERVICES=(
+  "appium|appium|node_modules/appium/index.js"
+  "wda-service|wda:service|src/devices/wda-service.ts"
+  "worker|worker|src/scheduler/worker.ts"
+  "web|web|src/api/server.ts"
+)
+
+die() { echo "phone-farm: $*" >&2; exit 1; }
+
+run() {
+  if [[ $DRY_RUN -eq 1 ]]; then echo "+ $*"; else "$@"; fi
+}
+
+need_farm() { [[ -f "$FARM_DIR/package.json" ]] || die "no farm at $FARM_DIR (set PHONE_FARM_DIR)"; }
+
+# pid_of <pattern>: the first matching process whose working directory is this
+# checkout. Another farm checkout on the same Mac matches the same pattern.
+pid_of() {
+  local pid cwd
+  for pid in $(pgrep -f "$1" || true); do
+    cwd="$(lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p')"
+    if [[ "$cwd" == "$(cd "$FARM_DIR" && pwd -P)" ]]; then echo "$pid"; return 0; fi
+  done
+}
+
+docker_ready() { docker info >/dev/null 2>&1; }
+
+wait_for() { # wait_for <seconds> <description> <command...>
+  local secs=$1 what=$2; shift 2
+  local i
+  for ((i = 0; i < secs; i++)); do
+    if "$@" >/dev/null 2>&1; then return 0; fi
+    sleep 1
+  done
+  die "timed out after ${secs}s waiting for $what"
+}
+
+web_ready() { [[ "$(curl -s -o /dev/null -w '%{http_code}' -m 3 "$BASE_URL/")" == 200 ]]; }
+
+cmd_up() {
+  need_farm
+  if [[ $DRY_RUN -eq 0 ]] && ! docker_ready; then
+    command -v orbctl >/dev/null || die "docker is down and orbctl is missing"
+    orbctl start >/dev/null 2>&1 || true
+    wait_for 60 "docker" docker_ready
+  elif [[ $DRY_RUN -eq 1 ]]; then
+    echo "+ orbctl start   # only when docker info fails"
+  fi
+
+  if ! grep -q '^POSTGRES_PORT=' "$FARM_DIR/.env" 2>/dev/null \
+     && lsof -nP -iTCP:5432 -sTCP:LISTEN >/dev/null 2>&1; then
+    echo "warning: port 5432 is taken and .env has no POSTGRES_PORT. Set POSTGRES_PORT=5433 and fix DATABASE_URL." >&2
+  fi
+  (cd "$FARM_DIR" && run npm run db:up)
+
+  local stale
+  stale="$(pgrep -fl "ios forward $WDA_PORT" || true)"
+  if [[ -n "$stale" ]]; then
+    echo "stale port forward holds $WDA_PORT:"
+    echo "$stale"
+    if [[ $DRY_RUN -eq 1 ]]; then echo "+ pkill -f 'ios forward $WDA_PORT'"; else pkill -f "ios forward $WDA_PORT" || true; fi
+  fi
+
+  mkdir -p "$LOG_DIR"
+  local entry name script pattern
+  for entry in "${SERVICES[@]}"; do
+    IFS='|' read -r name script pattern <<<"$entry"
+    if [[ -n "$(pid_of "$pattern")" ]]; then
+      echo "$name: already running (pid $(pid_of "$pattern"))"
+      continue
+    fi
+    if [[ $DRY_RUN -eq 1 ]]; then
+      echo "+ (cd $FARM_DIR && nohup npm run $script > $LOG_DIR/$name.log 2>&1 < /dev/null &)"
+    else
+      (cd "$FARM_DIR" && nohup npm run "$script" >"$LOG_DIR/$name.log" 2>&1 </dev/null & disown)
+      echo "$name: started, log $LOG_DIR/$name.log"
+    fi
+  done
+
+  if [[ $DRY_RUN -eq 0 ]]; then
+    wait_for 90 "the web server at $BASE_URL" web_ready
+    echo "ready: $BASE_URL"
+  fi
+}
+
+cmd_down() {
+  local with_db=0 arg
+  for arg in "$@"; do [[ $arg == --db ]] && with_db=1; done
+  local i name script pattern pid
+  for ((i = ${#SERVICES[@]} - 1; i >= 0; i--)); do
+    IFS='|' read -r name script pattern <<<"${SERVICES[$i]}"
+    pid="$(pid_of "$pattern")"
+    if [[ -z "$pid" ]]; then echo "$name: not running"; continue; fi
+    if [[ $DRY_RUN -eq 1 ]]; then echo "+ kill $pid   # $name"; else kill "$pid" || true; echo "$name: stopped"; fi
+  done
+  if [[ $with_db -eq 1 ]]; then
+    (cd "$FARM_DIR" && run docker compose stop postgres)
+  fi
+}
+
+cmd_status() {
+  local entry name script pattern pid
+  for entry in "${SERVICES[@]}"; do
+    IFS='|' read -r name script pattern <<<"$entry"
+    pid="$(pid_of "$pattern")"
+    if [[ -n "$pid" ]]; then printf '%-12s running (pid %s)\n' "$name" "$pid"; else printf '%-12s down\n' "$name"; fi
+  done
+  if docker_ready; then
+    local pg
+    pg="$(docker ps --filter name=postgres --format '{{.Names}} {{.Status}}' | head -1)"
+    printf '%-12s %s\n' postgres "${pg:-container not running}"
+  else
+    printf '%-12s %s\n' postgres "docker is down (run: orbctl start)"
+  fi
+  printf '%-12s http %s\n' web "$(curl -s -o /dev/null -w '%{http_code}' -m 3 "$BASE_URL/" || true)"
+  printf '%-12s http %s\n' "wda:$WDA_PORT" "$(curl -s -o /dev/null -w '%{http_code}' -m 3 "http://127.0.0.1:$WDA_PORT/status" || true)"
+}
+
+# api <METHOD> <path> [json-body]. Origin equals the base URL, so the CSRF guard passes.
+# A status of 400 or more prints the body to stderr and returns 1.
+api() {
+  local method=$1 path=$2 body=${3:-'{}'} out code
+  out="$(curl -s -w '\n%{http_code}' -X "$method" "$BASE_URL$path" \
+    -H "Origin: $BASE_URL" -H 'content-type: application/json' -d "$body")" || die "cannot reach $BASE_URL"
+  code="${out##*$'\n'}"
+  out="${out%$'\n'*}"
+  if [[ "$code" -ge 400 ]]; then echo "phone-farm: $method $path -> HTTP $code: $out" >&2; return 1; fi
+  printf '%s\n' "$out"
+}
+
+json() { /usr/bin/python3 -I -c "import sys,json; d=json.load(sys.stdin); $1"; }
+
+wait_idle() { # wait_idle <udid>
+  local i busy
+  for ((i = 0; i < 100; i++)); do
+    busy="$(curl -s "$BASE_URL/api/device-registrations/$1" | json 'print(d.get("busy", False))' 2>/dev/null || echo True)"
+    [[ "$busy" == False ]] && return 0
+    sleep 3
+  done
+  die "registration still busy after 300s"
+}
+
+check_udid() { [[ "$1" =~ ^[0-9A-Fa-f-]+$ ]] || die "invalid udid: $1"; }
+
+cmd_register() {
+  local udid=${1:?usage: phone-farm register <udid>}
+  check_udid "$udid"
+  need_farm
+  echo "Unlock the phone and keep it awake."
+  api POST /api/device-registrations "{\"udid\":\"$udid\"}" >/dev/null
+  local action
+  for action in refresh prepare verify; do
+    wait_idle "$udid"
+    echo "== $action"
+    api POST "/api/device-registrations/$udid/actions/$action" >/dev/null
+  done
+  wait_idle "$udid"
+  curl -s "$BASE_URL/api/device-registrations/$udid" | json '
+open_checks = {k: v["message"] for k, v in d["checks"].items() if v["state"] != "passed"}
+print("open checks:", open_checks or "none")
+sys.exit(0 if d.get("canFinalize") else 3)' \
+    || die "cannot finalize yet. Add the TikTok and Instagram usernames in the dashboard, then run register again."
+  api POST "/api/device-registrations/$udid/actions/finalize" | json 'print("finalized:", d.get("finalized", d))'
+}
+
+cmd_run_now() {
+  local udid=${1:?usage: phone-farm run-now <udid> <pluginId> <taskType> <json-payload>}
+  check_udid "$udid"
+  local plugin=${2:?missing pluginId} task=${3:?missing taskType} payload=${4:?missing json payload}
+  local body
+  body="$(/usr/bin/python3 -I -c '
+import json, sys
+udid, plugin, task, payload = sys.argv[1:5]
+print(json.dumps({"deviceUdid": udid, "timing": {"kind": "now"},
+  "task": {"pluginId": plugin, "taskType": task, "taskVersion": 1, "payload": json.loads(payload)}}))' \
+    "$udid" "$plugin" "$task" "$payload" 2>/dev/null)" || die "payload is not valid JSON"
+  api POST /api/schedules "$body"
+}
+
+cmd_stop() {
+  local id=${1:?usage: phone-farm stop <executionId>}
+  api POST "/api/executions/$id/stop"
+}
+
+main() {
+  local sub=${1:-}
+  [[ $# -gt 0 ]] && shift
+  local rest=() arg
+  for arg in "$@"; do
+    if [[ $arg == --dry-run ]]; then DRY_RUN=1; else rest+=("$arg"); fi
+  done
+  if [[ $DRY_RUN -eq 1 && "$sub" != up && "$sub" != down ]]; then
+    die "--dry-run works only with up and down. $sub would change the phone."
+  fi
+  case "$sub" in
+    up) cmd_up ;;
+    down) cmd_down "${rest[@]+"${rest[@]}"}" ;;
+    status) cmd_status ;;
+    register) cmd_register "${rest[@]+"${rest[@]}"}" ;;
+    run-now) cmd_run_now "${rest[@]+"${rest[@]}"}" ;;
+    stop) cmd_stop "${rest[@]+"${rest[@]}"}" ;;
+    *) sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; [[ -z $sub || $sub == help || $sub == --help ]] || exit 2 ;;
+  esac
+}
+
+main "$@"
