@@ -31,6 +31,8 @@ stops you from optimising a job that does not matter.
 | 3 | `ci-cache-health` | Do the caches actually hit? A cache that restores nothing still prints a green success line, and a disabled remote cache prints one grey line. |
 | 4 | `ci-runner-audit` | Is each job on a tier that can run it? Flags `services:` and `actions/cache` misuse on self-hosted runners. |
 
+Use the [CI optimization playbook](ci-optimization-playbook.md) for changes after diagnosis.
+
 Only optimise after step 4. The reasoning behind the order, and the checklist of defects
 that hide behind a green check, are in the
 [`ci-speed-diagnosis`](https://github.com/pooriaarab/skills/blob/main/ci-speed-diagnosis/SKILL.md)
