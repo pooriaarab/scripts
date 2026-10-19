@@ -53,6 +53,10 @@ SUB="${ARGS[0]}"
 case "$SUB" in start|status|add-goal|stop) ;; *) usage ;; esac
 [[ -n "$SSH_CMD" ]] || die 2 "no SSH command; pass --ssh or set VM_ORCHESTRATE_SSH"
 [[ "$ROUNDS" =~ ^[1-9][0-9]*$ ]] || die 2 "--rounds must be a positive integer"
+[[ "$SLEEP" =~ ^[0-9]+$ ]] || die 2 "--sleep must be a whole number of seconds"
+# DIR is spliced into remote command strings, so it must be inert there.
+[[ "$DIR" =~ ^[A-Za-z0-9_-][A-Za-z0-9._-]*(/[A-Za-z0-9_-][A-Za-z0-9._-]*)*$ && "$DIR" != *..* ]] ||
+  die 2 "--dir must be a relative path of letters, digits, '.', '_' and '-'"
 eval "SSH=($SSH_CMD)"
 
 # Runs one command string on the VM. Stdin passes through, so file content
@@ -70,6 +74,14 @@ runner_alive() {
   remote "cd ~/$DIR 2>/dev/null && test -f runner.pid && kill -0 \"\$(cat runner.pid)\" 2>/dev/null"
 }
 
+# Takes the start lock with an atomic mkdir. The runner holds it for its whole
+# life and removes it on exit; stop and a failed start remove it too.
+take_lock() {
+  remote "umask 077; mkdir -p ~/$DIR && mkdir ~/$DIR/.lock 2>/dev/null" && return 0
+  if runner_alive; then die 1 "a runner is already alive in ~/$DIR on the VM; stop it first"; fi
+  die 1 "~/$DIR/.lock exists but no runner is alive (another start, or a crashed run); run stop to clear it"
+}
+
 file_mode() { stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1"; }
 
 write_runner() {
@@ -77,16 +89,26 @@ write_runner() {
 #!/usr/bin/env bash
 # Written by vm-orchestrate. Restarts the agent until DONE or the round cap.
 set -uo pipefail
+umask 077
 cd "$(dirname "$0")"
 . ./runner.conf
 echo $$ > runner.pid
-if ! bash -n secrets.env 2>/dev/null; then
-  echo "secrets.env does not parse; runner stopped" >> runner.log
-  rm -f runner.pid; exit 1
-fi
+finish() { echo "$1" > result; echo "runner $1 $(date -u +%FT%TZ)" >> runner.log; rm -f runner.pid; rmdir .lock 2>/dev/null; exit "$2"; }
 agent_env="${ORCH_AGENT_ENV/#\~/$HOME}"
 [ -f "$agent_env" ] && . "$agent_env"
-set -a; . ./secrets.env; set +a
+# secrets.env is data, never code: KEY=VALUE lines, optional `export `, values
+# taken literally (one pair of surrounding quotes is stripped, nothing expands).
+n=0
+while IFS= read -r line || [ -n "$line" ]; do
+  n=$((n+1))
+  case "$line" in ''|'#'*) continue ;; esac
+  line="${line#export }"
+  if [[ ! "$line" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; then finish "failed: secrets.env line $n is not KEY=VALUE" 1; fi
+  k="${line%%=*}"; v="${line#*=}"
+  if [[ "$v" =~ ^\'(.*)\'$ || "$v" =~ ^\"(.*)\"$ ]]; then v="${BASH_REMATCH[1]}"
+  elif [[ "$v" == [\'\"]* ]]; then finish "failed: secrets.env line $n has an unclosed quote" 1; fi
+  export "$k=$v"
+done < secrets.env
 touch STATUS.md
 for round in $(seq 1 "$ORCH_ROUNDS"); do
   [ -f DONE ] && break
@@ -101,8 +123,7 @@ for round in $(seq 1 "$ORCH_ROUNDS"); do
   [ -f DONE ] && break
   sleep "$ORCH_SLEEP"
 done
-echo "runner finished $(date -u +%FT%TZ)" >> runner.log
-rm -f runner.pid
+finish finished 0
 EOF
 }
 
@@ -112,37 +133,54 @@ cmd_start() {
   [[ -f "$bundle/BRIEF.md" ]] || die 2 "$bundle/BRIEF.md is missing"
   [[ -f "$bundle/secrets.env" ]] || die 2 "$bundle/secrets.env is missing"
   [[ "$(file_mode "$bundle/secrets.env")" == 600 ]] || die 2 "$bundle/secrets.env must be mode 600"
-  if runner_alive; then die 1 "a runner is already alive in ~/$DIR on the VM; stop it first"; fi
+  take_lock
+  # A finished run leaves DONE and result behind; a new run must not inherit them.
+  remote "cd ~/$DIR && rm -f DONE result runner.pid agent.pid"
 
   local tarflags=(-czf - -C "$bundle" .)
   if tar --no-xattrs -cf /dev/null -T /dev/null 2>/dev/null; then tarflags=(--no-xattrs "${tarflags[@]}"); fi
   COPYFILE_DISABLE=1 tar "${tarflags[@]}" |
-    remote "mkdir -p ~/$DIR && tar -xzf - -C ~/$DIR 2>/dev/null; find ~/$DIR -name '._*' -delete; chmod 600 ~/$DIR/secrets.env"
-  write_runner | remote "cat > ~/$DIR/run.sh && chmod +x ~/$DIR/run.sh"
+    remote "umask 077; tar -xzf - -C ~/$DIR 2>/dev/null; find ~/$DIR -name '._*' -delete; chmod 600 ~/$DIR/secrets.env"
+  write_runner | remote "umask 077; cat > ~/$DIR/run.sh && chmod 700 ~/$DIR/run.sh"
   { printf 'ORCH_ROUNDS=%q\nORCH_SLEEP=%q\nORCH_MODEL=%q\n' "$ROUNDS" "$SLEEP" "$MODEL"
     printf 'ORCH_AGENT_CMD=%q\nORCH_AGENT_ENV=%q\n' "$AGENT_CMD" "$AGENT_ENV"
-  } | remote "cat > ~/$DIR/runner.conf"
+  } | remote "umask 077; cat > ~/$DIR/runner.conf"
   remote "command -v gh >/dev/null" ||
     echo "vm-orchestrate: warning: gh is not installed on the VM; an agent that opens PRs will fail" >&2
 
   # The remote shell drops its own descriptors first. A child that inherits the
   # SSH channel keeps the session open until the runner ends.
-  remote "cd ~/$DIR && rm -f runner.pid && exec > /dev/null 2>&1 < /dev/null
+  remote "cd ~/$DIR && exec > /dev/null 2>&1 < /dev/null
     if command -v setsid > /dev/null; then setsid nohup bash run.sh & else nohup bash run.sh & fi"
   sleep "$VERIFY_WAIT"
   if ! runner_alive; then
-    remote "tail -n 5 ~/$DIR/runner.log 2>/dev/null" >&2 || true
-    die 3 "the runner is not alive ${VERIFY_WAIT}s after start; see the log above"
+    # A short job may finish inside the wait; only a failed result is a failure.
+    if remote "grep -qx finished ~/$DIR/result 2>/dev/null"; then
+      echo "runner already finished in ~/$DIR on the VM"; return 0
+    fi
+    remote "cat ~/$DIR/result 2>/dev/null; rmdir ~/$DIR/.lock 2>/dev/null; true" >&2
+    die 3 "the runner is not alive ${VERIFY_WAIT}s after start; see the result above"
   fi
   echo "runner started in ~/$DIR on the VM. Give the VM a TTL and idle timeout longer than the job."
 }
+
+# Hides any line that holds a secrets.env value or looks like a credential.
+REDACT='BEGIN { while ((getline l < "secrets.env") > 0) { sub(/^export /, "", l)
+    if (l !~ /^[A-Za-z_][A-Za-z0-9_]*=/) continue; v = substr(l, index(l, "=") + 1)
+    q = substr(v, 1, 1); if ((q == "\047" || q == "\"") && substr(v, length(v)) == q) v = substr(v, 2, length(v) - 2)
+    if (length(v) >= 6) vals[v] = 1 } }
+  { for (v in vals) if (index($0, v)) { print "[line hidden: holds a secret value]"; next } }
+  tolower($0) ~ /(token|secret|password|passwd|api[_-]?key|authorization|bearer)[^a-z]*[:=]|-----begin|gh[pousr]_[a-z0-9]+|sk-[a-z0-9_-]+|xox[abp]-|akia[0-9a-z]+/ {
+    print "[line hidden: looks like a credential]"; next }
+  { print }'
 
 cmd_status() {
   remote "cd ~/$DIR || exit 1
     if test -f runner.pid && kill -0 \"\$(cat runner.pid)\" 2>/dev/null; then echo 'runner: alive'; else echo 'runner: not running'; fi
     if test -f DONE; then echo 'DONE: yes'; else echo 'DONE: no'; fi
-    echo '--- runner.log'; tail -n 10 runner.log 2>/dev/null
-    echo '--- STATUS.md'; tail -n 20 STATUS.md 2>/dev/null; true"
+    echo \"result: \$(cat result 2>/dev/null || echo none)\"
+    echo '--- runner.log'; tail -n 10 runner.log 2>/dev/null | awk '$REDACT'
+    echo '--- STATUS.md'; tail -n 20 STATUS.md 2>/dev/null | awk '$REDACT'; true"
 }
 
 cmd_add_goal() {
@@ -164,7 +202,7 @@ cmd_stop() {
     for f in runner.pid agent.pid; do
       test -f \$f || continue
       p=\$(cat \$f); pkill -TERM -P \"\$p\" 2>/dev/null; kill \"\$p\" 2>/dev/null; rm -f \$f
-    done; echo 'runner stopped'"
+    done; rmdir .lock 2>/dev/null; echo 'runner stopped'"
 }
 
 case "$SUB" in

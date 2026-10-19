@@ -18,7 +18,7 @@ cleanup() { for f in "$T"/home*/orch/runner.pid "$T"/home*/orch/agent.pid; do [ 
 trap cleanup EXIT
 
 RBIN="$T/rbin"; mkdir -p "$RBIN" "$T/bin"
-for tool in bash sh tar gzip find chmod mkdir cat awk sleep seq date rm mv tail head pkill setsid nohup dirname grep env stat touch; do
+for tool in bash sh tar gzip find chmod mkdir cat awk sleep seq date rm mv tail head pkill setsid nohup dirname grep env stat touch rmdir wc; do
   p="$(command -v "$tool" 2>/dev/null)" && ln -s "$p" "$RBIN/$tool"
 done
 cat > "$T/bin/ssh" <<'EOF'
@@ -79,8 +79,37 @@ check "10: each round resumes from BRIEF.md and STATUS.md" 'grep -q "^2|.*BRIEF.
 check "6: no ._ files reach the VM" '[ -z "$(find "$H/orch" -name "._*")" ]'
 check "7: secrets reach the agent but never argv" '[ -f "$H/secret-seen" ] && ! grep -q "$SECRET" "$L" && [[ "$OUT1" != *"$SECRET"* ]]'
 check "4: secrets.env stays 600 on the VM" '[ "$(stat -c %a "$H/orch/secrets.env" 2>/dev/null || stat -f %Lp "$H/orch/secrets.env")" = 600 ]'
+printf 'saw %s\napi_key: abcdef123456\nnormal line\n' "$SECRET" >> "$H/orch/STATUS.md"
 run status
+check "28: status hides secret values and credential-looking lines" '[[ "$OUT" != *abcdef123456* ]] && [[ "$OUT" == *"normal line"* ]] && [[ "$OUT" == *"line hidden"* ]]'
+check "27: the VM folder and logs are private" '[ "$(stat -c %a "$H/orch" 2>/dev/null || stat -f %Lp "$H/orch")" = 700 ] && [ "$(stat -c %a "$H/orch/runner.log" 2>/dev/null || stat -f %Lp "$H/orch/runner.log")" = 600 ]'
 check "14: status shows state, never secrets" '[ $CODE -eq 0 ] && [[ "$OUT" == *"DONE: yes"* ]] && [[ "$OUT" != *"$SECRET"* ]]'
+
+rm -f "$H/done-at" "$H/agent-sleep"; start --rounds 1
+wait_for "$H/orch/runner.log" "round 1 exit=0" && sleep 0.3
+check "24: a new start clears the old DONE and runs" '[ $CODE -eq 0 ] && [ "$(wc -l < "$H/calls.log")" -eq 3 ]'
+
+fresh; echo 1 > "$H/done-at"; start --rounds 3
+check "25: a job that ends inside the check exits 0" '[ $CODE -eq 0 ] && [[ "$OUT" == *"already finished"* ]]'
+
+fresh; echo 3 > "$H/agent-sleep"
+( start; echo $CODE > "$T/race1" ) & ( start; echo $CODE > "$T/race2" ) & wait
+check "22: of two racing starts, exactly one runs" '[ "$(cat "$T/race1" "$T/race2" | sort | tr "\n" " ")" = "0 1 " ]'
+run stop
+
+fresh; mkdir -p "$H/orch/.lock"; start
+check "23: a lock without a runner refuses start" '[ $CODE -eq 1 ] && [[ "$OUT" == *"run stop"* ]]'
+run stop; start
+check "23: stop clears the lock" '[ $CODE -eq 0 ]'
+run stop
+
+fresh; run start "$B" --dir 'x;touch $HOME/pwned' --agent-cmd fake-agent
+check "26: shell syntax in --dir exits 2 before SSH" '[ $CODE -eq 2 ] && [ ! -s "$L" ]'
+
+fresh; printf "TEST_SECRET='%s'\nCMD=\$(touch \"\$HOME/pwned\")\n" "$SECRET" > "$B/secrets.env"; echo 1 > "$H/done-at"; start
+check "29: a command in a value stays data" '[ $CODE -eq 0 ] && [ ! -e "$H/pwned" ] && [ -f "$H/secret-seen" ]'
+fresh; printf 'A=1\ntouch "$HOME/pwned"\n' > "$B/secrets.env"; start
+check "29: a line that is not KEY=VALUE stops the runner" '[ $CODE -eq 3 ] && [[ "$OUT" == *"line 2 is not KEY=VALUE"* ]] && [ ! -e "$H/pwned" ]'
 
 fresh; echo 7 > "$H/exit-code"; start --rounds 2
 wait_for "$H/orch/runner.log" "runner finished"
@@ -88,7 +117,7 @@ check "10: a failing agent gets another round" 'grep -q "round 1 exit=7" "$H/orc
 check "12: the round cap stops the runner" '[ "$(wc -l < "$H/calls.log")" -eq 2 ]'
 
 fresh; printf "TEST_SECRET='%s\n" "$SECRET" > "$B/secrets.env"; start
-check "9: a runner that dies at start exits 3 with the log" '[ $CODE -eq 3 ] && [[ "$OUT" == *"does not parse"* ]] && [[ "$OUT" != *"$SECRET"* ]]'
+check "9: a runner that dies at start exits 3 with the result" '[ $CODE -eq 3 ] && [[ "$OUT" == *"failed: secrets.env line 1"* ]] && [[ "$OUT" != *"$SECRET"* ]]'
 
 fresh; FAKE_SSH_FAIL=1 run status
 check "13: SSH failure exits 4 with the allowlist hint" '[ $CODE -eq 4 ] && [[ "$OUT" == *"public IP"* ]]'
