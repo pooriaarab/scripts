@@ -1,0 +1,306 @@
+diff --git a/src/devices/devicectl.ts b/src/devices/devicectl.ts
+new file mode 100644
+index 0000000..4eacca9
+--- /dev/null
++++ b/src/devices/devicectl.ts
+@@ -0,0 +1,16 @@
++import { execFile } from 'node:child_process';
++import { promisify } from 'node:util';
++
++const execFileAsync = promisify(execFile);
++
++/**
++ * Launch an app with CoreDevice, not WDA. On iOS 27 beta, WDA `activateApp`
++ * reports the app as foreground while SpringBoard stays on screen.
++ * `devicectl` always brings the app to the front.
++ */
++export async function launchAppViaDevicectl(udid: string, bundleId: string, options: { terminateExisting?: boolean } = {}): Promise<void> {
++    const args = ['devicectl', 'device', 'process', 'launch', '--device', udid];
++    if (options.terminateExisting) args.push('--terminate-existing');
++    args.push(bundleId);
++    await execFileAsync('xcrun', args, { timeout: 60_000, env: { ...process.env, ...(process.env.XCODE_DEVELOPER_DIR ? { DEVELOPER_DIR: process.env.XCODE_DEVELOPER_DIR } : {}) } });
++}
+diff --git a/src/devices/wda-remote.ts b/src/devices/wda-remote.ts
+index 7b659e3..cd8ef5e 100644
+--- a/src/devices/wda-remote.ts
++++ b/src/devices/wda-remote.ts
+@@ -1,3 +1,5 @@
++import sharp from 'sharp';
++
+ import { coordinatesForProfile } from './coordinates.js';
+ 
+ const DEFAULT_TIMEOUT_MS = 10_000;
+@@ -157,7 +159,28 @@ export class WdaRemoteControl {
+         if (typeof payload.value !== 'string') {
+             throw new RemoteDeviceError('WebDriverAgent returned an invalid screenshot');
+         }
+-        return Buffer.from(payload.value, 'base64');
++        return this.padCroppedScreenshot(udid, Buffer.from(payload.value, 'base64'));
++    }
++
++    /**
++     * On iOS 27 beta WDA can return only the top-left part of the screen at
++     * full scale (1124x2436 px of a 428x926 pt screen). Every pixel detector
++     * assumes a full frame, so pad the missing right and bottom edge with
++     * black. Does nothing when the screenshot already has full size.
++     */
++    private async padCroppedScreenshot(udid: string, image: Buffer): Promise<Buffer> {
++        const screen = this.cachedScreenInfo ?? await this.getScreenInfo(udid);
++        const fullWidth = Math.round(screen.screenSize.width * screen.scale);
++        const fullHeight = Math.round(screen.screenSize.height * screen.scale);
++        const { width = 0, height = 0 } = await sharp(image).metadata();
++        const missingWidth = fullWidth - width;
++        const missingHeight = fullHeight - height;
++        // Allow a little rounding slack.
++        if (missingWidth < 8 && missingHeight < 8) return image;
++        return sharp(image)
++            .extend({ right: Math.max(0, missingWidth), bottom: Math.max(0, missingHeight), background: '#000000' })
++            .png()
++            .toBuffer();
+     }
+ 
+     async getMjpegStream(udid: string, signal?: AbortSignal): Promise<Response> {
+diff --git a/src/tiktok/doomscroll.ts b/src/tiktok/doomscroll.ts
+index 1338c74..9bdd475 100644
+--- a/src/tiktok/doomscroll.ts
++++ b/src/tiktok/doomscroll.ts
+@@ -1,3 +1,5 @@
++import { launchAppViaDevicectl } from '../devices/devicectl.js';
++import { humanDwellMs, humanSwipeSteps } from './human-gesture.js';
+ import { remote, type Browser } from 'webdriverio';
+ 
+ import { loadRegisteredDevices, resolveDeviceCoordinates, WdaRemoteControl } from '@git-agni/phone-farm-core';
+@@ -107,8 +109,8 @@ const capabilities: WebdriverIO.Capabilities & Record<string, unknown> = {
+     'appium:udid': udid,
+     'appium:bundleId': tiktokBundleId,
+     'appium:noReset': true,
+-    'appium:forceAppLaunch': true,
+-    'appium:shouldTerminateApp': true,
++    // WDA launch does not foreground the app on iOS 27 beta; devicectl does it.
++    'appium:autoLaunch': false,
+     'appium:newCommandTimeout': 120,
+     'appium:wdaLaunchTimeout': 120000,
+     'appium:wdaConnectionTimeout': 120000,
+@@ -250,22 +252,20 @@ async function postComment(
+ }
+ 
+ async function swipeNext(driver: Browser): Promise<void> {
+-    // Pure vertical flick: identical X throughout. Left-of-center axis avoids
+-    // the engagement rail and reduces accidental carousel page-turns.
+-    const startY = Math.max(swipeStartY, Math.round(coordinates.screenSize.height * 0.72));
+-    const endY = Math.min(swipeEndY, Math.round(coordinates.screenSize.height * 0.22));
+-    const duration = Math.min(swipeDurationMs, 380);
++    // Curved, variable-speed stroke near the left-third axis. See human-gesture.ts.
++    const steps = humanSwipeSteps({
++        axisX: swipeAxisX,
++        startY: Math.max(swipeStartY, Math.round(coordinates.screenSize.height * 0.72)),
++        endY: Math.min(swipeEndY, Math.round(coordinates.screenSize.height * 0.22)),
++        durationMs: Math.min(swipeDurationMs, 380),
++        screenWidth: coordinates.screenSize.width,
++        screenHeight: coordinates.screenSize.height,
++    });
+     await driver.performActions([{
+         type: 'pointer',
+         id: 'finger',
+         parameters: { pointerType: 'touch' },
+-        actions: [
+-            { type: 'pointerMove', duration: 0, x: swipeAxisX, y: startY },
+-            { type: 'pointerDown', button: 0 },
+-            { type: 'pause', duration: 40 },
+-            { type: 'pointerMove', duration: duration, x: swipeAxisX, y: endY },
+-            { type: 'pointerUp', button: 0 },
+-        ],
++        actions: steps,
+     }]);
+     await driver.releaseActions();
+ }
+@@ -280,6 +280,8 @@ try {
+     await remoteControl.unlock(udid);
+ 
+     console.log(`Opening TikTok on ${udid}`);
++    await launchAppViaDevicectl(udid, tiktokBundleId, { terminateExisting: true });
++    await new Promise((resolve) => setTimeout(resolve, 4000));
+     driver = await remote({
+         hostname: process.env.APPIUM_HOST ?? '127.0.0.1',
+         port: positiveInteger('APPIUM_PORT', 4725),
+@@ -357,25 +359,11 @@ try {
+         console.log('Relaunching TikTok to reset to For You');
+         recoveries += 1;
+         try {
+-            await driver!.terminateApp(tiktokBundleId);
++            await launchAppViaDevicectl(udid, tiktokBundleId, { terminateExisting: true });
+         } catch (error) {
+-            console.log(`terminateApp: ${error instanceof Error ? error.message : String(error)}`);
++            console.log(`devicectl launch: ${error instanceof Error ? error.message : String(error)}`);
+         }
+-        await driver!.pause(900);
+-        await driver!.activateApp(tiktokBundleId);
+         await driver!.pause(3500);
+-        // After a popup/terminate we can land on SpringBoard if activate races.
+-        for (let tryActivate = 1; tryActivate <= 3; tryActivate++) {
+-            try {
+-                const state = await driver!.queryAppState(tiktokBundleId);
+-                if (state === 4) break;
+-                console.log(`TikTok not foreground (state=${state}); activate retry ${tryActivate}`);
+-            } catch (error) {
+-                console.log(`queryAppState: ${error instanceof Error ? error.message : String(error)}`);
+-            }
+-            await driver!.activateApp(tiktokBundleId);
+-            await driver!.pause(2500);
+-        }
+     }
+ 
+     async function ensureForYouFeed(maxAttempts = 6): Promise<boolean> {
+@@ -620,7 +608,7 @@ try {
+         await swipeNext(driver);
+         swipes += 1;
+         // Brief settle only — long pauses after swipe make carousels feel sticky.
+-        await cancellableDelay(clampToDeadline(Date.now(), deadline, carousel ? 350 : 550 + Math.round(Math.random() * 250)));
++        await cancellableDelay(clampToDeadline(Date.now(), deadline, carousel ? humanDwellMs(350) : humanDwellMs(650)));
+     }
+ 
+     const elapsedMs = Date.now() - runStartedAt;
+diff --git a/src/tiktok/human-gesture.ts b/src/tiktok/human-gesture.ts
+new file mode 100644
+index 0000000..2d154a8
+--- /dev/null
++++ b/src/tiktok/human-gesture.ts
+@@ -0,0 +1,110 @@
++/**
++ * Human-like next-video swipe.
++ *
++ * A bot swipe is one straight line: same X, same start and end Y, same
++ * duration, constant speed. A finger drifts sideways, bows the path, starts
++ * and ends at different heights, and speeds up then slows down. This builds
++ * a W3C pointer action list with those traits.
++ *
++ * Touch pressure is not modelled: XCTest synthesized touches carry no force
++ * on this hardware.
++ */
++
++export interface HumanSwipeInput {
++    /** Left-third axis the gesture stays near, so it does not turn a carousel sideways. */
++    axisX: number;
++    startY: number;
++    endY: number;
++    durationMs: number;
++    screenWidth: number;
++    screenHeight: number;
++    /** Injectable for repeatable output. Defaults to Math.random. */
++    random?: () => number;
++}
++
++export type PointerStep =
++    | { type: 'pointerMove'; duration: number; x: number; y: number }
++    | { type: 'pointerDown'; button: 0 }
++    | { type: 'pointerUp'; button: 0 }
++    | { type: 'pause'; duration: number };
++
++/** Approximate normal sample (sum of uniforms), mean 0, sd about 1. */
++function gaussian(random: () => number): number {
++    let sum = 0;
++    for (let i = 0; i < 6; i += 1) sum += random();
++    return (sum - 3) / Math.sqrt(0.5);
++}
++
++function clamp(value: number, min: number, max: number): number {
++    return Math.min(max, Math.max(min, value));
++}
++
++/**
++ * Speed profile: blend of ease-in-out and ease-out. `skew` near 1 is a flick
++ * (fast start, long tail). Near 0 is a slow, even drag.
++ */
++function progress(t: number, skew: number): number {
++    const easeInOut = t * t * (3 - 2 * t);
++    const easeOut = 1 - (1 - t) * (1 - t);
++    return easeInOut * (1 - skew) + easeOut * skew;
++}
++
++export function humanSwipeSteps(input: HumanSwipeInput): PointerStep[] {
++    const random = input.random ?? Math.random;
++    const margin = 12;
++
++    const startX = clamp(input.axisX + gaussian(random) * 5, margin, input.screenWidth - margin);
++    const startY = clamp(input.startY + (random() - 0.5) * 50, margin, input.screenHeight - margin);
++    // Travel 85% to 110% of the planned distance.
++    const planned = input.startY - input.endY;
++    const travel = planned * (0.85 + random() * 0.25);
++    const endY = clamp(startY - travel, margin, input.screenHeight - margin);
++    // Sideways drift of a thumb or finger: a few points either way.
++    const endX = clamp(startX + gaussian(random) * 7, margin, input.screenWidth - margin);
++    // Perpendicular bow in the middle of the stroke.
++    const bow = (random() < 0.5 ? -1 : 1) * (2 + random() * 7);
++
++    // 70% to 135% of the planned duration, never below 180 ms.
++    const total = Math.max(180, Math.round(input.durationMs * (0.7 + random() * 0.65)));
++    const skew = 0.25 + random() * 0.6;
++    const segments = 9 + Math.floor(random() * 4);
++    // A short hesitation mid-stroke on about one swipe in eight.
++    const hesitateAt = random() < 0.12 ? 3 + Math.floor(random() * (segments - 5)) : -1;
++
++    const steps: PointerStep[] = [
++        { type: 'pointerMove', duration: 0, x: Math.round(startX), y: Math.round(startY) },
++        { type: 'pointerDown', button: 0 },
++        // Finger rests on the glass before it moves.
++        { type: 'pause', duration: 30 + Math.floor(random() * 110) },
++    ];
++
++    let previousProgress = 0;
++    for (let i = 1; i <= segments; i += 1) {
++        const s = progress(i / segments, skew);
++        const x = startX + (endX - startX) * s + bow * Math.sin(Math.PI * s);
++        const y = startY + (endY - startY) * s;
++        const share = s - previousProgress;
++        previousProgress = s;
++        // Time follows the speed profile, with a little noise per segment.
++        const duration = Math.max(8, Math.round(total * share * (0.9 + random() * 0.2)));
++        steps.push({
++            type: 'pointerMove',
++            duration,
++            x: Math.round(clamp(x, margin, input.screenWidth - margin)),
++            y: Math.round(clamp(y, margin, input.screenHeight - margin)),
++        });
++        if (i === hesitateAt) steps.push({ type: 'pause', duration: 50 + Math.floor(random() * 120) });
++    }
++    steps.push({ type: 'pointerUp', button: 0 });
++    return steps;
++}
++
++/**
++ * Dwell time between actions. Log-normal: mostly near the median with an
++ * occasional long pause, unlike a flat uniform range.
++ */
++export function humanDwellMs(medianMs: number, random: () => number = Math.random): number {
++    const sigma = 0.45;
++    const value = medianMs * Math.exp(gaussian(random) * sigma);
++    return Math.round(clamp(value, medianMs * 0.4, medianMs * 3.5));
++}
+diff --git a/src/tiktok/screen-identity.ts b/src/tiktok/screen-identity.ts
+index 5d6cb10..264902c 100644
+--- a/src/tiktok/screen-identity.ts
++++ b/src/tiktok/screen-identity.ts
+@@ -131,6 +131,10 @@ export function detectHomeFeedTab(image: PixelImage): 'following' | 'forYou' | '
+     const following = sampleRegion(image, image.width * 0.28, y0, image.width * 0.42, y1, isBright);
+     const forYou = sampleRegion(image, image.width * 0.58, y0, image.width * 0.74, y1, isBright);
+     if (following.total < 10 || forYou.total < 10) return 'unknown';
++    // Wider header (LIVE, Community, Nearby, Following, For You — seen on a
++    // 428 pt wide iPhone 12 Pro Max): For You sits right of the old band.
++    const forYouRight = sampleRegion(image, image.width * 0.75, y0, image.width * 0.87, y1, isBright);
++    if (forYouRight.total >= 10 && forYouRight.hits / forYouRight.total > 0.03) return 'forYou';
+     const followingRatio = following.hits / following.total;
+     const forYouRatio = forYou.hits / forYou.total;
+     if (followingRatio < 0.01 && forYouRatio < 0.01) return 'unknown';
+@@ -247,6 +251,12 @@ export async function identifyTikTokScreen(
+         return feedKindFromImage(image, 0.62, ['tiktokTabBar'], preferredFeed);
+     }
+ 
++    // Header tabs are bright text on the feed. SpringBoard has none.
++    const headerTab = detectHomeFeedTab(image);
++    if (headerTab !== 'unknown') {
++        return feedKindFromImage(image, 0.7, ['homeTabsVisible'], preferredFeed);
++    }
++
+     // Never assume FYP — SpringBoard and random sheets used to get stuck here
+     // while the loop kept liking/swiping on the iOS home screen.
+     return { kind: 'off_feed', confidence: 0.55, reasons: ['unrecognized'] };
