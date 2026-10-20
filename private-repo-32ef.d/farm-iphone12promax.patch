@@ -1,5 +1,5 @@
 diff --git a/src/devices/coordinates.ts b/src/devices/coordinates.ts
-index 5268334..3159fc1 100644
+index 5268334..4b5a885 100644
 --- a/src/devices/coordinates.ts
 +++ b/src/devices/coordinates.ts
 @@ -263,6 +263,8 @@ const SX_X = 375 / 375;
@@ -11,7 +11,7 @@ index 5268334..3159fc1 100644
  const SX_17 = 402 / 375;
  const SY_17 = 874 / 667;
  
-@@ -376,6 +378,63 @@ export const DEVICE_COORDINATES = {
+@@ -376,6 +378,64 @@ export const DEVICE_COORDINATES = {
          },
          linkedin: linkedinForScreen({ width: 390, height: 844 }),
      },
@@ -32,7 +32,8 @@ index 5268334..3159fc1 100644
 +            save: { x: 397, y: 654 },
 +            comment: { x: 397, y: 585 },
 +            followingTab: { x: 173, y: 93 },
-+            homeTab: { x: 44, y: 906 },
++            homeTab: { x: 44, y: 884 },
++            profileTab: { x: 386, y: 884 },
 +            // Camera create · bottom-left Recents thumbnail (from live screenshot).
 +            upload: { x: 57, y: 817 },
 +            // Full-screen Videos/Recents grid (not the old half-sheet tray).
@@ -109,7 +110,7 @@ index cc52d06..3f9ba70 100644
      iphone17pro: {
          passcodeKeypad: { columnX: [110, 205, 295], rowY: [288, 455, 557, 663] },
 diff --git a/src/tiktok/coordinates.ts b/src/tiktok/coordinates.ts
-index 873f810..91b4b90 100644
+index 873f810..db2a0d4 100644
 --- a/src/tiktok/coordinates.ts
 +++ b/src/tiktok/coordinates.ts
 @@ -63,6 +63,23 @@ export const DEVICE_COORDINATES = {
@@ -120,7 +121,7 @@ index 873f810..91b4b90 100644
 +    iphone12promax: {
 +        passcodeKeypad: { columnX: [117, 218, 314], rowY: [305, 482, 590, 702] },
 +        tiktok: {
-+            profileTab: { x: 386, y: 911 }, homeTab: { x: 44, y: 906 }, accountSwitcher: { x: 211, y: 219 },
++            profileTab: { x: 386, y: 884 }, homeTab: { x: 44, y: 884 }, accountSwitcher: { x: 211, y: 219 },
 +            create: { x: 213, y: 889 }, postContent: { x: 213, y: 889 }, upload: { x: 57, y: 817 }, selectMultiple: { x: 27, y: 858 },
 +            useLayout: { x: 27, y: 679 },
 +            picker: { circleX: 70, columnStep: 143, firstY: 241, trayY: 500, rowStep: 143, cellX: 70, cellStep: 143, cellY: 241 },
