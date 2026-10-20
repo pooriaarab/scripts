@@ -7,6 +7,9 @@
 #   phone-farm register <udid>           walk the registration wizard through the REST API
 #   phone-farm run-now <udid> <pluginId> <taskType> <json-payload>
 #   phone-farm stop <executionId>        stop a running execution
+#   phone-farm doctor <udid>             check WDA, its supervisor, and screenshot cropping
+#   phone-farm launch <udid> <bundleId>  open an app with devicectl (WDA activateApp can fail)
+#   phone-farm apply-patch [--check]     apply the iOS 27 farm fixes (phone-farm.d/farm-ios27.patch)
 #
 # Environment:
 #   PHONE_FARM_DIR   checkout of the farm   (default ~/Documents/Personal/phone-farm/kevs-ios-agents)
@@ -22,6 +25,12 @@
 #   - `iphone-wda up` leaves `ios forward 8100` running. It holds the WDA port. `up` removes it.
 #   - macOS has no setsid. Use nohup plus disown.
 #   - Never pipe an endless stream (idevicesyslog) into head. It never exits.
+# Found on an iPhone 12 Pro Max with iOS 27 beta (see phone-farm.d/farm-ios27.patch):
+#   - WDA screenshots can show only the top-left part of the screen. `doctor` detects it.
+#   - WDA activateApp reports foreground while SpringBoard stays on screen. Use `launch`.
+#   - A hand-made WDA session ends the farm's Appium session. Do not make one during a run.
+#   - GET /source on the TikTok feed hangs and stops WDA. Read the screenshot instead.
+#   - The WDA supervisor starts WDA only for a USB phone. After a crash, plug the cable in.
 set -euo pipefail
 
 FARM_DIR="${PHONE_FARM_DIR:-$HOME/Documents/Personal/phone-farm/kevs-ios-agents}"
@@ -215,6 +224,75 @@ cmd_stop() {
   api POST "/api/executions/$id/stop"
 }
 
+# png_size <base64>: print "<width> <height>" of a PNG.
+png_size() { /usr/bin/python3 -I -c "
+import sys, base64, struct
+b = base64.b64decode(sys.stdin.read())
+print(*struct.unpack('>II', b[16:24]))"; }
+
+cmd_doctor() {
+  local udid=${1:?usage: phone-farm doctor <udid>}
+  check_udid "$udid"
+  need_farm
+  local base="http://127.0.0.1:$WDA_PORT" bad=0 screen shot w h sw sh scale
+  if ! curl -s -m 3 "$base/status" | json 'sys.exit(0 if d["value"].get("ready") is True else 1)' 2>/dev/null; then
+    echo "WDA        DOWN at $base"; bad=1
+  else
+    echo "WDA        up at $base"
+    sw="" w=""
+    screen="$(curl -s -m 5 "$base/wda/screen")" || screen=""
+    read -r sw sh scale <<<"$(json 'v = d["value"]; print(v["screenSize"]["width"], v["screenSize"]["height"], v["scale"])' <<<"$screen" 2>/dev/null)" || true
+    shot="$(curl -s -m 20 "$base/screenshot" | json 'print(d["value"])' 2>/dev/null)" || shot=""
+    read -r w h <<<"$(png_size <<<"$shot" 2>/dev/null)" || true
+    if [[ -z "$sw" || -z "$w" ]]; then
+      echo "SCREENSHOT FAILED: no usable /wda/screen or /screenshot reply"; bad=1
+    elif (( w + 8 < sw * scale || h + 8 < sh * scale )); then
+      echo "SCREENSHOT CROPPED: ${w}x${h} px, screen is $((sw * scale))x$((sh * scale)) px"
+      if grep -q padCroppedScreenshot "$FARM_DIR/src/devices/wda-remote.ts" 2>/dev/null; then
+        echo "           the farm pads it (patch applied)"
+      else
+        echo "           run: phone-farm apply-patch"; bad=1
+      fi
+    else
+      echo "SCREENSHOT OK: ${w}x${h} px"
+    fi
+  fi
+  if [[ -n "$(pid_of src/devices/wda/start.ts)" ]]; then
+    echo "supervisor running (pid $(pid_of src/devices/wda/start.ts))"
+  else
+    echo "supervisor NOT running (needs the USB cable to start WDA)"; bad=1
+  fi
+  local devices
+  devices="$(xcrun devicectl list devices 2>/dev/null || true)" # grep -q on a pipe breaks under pipefail
+  if grep -q "$udid" <<<"$devices"; then
+    echo "device     known to devicectl"
+  else
+    echo "device     NOT listed by devicectl"; bad=1
+  fi
+  return $bad
+}
+
+cmd_launch() {
+  local udid=${1:?usage: phone-farm launch <udid> <bundleId>} bundle=${2:?missing bundleId}
+  check_udid "$udid"
+  [[ "$bundle" =~ ^[A-Za-z0-9.-]+$ ]] || die "invalid bundle id: $bundle"
+  xcrun devicectl device process launch --device "$udid" --terminate-existing "$bundle"
+}
+
+cmd_apply_patch() {
+  need_farm
+  local patch check=0
+  patch="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/phone-farm.d/farm-ios27.patch"
+  [[ -f "$patch" ]] || die "missing $patch"
+  [[ "${1:-}" == --check ]] && check=1
+  cd "$FARM_DIR"
+  if git apply --reverse --check "$patch" 2>/dev/null; then echo "patch already applied"; return 0; fi
+  git apply --check "$patch" || die "patch does not apply to $FARM_DIR (the farm moved on, or edits clash)"
+  if [[ $check -eq 1 ]]; then echo "patch applies cleanly"; return 0; fi
+  git apply "$patch"
+  echo "patch applied. Restart the worker if it runs: phone-farm down && phone-farm up"
+}
+
 main() {
   local sub=${1:-}
   [[ $# -gt 0 ]] && shift
@@ -232,7 +310,10 @@ main() {
     register) cmd_register "${rest[@]+"${rest[@]}"}" ;;
     run-now) cmd_run_now "${rest[@]+"${rest[@]}"}" ;;
     stop) cmd_stop "${rest[@]+"${rest[@]}"}" ;;
-    *) sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; [[ -z $sub || $sub == help || $sub == --help ]] || exit 2 ;;
+    doctor) cmd_doctor "${rest[@]+"${rest[@]}"}" ;;
+    launch) cmd_launch "${rest[@]+"${rest[@]}"}" ;;
+    apply-patch) cmd_apply_patch "${rest[@]+"${rest[@]}"}" ;;
+    *) sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; [[ -z $sub || $sub == help || $sub == --help ]] || exit 2 ;;
   esac
 }
 
