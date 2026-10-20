@@ -222,3 +222,9 @@ monitors it found and the last level it sent.
 
 Do not trust `m1ddc ... get luminance` to confirm a write. Through some docks
 it returns a stale value after a write that worked, so look at the screen.
+
+## ble-bridge
+
+Send commands to the ESP32-S3 BLE mouse and keyboard board that controls iPhones.
+`./ble-bridge "list" "@1 home" "@1 click"`. Firmware, pairing and protocol are in
+[private-repo-32ef](https://github.com/pooriaarab/private-repo-32ef) `docs/ble-bridge.md`.
