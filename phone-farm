@@ -235,17 +235,18 @@ cmd_doctor() {
   check_udid "$udid"
   need_farm
   local base="http://127.0.0.1:$WDA_PORT" bad=0 screen shot w h sw sh scale
-  if ! curl -s -m 3 "$base/status" | grep -q ready; then
+  if ! curl -s -m 3 "$base/status" | json 'sys.exit(0 if d["value"].get("ready") is True else 1)' 2>/dev/null; then
     echo "WDA        DOWN at $base"; bad=1
   else
     echo "WDA        up at $base"
-    screen="$(curl -s -m 5 "$base/wda/screen")"
-    sw="$(json 'print(d["value"]["screenSize"]["width"])' <<<"$screen")"
-    sh="$(json 'print(d["value"]["screenSize"]["height"])' <<<"$screen")"
-    scale="$(json 'print(d["value"]["scale"])' <<<"$screen")"
-    shot="$(curl -s -m 20 "$base/screenshot" | json 'print(d["value"])')"
-    read -r w h <<<"$(png_size <<<"$shot")"
-    if (( w + 8 < sw * scale || h + 8 < sh * scale )); then
+    sw="" w=""
+    screen="$(curl -s -m 5 "$base/wda/screen")" || screen=""
+    read -r sw sh scale <<<"$(json 'v = d["value"]; print(v["screenSize"]["width"], v["screenSize"]["height"], v["scale"])' <<<"$screen" 2>/dev/null)" || true
+    shot="$(curl -s -m 20 "$base/screenshot" | json 'print(d["value"])' 2>/dev/null)" || shot=""
+    read -r w h <<<"$(png_size <<<"$shot" 2>/dev/null)" || true
+    if [[ -z "$sw" || -z "$w" ]]; then
+      echo "SCREENSHOT FAILED: no usable /wda/screen or /screenshot reply"; bad=1
+    elif (( w + 8 < sw * scale || h + 8 < sh * scale )); then
       echo "SCREENSHOT CROPPED: ${w}x${h} px, screen is $((sw * scale))x$((sh * scale)) px"
       if grep -q padCroppedScreenshot "$FARM_DIR/src/devices/wda-remote.ts" 2>/dev/null; then
         echo "           the farm pads it (patch applied)"

@@ -162,10 +162,10 @@ index 1338c74..9bdd475 100644
      const elapsedMs = Date.now() - runStartedAt;
 diff --git a/src/tiktok/human-gesture.ts b/src/tiktok/human-gesture.ts
 new file mode 100644
-index 0000000..2d154a8
+index 0000000..d5e9d06
 --- /dev/null
 +++ b/src/tiktok/human-gesture.ts
-@@ -0,0 +1,110 @@
+@@ -0,0 +1,108 @@
 +/**
 + * Human-like next-video swipe.
 + *
@@ -246,15 +246,13 @@ index 0000000..2d154a8
 +        { type: 'pause', duration: 30 + Math.floor(random() * 110) },
 +    ];
 +
-+    let previousProgress = 0;
++    // Time per segment is even and independent of position. Position follows the
++    // speed profile, so segments that cover more distance move faster.
 +    for (let i = 1; i <= segments; i += 1) {
 +        const s = progress(i / segments, skew);
 +        const x = startX + (endX - startX) * s + bow * Math.sin(Math.PI * s);
 +        const y = startY + (endY - startY) * s;
-+        const share = s - previousProgress;
-+        previousProgress = s;
-+        // Time follows the speed profile, with a little noise per segment.
-+        const duration = Math.max(8, Math.round(total * share * (0.9 + random() * 0.2)));
++        const duration = Math.max(8, Math.round((total / segments) * (0.9 + random() * 0.2)));
 +        steps.push({
 +            type: 'pointerMove',
 +            duration,
