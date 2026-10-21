@@ -38,7 +38,7 @@ MAIN_TOP="${MAIN_TOP#worktree }"
 # per-worktree check below can't be fooled by an unrelated repo whose own
 # path merely contains the substring "/worktrees/" (see below).
 COMMON_GITDIR="$(git rev-parse --git-common-dir)"
-COMMON_GITDIR="$(cd "$COMMON_GITDIR" && pwd)"
+COMMON_GITDIR="$(cd "$COMMON_GITDIR" && pwd -P)"
 # Re-anchor our own cwd to the main worktree, which process_worktree never
 # removes. Without this, if $REPO itself is a linked worktree that turns
 # out to be eligible for removal, `git worktree remove` deletes the
@@ -61,8 +61,35 @@ review_list=()
 # worktrees. Track whether it actually succeeded (offline is fine, but if
 # it fails we can't trust a possibly-stale origin/main to prove "merged"
 # after a remote history rewrite).
+#
+# The default branch comes from origin/HEAD, not an assumed `main`.
+DEFBR="$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)"
+DEFBR="${DEFBR#origin/}"
+if [ -z "$DEFBR" ]; then
+  for c in main master; do
+    if git rev-parse --verify --quiet "refs/remotes/origin/$c" >/dev/null; then DEFBR="$c"; break; fi
+  done
+fi
+DEFBR="${DEFBR:-main}"
 FETCH_OK=1
-git fetch origin main --quiet 2>/dev/null || FETCH_OK=0
+git fetch origin "$DEFBR" --quiet 2>/dev/null || FETCH_OK=0
+
+# `gh` guesses the repo from its own default, which can differ from origin (it
+# resolved dishdirectory to directory-template on 2026-10-21). Pass --repo always.
+SLUG=""
+ORIGIN_URL="$(git config --get remote.origin.url 2>/dev/null || true)"
+case "$ORIGIN_URL" in
+  https://github.com/*|git@github.com:*)
+    SLUG="${ORIGIN_URL#https://github.com/}"; SLUG="${SLUG#git@github.com:}"; SLUG="${SLUG%.git}" ;;
+esac
+
+# Directories that hold a running process. Removing one under a live agent breaks it.
+command -v lsof >/dev/null || { echo "error: lsof not found; cannot check for live processes" >&2; exit 1; }
+LIVE_CWDS="$(lsof -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | sort -u)"
+
+# Ignored paths that rebuild on demand. Any other ignored file (.env.local,
+# .dev.vars, keys) may be the only copy, so it sends the worktree to needs-review.
+REGEN_RE='(^|/)(node_modules|\.next|\.open-next|\.turbo|\.wrangler|\.cache|\.parcel-cache|\.pytest_cache|\.venv|__pycache__|dist|build|target|coverage|\.DS_Store)/?$'
 
 # --- Enumerate linked worktrees via porcelain output ---
 # Blocks look like: "worktree <path>", "branch refs/heads/<name>", ...
@@ -70,7 +97,10 @@ current_path=""
 current_branch=""
 process_worktree() {
   [ -n "$current_path" ] || return 0
-  local wt="$current_path" br="$current_branch"
+  # `line` must be local: the status loop below reads into it, and the caller's
+  # loop reuses the same name, so a global would blank the next worktree's path
+  # and skip it without a trace.
+  local line wt="$current_path" br="$current_branch"
   current_path=""; current_branch=""
 
   # Skip the main worktree itself.
@@ -116,25 +146,26 @@ process_worktree() {
   # could be an arbitrarily stale snapshot from before that remote was
   # ever fetched — the same "looks merged against stale history" trap
   # this script already guards against below via FETCH_OK.
-  local intobranch="origin/main"
+  local intobranch="origin/$DEFBR"
   if ! git rev-parse --verify --quiet "$intobranch" >/dev/null; then
     if [ "$FETCH_OK" -eq 0 ] && git remote get-url origin >/dev/null 2>&1; then
-      review_list+=("$wt ($short cannot verify merge: origin is configured but origin/main is unresolvable and the fetch failed; verify manually)")
+      review_list+=("$wt ($short cannot verify merge: origin is configured but $intobranch is unresolvable and the fetch failed; verify manually)")
       needs_review=$((needs_review + 1))
       return 0
-    elif git rev-parse --verify --quiet "refs/heads/main" >/dev/null; then
-      intobranch="main"
-    elif git rev-parse --verify --quiet "refs/heads/master" >/dev/null; then
-      intobranch="master"
+    elif git rev-parse --verify --quiet "refs/heads/$DEFBR" >/dev/null; then
+      intobranch="$DEFBR"
     fi
   fi
-  if git branch --merged "$intobranch" --format='%(refname)' 2>/dev/null | grep -qx "refs/heads/$short"; then
+  local tip
+  tip="$(git -C "$wt" rev-parse HEAD)"
+  if git merge-base --is-ancestor "$tip" "$intobranch" 2>/dev/null; then
     merged=1
-  elif command -v gh >/dev/null 2>&1; then
-    # Fall back to PR state when the local merged test fails.
-    local state
-    state="$(gh pr view "$short" --json state -q .state 2>/dev/null || true)"
-    if [ "$state" = "MERGED" ] || [ "$state" = "CLOSED" ]; then
+  elif [ -n "$SLUG" ] && command -v gh >/dev/null 2>&1; then
+    # Squash and rebase merges leave the tip off the default branch. Accept a
+    # MERGED PR only when its head SHA is the current tip. A closed PR is no
+    # evidence, and commits pushed after the merge are unmerged work.
+    if gh pr list --repo "$SLUG" --head "$short" --state merged \
+         --json headRefOid --jq '.[].headRefOid' 2>/dev/null | grep -qx "$tip"; then
       merged=1
     fi
   fi
@@ -147,15 +178,26 @@ process_worktree() {
   # offline) can't be trusted after a remote history rewrite: the branch
   # may look merged against the old cached ref while current main no
   # longer contains it. Route to needs-review instead of removing.
-  if [ "$intobranch" = "origin/main" ] && [ "$FETCH_OK" -eq 0 ]; then
+  if [ "$intobranch" = "origin/$DEFBR" ] && [ "$FETCH_OK" -eq 0 ]; then
     review_list+=("$wt ($short merged per stale origin/main; fetch failed, verify manually)")
     needs_review=$((needs_review + 1))
     return 0
   fi
 
+  # --- Live process check: an agent may be working here right now ---
+  local wt_real
+  wt_real="$(cd "$wt" && pwd -P)"
+  if printf '%s\n' "$LIVE_CWDS" | awk -v p="$wt_real" '$0 == p || index($0, p "/") == 1 { f = 1 } END { exit !f }'; then
+    skipped_list+=("$wt ($short live process in directory)")
+    skipped=$((skipped + 1))
+    return 0
+  fi
+
   # --- Cleanliness check ---
-  local status real_dirty=0
-  status="$(git -C "$wt" status --porcelain 2>/dev/null || echo "__ERROR__")"
+  # --ignored: plain status hides ignored files such as .env.local, and
+  # `git worktree remove` deletes them with the directory.
+  local status real_dirty=0 ignored_real=0
+  status="$(git -C "$wt" status --porcelain --ignored 2>/dev/null || echo "__ERROR__")"
   if [ "$status" = "__ERROR__" ]; then
     review_list+=("$wt ($short status unreadable)")
     needs_review=$((needs_review + 1))
@@ -171,6 +213,12 @@ process_worktree() {
       [ -n "$line" ] || continue
       # Porcelain v1: XY + space + path (handle renames "old -> new").
       local f="${line:3}"
+      # Ignored entries ("!! path"): regenerable ones are fine, any other is
+      # a file git will not restore, so keep the worktree for review.
+      if [ "${line:0:2}" = "!!" ]; then
+        printf '%s' "$f" | grep -Eq "$REGEN_RE" || ignored_real=1
+        continue
+      fi
       # A rename is never scratch-only: checking just the destination name
       # would let e.g. "important.txt -> BRIEF.md" pass as harmless, and
       # --apply's cleanup below (reset + checkout/rm on the new path alone)
@@ -193,6 +241,11 @@ process_worktree() {
     # Real changes: never delete. Report for manual salvage
     # (commit to a salvage branch and push).
     review_list+=("$wt ($short merged but has real changes)")
+    needs_review=$((needs_review + 1))
+    return 0
+  fi
+  if [ "$ignored_real" -eq 1 ]; then
+    review_list+=("$wt ($short merged but holds ignored files that would be lost, e.g. .env.local)")
     needs_review=$((needs_review + 1))
     return 0
   fi
