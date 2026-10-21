@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+# Install the periodic disk-hygiene sweep on this Mac. Idempotent.
+# Usage: disk-hygiene-install [--print]
+#   --print  write the launchd plist to stdout and change nothing.
+#
+# WHY THIS EXISTS
+# Running disk-hygiene by hand does not keep the disk free, because the problem is that
+# nobody remembers. This installs the launchd agent that remembers: every 6 hours it runs
+# `disk-hygiene --apply`, which prunes merged worktrees and, when free space is short,
+# clears caches that rebuild.
+#
+# TCC: a launchd agent cannot read ~/Documents without Full Disk Access granted by hand,
+# and fails with "Operation not permitted". So the scripts are COPIED to ~/.local/bin rather
+# than symlinked into the repo. The sweep itself still has to read ~/Documents/Personal, so
+# this installer checks for that failure and says what to grant.
+set -euo pipefail
+
+repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+bin_dir="$HOME/.local/bin"
+agent_dir="$HOME/Library/LaunchAgents"
+label="com.pooriaarab.disk-hygiene"
+interval="${DISK_HYGIENE_INTERVAL:-21600}"
+state="$HOME/.local/state/disk-hygiene"
+
+plist() {
+  cat <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>$label</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/bin/bash</string>
+		<string>-lc</string>
+		<string>exec "\$HOME/.local/bin/disk-hygiene" --apply</string>
+	</array>
+	<key>StartInterval</key>
+	<integer>$interval</integer>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>StandardOutPath</key>
+	<string>/tmp/$label.out.log</string>
+	<key>StandardErrorPath</key>
+	<string>/tmp/$label.err.log</string>
+</dict>
+</plist>
+PLIST
+}
+
+if [[ "${1:-}" == "--print" ]]; then plist; exit 0; fi
+
+[[ "$(uname -s)" == "Darwin" ]] || { echo "launchd is macOS-only; on Linux use a systemd timer around 'disk-hygiene --apply'." >&2; exit 2; }
+command -v git >/dev/null || { echo "git not found" >&2; exit 2; }
+command -v lsof >/dev/null || { echo "lsof not found; the prune script needs it" >&2; exit 2; }
+
+mkdir -p "$bin_dir" "$agent_dir" "$state"
+for f in disk-hygiene prune-merged-worktrees.sh; do
+  install -m 0755 "$repo_dir/$f" "$bin_dir/$f"
+  echo "installed $bin_dir/$f"
+done
+
+plist > "$agent_dir/$label.plist"
+launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || true
+launchctl bootstrap "gui/$(id -u)" "$agent_dir/$label.plist"
+echo "loaded $label (every ${interval}s)"
+
+# Verify rather than trust: bootstrap succeeds for an agent that then dies. RunAtLoad starts a
+# run now. Wait for it to log a finish line, or for macOS to refuse the read.
+rm -f "/tmp/$label.err.log"
+launchctl kickstart -k "gui/$(id -u)/$label" 2>/dev/null || true
+for _ in $(seq 1 60); do
+  if grep -q ' done ' "$state/log" 2>/dev/null && [[ -n "$(find "$state/log" -mmin -1 2>/dev/null)" ]]; then
+    echo "disk-hygiene agent healthy. Last run:"; tail -n 3 "$state/log"; exit 0
+  fi
+  if grep -qi 'operation not permitted' "/tmp/$label.err.log" "/tmp/$label.out.log" 2>/dev/null; then
+    echo "FAILED: macOS blocked the sweep from reading ~/Documents." >&2
+    echo "Grant /bin/bash Full Disk Access: System Settings > Privacy & Security > Full Disk Access," >&2
+    echo "add /bin/bash, then run this installer again." >&2
+    exit 1
+  fi
+  sleep 2
+done
+echo "FAILED: no finish line in $state/log after 2 minutes. Check /tmp/$label.err.log." >&2
+exit 1
