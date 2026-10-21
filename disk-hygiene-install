@@ -70,7 +70,7 @@ echo "loaded $label (every ${interval}s)"
 # run now. Wait for it to log a finish line, or for macOS to refuse the read.
 rm -f "$state/launchd.err.log"
 launchctl kickstart -k "gui/$(id -u)/$label" 2>/dev/null || true
-for _ in $(seq 1 60); do
+for _ in $(seq 1 150); do
   if grep -q ' done ' "$state/log" 2>/dev/null && [[ -n "$(find "$state/log" -mmin -1 2>/dev/null)" ]]; then
     echo "disk-hygiene agent healthy. Last run:"; tail -n 3 "$state/log"; exit 0
   fi
@@ -82,5 +82,5 @@ for _ in $(seq 1 60); do
   fi
   sleep 2
 done
-echo "FAILED: no finish line in $state/log after 2 minutes. Check $state/launchd.err.log." >&2
+echo "FAILED: no finish line in $state/log after 5 minutes. Check $state/launchd.err.log." >&2
 exit 1
