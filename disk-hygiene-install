@@ -41,9 +41,9 @@ plist() {
 	<key>RunAtLoad</key>
 	<true/>
 	<key>StandardOutPath</key>
-	<string>/tmp/$label.out.log</string>
+	<string>$state/launchd.out.log</string>
 	<key>StandardErrorPath</key>
-	<string>/tmp/$label.err.log</string>
+	<string>$state/launchd.err.log</string>
 </dict>
 </plist>
 PLIST
@@ -68,13 +68,13 @@ echo "loaded $label (every ${interval}s)"
 
 # Verify rather than trust: bootstrap succeeds for an agent that then dies. RunAtLoad starts a
 # run now. Wait for it to log a finish line, or for macOS to refuse the read.
-rm -f "/tmp/$label.err.log"
+rm -f "$state/launchd.err.log"
 launchctl kickstart -k "gui/$(id -u)/$label" 2>/dev/null || true
 for _ in $(seq 1 60); do
   if grep -q ' done ' "$state/log" 2>/dev/null && [[ -n "$(find "$state/log" -mmin -1 2>/dev/null)" ]]; then
     echo "disk-hygiene agent healthy. Last run:"; tail -n 3 "$state/log"; exit 0
   fi
-  if grep -qi 'operation not permitted' "/tmp/$label.err.log" "/tmp/$label.out.log" 2>/dev/null; then
+  if grep -qi 'operation not permitted' "$state/launchd.err.log" "$state/launchd.out.log" 2>/dev/null; then
     echo "FAILED: macOS blocked the sweep from reading ~/Documents." >&2
     echo "Grant /bin/bash Full Disk Access: System Settings > Privacy & Security > Full Disk Access," >&2
     echo "add /bin/bash, then run this installer again." >&2
@@ -82,5 +82,5 @@ for _ in $(seq 1 60); do
   fi
   sleep 2
 done
-echo "FAILED: no finish line in $state/log after 2 minutes. Check /tmp/$label.err.log." >&2
+echo "FAILED: no finish line in $state/log after 2 minutes. Check $state/launchd.err.log." >&2
 exit 1

@@ -40,6 +40,7 @@ done
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOTS="${DISK_HYGIENE_ROOTS:-$HOME/Documents/Personal}"
 THRESHOLD="${DISK_HYGIENE_THRESHOLD_GIB:-200}"
+[[ "$THRESHOLD" =~ ^[0-9]+$ ]] || { echo "error: DISK_HYGIENE_THRESHOLD_GIB must be a whole number, got: $THRESHOLD" >&2; exit 2; }
 PRUNE="${DISK_HYGIENE_PRUNE:-$here/prune-merged-worktrees.sh}"
 STATE="$HOME/.local/state/disk-hygiene"
 LOG="${DISK_HYGIENE_LOG:-$STATE/log}"
@@ -52,8 +53,21 @@ else VOLUME=/; fi
 mkdir -p "$(dirname "$LOG")" "$(dirname "$LOCK")"
 
 # A run can outlast the launchd interval. Two runs would race on the same worktrees.
-if ! mkdir "$LOCK" 2>/dev/null; then echo "another disk-hygiene run holds $LOCK; skipping"; exit 0; fi
-trap 'rmdir "$LOCK" 2>/dev/null || true' EXIT
+# The lock holds its owner's pid. A run killed by SIGKILL or a reboot never runs its EXIT
+# trap, and a lock that nobody owns would skip every later run in silence, so reclaim a
+# lock whose pid is dead. A lock with no pid file is treated as held: its owner may still
+# be between mkdir and writing the pid.
+if ! mkdir "$LOCK" 2>/dev/null; then
+  holder="$(cat "$LOCK/pid" 2>/dev/null || true)"
+  if [[ -z "$holder" ]] || kill -0 "$holder" 2>/dev/null; then
+    echo "another disk-hygiene run holds $LOCK; skipping"; exit 0
+  fi
+  echo "reclaiming stale lock $LOCK (pid $holder is gone)"
+  rm -rf "$LOCK"
+  mkdir "$LOCK" 2>/dev/null || { echo "another disk-hygiene run took $LOCK; skipping"; exit 0; }
+fi
+echo "$$" > "$LOCK/pid"
+trap 'rm -rf "$LOCK"' EXIT
 
 free_gib() {
   if [[ -n "${DISK_HYGIENE_FREE_GIB:-}" ]]; then echo "$DISK_HYGIENE_FREE_GIB"; return; fi

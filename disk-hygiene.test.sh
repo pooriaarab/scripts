@@ -10,11 +10,13 @@
 #   4  free space above the threshold               -> caches untouched
 #   5  free space below the threshold, --apply      -> caches cleared (tools + Xcode dirs)
 #   6  free space below the threshold, dry run      -> caches untouched (same run as 1)
-#   7  still below the threshold after cleaning     -> exit 3 (a warning, not a crash)
+#   7  still below the threshold after cleaning     -> status 3 (a warning, not a crash)
 #   8  the log records free space before and after  -> asserted
 #   9  a run already holds the lock                 -> second run does nothing, exits 0
 #  10  the prune script is missing                  -> loud failure, nonzero exit
 #  11  the installer's plist                        -> valid, runs --apply, 6-hour interval
+#  12  a lock whose owner died (SIGKILL)           -> reclaimed, the run proceeds
+#  13  a non-numeric threshold                      -> status 2, nothing removed
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -97,17 +99,29 @@ if [[ -s "$CALL_LOG" ]] && grep -q '^npm cache clean' "$CALL_LOG" && grep -q '^b
    && [[ ! -e "$derived" ]] && [[ ! -e "$HOME/Library/Developer/Xcode/iOS DeviceSupport/17.0" ]] \
    && [[ ! -e "$HOME/Library/Caches/ms-playwright/chromium" ]]; then cleared=0; fi
 check "5 below the threshold caches are cleared" "$cleared"
-check "7 still below the threshold after cleaning exits 3" "$([[ "$(rc)" -eq 3 ]] && echo 0 || echo 1)"
+check "7 still below the threshold after cleaning reports status 3" "$([[ "$(rc)" -eq 3 ]] && echo 0 || echo 1)"
 check "8 the log records free space before and after" "$(grep -q 'free_before_gib=10' "$DISK_HYGIENE_LOG" && grep -q 'free_after_gib=' "$DISK_HYGIENE_LOG" && echo 0 || echo 1)"
 
 # 9: with the lock held, a new merged worktree must survive a run
 gitq -C "$tmp/rootA/alpha" worktree add -q "$tmp/wt-late" -b late
 (cd "$tmp/wt-late" && echo l > l && gitq add l && gitq commit -qm l)
 (cd "$tmp/rootA/alpha" && gitq merge -q --ff-only late && gitq push -q origin main)
-mkdir -p "$DISK_HYGIENE_LOCK"
+mkdir -p "$DISK_HYGIENE_LOCK"; echo "$$" > "$DISK_HYGIENE_LOCK/pid"   # this shell is alive
 DISK_HYGIENE_FREE_GIB=500 run --apply
-check "9 a held lock stops a second run" "$([[ "$(rc)" -eq 0 ]] && alive late && echo 0 || echo 1)"
-rmdir "$DISK_HYGIENE_LOCK"
+check "9 a lock held by a live pid stops a second run" "$([[ "$(rc)" -eq 0 ]] && alive late && echo 0 || echo 1)"
+
+# 12: the owner was SIGKILLed, so its EXIT trap never ran and the lock stayed behind
+sleep 30 & dead=$!; kill -9 "$dead"; wait "$dead" 2>/dev/null || true
+echo "$dead" > "$DISK_HYGIENE_LOCK/pid"
+DISK_HYGIENE_FREE_GIB=500 run --apply
+check "12 a lock whose owner died is reclaimed and the run proceeds" "$([[ "$(rc)" -eq 0 ]] && ! alive late && grep -q 'reclaiming stale lock' "$tmp/out" && [[ ! -e "$DISK_HYGIENE_LOCK" ]] && echo 0 || echo 1)"
+
+# 13: a bad threshold must stop the run before it touches anything
+gitq -C "$tmp/rootA/alpha" worktree add -q "$tmp/wt-later" -b later
+(cd "$tmp/wt-later" && echo z > z && gitq add z && gitq commit -qm z)
+(cd "$tmp/rootA/alpha" && gitq merge -q --ff-only later && gitq push -q origin main)
+DISK_HYGIENE_THRESHOLD_GIB=lots DISK_HYGIENE_FREE_GIB=500 run --apply
+check "13 a non-numeric threshold reports status 2 and removes nothing" "$([[ "$(rc)" -eq 2 ]] && alive later && echo 0 || echo 1)"
 
 # 10: missing prune script
 DISK_HYGIENE_PRUNE="$tmp/nope.sh" DISK_HYGIENE_FREE_GIB=500 run --apply
