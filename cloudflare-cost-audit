@@ -1,0 +1,175 @@
+#!/usr/bin/env python3
+"""Read D1 inventory and row analytics. Never run SQL or change resources."""
+import argparse
+import datetime as dt
+import json
+import os
+from pathlib import Path
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+
+API = 'https://api.cloudflare.com/client/v4'
+QUERY = '''query($account: string!, $start: Date!, $end: Date!) {
+  viewer { accounts(filter: {accountTag: $account}) {
+    d1AnalyticsAdaptiveGroups(limit: 10000,
+      filter: {date_geq: $start, date_leq: $end},
+      orderBy: [sum_rowsRead_DESC]) {
+      dimensions {databaseId}
+      sum {rowsRead rowsWritten readQueries writeQueries}
+    }
+  }}
+}'''
+
+
+class AuditError(Exception):
+    pass
+
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        raise AuditError('API redirect refused')
+
+
+class Collector:
+    def __init__(self, account, token, output):
+        self.account, self.token, self.output = account, token, output
+        self.opener = urllib.request.build_opener(NoRedirect)
+        self.requests = 0
+
+    def request(self, path, body=None):
+        self.requests += 1
+        request = urllib.request.Request(API + path,
+            headers={'Authorization': 'Bearer ' + self.token,
+                     'Content-Type': 'application/json'},
+            data=json.dumps(body).encode() if body else None)
+        try:
+            with self.opener.open(request, timeout=60) as response:
+                data = json.load(response)
+        except urllib.error.HTTPError as error:
+            raise AuditError(f'API HTTP {error.code}') from None
+        except (ValueError, OSError):
+            raise AuditError('API network or JSON failure') from None
+        if not isinstance(data, dict):
+            raise AuditError('API response is not an object')
+        if data.get('errors') or data.get('success') is False:
+            raise AuditError('API returned errors; check token permissions and dates')
+        self.save(f'response-{self.requests:04}.json', data)
+        return data
+
+    def save(self, name, value):
+        # Output directory is new and private; do not follow existing files.
+        with (self.output / name).open('x', encoding='utf-8') as target:
+            os.chmod(target.name, 0o600)
+            json.dump(value, target, indent=2)
+            target.write('\n')
+
+    def inventory(self):
+        result, seen, expected_total = [], set(), None
+        for page in range(1, 10001):
+            data = self.request(f'/accounts/{self.account}/d1/database?'
+                                + urllib.parse.urlencode({'page': page, 'per_page': 100}))
+            rows = data.get('result')
+            info = data.get('result_info', {})
+            if not isinstance(rows, list):
+                raise AuditError('Inventory result is not a list')
+            total = info.get('total_count')
+            if expected_total is not None and total != expected_total:
+                raise AuditError('Inventory total changed; repeat the snapshot')
+            expected_total = total
+            for row in rows:
+                key = row.get('uuid')
+                if not key or key in seen:
+                    raise AuditError('Missing or repeated database ID; inventory incomplete')
+                seen.add(key)
+                result.append(row)
+            if total is not None:
+                if not isinstance(total, int) or total < len(result):
+                    raise AuditError('Inventory total changed; repeat the snapshot')
+                if len(result) == total:
+                    return result
+            if not rows:
+                if total is not None:
+                    raise AuditError('Empty page before inventory total')
+                return result
+            # An API can silently cap per_page. Continue until total or empty.
+        raise AuditError('Inventory page limit reached')
+
+    def analytics(self, start, end):
+        data = self.request('/graphql', {'query': QUERY, 'variables': {
+            'account': self.account, 'start': start, 'end': end}})
+        try:
+            accounts = data['data']['viewer']['accounts']
+            if len(accounts) != 1:
+                raise AuditError('Expected exactly one analytics account')
+            groups = accounts[0]['d1AnalyticsAdaptiveGroups']
+            if len(groups) >= 10000:
+                raise AuditError('Analytics limit reached; narrow the interval')
+            seen = set()
+            for group in groups:
+                key = group['dimensions']['databaseId']
+                if not key or key in seen:
+                    raise AuditError('Repeated or missing analytics database ID')
+                seen.add(key)
+                for metric in ('rowsRead', 'rowsWritten', 'readQueries', 'writeQueries'):
+                    value = group['sum'][metric]
+                    if type(value) is not int or value < 0:
+                        raise AuditError('Missing or invalid analytics metric')
+            return groups
+        except (KeyError, TypeError):
+            raise AuditError('Incomplete analytics response') from None
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--billing', action='store_true', help='Also save raw current-period billable usage; no invoice total')
+    parser.add_argument('--start', required=True, help='First UTC date, YYYY-MM-DD (inclusive)')
+    parser.add_argument('--end', required=True, help='Last UTC date, YYYY-MM-DD (inclusive)')
+    parser.add_argument('--output', required=True, type=Path, help='New private directory outside Git')
+    args = parser.parse_args()
+    try:
+        start, end = dt.date.fromisoformat(args.start), dt.date.fromisoformat(args.end)
+        if start > end:
+            raise AuditError('Start date follows end date')
+        account = os.environ.get('CLOUDFLARE_ACCOUNT_ID', '')
+        token = os.environ.get('CLOUDFLARE_API_TOKEN', '')
+        if not account or not token:
+            raise AuditError('Set CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN')
+        if not all(char.isalnum() for char in account):
+            raise AuditError('Account ID must contain only letters and digits')
+        args.output.mkdir(mode=0o700, parents=False, exist_ok=False)
+        collector = Collector(account, token, args.output)
+        inventory = collector.inventory()
+        analytics = collector.analytics(args.start, args.end)
+        if args.billing:
+            billing = collector.request(f'/accounts/{account}/billable-usage')
+            if not isinstance(billing.get('result'), list):
+                raise AuditError('Billing result is not a list')
+            collector.save('billing-current-period.json', billing)
+        names = {row['uuid']: row.get('name') for row in inventory}
+        ranked = sorted([dict(databaseId=row['dimensions']['databaseId'],
+            name=names.get(row['dimensions']['databaseId']), **row['sum'])
+            for row in analytics], key=lambda row: row['rowsRead'], reverse=True)
+        collector.save('inventory.json', inventory)
+        collector.save('ranked.json', ranked)
+        summary = {'start': args.start, 'end': args.end, 'complete': True,
+            'collectedAt': dt.datetime.now(dt.timezone.utc).isoformat(),
+            'billingSnapshot': args.billing, 'inventorySnapshot': 'nontransactional',
+            'databaseCount': len(inventory), 'databasesWithActivity': len(ranked),
+            'historicalDatabaseCount': sum(row['databaseId'] not in names for row in ranked),
+            'rowsRead': sum(row['rowsRead'] for row in ranked),
+            'rowsWritten': sum(row['rowsWritten'] for row in ranked),
+            'scope': 'D1 inventory and row analytics only; not an invoice or full account audit'}
+        collector.save('summary.json', summary)
+        print(json.dumps(summary, indent=2))
+    except (AuditError, ValueError, OSError) as error:
+        # Never echo account API bodies or headers into logs.
+        message = str(error) if isinstance(error, AuditError) else 'Invalid date or output path'
+        print('error: ' + message, file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())
