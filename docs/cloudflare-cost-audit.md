@@ -43,3 +43,6 @@ The fixture runs the executable through its CLI against a local HTTP server.
 Sources: [D1 inventory](https://developers.cloudflare.com/api/resources/d1/subresources/database/methods/list/),
 [D1 billing metrics](https://developers.cloudflare.com/d1/observability/billing/),
 [billable usage](https://developers.cloudflare.com/api/resources/billing/subresources/usage/methods/paygo/).
+
+For temporary experiments outside this read-only command, follow the
+[bounded cleanup contract](cloudflare-cleanup-deadlines.md).
