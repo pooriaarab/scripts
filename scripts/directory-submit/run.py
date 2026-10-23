@@ -73,7 +73,8 @@ def main():
             res = run_one(mod, site, args.retries)
         except lib.RateLimited as e:
             retry = (datetime.date.today() + datetime.timedelta(days=mod.RETRY_DAYS)).isoformat()
-            ledger.record(mod.TARGET, site, "blocked", f"rate limit: {e}", retry_after=retry)
+            if not args.dry_run:
+                ledger.record(mod.TARGET, site, "blocked", f"rate limit: {e}", retry_after=retry)
             print(f"{site}: RATE LIMITED, blocked until {retry}; stopping")
             return 3
         except lib.DriverFail as e:
