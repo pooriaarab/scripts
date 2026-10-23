@@ -47,7 +47,7 @@ def record(target, site, status, note, retry_after="", today=None):
     p.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=p.parent, suffix=".csv")
     with os.fdopen(fd, "w", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=COLS)
+        w = csv.DictWriter(f, fieldnames=COLS, lineterminator="\n")
         w.writeheader()
         w.writerows(rows)
     os.replace(tmp, p)

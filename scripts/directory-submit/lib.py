@@ -127,6 +127,16 @@ def find(snapshot, pattern):
     return m.group(1) if m else None
 
 
+def refs(snapshot, pattern):
+    """Refs of every line that matches pattern, in page order. For fields with no accessible name."""
+    out = []
+    for ln in snapshot.split("\n"):
+        m = re.search(r"ref=(e\d+)", ln)
+        if m and re.search(pattern, ln):
+            out.append(m.group(1))
+    return out
+
+
 def must(snapshot, pattern):
     ref = find(snapshot, pattern)
     if not ref:
@@ -154,6 +164,19 @@ def fill(snapshot, pattern, value):
     b("fill", "@" + must(snapshot, pattern), value)
 
 
+def select(index, label):
+    """Pick an option of the index-th <select> by its text or value, with the native setter
+    and real events, so a React form sees it. Raises if the page does not hold it afterwards."""
+    js = ("(()=>{const s=document.querySelectorAll('select')[%d];const L=%s;"
+          "const o=[...s.options].find(o=>o.textContent.trim()===L||o.value===L);if(!o)return 'NO-OPTION';"
+          "Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'value').set.call(s,o.value);"
+          "s.dispatchEvent(new Event('input',{bubbles:true}));s.dispatchEvent(new Event('change',{bubbles:true}));"
+          "return 'OK:'+s.value})()") % (index, json.dumps(label))
+    out = b("eval", js)
+    if "OK:" not in out:
+        raise DriverFail(f"select {index} did not take {label!r}: {out.strip()[:80]}")
+
+
 def click(ref):
     wake()
     return b("click", "@" + ref)
@@ -173,8 +196,22 @@ def go(url, wait=5):
     wake()
 
 
+def ev(js):
+    """Run JavaScript on the page. Returns the decoded result, with the tool's status lines removed."""
+    out = "\n".join(l for l in b("eval", js).split("\n") if not l.startswith("✓")).strip()
+    try:
+        return json.loads(out)
+    except ValueError:
+        return out
+
+
 def text(n=1500, start=0):
-    return b("eval", f"document.body.innerText.slice({start},{start + n})")
+    return str(ev(f"document.body.innerText.slice({start},{start + n})"))
+
+
+def say(page, n=140):
+    """One line of page text, for a proof or reason column."""
+    return " ".join(page.split())[:n]
 
 
 def current_url():
@@ -193,3 +230,82 @@ def gog(*args):
             continue
         return r.stdout
     raise DriverFail("Gmail API rate limit did not clear")
+
+
+def newest_message(query):
+    """Text of the newest message of the newest thread for a query, or ''. Mail with the same subject
+    joins one thread, so the last message of that thread is the new one."""
+    try:
+        threads = json.loads(gog("--gmail-no-send", "gmail", "search", query, "--max", "1", "--json")).get("threads", [])
+    except ValueError:
+        return ""
+    if not threads:
+        return ""
+    body = gog("--gmail-no-send", "gmail", "thread", "get", threads[0]["id"])
+    return body.split("=== Message ")[-1]
+
+
+def mail_link(query, pattern, before, tries=20, delay=6):
+    """First URL that matches pattern in the newest message for a Gmail query, once the message count
+    passes `before` (take mail_count(query) before the action that sends the mail).
+    Never prints the URL: it may hold a token."""
+    for _ in range(tries):
+        if mail_count(query) > before:
+            for url in re.findall(r"https?://[^\s<>\"')\]]+", newest_message(query)):
+                if re.search(pattern, url):
+                    return url
+        time.sleep(delay)
+    raise DriverFail(f"no new mail for {query!r} with a link matching {pattern!r}")
+
+
+# Accounts
+
+ACCOUNTS_FILE = Path(os.environ.get("DIRSUB_ACCOUNTS", "~/.secrets/directory-submission-accounts.env")).expanduser()
+
+
+def account(board):
+    """(email, password) for a board. The first call makes a random password and saves a
+    `board|email|password` line in ACCOUNTS_FILE (mode 0600). Nothing here prints a password."""
+    import secrets
+    import string
+    if ACCOUNTS_FILE.exists():
+        for ln in ACCOUNTS_FILE.read_text().splitlines():
+            name, _, rest = ln.partition("|")
+            email, _, pw = rest.partition("|")
+            if name == board and pw:
+                return email, pw
+    alphabet = string.ascii_letters + string.digits
+    pw = "".join(secrets.choice(alphabet) for _ in range(18)) + "!7"
+    fd = os.open(ACCOUNTS_FILE, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    os.write(fd, f"{board}|{CONTACT_EMAIL}|{pw}\n".encode())
+    os.close(fd)
+    return CONTACT_EMAIL, pw
+
+
+def type_secret(ref, value):
+    """Fill a password field. The value goes to the browser and is never echoed."""
+    r = subprocess.run(["zsh", "-ic", f"{BROWSER} fill @{ref} {shlex.quote(value)}"], capture_output=True, text=True)
+    if "Done" not in r.stdout:
+        raise DriverFail("password field did not take the value")
+
+
+def mail_count(query):
+    """Number of messages in all threads that match a query. A new mail with the same subject joins
+    an old thread, so compare this count before and after an action instead of thread ids."""
+    try:
+        threads = json.loads(gog("--gmail-no-send", "gmail", "search", query, "--max", "20", "--json")).get("threads", [])
+    except ValueError:
+        return -1
+    return sum(t.get("messageCount", 1) for t in threads)
+
+
+def mail_pin(query, pattern, before, tries=20, delay=6):
+    """First match of the regex `pattern` (group 1) in the newest message for a query: a verification
+    PIN or code. Waits until mail_count(query) passes `before`."""
+    for _ in range(tries):
+        if mail_count(query) > before:
+            m = re.search(pattern, newest_message(query), re.S)
+            if m:
+                return m.group(1)
+        time.sleep(delay)
+    raise DriverFail(f"no new mail for {query!r} with a code matching {pattern!r}")
