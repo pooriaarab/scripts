@@ -46,3 +46,26 @@ Sources: [D1 inventory](https://developers.cloudflare.com/api/resources/d1/subre
 
 For temporary experiments outside this read-only command, follow the
 [bounded cleanup contract](cloudflare-cleanup-deadlines.md).
+
+
+## Measure a proposed batch
+
+Fewer database calls can accompany more billable reads. Measure both effects.
+
+1. Capture D1 row counters for statements called through `.run()`, `.first()`,
+   `.all()`, and every `.batch()` result. Do not assume each return type exposes
+   metadata; instrument the underlying execution when needed.
+2. Record calls, statements, reads, writes, R2 PUTs, and result correctness
+   separately. Keep per-statement counters to locate expensive work.
+3. Pin the source and payload. Use the same engine, data size, cleanup behavior,
+   and changed content in both arms. Reject an unintended deduplicated workload.
+4. Warm both arms, alternate paired runs, and retain every sample and failure.
+   Record medians, tails, uncertainty, and overlapping work that limits timing.
+5. Inspect the actual query plan when reads grow. A materialized candidate set
+   can still be scanned once for each outer tenant row. Measure join-order
+   alternatives with unchanged authorization predicates and accounting checks.
+6. Recheck source identity after collection. Separate local service timings
+   from HTTP latency, production observations, and invoice savings.
+
+A read-cost reduction can trade away latency. Report the tradeoff before promotion.
+Keep failed attempts as failures, even when later cleanup proves absence.
