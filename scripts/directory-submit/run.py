@@ -61,7 +61,11 @@ def main():
     mod = importlib.import_module(f"drivers.{args.driver}")
     sites = args.sites.split(",") if args.sites else all_sites()
     if args.confirm:
-        mod.confirm(sites)
+        try:
+            mod.confirm(sites)
+        except lib.DriverFail as e:
+            print(f"FAIL {e}", file=sys.stderr)
+            return 1
         return 0
     todo = sites if args.dry_run else ledger.pending(mod.TARGET, sites)
     delay = mod.DELAY if args.delay is None else args.delay
