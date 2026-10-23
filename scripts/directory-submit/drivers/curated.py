@@ -29,7 +29,7 @@ def submit(site, p):
     if not final_click(ref):
         return Result("skipped", "dry run")
     time.sleep(6)
-    page = text(900)
+    page = text(3000)
     if "it's in the queue" in page:
         return Result("submitted", "curated.design/submit: \"Thanks, it's in the queue.\" (free queue, a person reads each entry, a few weeks)")
     if "Send the rest tomorrow" in page:
