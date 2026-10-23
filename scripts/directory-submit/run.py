@@ -4,7 +4,8 @@
   python3 run.py <driver> [--sites a,b,c] [--delay SECONDS] [--retries N]
                  [--dry-run] [--confirm]
 
-<driver> is a module in drivers/. It sets TARGET (the catalog name), DELAY
+<driver> is a module in drivers/. It sets TARGET (the catalog name), an optional
+SITES list (the sites that fit the board; the default is every site), DELAY
 (seconds between sites), RETRY_DAYS (days to wait after a rate limit) and
 defines submit(site, packet) -> Result. A driver may also define
 confirm(sites) for a second step that needs the inbox.
@@ -59,7 +60,9 @@ def main():
         os.environ["DIRSUB_DRY_RUN"] = "1"
 
     mod = importlib.import_module(f"drivers.{args.driver}")
-    sites = args.sites.split(",") if args.sites else all_sites()
+    sites = args.sites.split(",") if args.sites else (getattr(mod, "SITES", None) or all_sites())
+    if getattr(mod, "SITES", None):  # never file a site the driver does not fit
+        sites = [s for s in sites if s in mod.SITES]
     if args.confirm:
         mod.confirm(sites)
         return 0
@@ -77,7 +80,7 @@ def main():
                 ledger.record(mod.TARGET, site, "blocked", f"rate limit: {e}", retry_after=retry)
             print(f"{site}: RATE LIMITED, blocked until {retry}; stopping")
             return 3
-        except lib.DriverFail as e:
+        except Exception as e:  # DriverFail or a driver bug: record nothing, go on to the next site
             failures += 1
             print(f"{site}: FAIL {e}", file=sys.stderr)
             continue
