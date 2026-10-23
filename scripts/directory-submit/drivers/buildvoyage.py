@@ -2,7 +2,9 @@
 The board returns HTTP 429 after about 9 submissions in 70 minutes.
 `run.py buildvoyage --confirm` clicks the emailed links and records the result."""
 import re
+import sys
 import time
+from urllib.parse import urlparse
 
 import ledger
 from lib import (DriverFail, RateLimited, Result, asset, b, click, fill, final_click, find, fit, go, gog,
@@ -57,10 +59,13 @@ def submit(site, p):
 
 
 def confirm(sites):
-    """Click every emailed BuildVoyage confirm link and record the sites it confirms."""
-    names = {packet(s)["name"]: s for s in sites}
+    """Click every emailed BuildVoyage confirm link and record the sites it confirms.
+    A row is written only when the confirmation page shows the site name or its host.
+    A page that shows neither raises DriverFail after the other links are done."""
+    packets = {packet(s)["name"]: packet(s) for s in sites}
     out = gog("gmail", "search", "from:updates.buildvoyage.com subject:Confirm newer_than:1d", "--max", "40")
     done = set()
+    wrong = []
     for row in out.strip().split("\n")[1:]:
         if not row.strip():
             continue
@@ -68,7 +73,7 @@ def confirm(sites):
         link = re.search(r"https://buildvoyage\.com/submit/verify/[A-Za-z0-9]+", thread)
         subject = re.search(r"Subject: Confirm your BuildVoyage submission: (.*)", thread)
         name = subject.group(1).strip() if subject else ""
-        if not link or name in done or name not in names:
+        if not link or name in done or name not in packets:
             continue
         done.add(name)
         go(link.group(0))
@@ -78,7 +83,15 @@ def confirm(sites):
             continue
         click(button)
         time.sleep(5)
-        site = names[name]
-        ledger.record(TARGET, site, "submitted",
-                      f"https://buildvoyage.com/products/{site} (email confirmed, under review, free 48 hour review)")
+        p = packets[name]
+        page = text(1500).lower()
+        if name.lower() not in page and urlparse(p["url"]).netloc.lower() not in page:
+            wrong.append(name)
+            print(f"{name}: confirmation page shows neither the site name nor {urlparse(p['url']).netloc}; no ledger row",
+                  file=sys.stderr)
+            continue
+        ledger.record(TARGET, p["site"], "submitted",
+                      f"https://buildvoyage.com/products/{p['site']} (email confirmed, under review, free 48 hour review)")
         print(f"{name}: confirmed")
+    if wrong:
+        raise DriverFail("confirmation page did not match the packet for: " + ", ".join(wrong))
