@@ -49,5 +49,5 @@ Stop the independent process only after complete absence is verified.
 Keep failed attempts beside the final result.
 
 For container experiments, use the
-[Cloudflare cost audit skill](https://github.com/pooriaarab/skills/blob/main/cloudflare-cost-audit/SKILL.md).
+installed `cloudflare-cost-audit` skill.
 Skipped dispatch, actual sleep, and billed usage are separate measurements.
