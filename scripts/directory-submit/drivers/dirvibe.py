@@ -47,7 +47,7 @@ def submit(site, p):
     time.sleep(3)
     s = snap()
     if "disabled" in line(s, r'button "Next"'):
-        raise DriverFail("step 2 Next disabled after uploads: " + say(ev("document.body.innerText.match(/Logo[\\s\\S]{0,200}/)?.[0] or ''"), 200))
+        raise DriverFail("step 2 Next disabled after uploads: " + say(ev("document.body.innerText.match(/Logo[\\s\\S]{0,200}/)?.[0] ?? ''"), 200))
     click(must(s, r'button "Next"'))
     time.sleep(2)
     for lab in (CAT[KIND[site]], "Web", "API", "Free"):
