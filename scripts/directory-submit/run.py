@@ -33,8 +33,9 @@ import lib  # noqa: E402
 
 def all_sites():
     root = lib.REPO / "sites"
+    from drivers.common import FLEET
     return sorted(d.name for d in root.iterdir()
-                  if not d.name.startswith("_") and (d / "data" / "submission.json").exists())
+                  if d.name in FLEET and (d / "data" / "submission.json").exists())
 
 
 def run_one(mod, site, retries):
@@ -76,13 +77,16 @@ def main():
             res = run_one(mod, site, args.retries)
         except lib.RateLimited as e:
             retry = (datetime.date.today() + datetime.timedelta(days=mod.RETRY_DAYS)).isoformat()
-            if not args.dry_run:
+            if not args.dry_run and not os.environ.get("DIRSUB_DEFER_LIMIT"):
                 ledger.record(mod.TARGET, site, "blocked", f"rate limit: {e}", retry_after=retry)
             print(f"{site}: RATE LIMITED, blocked until {retry}; stopping")
             return 3
         except Exception as e:  # DriverFail or a driver bug: record nothing, go on to the next site
             failures += 1
             print(f"{site}: FAIL {e}", file=sys.stderr)
+            if failures >= 2 and failures == i + 1:
+                print("two failures at the start; stopping", file=sys.stderr)
+                return 1
             continue
         if not args.dry_run:
             ledger.record(mod.TARGET, site, res.status, res.note)
