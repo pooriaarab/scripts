@@ -34,6 +34,6 @@ def submit(site, p):
     time.sleep(6)
     url = current_url()
     page = text(1500)
-    if "/submit" not in url or re.search(p["name"], page):
+    if "/submit" not in url or re.search(re.escape(p["name"]), page):
         return Result("live", f"{url.split('?')[0]}: public startup page '{p['name']}' LIVE")
     raise DriverFail("no confirmation: " + say(page, 300))
