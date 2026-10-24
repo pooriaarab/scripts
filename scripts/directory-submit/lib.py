@@ -241,7 +241,7 @@ def newest_message(query):
         return ""
     if not threads:
         return ""
-    body = gog("--gmail-no-send", "gmail", "thread", "get", threads[0]["id"])
+    body = gog("--gmail-no-send", "gmail", "thread", "get", threads[0]["id"], "--full")
     return body.split("=== Message ")[-1]
 
 
@@ -309,3 +309,73 @@ def mail_pin(query, pattern, before, tries=20, delay=6):
                 return m.group(1)
         time.sleep(delay)
     raise DriverFail(f"no new mail for {query!r} with a code matching {pattern!r}")
+
+
+def set_text(selector, value):
+    """Set a textarea or input by CSS selector with the native setter and real events. For multi-line values."""
+    js = ("(()=>{const e=document.querySelector(%s);if(!e)return 'NO-EL';const P=e.tagName==='TEXTAREA'?HTMLTextAreaElement:HTMLInputElement;"
+          "Object.getOwnPropertyDescriptor(P.prototype,'value').set.call(e,%s);e.dispatchEvent(new Event('input',{bubbles:true}));"
+          "e.dispatchEvent(new Event('change',{bubbles:true}));return 'OK'})()") % (json.dumps(selector), json.dumps(value))
+    out = b("eval", js)
+    if "OK" not in out:
+        raise DriverFail(f"set_text {selector}: {out.strip()[:60]}")
+
+
+def dismiss_cookies():
+    """Close a cookie banner that covers the page. Prefers Decline, else Reject, else Accept necessary."""
+    s = snap()
+    for pat in (r'button "(?:Decline|Reject all|Reject|decline|Only necessary|Necessary only)"', r'button "(?:Accept|accept|Got it|OK)"'):
+        ref = find(s, pat)
+        if ref:
+            b("click", "@" + ref)
+            time.sleep(1)
+            return True
+    return False
+
+
+def html_link(query, pattern, before, tries=20, delay=6):
+    """Like mail_link, but reads hrefs from the HTML part of the newest thread (for mail whose button link is not in the text)."""
+    import base64
+    for _ in range(tries):
+        if mail_count(query) > before:
+            try:
+                threads = json.loads(gog("--gmail-no-send", "gmail", "search", query, "--max", "1", "--json")).get("threads", [])
+                raw = gog("--gmail-no-send", "gmail", "thread", "get", threads[0]["id"], "--full", "--json")
+                j = json.loads(raw)
+            except (ValueError, IndexError, KeyError):
+                time.sleep(delay)
+                continue
+            parts = []
+
+            def walk(o):
+                if isinstance(o, dict):
+                    for k, v in o.items():
+                        if k == "data" and isinstance(v, str) and len(v) > 40:
+                            try:
+                                parts.append(base64.urlsafe_b64decode(v + "=" * (-len(v) % 4)).decode("utf8", "ignore"))
+                            except Exception:
+                                pass
+                        else:
+                            walk(v)
+                elif isinstance(o, list):
+                    for v in o:
+                        walk(v)
+            walk(j)
+            html = "\n".join(parts)
+            urls = [u.replace("&amp;", "&") for u in re.findall(r'href=["\']([^"\']+)["\']', html)]
+            # the newest message is last in the thread; prefer the last match
+            hits = [u for u in urls if re.search(pattern, u)]
+            if hits:
+                return hits[-1]
+        time.sleep(delay)
+    raise DriverFail(f"no new mail for {query!r} with an href matching {pattern!r}")
+
+
+def select_opt(label):
+    """Pick the option `label` in whichever native select holds it, with the native setter and real events."""
+    js = ("(()=>{const L=%s;for(const s of document.querySelectorAll('select')){const o=[...s.options].find(o=>o.textContent.trim()===L||o.value===L);"
+          "if(!o)continue;Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'value').set.call(s,o.value);"
+          "s.dispatchEvent(new Event('input',{bubbles:true}));s.dispatchEvent(new Event('change',{bubbles:true}));return 'OK:'+s.value}return 'NO-OPTION'})()") % json.dumps(label)
+    out = b("eval", js)
+    if "OK:" not in out:
+        raise DriverFail(f"no select holds {label!r}: {out.strip()[:80]}")
