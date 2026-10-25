@@ -49,4 +49,4 @@ def submit(site, p):
     if "/launch/success" in url and "SUBMITTED" in page:
         m = re.search(r"Scheduled for[^\n]*", page)
         return Result("submitted", f"{url.split('&code')[0]}: 'SUBMITTED. {say(m.group(0) if m else '', 110)}'")
-    raise DriverFail("no confirmation at " + url + ": " + say(page, 300))
+    raise DriverFail("no confirmation at " + url.split("&code")[0] + ": " + say(page, 300))
