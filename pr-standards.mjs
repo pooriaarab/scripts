@@ -2324,8 +2324,28 @@ async function runPr(options) {
   ]);
   const commitsTruncated = typeof pull.commits === 'number' && commits.length < pull.commits;
   const commitResult = validateCommits(commits, config, commitsTruncated);
-  failures.push(...commitResult.failures);
-  if (commitResult.ok) passes.push(`${commits.length} commit messages`);
+  // A squash merge copies the pull request body into the commit. The body is
+  // required to carry Assisted-by, so the commit already on the default branch
+  // carries it too. Rewriting that branch is the only way to delete the line.
+  // A promotion warns for that one disclosure line. Co-authored-by and
+  // "Generated with" footers still fail.
+  const releasePromotion = isReleasePromotion(pull);
+  let commitFailures = 0;
+  for (const item of commitResult.failures) {
+    const disclosure = item.got.trim();
+    if (releasePromotion && item.check.startsWith('AI attribution in ') && /^assisted-by:\s*\S+:\S+$/i.test(disclosure)) {
+      warnings.push(fail(
+        'release promotion: commit disclosure not applied',
+        disclosure,
+        'no Assisted-by trailer in a commit on ordinary work',
+        `This line is the disclosure the pull request body must carry. A squash merge copies the body into the commit, and rewriting ${pull.base.repo.default_branch} is the only way to remove it.`,
+      ));
+      continue;
+    }
+    failures.push(item);
+    commitFailures += 1;
+  }
+  if (commitFailures === 0) passes.push(`${commits.length} commit messages`);
   // GitHub's pull-request files endpoint stops at 3000 entries and gives no
   // signal that it did. Comparing against the count the pull request itself
   // reports is the only way to notice, and a size check that silently measured

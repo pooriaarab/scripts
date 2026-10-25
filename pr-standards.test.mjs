@@ -2766,6 +2766,30 @@ test('a release promotion still fails every rule but the size caps', async () =>
   assert.equal(result.failures.some((f) => f.check === 'PR size'), false);
 });
 
+test('a release promotion warns when squash copied the Assisted-by disclosure', async () => {
+  const { exitCode, result } = await runPrWithRoutes(36, promotionRoutes(36, {
+    commitMessage: 'Stop the upload\n\nAssisted-by: grok:grok-4.7',
+  }));
+
+  assert.equal(exitCode, 0);
+  assert.equal(result.failures.some((f) => f.check.startsWith('AI attribution')), false);
+  const warning = result.warnings.find((w) => w.check === 'release promotion: commit disclosure not applied');
+  assert.notEqual(warning, undefined);
+  assert.match(warning.got, /Assisted-by: grok:grok-4.7/);
+});
+
+test('an ordinary pull request still fails an Assisted-by commit trailer', async () => {
+  const { exitCode, result } = await runPrWithRoutes(37, promotionRoutes(37, {
+    head: 'refactor',
+    base: 'main',
+    commitMessage: 'Stop the upload\n\nAssisted-by: grok:grok-4.7',
+  }));
+
+  assert.equal(exitCode, 1);
+  assert.equal(result.failures.some((f) => f.check === 'AI attribution in abc1234'), true);
+  assert.equal(result.warnings.some((w) => w.check === 'release promotion: commit disclosure not applied'), false);
+});
+
 test('a submodule bump under an excluded path counts, vendored source does not', () => {
   const bump = [{
     filename: 'vendor/public-skills',
