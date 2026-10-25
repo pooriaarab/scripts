@@ -1671,7 +1671,8 @@ export function validateCommits(commits, config, truncated = false) {
         'no model or agent named in a commit trailer',
         `Reword the commit: git rebase -i, or amend if it is the only one. Keep Assisted-by in the PR body instead.`,
       ));
-      break;
+      // Keep going. Stopping at the first trailer let a later Co-authored-by
+      // hide behind an Assisted-by line that a promotion only warns about.
     }
   }
   return { ok: failures.length === 0, failures };
@@ -2333,7 +2334,7 @@ async function runPr(options) {
   let commitFailures = 0;
   for (const item of commitResult.failures) {
     const disclosure = item.got.trim();
-    if (releasePromotion && item.check.startsWith('AI attribution in ') && /^assisted-by:\s*\S+:\S+$/i.test(disclosure)) {
+    if (releasePromotion && item.check.startsWith('AI attribution in ') && isValidAssistedByLine(disclosure)) {
       warnings.push(fail(
         'release promotion: commit disclosure not applied',
         disclosure,
