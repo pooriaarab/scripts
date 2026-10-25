@@ -140,6 +140,10 @@ $details
 $evidence
 Operator: not applicable - promotes changes already merged to $main; each was verified in its own pull request
 
+## Review
+Reviewed-by: merged:prior-pull-requests
+Verdict: 0 major. Each change was reviewed on the pull request that merged it to $main.
+
 Assisted-by: $assisted
 EOF
 )
