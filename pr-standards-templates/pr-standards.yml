@@ -3,9 +3,15 @@ name: pr-standards
 on:
   pull_request:
     types: [opened, edited, synchronize, reopened, labeled, unlabeled]
+  # A review posted as a comment has to be able to clear the check. Without
+  # these, the comment sits there and the check stays red until the next push.
+  issue_comment:
+    types: [created, edited]
+  pull_request_review:
+    types: [submitted, edited]
 
 concurrency:
-  group: pr-standards-${{ github.event.pull_request.number }}
+  group: pr-standards-${{ github.event.pull_request.number || github.event.issue.number }}
   cancel-in-progress: true
 
 # Private repos use Boat. Public repos use free GitHub-hosted runners.
@@ -13,6 +19,9 @@ concurrency:
 jobs:
   pr-standards:
     name: PR standards
+    # issue_comment also fires for ordinary issues. Those have no pull request
+    # to check. A review event and a pull_request event both carry one.
+    if: github.event_name != 'issue_comment' || github.event.issue.pull_request
     runs-on: ${{ github.event.repository.private == true && 'boat' || 'ubuntu-latest' }}
     timeout-minutes: 5
     permissions:
@@ -83,4 +92,4 @@ jobs:
       - name: Check branch, title, description, and size
         env:
           GH_TOKEN: ${{ github.token }}
-        run: node /tmp/prs/pr-standards pr --repo "$GITHUB_REPOSITORY" --number "${{ github.event.pull_request.number }}"
+        run: node /tmp/prs/pr-standards pr --repo "$GITHUB_REPOSITORY" --number "${{ github.event.pull_request.number || github.event.issue.number }}"
