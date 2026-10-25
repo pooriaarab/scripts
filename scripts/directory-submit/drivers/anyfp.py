@@ -47,7 +47,7 @@ def submit(site, p):
     if not final_click(ref):
         return Result("skipped", "dry run")
     time.sleep(5)
-    link = html_link(q, r"submit/verify", mail_before)
+    link = html_link(q, r"^https://(?:www\.)?anyfp\.com/submit/verify", mail_before)
     go(link, wait=6)
     before = ""
     page = text(3000)
