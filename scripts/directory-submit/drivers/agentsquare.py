@@ -1,4 +1,5 @@
 """AgentSquare: free vendor listing; account the maker mailbox (email confirm, profile name and about); save a draft then Publish."""
+import json
 import re
 import time
 from lib import *
@@ -29,7 +30,7 @@ def submit(site, p):
     pub = find(snap(), r'button "Publish"')
     # publish the row for this product
     js = ("(()=>{const rows=[...document.querySelectorAll('tr')];const r=rows.find(r=>r.innerText.includes(%s)&&/Draft/.test(r.innerText));"
-          "if(!r)return 'NO-ROW';const b=[...r.querySelectorAll('button')].find(b=>/Publish/.test(b.innerText));if(!b)return 'NO-BTN';b.click();return 'OK'})()") % repr(p["name"]).replace("'", '"')
+          "if(!r)return 'NO-ROW';const b=[...r.querySelectorAll('button')].find(b=>/Publish/.test(b.innerText));if(!b)return 'NO-BTN';b.click();return 'OK'})()") % json.dumps(p["name"])
     if "OK" not in str(ev(js)):
         raise DriverFail("no Draft row to publish for " + p["name"])
     time.sleep(5)
