@@ -9,6 +9,7 @@ reads the record instead of exploring the board again.
 |---|---|
 | `boards.jsonl` | Boards where the structure was seen: `verified` is `filed` or `static-html`. |
 | `blocked.jsonl` | Boards where only the gate is known: `verified` is `registry-only`. Do not retry these without a reason. |
+| `github-lists.jsonl` | GitHub lists and catalogs: repo, files, entry format, PR title style, rules, outcome. See `../github-lists/README.md`. |
 | `lookup.py` | Find a board by name, gate, method or verified level. |
 
 Each file has one JSON object per line, sorted by `slug`.
