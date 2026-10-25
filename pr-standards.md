@@ -65,6 +65,10 @@ Four things, all required:
     bun run build   -> clean
     Manually walked steps 1-4 of onboarding in staging.
 
+    ## Review
+    Reviewed-by: codex:gpt-6-astra
+    Verdict: 0 major
+
     Assisted-by: claude-personal:claude-opus-5
     Assisted-by: pi:glm-5
 
@@ -108,6 +112,23 @@ Four things, all required:
   Both fields must be non-empty tokens with no internal whitespace, no backticks,
   and no comma. The agent field must not contain a slash — `owner/repo:thing` is
   a repository path, not a fleet member.
+- `## Review` is the proof that a second model read the diff. The council no
+  longer runs on pull requests. The author runs that review on the same boat
+  box, in a fresh process, with a model that did not write the change, and
+  pastes two lines:
+
+      ## Review
+      Reviewed-by: codex:gpt-6-astra
+      Verdict: 0 major
+
+  `Reviewed-by` uses the same `<agent>:<model>` shape as `Assisted-by`. It
+  must name a different model. A verdict of `N/A`, `TODO`, or `TBD` fails.
+  `Verdict: 1 major` is fine when the findings are written under it: the check
+  proves the review ran, it does not demand a clean one.
+
+  The same two lines in a pull request comment count, so the review can live
+  on the conversation instead of the description. An HTML comment does not
+  count. An unedited template fails.
 
 #### Proof of work
 
@@ -383,8 +404,8 @@ requirement, which helps if dependency bumps and CI fixes start costing more in
 issue bookkeeping than they save. It is a knob so the decision stays visible.
 
 **It skips the issue requirement and nothing else.** A chore branch still has to
-satisfy every title and body rule: imperative subject, the three sections, the
-minimum length, the `Assisted-by` line. It must also carry no closing reference,
+satisfy every title and body rule: imperative subject, the four sections, the
+minimum length, the `Assisted-by` line, and the review proof. It must also carry no closing reference,
 because a change that closes an issue is not a chore and belongs on a numbered
 branch. The obvious implementation gets this wrong. Written as "there is no issue
 number, so skip the checks that need one", the knob quietly disables the title and

@@ -1,17 +1,10 @@
 name: vibecodereview
+# The council does not run on pull requests. A second model reviews the diff
+# on the boat box, and the proof is ## Review in the description or the same
+# two lines in a pull request comment. pr-standards checks that. Dispatch
+# stays so a person can still start it by hand. It does not run on its own.
 on:
-  pull_request:
-    types: [opened, synchronize, review_requested]
-    # `!` exclusions work with `paths`, not `paths-ignore`, so the negated
-    # form still skipped a pull request that changed only VISION.md.
-    # Ordered: take everything, drop the markdown and docs, then put
-    # VISION.md back. It is what the council reads to judge whether every
-    # OTHER pull request belongs here, so it is the one doc worth a council.
-    paths:
-      - "**"
-      - "!**.md"
-      - "!docs/**"
-      - "VISION.md"
+  workflow_dispatch:
 concurrency:
   group: vibecodereview-${{ github.event.pull_request.number }}
   cancel-in-progress: true

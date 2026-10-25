@@ -18,6 +18,15 @@ bun test      ->
 bun run build ->
 ```
 
+## Review
+
+<!-- A second model, not the one that wrote the change, reads the diff. Paste
+     its two lines here, or post them as a pull request comment. Delete this
+     comment and write the lines for real. An example that does not count
+     while it stays inside this comment:
+     Reviewed-by: codex:gpt-6-astra
+     Verdict: 0 major -->
+
 Assisted-by: <agent>:<model>
 
 <!--

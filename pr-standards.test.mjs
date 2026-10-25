@@ -26,6 +26,9 @@ import {
   summarizeFiles,
   multisetDifference,
   splitBlobLines,
+  authorLabels,
+  reviewProofFailures,
+  unresolvedReviewFailures,
   validateBody,
   validateBranchName,
   validateTitle,
@@ -66,7 +69,8 @@ test('box counts as a command, like docker already did', () => {
     '## Why', 'The reason it matters, stated plainly enough to be judged.', '',
     '## How I verified', '```text',
     "box exec bx_1 --cwd cr -- bash -lc 'bun install' -> 1695 packages installed, verified",
-    '```', '', 'Assisted-by: a:b', '',
+    '```', '', '## Review', 'Reviewed-by: codex:gpt-6', 'Verdict: 0 major', '',
+    'Assisted-by: a:b', '',
   ].join('\n');
   assert.deepEqual(validateBody(body, 1, config).failures.map((f) => f.check), []);
 });
@@ -266,10 +270,54 @@ Fixes the onboarding drop-off after step three.
 ## Why
 Issue #142 reports that users lose their progress at this step. This change keeps the progress state.
 
+## Review
+Reviewed-by: codex:gpt-6-astra
+Verdict: 0 major
+
 ## How I verified
 bun test -> 214 passed
 
 Assisted-by: claude-personal:claude-opus-5`;
+
+test('review proof needs a second model and a verdict', () => {
+  // The council no longer runs on the pull request. These two lines are the
+  // proof a different model read the diff. The author reviewing their own
+  // change, a TODO verdict, and a missing section all have to fail, and a
+  // comment with the same two lines has to clear the body failure.
+  const review = (result) => result.failures.filter((item) => (
+    item.check === 'Reviewed-by line'
+    || item.check === 'Review verdict'
+    || (item.check === 'PR body section' && String(item.got).includes('## Review'))
+  ));
+  assert.equal(validateBody(validBody, 142, config).ok, true);
+  const missing = validateBody(validBody.replace(/## Review\n[\s\S]*?\n\n/, ''), 142, config);
+  assert.equal(review(missing).length, 1);
+  assert.equal(review(missing)[0].got, 'missing ## Review');
+
+  const sameModel = validateBody(
+    validBody.replace('Reviewed-by: codex:gpt-6-astra', 'Reviewed-by: claude-personal:claude-opus-5'),
+    142,
+    config,
+  );
+  assert.equal(review(sameModel).some((item) => item.expected === 'a model that did not write the change'), true);
+
+  const todo = validateBody(validBody.replace('Verdict: 0 major', 'Verdict: TODO'), 142, config);
+  assert.equal(review(todo).some((item) => item.check === 'Review verdict'), true);
+
+  const comment = [
+    'Reviewed-by: codex:gpt-6-astra',
+    'Verdict: 1 major',
+    '- Major: the wait job names no repository.',
+  ].join('\n');
+  assert.deepEqual(reviewProofFailures(comment, ['claude-personal:claude-opus-5']), []);
+  assert.deepEqual(unresolvedReviewFailures(missing.failures, comment, ['claude-personal:claude-opus-5']), []);
+  assert.equal(unresolvedReviewFailures(missing.failures, 'looks good', []).length, 1);
+  // A template that only shows the lines inside an HTML comment is not proof.
+  assert.equal(reviewProofFailures('<!-- Reviewed-by: codex:gpt-6\nVerdict: 0 major -->').length, 2);
+  // An example inside an HTML comment is not an author, so it must not
+  // collide with the model that actually reviewed the diff.
+  assert.deepEqual(authorLabels('<!-- Assisted-by: codex:gpt-6 -->\nAssisted-by: grok:grok-4.7'), ['grok:grok-4.7']);
+});
 
 test('requires one matching closing reference and the required body sections', () => {
   assert.equal(countClosingReferences(validBody).length, 1);
@@ -1552,7 +1600,9 @@ test('the documented proof hatch is not a refusal to answer', () => {
   // it. Found by hitting it on this feature's own pull request.
   const section = (...lines) => [
     'Closes #64', '', '## What', 'One sentence.', '', '## Why', 'Because.', '',
-    '## How I verified', ...lines, '', 'Assisted-by: agent:model',
+    '## How I verified', ...lines, '',
+    '## Review', 'Reviewed-by: codex:gpt-6', 'Verdict: 0 major', '',
+    'Assisted-by: agent:model',
   ].join('\n');
   const cfg = { ...DEFAULT_CONFIG, prefix: 'scr' };
   const evidence = '$ node --test pr-standards.test.mjs\ntests 43 / pass 43 / fail 0';
@@ -2171,6 +2221,7 @@ test('prefix precedence holds on the CI path, not only in loadConfig', async () 
           ? { ok: true, json: async () => ({ content: Buffer.from(configBody).toString('base64'), encoding: 'base64' }) }
           : { ok: false, status: 404, text: async () => 'Not Found' };
       }
+      if (url.includes('/comments') || url.includes('/reviews')) return { ok: true, json: async () => [] };
       if (url.includes('/commits')) return { ok: true, json: async () => ([{ sha: 'abc1234', commit: { message: 'Do one thing' } }]) };
       if (url.includes('/files')) return { ok: true, json: async () => ([]) };
       if (url.includes('/compare/')) return { ok: true, json: async () => ({ behind_by: 0, merge_base_commit: { sha: '1234567' } }) };
@@ -2556,6 +2607,12 @@ async function runPrWithRoutes(number, routes) {
     for (const [fragment, body] of Object.entries(routes)) {
       if (url.includes(fragment)) return { ok: true, json: async () => body };
     }
+    // The review proof looks at the conversation only when the body has none.
+    // An empty conversation is the fixture. A test that wants a comment puts
+    // the route in first, and the loop above wins.
+    if (url.includes('/comments') || url.includes('/reviews')) {
+      return { ok: true, json: async () => [] };
+    }
     throw new Error(`Unexpected fetch URL: ${url}`);
   };
   try {
@@ -2802,7 +2859,9 @@ for (const [name, evidence, accepted] of [
     routes[`pulls/${number}`].body = [
       `Closes #${number}`, '## What', 'Check command evidence in a pull request.',
       '## Why', 'Keep real verification results readable in Markdown lists.',
-      '## How I verified', evidence, 'Assisted-by: agent:model',
+      '## How I verified', evidence,
+      '## Review', 'Reviewed-by: codex:gpt-6', 'Verdict: 0 major',
+      'Assisted-by: agent:model',
     ].join('\n\n');
     const { exitCode, result } = await runPrWithRoutes(number, routes);
     assert.equal(exitCode, accepted ? 0 : 1, JSON.stringify(result.failures));

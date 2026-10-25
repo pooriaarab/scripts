@@ -5,7 +5,7 @@ import { execFile, execFileSync, spawnSync } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 
-import { assistedByLinesFromBody, isValidAssistedByLine } from './assisted-by.mjs';
+import { ASSISTED_BY_VALID_RE, assistedByLinesFromBody, isValidAssistedByLine } from './assisted-by.mjs';
 
 const execFileAsync = promisify(execFile);
 const PREFIX_REGISTRY_PATH = fileURLToPath(new URL('./repo-prefixes.json', import.meta.url));
@@ -380,6 +380,77 @@ export function countClosingReferences(body) {
     references.push({ repo: match[1] || null, number: Number(match[2]) });
   }
   return references;
+}
+
+// Same shape as Assisted-by, on purpose: one line, two tokens, no path.
+// The reviewer is a second model. Matching an Assisted-by line means the
+// author reviewed their own diff, which is the thing this check exists to
+// catch.
+const REVIEWED_BY_VALID_RE = /^Reviewed-by:\s*([^\s:,/`]+):([^\s:,`]+)\s*$/i;
+
+export function authorLabels(body) {
+  const visible = String(body || '').replace(/<!--[\s\S]*?-->/g, '');
+  return assistedByLinesFromBody(visible).flatMap((line) => {
+    const match = ASSISTED_BY_VALID_RE.exec(line.trim());
+    return match ? [`${match[1]}:${match[2]}`] : [];
+  });
+}
+
+export function isReviewCheck(item) {
+  return item.check === 'Reviewed-by line'
+    || item.check === 'Review verdict'
+    || (item.check === 'PR body section' && String(item.got).includes('## Review'));
+}
+
+// `text` is either the ## Review section or the pull request conversation
+// (issue comments, review bodies, and inline comments joined together).
+// HTML comments do not count: an unedited template must not pass.
+export function reviewProofFailures(text, authors = []) {
+  const source = String(text || '').replace(/<!--[\s\S]*?-->/g, '');
+  const failures = [];
+  const lines = source.split('\n').filter((line) => /^\s*reviewed-by:/i.test(line));
+  const good = lines.find((line) => REVIEWED_BY_VALID_RE.test(line.trim()));
+  if (!good) {
+    failures.push(fail(
+      'Reviewed-by line',
+      lines[0] ? `not in the accepted form: ${lines[0].trim()}` : 'missing',
+      'Reviewed-by: <agent>:<model>',
+      'Run a second model on the diff and add Reviewed-by: <agent>:<model> under ## Review, or in a pull request comment.',
+    ));
+  } else {
+    const match = REVIEWED_BY_VALID_RE.exec(good.trim());
+    const label = `${match[1]}:${match[2]}`;
+    const author = authors.find((item) => item.toLowerCase() === label.toLowerCase());
+    if (author) {
+      failures.push(fail(
+        'Reviewed-by line',
+        label,
+        'a model that did not write the change',
+        `${label} is also an Assisted-by line. Run a different model and record that one.`,
+      ));
+    }
+  }
+  const verdict = source.split('\n').find((line) => /^\s*verdict\s*:/i.test(line));
+  const verdictValue = verdict ? verdict.replace(/^\s*verdict\s*:/i, '').trim() : '';
+  if (!verdictValue || /^(?:n\/a|todo|tbd)\b/i.test(verdictValue)) {
+    failures.push(fail(
+      'Review verdict',
+      verdict ? verdict.trim() : 'missing',
+      'Verdict: 0 major, or Verdict: followed by the findings',
+      'Add a Verdict line under ## Review, or in a pull request comment. Example: Verdict: 0 major',
+    ));
+  }
+  return failures;
+}
+
+// A missing or weak ## Review is fine when the same proof is in a comment.
+// The body failures stay when the conversation does not carry the proof, so
+// the message still tells the author where to put it.
+export function unresolvedReviewFailures(bodyFailures, commentText, authors = []) {
+  const reviewFailures = bodyFailures.filter(isReviewCheck);
+  if (reviewFailures.length === 0) return [];
+  if (reviewProofFailures(commentText, authors).length === 0) return [];
+  return reviewFailures;
 }
 
 function sectionBody(body, heading) {
@@ -1114,6 +1185,21 @@ export function validateBody(body, issueNumber, config = DEFAULT_CONFIG) {
     }
   }
 
+  // The council used to run on the pull request. It now has to be a second
+  // model, and the proof is these two lines. A comment can carry them instead;
+  // that path is resolved later, once the conversation has been fetched.
+  const review = sectionBody(visibleSource, 'Review');
+  if (review === null) {
+    failures.push(fail(
+      'PR body section',
+      'missing ## Review',
+      '## Review with Reviewed-by and a Verdict, or the same two lines in a pull request comment',
+      'Add a ## Review section, or post the review as a pull request comment.',
+    ));
+  } else {
+    failures.push(...reviewProofFailures(review, authorLabels(visibleSource)));
+  }
+
   return { ok: failures.length === 0, failures };
 }
 
@@ -1444,6 +1530,26 @@ async function apiRequest(endpoint, repo) {
 
 // The commit list caps at 250. A check that cannot see every commit must not
 // report a pass, which is how the file list beside this one already behaves.
+// Issue comments, the review summary, and inline review comments. Any one of
+// them can carry the Reviewed-by and Verdict lines. One page is the whole
+// conversation for a normal pull request; a review buried past 100 comments
+// is not the proof we can see, so it does not count.
+async function pullRequestDiscussionText(repo, number) {
+  const [issueComments, reviewComments, reviews] = await Promise.all([
+    apiRequest(`issues/${number}/comments?per_page=100`, repo),
+    apiRequest(`pulls/${number}/comments?per_page=100`, repo),
+    apiRequest(`pulls/${number}/reviews?per_page=100`, repo),
+  ]);
+  const chunks = [];
+  for (const list of [issueComments, reviewComments, reviews]) {
+    if (!Array.isArray(list)) continue;
+    for (const item of list) {
+      if (item && item.body) chunks.push(item.body);
+    }
+  }
+  return chunks.join('\n\n');
+}
+
 async function fetchPullCommits(repo, number) {
   const commits = [];
   for (let page = 1; ; page += 1) {
@@ -2244,8 +2350,16 @@ async function runPr(options) {
     failures.push(...titleResult.failures);
     if (titleResult.ok) passes.push('PR title');
     const bodyResult = validateBody(pull.body || '', branchResult.issueNumber, config);
-    failures.push(...bodyResult.failures);
-    if (bodyResult.ok) passes.push('PR body');
+    const authors = authorLabels(pull.body || '');
+    let reviewFailures = bodyResult.failures.filter(isReviewCheck);
+    const otherFailures = bodyResult.failures.filter((item) => !isReviewCheck(item));
+    if (reviewFailures.length > 0) {
+      const commentText = await pullRequestDiscussionText(options.repo, number);
+      reviewFailures = unresolvedReviewFailures(bodyResult.failures, commentText, authors);
+      if (reviewFailures.length === 0) passes.push('review proof in a pull request comment');
+    }
+    failures.push(...otherFailures, ...reviewFailures);
+    if (otherFailures.length === 0 && reviewFailures.length === 0) passes.push('PR body');
     // Same exemption as title and body: a branch exempt from the `## How I
     // verified` convention (release, refactor, gh-pages, dependabot/*,
     // renovate/*) has no reason to carry a section it was never asked to
