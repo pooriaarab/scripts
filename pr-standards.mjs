@@ -1397,11 +1397,14 @@ export function checkSize(summary, config) {
   config ??= DEFAULT_CONFIG;
   const failures = [];
   const warnings = [];
-  if (summary.countedFiles === 0 && summary.countedLines === 0) {
+  // Exclusions remove files from the size caps, not from the diff. GitHub's
+  // changed-file list also includes binary and rename-only changes with no
+  // textual lines, so only an empty raw list proves there is no diff.
+  if (!summary.rawFiles) {
     failures.push(fail(
       'empty diff',
-      '0 counted files and 0 counted lines',
-      'at least 1 counted file with at least 1 counted line',
+      '0 raw changed files',
+      'at least 1 raw changed file',
       'Either the change was absorbed by a rebase of its stack — close the PR, the work is already on main — or the branch was cut but never committed to, and the work still needs doing.',
     ));
   }
