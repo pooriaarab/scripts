@@ -481,22 +481,22 @@ test('rejects an empty diff with both likely causes', () => {
   const result = checkSize(summary, config);
   assert.equal(result.failures.length, 1);
   assert.equal(result.failures[0].check, 'empty diff');
-  assert.match(result.failures[0].got, /0 counted files and 0 counted lines/);
+  assert.match(result.failures[0].got, /0 raw changed files/);
   assert.match(result.failures[0].fix, /absorbed by a rebase/);
   assert.match(result.failures[0].fix, /never committed/);
 });
 
-test('rejects a change with only excluded files as an empty diff', () => {
+test('accepts real changes with only excluded files without counting them', () => {
   const summary = summarizeFiles([
     { filename: 'bun.lock', additions: 100, deletions: 50 },
     { filename: 'dist/app.js', additions: 20, deletions: 10 },
   ], config);
   assert.equal(summary.countedFiles, 0);
   assert.equal(summary.countedLines, 0);
+  assert.equal(summary.rawFiles, 2);
 
   const result = checkSize(summary, config);
-  assert.equal(result.failures.length, 1);
-  assert.equal(result.failures[0].check, 'empty diff');
+  assert.deepEqual(result, { failures: [], warnings: [] });
 });
 
 test('passes a one-line real change', () => {
@@ -2642,6 +2642,84 @@ async function runPrWithRoutes(number, routes) {
     delete process.env.GITHUB_REPOSITORY;
   }
 }
+
+function sizeCheckRoutes(number, files) {
+  return {
+    'contents/.github/pr-standards.json': {
+      encoding: 'base64',
+      content: Buffer.from(JSON.stringify({ prefix: 'cr' })).toString('base64'),
+    },
+    [`pulls/${number}/commits`]: [{
+      sha: 'abc1234',
+      commit: { message: 'Fix lockfile validation' },
+    }],
+    [`pulls/${number}/files`]: files,
+    '/compare/': { behind_by: 0, merge_base_commit: { sha: '1234567' } },
+    [`pulls/${number}`]: {
+      changed_files: files.length,
+      head: { ref: `cr-${number}-fix-lockfile-validation`, sha: 'deadbee' },
+      base: { ref: 'main', sha: 'base123', repo: { full_name: 'test/repo', default_branch: 'main' } },
+      title: `[CR-${number}] Fix lockfile validation`,
+      body: validBody.replaceAll('142', String(number)),
+    },
+    [`issues/${number}`]: { state: 'open' },
+  };
+}
+
+test('accepts a real lockfile-only patch without counting it against size limits', async () => {
+  const { exitCode, result } = await runPrWithRoutes(652, sizeCheckRoutes(652, [{
+    filename: 'bun.lock', status: 'modified', additions: 900, deletions: 700, changes: 1600,
+    patch: '@@ -1,700 +1,900 @@',
+  }]));
+
+  assert.equal(exitCode, 0, JSON.stringify(result.failures));
+  assert.deepEqual(result.size, {
+    rawLines: 1600,
+    countedLines: 0,
+    grossCountedLines: 0,
+    movedLines: 0,
+    excludedLines: 1600,
+    rawFiles: 1,
+    countedFiles: 0,
+    excludedFiles: 1,
+    topLevelDirs: [],
+  });
+  assert.equal(result.failures.some(({ check }) => check === 'empty diff'), false);
+});
+
+test('accepts binary-only and rename-only changes with no textual lines', async () => {
+  const cases = [
+    [{ filename: 'assets/logo.png', status: 'modified', additions: 0, deletions: 0, changes: 0 }],
+    [{ filename: 'new.lock', previous_filename: 'old.lock', status: 'renamed', additions: 0, deletions: 0, changes: 0 }],
+  ];
+
+  for (const [index, files] of cases.entries()) {
+    const number = 653 + index;
+    const { exitCode, result } = await runPrWithRoutes(number, sizeCheckRoutes(number, files));
+    assert.equal(exitCode, 0, JSON.stringify(result.failures));
+    assert.equal(result.size.rawFiles, 1);
+    assert.equal(result.size.rawLines, 0);
+    assert.equal(result.failures.some(({ check }) => check === 'empty diff'), false);
+  }
+});
+
+test('rejects empty file lists after changes are absorbed', async () => {
+  const { exitCode, result } = await runPrWithRoutes(655, sizeCheckRoutes(655, []));
+
+  assert.equal(exitCode, 1);
+  assert.equal(result.size.rawFiles, 0);
+  assert.equal(result.failures.some(({ check }) => check === 'empty diff'), true);
+});
+
+test('still rejects source changes above the configured line cap', async () => {
+  const { exitCode, result } = await runPrWithRoutes(656, sizeCheckRoutes(656, [{
+    filename: 'src/app.js', status: 'modified', additions: 501, deletions: 0, changes: 501,
+    patch: '@@ -0,0 +1,501 @@',
+  }]));
+
+  assert.equal(exitCode, 1);
+  assert.equal(result.failures.some(({ check }) => check === 'PR size'), true);
+});
 
 // 792 counted lines over a 500 cap: the exact shape of
 // pooriaarab/private-repo-4a88#271, which had no route to green.
