@@ -1,0 +1,166 @@
+#!/usr/bin/env bash
+# warmup-tiktok — TikTok account warmup on iPhone via ESP32
+#
+# Human-like browsing: scrolls For You feed, likes videos, leaves comments,
+# checks inbox, scrolls by category. Randomized patterns.
+#
+# Usage:
+#   warmup-tiktok [--dry-run] [--auto] [--rounds N]
+#   warmup-tiktok --open     # just open and scroll
+#   warmup-tiktok --help
+#
+# Env: ESP32=http://127.0.0.1:8890
+# ============================================================================
+set -uo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/warmup-lib.sh"
+
+TT_X="0.50"; TT_Y="0.48"
+
+# Chrome approx positions
+FEED_X="0.5"
+LIKE_X="0.30"; LIKE_Y="0.80"       # heart button on right side
+COMMENT_X="0.40"; COMMENT_Y="0.80"  # comment bubble
+SHARE_X="0.60"; SHARE_Y="0.80"      # share arrow
+PROFILE_X="0.85"; PROFILE_Y="0.92"  # profile tab
+INBOX_X="0.65"; INBOX_Y="0.92"      # inbox tab
+
+LIKE_PROBABILITY=0.5
+COMMENT_PROBABILITY=0.1
+
+tiktok_open() {
+  log_action tiktok open
+  social_open
+  app_open_tiktok
+}
+
+tiktok_leave() {
+  log_action tiktok leave
+  app_leave
+}
+
+tiktok_scroll_feed() {
+  local count="${1:-10}"
+  log_action tiktok scroll "feed ${count}x"
+  # TikTok uses full-screen swipe up
+  warmup_scroll_shorts "$FEED_X" 0.5 "$count"
+  # Watch a few videos longer
+  human_pause 2.0 5.0
+}
+
+tiktok_like_current() {
+  like_x=$(random_range 0.25 0.35)
+  like_y=$(random_range 0.75 0.85)
+  log_action tiktok like
+  warmup_like "$like_x" "$like_y"
+}
+
+tiktok_comment_current() {
+  local comments=(
+    "This is hilarious 🤣"
+    "Love this trend!"
+    "Underrated video"
+    "How do you do this?"
+    "This is everything"
+    "Can't stop watching"
+    "Send this to everyone"
+    "My new favorite account"
+    "So underrated!"
+    "This deserves more views"
+    "POV: you found gold"
+    "The editing is insane"
+  )
+  local text="${comments[$((RANDOM % ${#comments[@]}))]}"
+  log_action tiktok comment "$text"
+  # Tap comment icon, type, post
+  human_commit
+  esp32_tap "$(random_range 0.35 0.45)" "$(random_range 0.75 0.85)"  # comment icon
+  human_pause 0.5 1.0
+  esp32_type "$text"
+  human_pause 0.3 0.8
+  esp32_tap "$(random_range 0.8 0.9)" "$(random_range 0.75 0.85)"     # post button
+  human_pause 0.5 1.5
+}
+
+tiktok_check_inbox() {
+  log_action tiktok inbox
+  esp32_tap "$INBOX_X" "$INBOX_Y"
+  human_pause 1.0 2.0
+  warmup_read_dms 0.5 3
+  # Tap back to feed
+  esp32_tap 0.1 0.05
+  human_pause 0.5 1.0
+}
+
+tiktok_follow_someone() {
+  # Tap the profile picture to view profile, then follow
+  log_action tiktok follow
+  human_commit
+  esp32_tap "$(random_range 0.1 0.2)" "$(random_range 0.15 0.25)"  # avatar
+  human_pause 1.0 2.0
+  # Follow button is usually at top of profile
+  esp32_tap "$(random_range 0.5 0.7)" "$(random_range 0.1 0.2)"
+  human_pause 0.5 1.0
+  # Go back to feed
+  esp32_back
+  human_pause 0.5 1.0
+  esp32_back
+  human_pause 0.5 1.0
+}
+
+tiktok_run_round() {
+  local actions
+  actions=$(random_session_plan 8)
+  log_action tiktok round "plan: $actions"
+  for action in $actions; do
+    case $action in
+      scroll)  tiktok_scroll_feed $(random_int 2 4) ;;
+      like)    [[ $(random_float) < $LIKE_PROBABILITY ]] && tiktok_like_current ;;
+      read)    human_read ;;  # watch the video
+      comment) [[ $(random_float) < $COMMENT_PROBABILITY ]] && tiktok_comment_current ;;
+      dm)      [[ $(random_float) < 0.15 ]] && tiktok_check_inbox ;;
+    esac
+  done
+}
+
+# ---- Main ----
+main() {
+  local rounds=3
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --dry-run) DRY_RUN=1; shift ;;
+      --auto)    HUMAN_PAUSE_MIN=0.2; HUMAN_PAUSE_MAX=0.8; shift ;;
+      --rounds)  rounds="$2"; shift 2 ;;
+      --open)    rounds=0; shift ;;
+      --help|-h) echo "Usage: warmup-tiktok [--rounds N] [--dry-run] [--auto]"; exit 0 ;;
+      *) echo "warmup-tiktok: unknown flag $1"; exit 1 ;;
+    esac
+  done
+
+  esp32_health || die "ESP32 not reachable"
+
+  log_action tiktok start "rounds=$rounds"
+  tiktok_open
+
+  # Initial scroll
+  tiktok_scroll_feed 5
+  human_read
+
+  # Optionally like a few
+  tiktok_like_current
+  tiktok_scroll_feed 3
+
+  local r=0
+  while [[ $r -lt $rounds ]]; do
+    log_action tiktok "round-start" "$((r+1))/$rounds"
+    tiktok_run_round
+    r=$(( r + 1 ))
+  done
+
+  tiktok_leave
+  log_action tiktok done
+  echo "TikTok warmup complete ✓"
+}
+
+main "$@"

@@ -1,24 +1,17 @@
 name: vibecodereview
+# Retired. Pull requests do not start this, and a manual dispatch has no pull
+# request for the action to review, so the job does not run. The proof that a
+# second model read the diff is ## Review in the description, or the same two
+# lines in a pull request comment. pr-standards checks that.
 on:
-  pull_request:
-    types: [opened, synchronize, review_requested]
-    # `!` exclusions work with `paths`, not `paths-ignore`, so the negated
-    # form still skipped a pull request that changed only VISION.md.
-    # Ordered: take everything, drop the markdown and docs, then put
-    # VISION.md back. It is what the council reads to judge whether every
-    # OTHER pull request belongs here, so it is the one doc worth a council.
-    paths:
-      - "**"
-      - "!**.md"
-      - "!docs/**"
-      - "VISION.md"
+  workflow_dispatch:
 concurrency:
   group: vibecodereview-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 jobs:
   vibecodereview:
-    # Only review the repo owner's own PRs (cost + injection guard on public repos).
-    if: github.event.pull_request.user.login == github.repository_owner
+    # Retired. See the note at the top of this file.
+    if: false
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:

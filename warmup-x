@@ -1,0 +1,162 @@
+#!/usr/bin/env bash
+# warmup-x — X (Twitter) account warmup on iPhone via ESP32
+#
+# Human-like browsing: scrolls timeline, likes posts, replies, checks DMs,
+# retweets, looks at trending. Randomized patterns.
+#
+# Usage:
+#   warmup-x [--dry-run] [--auto] [--rounds N]
+#   warmup-x --open     # just open and scroll
+#   warmup-x --help
+#
+# Env: ESP32=http://127.0.0.1:8890
+# ============================================================================
+set -uo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/warmup-lib.sh"
+
+X_X="0.50"; X_Y="0.59"
+
+# Chrome approx — from ref: bottom bar shows home, search, swirl, bell, chat
+LIKE_X="0.35"; LIKE_Y="0.65"
+RETWEET_X="0.45"; RETWEET_Y="0.65"
+REPLY_X="0.25"; REPLY_Y="0.65"
+SHARE_X="0.60"; SHARE_Y="0.65"
+DM_X="0.85"; DM_Y="0.08"       # Chat icon top right? Actually from ref bottom bar has chat
+SEARCH_X="0.35"; SEARCH_Y="0.92"
+NOTIF_X="0.65"; NOTIF_Y="0.92"
+
+LIKE_PROBABILITY=0.45
+RETWEET_PROBABILITY=0.15
+REPLY_PROBABILITY=0.1
+
+x_open() {
+  log_action x open
+  social_open
+  app_open_x
+}
+
+x_leave() {
+  log_action x leave
+  app_leave
+}
+
+x_scroll_timeline() {
+  local count="${1:-8}"
+  log_action x scroll "timeline ${count}x"
+  warmup_scroll 0.5 0.5 "$count"
+}
+
+x_like_random() {
+  log_action x like
+  warmup_like "$(random_range 0.30 0.40)" "$(random_range 0.55 0.70)"
+}
+
+x_retweet() {
+  log_action x retweet
+  human_commit
+  esp32_tap "$(random_range 0.40 0.50)" "$(random_range 0.55 0.70)"  # retweet icon
+  human_pause 0.5 1.0
+  # Confirm retweet
+  esp32_tap "$(random_range 0.5 0.7)" "$(random_range 0.4 0.6)"
+  human_pause 0.5 1.5
+}
+
+x_reply() {
+  local replies=(
+    "This is such a good thread!"
+    "Totally agree with this take"
+    "Thanks for sharing this perspective"
+    "Really interesting point"
+    "Bookmarked this for later"
+    "This deserves more attention"
+    "Exactly what I was thinking"
+    "Couldn't have said it better"
+  )
+  local text="${replies[$((RANDOM % ${#replies[@]}))]}"
+  log_action x reply "$text"
+  human_commit
+  esp32_tap "$(random_range 0.20 0.30)" "$(random_range 0.55 0.70)"  # reply icon
+  human_pause 0.5 1.2
+  esp32_type "$text"
+  human_pause 0.3 0.8
+  esp32_tap "$(random_range 0.8 0.9)" "$(random_range 0.1 0.2)"       # reply button
+  human_pause 0.5 1.5
+}
+
+x_check_dms() {
+  log_action x dms
+  # From ref: bottom bar has chat icon
+  esp32_tap "$(random_range 0.75 0.90)" 0.92
+  human_pause 1.0 2.0
+  warmup_read_dms 0.5 3
+  # Back to timeline
+  esp32_tap 0.1 0.05
+  human_pause 0.5 1.0
+}
+
+x_check_notifications() {
+  log_action x notifications
+  esp32_tap "$(random_range 0.60 0.70)" 0.92  # bell icon
+  human_pause 1.0 2.0
+  warmup_scroll 0.5 0.5 4
+  # Back
+  esp32_tap 0.1 0.05
+  human_pause 0.5 1.0
+}
+
+x_run_round() {
+  local actions
+  actions=$(random_session_plan 10)
+  log_action x round "plan: $actions"
+  for action in $actions; do
+    case $action in
+      scroll)  x_scroll_timeline $(random_int 3 6) ;;
+      like)    [[ $(random_float) < $LIKE_PROBABILITY ]] && x_like_random ;;
+      read)    human_read ;;
+      comment) [[ $(random_float) < $REPLY_PROBABILITY ]] && x_reply ;;
+      dm)      [[ $(random_float) < 0.15 ]] && x_check_dms ;;
+    esac
+  done
+}
+
+# ---- Main ----
+main() {
+  local rounds=3
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --dry-run) DRY_RUN=1; shift ;;
+      --auto)    HUMAN_PAUSE_MIN=0.2; HUMAN_PAUSE_MAX=1.0; shift ;;
+      --rounds)  rounds="$2"; shift 2 ;;
+      --open)    rounds=0; shift ;;
+      --help|-h) echo "Usage: warmup-x [--rounds N] [--dry-run] [--auto]"; exit 0 ;;
+      *) echo "warmup-x: unknown flag $1"; exit 1 ;;
+    esac
+  done
+
+  esp32_health || die "ESP32 not reachable"
+
+  log_action x start "rounds=$rounds"
+  x_open
+
+  x_scroll_timeline 5
+  human_read
+  x_like_random
+  x_scroll_timeline 3
+
+  local r=0
+  while [[ $r -lt $rounds ]]; do
+    log_action x "round-start" "$((r+1))/$rounds"
+    x_run_round
+    r=$(( r + 1 ))
+  done
+
+  x_check_notifications
+
+  x_leave
+  log_action x done
+  echo "X warmup complete ✓"
+}
+
+main "$@"

@@ -61,7 +61,7 @@ list_boxes() {
     info="$("$BOX" info "$id" --json 2>/dev/null | python3 -c '
 import sys,json
 try:
-    b=json.load(sys.stdin)["box"]; print(b.get("state","?"), b.get("url","-"))
+    b=(lambda d: d.get("sandbox") or d["box"])(json.load(sys.stdin)); print(b.get("state","?"), b.get("url","-"))
 except Exception: print("gone -")' )"
     printf '%-26s %-14s %s\n' "$name" "$id" "$info"
   done
@@ -174,7 +174,7 @@ if [[ -f "$IDFILE" ]]; then
   cand="$(tr -d '[:space:]' < "$IDFILE")"
   st="$("$BOX" info "$cand" --json 2>/dev/null | python3 -c '
 import sys,json
-try: print(json.load(sys.stdin)["box"].get("state",""))
+try: print((lambda d: d.get("sandbox") or d["box"])(json.load(sys.stdin)).get("state",""))
 except Exception: print("")')"
   case "$st" in
     ready|idle|running) ID="$cand"; echo "[box-work] reusing $NAME box $ID ($st)" ;;
@@ -366,13 +366,15 @@ set -- "\$BRIEF"
 # trap stops the agent and the heartbeat, then re-raises for exact status.
 run_worker() {
 case "$AGENT" in
-  pi)     PI_WORKER=1 pi -p --no-extensions --provider zai-api --model glm-5.3-flash -a --tools read,grep,find,ls,edit,write,bash "\$1" ;;
+  pi)     PI_WORKER=1 pi -p --no-extensions --provider openrouter --model deepseek/deepseek-v4-flash-0731 -a --tools read,grep,find,ls,edit,write,bash "\$1" ;;
   muse)
     # Headless: without --yolo the run can wait on an approval prompt and do
     # nothing while the call still reports success.
     brief_file="\$(mktemp)"
     printf '%s' "\$1" > "\$brief_file"
-    muse exec --yolo --json --model muse-spark-1.3-contributor --workspace "/home/user/$NAME" --prompt-file "\$brief_file"
+    # Meta lists Muse models per region; a Box in France sees none. Muse reaches Meta
+    # through the laptop (scripts/muse-geo-proxy box <box-id>), so the proxy must be up.
+    HTTPS_PROXY=http://127.0.0.1:18899 muse exec --yolo --json --model muse-spark-1.3-contributor --workspace "/home/user/$NAME" --prompt-file "\$brief_file"
     rc=\$?
     rm -f "\$brief_file"
     exit \$rc ;;
@@ -449,7 +451,7 @@ sys.exit(d.get("exitCode") or 0)'
   start)
     url="$("$BOX" info "$ID" --json 2>/dev/null | python3 -c '
 import sys,json
-try: print(json.load(sys.stdin)["box"].get("url","-"))
+try: print((lambda d: d.get("sandbox") or d["box"])(json.load(sys.stdin)).get("url","-"))
 except Exception: print("-")')"
     cat <<EOF
 

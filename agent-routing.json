@@ -11,7 +11,7 @@
           "cost": "$0.075/M in, $0.25/M out",
           "coding_index": 71.5,
           "agentic_index": 58.2,
-          "default": true
+          "default": false
         },
         {
           "id": "deepseek-v4-flash",
@@ -19,7 +19,7 @@
           "cost": "$0.065/M in, $0.18/M out",
           "coding_index": 69.1,
           "agentic_index": 48.4,
-          "default": false
+          "default": true
         }
       ]
     },
@@ -72,6 +72,10 @@
     "grok": {
       "reason": "Grok Build usage balance exhausted. `grok -p` returns HTTP 402 Payment Required and exits non-zero, so the failure is visible in the exit code, unlike codex which exits 0 having written nothing.",
       "since": "2026-09-06"
+    },
+    "glm-5.3-flash": {
+      "reason": "zai-api returns 429 'Insufficient balance or no resource package'. Route mechanical work to deepseek-v4-flash via openrouter instead.",
+      "since": "2026-10-18"
     }
   }
 }
