@@ -36,7 +36,7 @@ def submit(site, p):
             time.sleep(0.5)
     ev("document.body.click()")
     # launch date: first open day
-    d = ev("(()=>{const b=[...document.querySelectorAll('button')].find(b=>/^October \\d+, (?!past|full)/i.test(b.getAttribute('aria-label')||'')&&!b.disabled&&!/Full/.test(b.innerText));if(!b)return 'NONE';b.scrollIntoView({block:'center'});b.click();return b.getAttribute('aria-label')})()")
+    d = ev("(()=>{const b=[...document.querySelectorAll('button')].find(b=>/^[A-Z][a-z]+ \\d+, (?!past|full)/i.test(b.getAttribute('aria-label')||'')&&!b.disabled&&!/Full/.test(b.innerText));if(!b)return 'NONE';b.scrollIntoView({block:'center'});b.click();return b.getAttribute('aria-label')})()")
     time.sleep(1)
     fill(snap(), r'textbox "Description"', fit(p["long"], 590))
     b("check", "@" + must(snap(), r'radio "Free listing'))
