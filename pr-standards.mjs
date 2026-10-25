@@ -420,13 +420,16 @@ export function reviewProofFailures(text, authors = []) {
   } else {
     const match = REVIEWED_BY_VALID_RE.exec(good.trim());
     const label = `${match[1]}:${match[2]}`;
-    const author = authors.find((item) => item.toLowerCase() === label.toLowerCase());
+    const model = match[2].toLowerCase();
+    // The agent name is the seat. The model is the reviewer. Renaming the
+    // seat and keeping the model that wrote the diff is the same review.
+    const author = authors.find((item) => item.split(':').pop().toLowerCase() === model);
     if (author) {
       failures.push(fail(
         'Reviewed-by line',
         label,
         'a model that did not write the change',
-        `${label} is also an Assisted-by line. Run a different model and record that one.`,
+        `${label} uses the same model as ${author}. Run a different model and record that one.`,
       ));
     }
   }
@@ -446,10 +449,13 @@ export function reviewProofFailures(text, authors = []) {
 // A missing or weak ## Review is fine when the same proof is in a comment.
 // The body failures stay when the conversation does not carry the proof, so
 // the message still tells the author where to put it.
-export function unresolvedReviewFailures(bodyFailures, commentText, authors = []) {
+export function unresolvedReviewFailures(bodyFailures, comments, authors = []) {
   const reviewFailures = bodyFailures.filter(isReviewCheck);
   if (reviewFailures.length === 0) return [];
-  if (reviewProofFailures(commentText, authors).length === 0) return [];
+  // One comment has to carry both lines. Joining the thread would let an
+  // old `Verdict: TODO` hide a later review that is actually complete.
+  const list = Array.isArray(comments) ? comments : [comments];
+  if (list.some((text) => reviewProofFailures(text, authors).length === 0)) return [];
   return reviewFailures;
 }
 
@@ -1534,7 +1540,7 @@ async function apiRequest(endpoint, repo) {
 // them can carry the Reviewed-by and Verdict lines. One page is the whole
 // conversation for a normal pull request; a review buried past 100 comments
 // is not the proof we can see, so it does not count.
-async function pullRequestDiscussionText(repo, number) {
+async function pullRequestDiscussion(repo, number) {
   const [issueComments, reviewComments, reviews] = await Promise.all([
     apiRequest(`issues/${number}/comments?per_page=100`, repo),
     apiRequest(`pulls/${number}/comments?per_page=100`, repo),
@@ -1547,7 +1553,7 @@ async function pullRequestDiscussionText(repo, number) {
       if (item && item.body) chunks.push(item.body);
     }
   }
-  return chunks.join('\n\n');
+  return chunks;
 }
 
 async function fetchPullCommits(repo, number) {
@@ -2354,8 +2360,8 @@ async function runPr(options) {
     let reviewFailures = bodyResult.failures.filter(isReviewCheck);
     const otherFailures = bodyResult.failures.filter((item) => !isReviewCheck(item));
     if (reviewFailures.length > 0) {
-      const commentText = await pullRequestDiscussionText(options.repo, number);
-      reviewFailures = unresolvedReviewFailures(bodyResult.failures, commentText, authors);
+      const comments = await pullRequestDiscussion(options.repo, number);
+      reviewFailures = unresolvedReviewFailures(bodyResult.failures, comments, authors);
       if (reviewFailures.length === 0) passes.push('review proof in a pull request comment');
     }
     failures.push(...otherFailures, ...reviewFailures);

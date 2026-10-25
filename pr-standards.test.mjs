@@ -300,6 +300,13 @@ test('review proof needs a second model and a verdict', () => {
     config,
   );
   assert.equal(review(sameModel).some((item) => item.expected === 'a model that did not write the change'), true);
+  // A new agent name in front of the same model is still the author.
+  const renamedSeat = validateBody(
+    validBody.replace('Reviewed-by: codex:gpt-6-astra', 'Reviewed-by: other:claude-opus-5'),
+    142,
+    config,
+  );
+  assert.equal(review(renamedSeat).some((item) => item.expected === 'a model that did not write the change'), true);
 
   const todo = validateBody(validBody.replace('Verdict: 0 major', 'Verdict: TODO'), 142, config);
   assert.equal(review(todo).some((item) => item.check === 'Review verdict'), true);
@@ -312,6 +319,15 @@ test('review proof needs a second model and a verdict', () => {
   assert.deepEqual(reviewProofFailures(comment, ['claude-personal:claude-opus-5']), []);
   assert.deepEqual(unresolvedReviewFailures(missing.failures, comment, ['claude-personal:claude-opus-5']), []);
   assert.equal(unresolvedReviewFailures(missing.failures, 'looks good', []).length, 1);
+  // An older refusal must not hide a later comment that has both lines.
+  const authors = ['claude-personal:claude-opus-5'];
+  assert.deepEqual(unresolvedReviewFailures(missing.failures, [
+    'Reviewed-by: codex:gpt-6\nVerdict: TODO',
+    comment,
+  ], authors), []);
+  assert.equal(unresolvedReviewFailures(missing.failures, [
+    'Reviewed-by: codex:gpt-6\nVerdict: TODO\n\n' + comment,
+  ], authors).length > 0, true);
   // A template that only shows the lines inside an HTML comment is not proof.
   assert.equal(reviewProofFailures('<!-- Reviewed-by: codex:gpt-6\nVerdict: 0 major -->').length, 2);
   // An example inside an HTML comment is not an author, so it must not

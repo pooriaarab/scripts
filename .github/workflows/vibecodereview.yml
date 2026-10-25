@@ -1,8 +1,8 @@
 name: vibecodereview
-# The council does not run on pull requests. A second model reviews the diff
-# on the boat box, and the proof is ## Review in the description or the same
-# two lines in a pull request comment. pr-standards checks that. Dispatch
-# stays so a person can still start it by hand. It does not run on its own.
+# Retired. Pull requests do not start this, and a manual dispatch has no pull
+# request for the action to review, so the job does not run. The proof that a
+# second model read the diff is ## Review in the description, or the same two
+# lines in a pull request comment. pr-standards checks that.
 on:
   workflow_dispatch:
 concurrency:
@@ -10,8 +10,8 @@ concurrency:
   cancel-in-progress: true
 jobs:
   vibecodereview:
-    # Only review the repo owner's own PRs (cost + injection guard on public repos).
-    if: github.event.pull_request.user.login == github.repository_owner
+    # Retired. See the note at the top of this file.
+    if: false
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:

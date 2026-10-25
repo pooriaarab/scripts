@@ -121,8 +121,10 @@ Four things, all required:
       Reviewed-by: codex:gpt-6-astra
       Verdict: 0 major
 
-  `Reviewed-by` uses the same `<agent>:<model>` shape as `Assisted-by`. It
-  must name a different model. A verdict of `N/A`, `TODO`, or `TBD` fails.
+  `Reviewed-by` uses the same `<agent>:<model>` shape as `Assisted-by`. The
+  model, the part after the colon, has to be a different model from every
+  `Assisted-by` line. A new agent name in front of the same model still fails.
+  A verdict of `N/A`, `TODO`, or `TBD` fails.
   `Verdict: 1 major` is fine when the findings are written under it: the check
   proves the review ran, it does not demand a clean one.
 
