@@ -76,6 +76,17 @@ verdict() { # LOGFILE
     skipped) echo "FAILED: the last sweep was skipped because a lock is held (${last#* skipped }). A stale lock blocks every later run." >&2; return 1 ;;
     *) echo "FAILED: the last sweep started but did not finish. Check the launchd logs next to $1." >&2; return 1 ;;
   esac
+  # "Healthy" must mean recent. A success from days ago says nothing about an agent that has since
+  # stopped, or about a log the sweep can no longer write.
+  local ts epoch max_h age_h
+  ts="${last%% *}"; max_h="${DISK_HYGIENE_MAX_AGE_HOURS:-14}"
+  epoch="$(date -u -d "$ts" +%s 2>/dev/null || date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "$ts" +%s 2>/dev/null || true)"
+  [[ -n "$epoch" ]] || { echo "FAILED: cannot read the time of the last sweep: $ts" >&2; return 1; }
+  age_h=$(( ( $(date -u +%s) - epoch ) / 3600 ))
+  if [[ "$age_h" -ge "$max_h" ]]; then
+    echo "FAILED: the last sweep is ${age_h} hours old (limit ${max_h}). The agent may have stopped, or the log may be unwritable." >&2
+    return 1
+  fi
   repos="$(sed -n 's/.* done repos=\([0-9][0-9]*\) .*/\1/p' <<< "$last")"
   failed="$(sed -n 's/.* failed=\([0-9][0-9]*\) .*/\1/p' <<< "$last")"
   if [[ -z "$repos" || "$repos" -eq 0 ]]; then
@@ -111,6 +122,9 @@ for f in disk-hygiene prune-merged-worktrees.sh; do
 done
 
 loops="${DISK_HYGIENE_INSTALL_LOOPS:-150}"; poll="${DISK_HYGIENE_INSTALL_POLL:-2}"
+# Truncate, never delete: the job opens these files when bootstrap starts it, and a deleted file
+# leaves it writing to an unlinked inode. Truncating first also clears errors from earlier runs.
+: > "$state/launchd.err.log"; : > "$state/launchd.out.log"
 plist > "$agent_dir/$label.plist"
 launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || true
 launchctl bootstrap "gui/$(id -u)" "$agent_dir/$label.plist"
@@ -119,7 +133,6 @@ echo "loaded $label (every ${interval}s)"
 # Verify rather than trust: bootstrap succeeds for an agent that then dies. RunAtLoad starts the run
 # at bootstrap, so there is no second start to wait for. Wait for that run to log a finish line, or
 # for macOS to refuse the read.
-rm -f "$state/launchd.err.log"
 for _ in $(seq 1 "$loops"); do
   # Only records stamped with this install's run id count. An older process cannot supply them.
   mine="$(grep -F " run=$run_id" "$state/log" 2>/dev/null || true)"

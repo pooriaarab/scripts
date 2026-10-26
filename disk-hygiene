@@ -56,8 +56,24 @@ mkdir -p "$(dirname "$LOG")" || { echo "error: cannot create the log directory f
 # Every attempt leaves a record. `start` opens a sweep and `done` closes it. A failure before the
 # sweep starts leaves `error`. The installer judges the LAST record, so an old success can never
 # stand in for a newer attempt that failed (found by review, 2026-10-26).
-log() { printf '%s %s%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" "${RUN_ID:+ run=$RUN_ID}" | tee -a "$LOG"; }
-die() { printf '%s error %s%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" "${RUN_ID:+ run=$RUN_ID}" >> "$LOG"; echo "error: $*" >&2; exit 2; }
+# A newline in a message would start a second record, so flatten it. An env value that reaches the
+# log must never be able to forge a finish line.
+flatten() { local m="$*"; m="${m//$'\n'/ }"; m="${m//$'\r'/ }"; printf '%s' "$m"; }
+log() { printf '%s %s%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(flatten "$*")" "${RUN_ID:+ run=$RUN_ID}" | tee -a "$LOG"; }
+
+# Every run ends with a terminal record: done, error or skipped. `finished` marks that one was written.
+# Any other non-zero exit (a failed rm, a failed write, anything set -e catches) leaves an error record
+# here, so an old success can never stand in for a run that died without saying so.
+finished=no; owns_lock=no
+on_exit() {
+  local rc=$?
+  if [[ "$finished" == no && "$rc" -ne 0 ]]; then
+    printf '%s error unexpected exit status %s%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$rc" "${RUN_ID:+ run=$RUN_ID}" >> "$LOG" 2>/dev/null || true
+  fi
+  if [[ "$owns_lock" == yes ]]; then rm -rf "$LOCK" 2>/dev/null || true; fi
+}
+trap on_exit EXIT
+die() { finished=yes; printf '%s error %s%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(flatten "$*")" "${RUN_ID:+ run=$RUN_ID}" >> "$LOG"; echo "error: $*" >&2; exit 2; }
 
 mkdir -p "$(dirname "$LOCK")" 2>/dev/null || die "cannot create the lock directory $(dirname "$LOCK")"
 
@@ -74,14 +90,14 @@ if ! mkdir "$LOCK" 2>/dev/null; then
   if [[ -n "$holder" ]]; then kill -0 "$holder" 2>/dev/null || stale=yes
   elif [[ -n "$(find "$LOCK" -maxdepth 0 -mmin +60 2>/dev/null)" ]]; then stale=yes; fi
   if [[ "$stale" == no ]]; then
-    log "skipped lock=$LOCK holder=${holder:-none}"; exit 0
+    finished=yes; log "skipped lock=$LOCK holder=${holder:-none}"; exit 0
   fi
   log "reclaiming stale lock $LOCK (holder ${holder:-none} is gone)"
   rm -rf "$LOCK"
-  mkdir "$LOCK" 2>/dev/null || { log "skipped lock=$LOCK taken by another run"; exit 0; }
+  mkdir "$LOCK" 2>/dev/null || { finished=yes; log "skipped lock=$LOCK taken by another run"; exit 0; }
 fi
 echo "$$" > "$LOCK/pid"
-trap 'rm -rf "$LOCK"' EXIT
+owns_lock=yes
 
 [[ "$THRESHOLD" =~ ^[0-9]+$ ]] || die "DISK_HYGIENE_THRESHOLD_GIB must be a whole number, got: $THRESHOLD"
 [[ -x "$PRUNE" ]] || die "prune script not found or not executable: $PRUNE"
@@ -164,6 +180,7 @@ fi
 
 after="$(free_gib)" || die "cannot read free space on $VOLUME"
 log "done repos=$repos_seen swept=$repos_swept removed=$total_removed needs_review=$total_review failed=$repos_failed caches_cleared=$cleared free_before_gib=$before free_after_gib=$after"
+finished=yes
 if [[ "$repos_failed" -gt 0 ]]; then
   log "WARNING: ${repos_failed} repo(s) could not be inspected or pruned. Read the log above."
   exit 2

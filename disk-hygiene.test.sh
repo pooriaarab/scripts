@@ -36,6 +36,11 @@
 #  28  a lock skip                                  -> recorded, so an old success cannot stand; an old empty lock is reclaimed
 #  29  setup checks run under the lock              -> a second run records a skip, not an error between start and done
 #  30  free space unreadable after the sweep        -> recorded, status 2
+#  31  a success that is days old                   -> not healthy: a dead agent or unwritable log shows as stale
+#  32  an unexpected exit (a lock that cannot go)   -> an error record, so the old success cannot stand
+#  33  a newline in an env value                    -> cannot forge a finish line
+#  34  an unwritable log                            -> the sweep exits non-zero and says so
+#  35  the installer's launchd logs                 -> truncated before the job starts, never deleted
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -199,8 +204,8 @@ DISK_HYGIENE_FREE_GIB=500 run --apply
 check "15 the done line reports repos seen" "$(grep -q ' done repos=2 ' "$tmp/out" && echo 0 || echo 1)"
 
 # 16: the installer reads the same log and must not call a run that read nothing healthy
-printf '2026-10-26T16:01:38Z done repos=0 swept=0 removed=0 needs_review=0 failed=0 caches_cleared=no free_before_gib=36 free_after_gib=36\n' > "$tmp/blind.log"
-printf '2026-10-26T16:29:47Z done repos=33 swept=33 removed=35 needs_review=110 failed=0 caches_cleared=no free_before_gib=32 free_after_gib=37\n' > "$tmp/sighted.log"
+printf '%s done repos=0 swept=0 removed=0 needs_review=0 failed=0 caches_cleared=no free_before_gib=36 free_after_gib=36\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$tmp/blind.log"
+printf '%s done repos=33 swept=33 removed=35 needs_review=110 failed=0 caches_cleared=no free_before_gib=32 free_after_gib=37\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$tmp/sighted.log"
 printf '2026-10-26T16:29:47Z start mode=apply\n' > "$tmp/nodone.log"
 "$here/disk-hygiene-install" --verdict "$tmp/blind.log" > "$tmp/v1.out" 2>&1 && v1=0 || v1=$?
 "$here/disk-hygiene-install" --verdict "$tmp/sighted.log" > "$tmp/v2.out" 2>&1 && v2=0 || v2=$?
@@ -341,6 +346,53 @@ PATH="$tmp/dfbin:$PATH" DF_COUNT="$tmp/df.count" DISK_HYGIENE_ROOTS="$tmp/rootB"
 df_rc="$(rc)"
 "$here/disk-hygiene-install" --verdict "$log30" > /dev/null 2>&1 && v30=0 || v30=1
 check "30 free space unreadable after the sweep is recorded and reports status 2" "$([[ "$df_rc" -eq 2 && "$v30" -eq 1 ]] && grep -q ' error ' "$log30" && echo 0 || echo 1)"
+
+# 31: "healthy" must mean recent. A success three days old says nothing about an agent that stopped.
+old_ts="$(date -u -v-3d +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '3 days ago' +%Y-%m-%dT%H:%M:%SZ)"
+printf '%s done repos=3 swept=1 removed=0 needs_review=0 failed=0 caches_cleared=no free_before_gib=90 free_after_gib=90\n' "$old_ts" > "$tmp/old.log"
+"$here/disk-hygiene-install" --verdict "$tmp/old.log" > "$tmp/v8.out" 2>&1 && v8=0 || v8=$?
+check "31 a success that is days old is not healthy and names its age" "$([[ "$v8" -ne 0 ]] && grep -qi 'old' "$tmp/v8.out" && echo 0 || echo 1)"
+
+# 32: an unexpected exit must leave an error record. A lock directory that cannot be emptied makes rm
+# fail under set -e, before any repo is read; the old success used to stay authoritative.
+if [[ "$(id -u)" -ne 0 ]]; then
+  log32="$tmp/state/log32"
+  DISK_HYGIENE_LOG="$log32" DISK_HYGIENE_FREE_GIB=500 run --apply
+  sleep 30 & gone=$!; kill -9 "$gone"; wait "$gone" 2>/dev/null || true
+  mkdir -p "$DISK_HYGIENE_LOCK"; echo "$gone" > "$DISK_HYGIENE_LOCK/pid"; chmod 500 "$DISK_HYGIENE_LOCK"
+  DISK_HYGIENE_LOG="$log32" DISK_HYGIENE_FREE_GIB=500 run --apply
+  unexpected_rc="$(rc)"; chmod 755 "$DISK_HYGIENE_LOCK"; rm -rf "$DISK_HYGIENE_LOCK"
+  "$here/disk-hygiene-install" --verdict "$log32" > /dev/null 2>&1 && v32=0 || v32=1
+  check "32 an unexpected exit leaves an error record and the old success cannot stand" "$([[ "$unexpected_rc" -ne 0 && "$v32" -eq 1 ]] && tail -n 1 "$log32" | grep -q ' error ' && echo 0 || echo 1)"
+else
+  echo "skip 32 (running as root)"
+fi
+
+# 33: a newline in a value that reaches the log must not start a new record
+log33="$tmp/state/log33"
+DISK_HYGIENE_LOG="$log33" DISK_HYGIENE_FREE_GIB=500 run --apply
+forged=$'/missing\n'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"' done repos=1 failed=0 x'
+DISK_HYGIENE_LOG="$log33" DISK_HYGIENE_PRUNE="$forged" DISK_HYGIENE_FREE_GIB=500 run --apply
+"$here/disk-hygiene-install" --verdict "$log33" > /dev/null 2>&1 && v33=0 || v33=1
+check "33 a newline in an env value cannot forge a finish line" "$([[ "$v33" -eq 1 ]] && echo 0 || echo 1)"
+
+# 34: a log the sweep cannot write. Nothing can be recorded, so it must at least fail out loud.
+if [[ "$(id -u)" -ne 0 ]]; then
+  log34="$tmp/state/log34"; : > "$log34"; chmod 400 "$log34"
+  DISK_HYGIENE_LOG="$log34" DISK_HYGIENE_FREE_GIB=500 run --apply
+  unwritable_rc="$(rc)"; chmod 644 "$log34"
+  check "34 an unwritable log makes the sweep exit non-zero and say why" "$([[ "$unwritable_rc" -ne 0 ]] && grep -qi 'permission denied' "$tmp/out" && echo 0 || echo 1)"
+else
+  echo "skip 34 (running as root)"
+fi
+
+# 35: the installer truncates the launchd logs before bootstrap, so the job's open file stays the same
+mkdir -p "$HOME/.local/state/disk-hygiene"
+echo "stale error from an earlier run" > "$HOME/.local/state/disk-hygiene/launchd.err.log"
+PATH="$tmp/unamebin:$PATH" LAUNCHCTL_MODE=ok LAUNCHCTL_APPEND_DONE=good DISK_HYGIENE_INSTALL_LOOPS=20 DISK_HYGIENE_INSTALL_POLL=0.1 \
+  "$here/disk-hygiene-install" > "$tmp/i5.out" 2>&1 || true
+errlog="$HOME/.local/state/disk-hygiene/launchd.err.log"
+check "35 the launchd logs are truncated, not deleted" "$([[ -f "$errlog" && ! -s "$errlog" ]] && echo 0 || echo 1)"
 
 if [[ "$fails" -ne 0 ]]; then echo "--- last out"; cat "$tmp/out"; echo "$fails case(s) failed" >&2; exit 1; fi
 echo "all cases passed"
