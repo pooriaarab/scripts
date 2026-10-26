@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # Install the periodic disk-hygiene sweep on this Mac. Idempotent.
-# Usage: disk-hygiene-install [--print]
-#   --print  write the launchd plist to stdout and change nothing.
+# Usage: disk-hygiene-install [--print | --verdict LOGFILE]
+#   --print            write the launchd plist to stdout and change nothing.
+#   --verdict LOGFILE  judge the last sweep in LOGFILE and change nothing. Healthy only when
+#                      that sweep read at least one repo.
+# Any other argument is an error. An unrecognised flag must never fall through to the install.
 #
 # WHY THIS EXISTS
 # Running disk-hygiene by hand does not keep the disk free, because the problem is that
@@ -21,6 +24,9 @@ agent_dir="$HOME/Library/LaunchAgents"
 label="com.pooriaarab.disk-hygiene"
 interval="${DISK_HYGIENE_INTERVAL:-21600}"
 state="$HOME/.local/state/disk-hygiene"
+# Written into the plist. The sweep stamps every record with it, so verification can pick out the
+# records of the run this install started and ignore a finish line from an older process.
+run_id="$(date +%s)-$$-$RANDOM"
 
 plist() {
   cat <<PLIST
@@ -38,6 +44,11 @@ plist() {
 	</array>
 	<key>StartInterval</key>
 	<integer>$interval</integer>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>DISK_HYGIENE_RUN_ID</key>
+		<string>$run_id</string>
+	</dict>
 	<key>RunAtLoad</key>
 	<true/>
 	<key>StandardOutPath</key>
@@ -49,7 +60,58 @@ plist() {
 PLIST
 }
 
-if [[ "${1:-}" == "--print" ]]; then plist; exit 0; fi
+# A sweep that finished having read 0 repos is not healthy. macOS gives launchd exactly that for
+# ~/Documents without Full Disk Access, and the installer once called it healthy (2026-10-26).
+verdict() { # LOGFILE
+  # Judge the LAST sweep. An old success must not hide a newer run that never finished.
+  local last event repos failed
+  last="$(grep -E '^[^ ]+ (start|done|error|skipped) ' "$1" 2>/dev/null | tail -n 1 || true)"
+  [[ -n "$last" ]] || { echo "FAILED: no sweep in $1." >&2; return 1; }
+  # The event is the second field. Matching " done " anywhere in the line would let error text that
+  # contains those words pass as a finish line.
+  event="$(awk '{ print $2 }' <<< "$last")"
+  case "$event" in
+    done) ;;
+    error) echo "FAILED: the last sweep failed: ${last#* error }" >&2; return 1 ;;
+    skipped) echo "FAILED: the last sweep was skipped because a lock is held (${last#* skipped }). A stale lock blocks every later run." >&2; return 1 ;;
+    *) echo "FAILED: the last sweep started but did not finish. Check the launchd logs next to $1." >&2; return 1 ;;
+  esac
+  # "Healthy" must mean recent. A success from days ago says nothing about an agent that has since
+  # stopped, or about a log the sweep can no longer write.
+  local ts epoch max_h age_h
+  ts="${last%% *}"; max_h="${DISK_HYGIENE_MAX_AGE_HOURS:-14}"
+  epoch="$(date -u -d "$ts" +%s 2>/dev/null || date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "$ts" +%s 2>/dev/null || true)"
+  [[ -n "$epoch" ]] || { echo "FAILED: cannot read the time of the last sweep: $ts" >&2; return 1; }
+  age_h=$(( ( $(date -u +%s) - epoch ) / 3600 ))
+  if [[ "$age_h" -ge "$max_h" ]]; then
+    echo "FAILED: the last sweep is ${age_h} hours old (limit ${max_h}). The agent may have stopped, or the log may be unwritable." >&2
+    return 1
+  fi
+  # The first repos= and failed= tokens decide. A greedy match would let a later token, such as one
+  # injected through an env value, override the real counts.
+  repos="$(awk '{ for (i = 3; i <= NF; i++) if ($i ~ /^repos=[0-9]+$/) { print substr($i, 7); exit } }' <<< "$last")"
+  failed="$(awk '{ for (i = 3; i <= NF; i++) if ($i ~ /^failed=[0-9]+$/) { print substr($i, 8); exit } }' <<< "$last")"
+  if [[ -z "$repos" || "$repos" -eq 0 ]]; then
+    echo "FAILED: the sweep finished but read 0 repos. macOS likely blocks launchd from reading ~/Documents." >&2
+    echo "Grant /bin/bash Full Disk Access: System Settings > Privacy & Security > Full Disk Access," >&2
+    echo "add /bin/bash, then run this installer again." >&2
+    return 1
+  fi
+  if [[ -z "$failed" || "$failed" -gt 0 ]]; then
+    echo "FAILED: the sweep could not inspect ${failed:-some} repo(s). Read the log." >&2
+    return 1
+  fi
+  echo "disk-hygiene agent healthy: the last sweep read $repos repos."
+  echo "$last"
+}
+
+case "${1:-}" in
+  "") ;;
+  --print) plist; exit 0 ;;
+  --verdict) [[ $# -eq 2 && -n "$2" ]] || { echo "usage: disk-hygiene-install --verdict LOGFILE" >&2; exit 2; }
+             verdict "$2"; exit $? ;;
+  *) echo "usage: disk-hygiene-install [--print | --verdict LOGFILE]" >&2; exit 2 ;;
+esac
 
 [[ "$(uname -s)" == "Darwin" ]] || { echo "launchd is macOS-only; on Linux use a systemd timer around 'disk-hygiene --apply'." >&2; exit 2; }
 command -v git >/dev/null || { echo "git not found" >&2; exit 2; }
@@ -61,26 +123,33 @@ for f in disk-hygiene prune-merged-worktrees.sh; do
   echo "installed $bin_dir/$f"
 done
 
+loops="${DISK_HYGIENE_INSTALL_LOOPS:-150}"; poll="${DISK_HYGIENE_INSTALL_POLL:-2}"
+# Truncate, never delete: the job opens these files when bootstrap starts it, and a deleted file
+# leaves it writing to an unlinked inode. Truncating first also clears errors from earlier runs.
+: > "$state/launchd.err.log"; : > "$state/launchd.out.log"
 plist > "$agent_dir/$label.plist"
 launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || true
 launchctl bootstrap "gui/$(id -u)" "$agent_dir/$label.plist"
 echo "loaded $label (every ${interval}s)"
 
-# Verify rather than trust: bootstrap succeeds for an agent that then dies. RunAtLoad starts a
-# run now. Wait for it to log a finish line, or for macOS to refuse the read.
-rm -f "$state/launchd.err.log"
-launchctl kickstart -k "gui/$(id -u)/$label" 2>/dev/null || true
-for _ in $(seq 1 150); do
-  if grep -q ' done ' "$state/log" 2>/dev/null && [[ -n "$(find "$state/log" -mmin -1 2>/dev/null)" ]]; then
-    echo "disk-hygiene agent healthy. Last run:"; tail -n 3 "$state/log"; exit 0
-  fi
-  if grep -qi 'operation not permitted' "$state/launchd.err.log" "$state/launchd.out.log" 2>/dev/null; then
+# Verify rather than trust: bootstrap succeeds for an agent that then dies. RunAtLoad starts the run
+# at bootstrap, so there is no second start to wait for. Wait for that run to log a finish line, or
+# for macOS to refuse the read.
+for _ in $(seq 1 "$loops"); do
+  # Only records stamped with this install's run id count. An older process cannot supply them.
+  mine="$(grep -F " run=$run_id" "$state/log" 2>/dev/null || true)"
+  event="$(grep -E '^[^ ]+ (start|done|error|skipped) ' <<< "$mine" | tail -n 1 | awk '{ print $2 }' || true)"
+  case "$event" in
+    done|error|skipped) slice="$(mktemp)"; printf '%s\n' "$mine" > "$slice"
+                status=0; verdict "$slice" || status=$?; rm -f "$slice"; exit "$status" ;;
+  esac
+  if grep -qiE 'operation not permitted|cannot list root' "$state/launchd.err.log" "$state/launchd.out.log" 2>/dev/null; then
     echo "FAILED: macOS blocked the sweep from reading ~/Documents." >&2
     echo "Grant /bin/bash Full Disk Access: System Settings > Privacy & Security > Full Disk Access," >&2
     echo "add /bin/bash, then run this installer again." >&2
     exit 1
   fi
-  sleep 2
+  sleep "$poll"
 done
-echo "FAILED: no finish line in $state/log after 5 minutes. Check $state/launchd.err.log." >&2
+echo "FAILED: no finish line from this install after $loops polls. Check $state/launchd.err.log." >&2
 exit 1
