@@ -25,7 +25,7 @@
 #   DISK_HYGIENE_VOLUME         volume to measure; default /System/Volumes/Data on macOS, else /
 #   DISK_HYGIENE_FREE_GIB       fixed free-space reading, for tests only
 #
-# Exit: 0 done, 2 bad setup, 3 still under the threshold after cleaning.
+# Exit: 0 done, 2 bad setup or a repo that could not be read or pruned, 3 still under the threshold.
 set -euo pipefail
 
 APPLY=0
@@ -40,7 +40,6 @@ done
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOTS="${DISK_HYGIENE_ROOTS:-$HOME/Documents/Personal}"
 THRESHOLD="${DISK_HYGIENE_THRESHOLD_GIB:-200}"
-[[ "$THRESHOLD" =~ ^[0-9]+$ ]] || { echo "error: DISK_HYGIENE_THRESHOLD_GIB must be a whole number, got: $THRESHOLD" >&2; exit 2; }
 PRUNE="${DISK_HYGIENE_PRUNE:-$here/prune-merged-worktrees.sh}"
 STATE="$HOME/.local/state/disk-hygiene"
 LOG="${DISK_HYGIENE_LOG:-$STATE/log}"
@@ -49,48 +48,115 @@ if [[ -n "${DISK_HYGIENE_VOLUME:-}" ]]; then VOLUME="$DISK_HYGIENE_VOLUME"
 elif [[ "$(uname -s)" == "Darwin" ]]; then VOLUME=/System/Volumes/Data
 else VOLUME=/; fi
 
-[[ -x "$PRUNE" ]] || { echo "error: prune script not found or not executable: $PRUNE" >&2; exit 2; }
-mkdir -p "$(dirname "$LOG")" "$(dirname "$LOCK")"
+# One id per install, set by the launchd plist. Every record carries it, so the installer can pick
+# out the records of the run it started and ignore a finish line from an older process.
+RUN_ID="${DISK_HYGIENE_RUN_ID:-}"
+# It lands in every record, so it must not be able to carry fields. Refuse one that is not a plain id.
+if [[ ! "$RUN_ID" =~ ^[A-Za-z0-9._-]*$ ]]; then RUN_ID=""; BAD_RUN_ID=yes; else BAD_RUN_ID=no; fi
+mkdir -p "$(dirname "$LOG")" || { echo "error: cannot create the log directory for $LOG" >&2; exit 2; }
 
-# A run can outlast the launchd interval. Two runs would race on the same worktrees.
-# The lock holds its owner's pid. A run killed by SIGKILL or a reboot never runs its EXIT
-# trap, and a lock that nobody owns would skip every later run in silence, so reclaim a
-# lock whose pid is dead. A lock with no pid file is treated as held: its owner may still
-# be between mkdir and writing the pid.
+# Every attempt leaves a record. `start` opens a sweep and `done` closes it. A failure before the
+# sweep starts leaves `error`. The installer judges the LAST record, so an old success can never
+# stand in for a newer attempt that failed (found by review, 2026-10-26).
+# A newline in a message would start a second record, so flatten it. An env value that reaches the
+# log must never be able to forge a finish line.
+flatten() { local m="$*"; m="${m//$'\n'/ }"; m="${m//$'\r'/ }"; printf '%s' "$m"; }
+log() { printf '%s %s%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(flatten "$*")" "${RUN_ID:+ run=$RUN_ID}" | tee -a "$LOG"; }
+
+# Every run ends with a terminal record: done, error or skipped. `finished` marks that one was written.
+# Any other non-zero exit (a failed rm, a failed write, anything set -e catches) leaves an error record
+# here, so an old success can never stand in for a run that died without saying so.
+finished=no; owns_lock=no
+on_exit() {
+  local rc=$?
+  if [[ "$finished" == no && "$rc" -ne 0 ]]; then
+    printf '%s error unexpected exit status %s%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$rc" "${RUN_ID:+ run=$RUN_ID}" >> "$LOG" 2>/dev/null || true
+  fi
+  if [[ "$owns_lock" == yes ]]; then rm -rf "$LOCK" 2>/dev/null || true; fi
+}
+trap on_exit EXIT
+die() { finished=yes; printf '%s error %s%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(flatten "$*")" "${RUN_ID:+ run=$RUN_ID}" >> "$LOG"; echo "error: $*" >&2; exit 2; }
+
+mkdir -p "$(dirname "$LOCK")" 2>/dev/null || die "cannot create the lock directory $(dirname "$LOCK")"
+
+# A run can outlast the launchd interval. Two runs would race on the same worktrees. Take the lock
+# BEFORE the setup checks, so attempts are serialised and a second run cannot write an error in
+# the middle of another run's start and done.
+# The lock holds its owner's pid. A run killed by SIGKILL or a reboot never runs its EXIT trap, so
+# reclaim a lock whose pid is dead. A lock with no pid file may belong to an owner between mkdir and
+# writing the pid, so treat a fresh one as held, and reclaim one more than an hour old. A skip is
+# recorded: without a record, a stuck lock would leave the last success looking current for ever.
 if ! mkdir "$LOCK" 2>/dev/null; then
   holder="$(cat "$LOCK/pid" 2>/dev/null || true)"
-  if [[ -z "$holder" ]] || kill -0 "$holder" 2>/dev/null; then
-    echo "another disk-hygiene run holds $LOCK; skipping"; exit 0
+  stale=no
+  if [[ -n "$holder" ]]; then kill -0 "$holder" 2>/dev/null || stale=yes
+  elif [[ -n "$(find "$LOCK" -maxdepth 0 -mmin +60 2>/dev/null)" ]]; then stale=yes; fi
+  if [[ "$stale" == no ]]; then
+    finished=yes; log "skipped lock=$LOCK holder=${holder:-none}"; exit 0
   fi
-  echo "reclaiming stale lock $LOCK (pid $holder is gone)"
+  log "reclaiming stale lock $LOCK (holder ${holder:-none} is gone)"
   rm -rf "$LOCK"
-  mkdir "$LOCK" 2>/dev/null || { echo "another disk-hygiene run took $LOCK; skipping"; exit 0; }
+  mkdir "$LOCK" 2>/dev/null || { finished=yes; log "skipped lock=$LOCK taken by another run"; exit 0; }
 fi
 echo "$$" > "$LOCK/pid"
-trap 'rm -rf "$LOCK"' EXIT
+owns_lock=yes
+
+[[ "$BAD_RUN_ID" == no ]] || die "DISK_HYGIENE_RUN_ID must be letters, digits, dot, dash or underscore"
+[[ "$THRESHOLD" =~ ^[0-9]+$ ]] || die "DISK_HYGIENE_THRESHOLD_GIB must be a whole number, got: $THRESHOLD"
+[[ -x "$PRUNE" ]] || die "prune script not found or not executable: $PRUNE"
 
 free_gib() {
   if [[ -n "${DISK_HYGIENE_FREE_GIB:-}" ]]; then echo "$DISK_HYGIENE_FREE_GIB"; return; fi
-  df -k "$VOLUME" | awk 'NR == 2 { printf "%d", $4 / 1048576 }'
+  # Capture df's own status. In a pipeline its failure is hidden, and errexit is off inside a
+  # function called through || die, so a df that prints a table and then fails would count as a reading.
+  local raw out
+  raw="$(df -k "$VOLUME" 2>/dev/null)" || return 1
+  out="$(awk 'NR == 2 { printf "%d", $4 / 1048576 }' <<< "$raw")"
+  [[ "$out" =~ ^[0-9]+$ ]] || return 1
+  echo "$out"
 }
-log() { printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" | tee -a "$LOG"; }
 
 mode=dry-run; [[ "$APPLY" -eq 1 ]] && mode=apply
-before="$(free_gib)"
+before="$(free_gib)" || die "cannot read free space on $VOLUME"
 log "start mode=$mode volume=$VOLUME free_before_gib=$before threshold_gib=$THRESHOLD"
 
 # --- 1. worktrees
-total_removed=0; total_review=0
-prune_args=(); [[ "$APPLY" -eq 1 ]] && prune_args+=(--apply)
+# A root that exists but cannot be listed is how macOS shows a launchd job without Full Disk
+# Access: `[[ -d ]]` passes, `ls` fails with "Operation not permitted", and a glob over the root
+# matches nothing. Without this check the sweep logs "done" having read no repo, and the
+# installer once reported that as healthy (2026-10-26). Check every root before touching one.
 IFS=: read -r -a root_list <<< "$ROOTS"
+for root in "${root_list[@]}"; do
+  [[ -d "$root" ]] || continue  # a missing root is logged and skipped in the sweep below
+  ls -A "$root" >/dev/null 2>&1 || die "cannot list root $root. Under launchd on macOS, grant /bin/bash Full Disk Access."
+done
+
+total_removed=0; total_review=0; repos_seen=0; repos_swept=0; repos_failed=0
+prune_args=(); [[ "$APPLY" -eq 1 ]] && prune_args+=(--apply)
 for root in "${root_list[@]}"; do
   [[ -d "$root" ]] || { log "root missing, skipped: $root"; continue; }
   for repo in "$root"/*/; do
     repo="${repo%/}"
+    [[ -d "$repo" ]] || continue  # an empty root leaves the glob unmatched: the literal pattern
+    # A directory this run cannot read is a failed repo, not "a directory that is not a repo".
+    if ! ls -A "$repo" >/dev/null 2>&1; then
+      log "cannot read directory, skipped: $repo"
+      repos_failed=$((repos_failed + 1))
+      continue
+    fi
     [[ -d "$repo/.git" ]] || continue  # main clones only; a linked worktree has a .git file
-    [[ "$(git -C "$repo" worktree list 2>/dev/null | wc -l)" -gt 1 ]] || continue
+    # Count a repo as seen only after git can read it. A clone git cannot inspect is a sweep
+    # error, not a repo with no worktrees: counting it would let a blind sweep report repos=1.
+    if ! wt_list="$(git -C "$repo" worktree list 2>&1)"; then
+      log "cannot inspect repo, skipped: $repo ($(head -n 1 <<< "$wt_list"))"
+      repos_failed=$((repos_failed + 1))
+      continue
+    fi
+    repos_seen=$((repos_seen + 1))
+    [[ "$(grep -c . <<< "$wt_list")" -gt 1 ]] || continue
     out="$("$PRUNE" "$repo" ${prune_args[@]+"${prune_args[@]}"} 2>&1)" \
-      || { log "prune failed in $repo"; echo "$out" >&2; continue; }
+      || { log "prune failed in $repo"; echo "$out" >&2; repos_failed=$((repos_failed + 1)); continue; }
+    repos_swept=$((repos_swept + 1))
     removed="$(sed -n 's/^removed: //p' <<< "$out")"
     review="$(sed -n 's/^needs-review: //p' <<< "$out")"
     total_removed=$((total_removed + ${removed:-0})); total_review=$((total_review + ${review:-0}))
@@ -111,15 +177,20 @@ clear_caches() {
          "$HOME/Library/Developer/Xcode/iOS DeviceSupport/"* \
          "$HOME/Library/Caches/ms-playwright/"* 2>/dev/null || true
 }
-mid="$(free_gib)"
+mid="$(free_gib)" || die "cannot read free space on $VOLUME"
 cleared=no
 if [[ "$mid" -lt "$THRESHOLD" ]]; then
   if [[ "$APPLY" -eq 1 ]]; then clear_caches; cleared=yes
   else log "would clear caches: free ${mid} GiB is under ${THRESHOLD} GiB"; fi
 fi
 
-after="$(free_gib)"
-log "done removed=$total_removed needs_review=$total_review caches_cleared=$cleared free_before_gib=$before free_after_gib=$after"
+after="$(free_gib)" || die "cannot read free space on $VOLUME"
+log "done repos=$repos_seen swept=$repos_swept removed=$total_removed needs_review=$total_review failed=$repos_failed caches_cleared=$cleared free_before_gib=$before free_after_gib=$after"
+finished=yes
+if [[ "$repos_failed" -gt 0 ]]; then
+  log "WARNING: ${repos_failed} repo(s) could not be inspected or pruned. Read the log above."
+  exit 2
+fi
 if [[ "$after" -lt "$THRESHOLD" ]]; then
   log "WARNING: ${after} GiB free is still under ${THRESHOLD} GiB. Review needs-review items and large data by hand."
   exit 3
