@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # Install the periodic disk-hygiene sweep on this Mac. Idempotent.
-# Usage: disk-hygiene-install [--print]
-#   --print  write the launchd plist to stdout and change nothing.
+# Usage: disk-hygiene-install [--print | --verdict LOGFILE]
+#   --print            write the launchd plist to stdout and change nothing.
+#   --verdict LOGFILE  judge the last sweep in LOGFILE and change nothing. Healthy only when
+#                      that sweep read at least one repo.
+# Any other argument is an error. An unrecognised flag must never fall through to the install.
 #
 # WHY THIS EXISTS
 # Running disk-hygiene by hand does not keep the disk free, because the problem is that
@@ -49,7 +52,30 @@ plist() {
 PLIST
 }
 
-if [[ "${1:-}" == "--print" ]]; then plist; exit 0; fi
+# A sweep that finished having read 0 repos is not healthy. macOS gives launchd exactly that for
+# ~/Documents without Full Disk Access, and the installer once called it healthy (2026-10-26).
+verdict() { # LOGFILE
+  local line repos
+  line="$(grep ' done ' "$1" 2>/dev/null | tail -n 1 || true)"
+  [[ -n "$line" ]] || { echo "FAILED: no finish line in $1." >&2; return 1; }
+  repos="$(sed -n 's/.* done repos=\([0-9][0-9]*\) .*/\1/p' <<< "$line")"
+  if [[ -z "$repos" || "$repos" -eq 0 ]]; then
+    echo "FAILED: the sweep finished but read 0 repos. macOS likely blocks launchd from reading ~/Documents." >&2
+    echo "Grant /bin/bash Full Disk Access: System Settings > Privacy & Security > Full Disk Access," >&2
+    echo "add /bin/bash, then run this installer again." >&2
+    return 1
+  fi
+  echo "disk-hygiene agent healthy: the last sweep read $repos repos."
+  echo "$line"
+}
+
+case "${1:-}" in
+  "") ;;
+  --print) plist; exit 0 ;;
+  --verdict) [[ -n "${2:-}" ]] || { echo "usage: disk-hygiene-install --verdict LOGFILE" >&2; exit 2; }
+             verdict "$2"; exit $? ;;
+  *) echo "usage: disk-hygiene-install [--print | --verdict LOGFILE]" >&2; exit 2 ;;
+esac
 
 [[ "$(uname -s)" == "Darwin" ]] || { echo "launchd is macOS-only; on Linux use a systemd timer around 'disk-hygiene --apply'." >&2; exit 2; }
 command -v git >/dev/null || { echo "git not found" >&2; exit 2; }
@@ -72,9 +98,9 @@ rm -f "$state/launchd.err.log"
 launchctl kickstart -k "gui/$(id -u)/$label" 2>/dev/null || true
 for _ in $(seq 1 150); do
   if grep -q ' done ' "$state/log" 2>/dev/null && [[ -n "$(find "$state/log" -mmin -1 2>/dev/null)" ]]; then
-    echo "disk-hygiene agent healthy. Last run:"; tail -n 3 "$state/log"; exit 0
+    verdict "$state/log"; exit $?
   fi
-  if grep -qi 'operation not permitted' "$state/launchd.err.log" "$state/launchd.out.log" 2>/dev/null; then
+  if grep -qiE 'operation not permitted|cannot list root' "$state/launchd.err.log" "$state/launchd.out.log" 2>/dev/null; then
     echo "FAILED: macOS blocked the sweep from reading ~/Documents." >&2
     echo "Grant /bin/bash Full Disk Access: System Settings > Privacy & Security > Full Disk Access," >&2
     echo "add /bin/bash, then run this installer again." >&2

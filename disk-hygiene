@@ -80,15 +80,29 @@ before="$(free_gib)"
 log "start mode=$mode volume=$VOLUME free_before_gib=$before threshold_gib=$THRESHOLD"
 
 # --- 1. worktrees
-total_removed=0; total_review=0
-prune_args=(); [[ "$APPLY" -eq 1 ]] && prune_args+=(--apply)
+# A root that exists but cannot be listed is how macOS shows a launchd job without Full Disk
+# Access: `[[ -d ]]` passes, `ls` fails with "Operation not permitted", and a glob over the root
+# matches nothing. Without this check the sweep logs "done" having read no repo, and the
+# installer once reported that as healthy (2026-10-26). Check every root before touching one.
 IFS=: read -r -a root_list <<< "$ROOTS"
+for root in "${root_list[@]}"; do
+  [[ -d "$root" ]] || continue  # a missing root is logged and skipped in the sweep below
+  if ! ls -A "$root" >/dev/null 2>&1; then
+    echo "error: cannot list root $root. Under launchd on macOS, grant /bin/bash Full Disk Access." >&2
+    exit 2
+  fi
+done
+
+total_removed=0; total_review=0; repos_seen=0; repos_swept=0
+prune_args=(); [[ "$APPLY" -eq 1 ]] && prune_args+=(--apply)
 for root in "${root_list[@]}"; do
   [[ -d "$root" ]] || { log "root missing, skipped: $root"; continue; }
   for repo in "$root"/*/; do
     repo="${repo%/}"
     [[ -d "$repo/.git" ]] || continue  # main clones only; a linked worktree has a .git file
+    repos_seen=$((repos_seen + 1))
     [[ "$(git -C "$repo" worktree list 2>/dev/null | wc -l)" -gt 1 ]] || continue
+    repos_swept=$((repos_swept + 1))
     out="$("$PRUNE" "$repo" ${prune_args[@]+"${prune_args[@]}"} 2>&1)" \
       || { log "prune failed in $repo"; echo "$out" >&2; continue; }
     removed="$(sed -n 's/^removed: //p' <<< "$out")"
@@ -119,7 +133,7 @@ if [[ "$mid" -lt "$THRESHOLD" ]]; then
 fi
 
 after="$(free_gib)"
-log "done removed=$total_removed needs_review=$total_review caches_cleared=$cleared free_before_gib=$before free_after_gib=$after"
+log "done repos=$repos_seen swept=$repos_swept removed=$total_removed needs_review=$total_review caches_cleared=$cleared free_before_gib=$before free_after_gib=$after"
 if [[ "$after" -lt "$THRESHOLD" ]]; then
   log "WARNING: ${after} GiB free is still under ${THRESHOLD} GiB. Review needs-review items and large data by hand."
   exit 3
