@@ -7,6 +7,7 @@
 #   cliproxy-hub client codex  [--codex-home D]   client: point Codex at the hub
 #   cliproxy-hub verify                     client: can this host reach the hub?
 #
+# Hub commands read CLIPROXY_MANAGEMENT_KEY from the environment or from CLIPROXY_ENV_FILE.
 # Client commands read HUB_URL and HUB_KEY from the environment, or HUB_KEY_FILE.
 # Nothing here prints a key. Config files get a timestamped backup before any edit.
 #
@@ -50,7 +51,7 @@ models_count() { # url key -> number of models, or empty on failure
 # lists its models, so /v1/models alone never shows a dead login.
 seats() {
   mk="${CLIPROXY_MANAGEMENT_KEY:-}"
-  [ -n "$mk" ] || mk=$(sed -n 's/^CLIPROXY_MANAGEMENT_KEY=//p' "${CLIPROXY_ENV_FILE:-$HOME/Documents/Personal/.secrets/cliproxyapi.env}" 2>/dev/null)
+  [ -n "$mk" ] || mk=$(sed -n 's/^CLIPROXY_MANAGEMENT_KEY=//p' "${CLIPROXY_ENV_FILE:-$HOME/.config/cliproxy-hub/env}" 2>/dev/null)
   [ -n "$mk" ] || { bad "no management key: set CLIPROXY_MANAGEMENT_KEY"; return; }
   out=$(curl -fsS -m 10 "http://127.0.0.1:$PORT/v0/management/auth-files" -H "Authorization: Bearer $mk" 2>/dev/null |
     python3 -c '
