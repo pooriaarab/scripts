@@ -33,6 +33,9 @@
 #  27  a failed verification                       -> leaves no temp file behind (a guard: the previous
 #                                                     code did not leak on bash 5 either)
 #  22b an old process finishing during the install -> its finish line has no run id and is ignored
+#  28  a lock skip                                  -> recorded, so an old success cannot stand; an old empty lock is reclaimed
+#  29  setup checks run under the lock              -> a second run records a skip, not an error between start and done
+#  30  free space unreadable after the sweep        -> recorded, status 2
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -66,7 +69,7 @@ if [[ "$1" == "bootout" && -n "${LAUNCHCTL_APPEND_OLD:-}" ]]; then
   # the OLD process finishes while the installer replaces it: a finish line with no run id
   printf '%s done repos=3 swept=1 removed=0 needs_review=0 failed=0 caches_cleared=no free_before_gib=90 free_after_gib=90\n' "$(ts)" >> "$state/log"
 fi
-if [[ "$1" == "kickstart" && -n "${LAUNCHCTL_APPEND_DONE:-}" ]]; then
+if [[ "$1" == "bootstrap" && -n "${LAUNCHCTL_APPEND_DONE:-}" ]]; then
   repos=3; [[ "$LAUNCHCTL_APPEND_DONE" == "blind" ]] && repos=0
   printf '%s start mode=apply run=%s\n%s done repos=%s swept=1 removed=0 needs_review=0 failed=0 caches_cleared=no free_before_gib=90 free_after_gib=90 run=%s\n' \
     "$(ts)" "$id" "$(ts)" "$repos" "$id" >> "$state/log"
@@ -253,7 +256,7 @@ PATH="$tmp/unamebin:$PATH" LAUNCHCTL_MODE=ok DISK_HYGIENE_INSTALL_LOOPS=3 DISK_H
 check "22 an old finish line does not make a new install healthy" "$([[ "$i1" -ne 0 ]] && ! grep -q 'agent healthy' "$tmp/i1.out" && echo 0 || echo 1)"
 PATH="$tmp/unamebin:$PATH" LAUNCHCTL_MODE=ok LAUNCHCTL_APPEND_DONE=good DISK_HYGIENE_INSTALL_LOOPS=20 DISK_HYGIENE_INSTALL_POLL=0.1 \
   "$here/disk-hygiene-install" > "$tmp/i2.out" 2>&1 && i2=0 || i2=$?
-check "22 a finish line written after the install makes it healthy" "$([[ "$i2" -eq 0 ]] && grep -q 'agent healthy' "$tmp/i2.out" && echo 0 || echo 1)"
+check "22 a finish line written after the install makes it healthy, with no kickstart" "$([[ "$i2" -eq 0 ]] && grep -q 'agent healthy' "$tmp/i2.out" && ! grep -q 'kickstart' "$LAUNCHCTL_LOG" && echo 0 || echo 1)"
 
 # 23: a prune that fails is a failed repo. It must not count as swept, and the run must say so.
 printf '#!/usr/bin/env bash\nexit 1\n' > "$tmp/prune-fails.sh"; chmod +x "$tmp/prune-fails.sh"
@@ -300,6 +303,44 @@ if [[ "$(id -u)" -ne 0 ]]; then
 else
   echo "skip 26 (running as root)"
 fi
+
+# 28: a skipped run leaves a record. An empty lock directory (its owner died between mkdir and writing
+# the pid) used to make every later run skip in silence while the last success stayed "healthy".
+log28="$tmp/state/log28"
+DISK_HYGIENE_LOG="$log28" DISK_HYGIENE_FREE_GIB=500 run --apply
+mkdir -p "$DISK_HYGIENE_LOCK"                                  # fresh and empty: held, so skip
+DISK_HYGIENE_LOG="$log28" DISK_HYGIENE_FREE_GIB=500 run --apply
+skip_rc="$(rc)"
+"$here/disk-hygiene-install" --verdict "$log28" > /dev/null 2>&1 && v28=0 || v28=1
+touch -t 202001010000 "$DISK_HYGIENE_LOCK"                     # the same empty lock, hours old: reclaim
+DISK_HYGIENE_LOG="$log28" DISK_HYGIENE_FREE_GIB=500 run --apply
+reclaim_rc="$(rc)"
+"$here/disk-hygiene-install" --verdict "$log28" > /dev/null 2>&1 && v28b=0 || v28b=1
+check "28 a skipped run is recorded and not healthy; an old empty lock is reclaimed" "$([[ "$skip_rc" -eq 0 && "$v28" -eq 1 && "$reclaim_rc" -eq 0 && "$v28b" -eq 0 ]] && echo 0 || echo 1)"
+
+# 29: with a live owner holding the lock, a second run with a bad setup must skip, not write an error
+# in the middle of the owner's run.
+log29="$tmp/state/log29"
+mkdir -p "$DISK_HYGIENE_LOCK"; echo "$$" > "$DISK_HYGIENE_LOCK/pid"
+DISK_HYGIENE_LOG="$log29" DISK_HYGIENE_PRUNE="$tmp/nope.sh" DISK_HYGIENE_FREE_GIB=500 run --apply
+second_rc="$(rc)"; last29="$(tail -n 1 "$log29" | awk '{ print $2 }')"
+rm -rf "$DISK_HYGIENE_LOCK"
+check "29 a second run under a held lock records a skip, not a setup error" "$([[ "$second_rc" -eq 0 && "$last29" == "skipped" ]] && echo 0 || echo 1)"
+
+# 30: free space unreadable after the sweep started. df answers once, then fails.
+mkdir -p "$tmp/dfbin"
+cat > "$tmp/dfbin/df" <<'STUB'
+#!/usr/bin/env bash
+n="$(cat "$DF_COUNT" 2>/dev/null || echo 0)"; echo $((n + 1)) > "$DF_COUNT"
+[[ "$n" -eq 0 ]] || exit 1
+printf 'Filesystem 1024-blocks Used Available Capacity Mounted\n/dev/x 976490576 1000 943718400 1%% /\n'
+STUB
+chmod +x "$tmp/dfbin/df"; : > "$tmp/df.count"; rm -f "$tmp/df.count"
+log30="$tmp/state/log30"
+PATH="$tmp/dfbin:$PATH" DF_COUNT="$tmp/df.count" DISK_HYGIENE_ROOTS="$tmp/rootB" DISK_HYGIENE_LOG="$log30" DISK_HYGIENE_FREE_GIB='' run --apply
+df_rc="$(rc)"
+"$here/disk-hygiene-install" --verdict "$log30" > /dev/null 2>&1 && v30=0 || v30=1
+check "30 free space unreadable after the sweep is recorded and reports status 2" "$([[ "$df_rc" -eq 2 && "$v30" -eq 1 ]] && grep -q ' error ' "$log30" && echo 0 || echo 1)"
 
 if [[ "$fails" -ne 0 ]]; then echo "--- last out"; cat "$tmp/out"; echo "$fails case(s) failed" >&2; exit 1; fi
 echo "all cases passed"

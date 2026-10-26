@@ -61,25 +61,30 @@ die() { printf '%s error %s%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" "${RUN_ID
 
 mkdir -p "$(dirname "$LOCK")" 2>/dev/null || die "cannot create the lock directory $(dirname "$LOCK")"
 
-[[ "$THRESHOLD" =~ ^[0-9]+$ ]] || die "DISK_HYGIENE_THRESHOLD_GIB must be a whole number, got: $THRESHOLD"
-[[ -x "$PRUNE" ]] || die "prune script not found or not executable: $PRUNE"
-
-# A run can outlast the launchd interval. Two runs would race on the same worktrees.
-# The lock holds its owner's pid. A run killed by SIGKILL or a reboot never runs its EXIT
-# trap, and a lock that nobody owns would skip every later run in silence, so reclaim a
-# lock whose pid is dead. A lock with no pid file is treated as held: its owner may still
-# be between mkdir and writing the pid.
+# A run can outlast the launchd interval. Two runs would race on the same worktrees. Take the lock
+# BEFORE the setup checks, so attempts are serialised and a second run cannot write an error in
+# the middle of another run's start and done.
+# The lock holds its owner's pid. A run killed by SIGKILL or a reboot never runs its EXIT trap, so
+# reclaim a lock whose pid is dead. A lock with no pid file may belong to an owner between mkdir and
+# writing the pid, so treat a fresh one as held, and reclaim one more than an hour old. A skip is
+# recorded: without a record, a stuck lock would leave the last success looking current for ever.
 if ! mkdir "$LOCK" 2>/dev/null; then
   holder="$(cat "$LOCK/pid" 2>/dev/null || true)"
-  if [[ -z "$holder" ]] || kill -0 "$holder" 2>/dev/null; then
-    echo "another disk-hygiene run holds $LOCK; skipping"; exit 0
+  stale=no
+  if [[ -n "$holder" ]]; then kill -0 "$holder" 2>/dev/null || stale=yes
+  elif [[ -n "$(find "$LOCK" -maxdepth 0 -mmin +60 2>/dev/null)" ]]; then stale=yes; fi
+  if [[ "$stale" == no ]]; then
+    log "skipped lock=$LOCK holder=${holder:-none}"; exit 0
   fi
-  echo "reclaiming stale lock $LOCK (pid $holder is gone)"
+  log "reclaiming stale lock $LOCK (holder ${holder:-none} is gone)"
   rm -rf "$LOCK"
-  mkdir "$LOCK" 2>/dev/null || { echo "another disk-hygiene run took $LOCK; skipping"; exit 0; }
+  mkdir "$LOCK" 2>/dev/null || { log "skipped lock=$LOCK taken by another run"; exit 0; }
 fi
 echo "$$" > "$LOCK/pid"
 trap 'rm -rf "$LOCK"' EXIT
+
+[[ "$THRESHOLD" =~ ^[0-9]+$ ]] || die "DISK_HYGIENE_THRESHOLD_GIB must be a whole number, got: $THRESHOLD"
+[[ -x "$PRUNE" ]] || die "prune script not found or not executable: $PRUNE"
 
 free_gib() {
   if [[ -n "${DISK_HYGIENE_FREE_GIB:-}" ]]; then echo "$DISK_HYGIENE_FREE_GIB"; return; fi
@@ -150,14 +155,14 @@ clear_caches() {
          "$HOME/Library/Developer/Xcode/iOS DeviceSupport/"* \
          "$HOME/Library/Caches/ms-playwright/"* 2>/dev/null || true
 }
-mid="$(free_gib)"
+mid="$(free_gib)" || die "cannot read free space on $VOLUME"
 cleared=no
 if [[ "$mid" -lt "$THRESHOLD" ]]; then
   if [[ "$APPLY" -eq 1 ]]; then clear_caches; cleared=yes
   else log "would clear caches: free ${mid} GiB is under ${THRESHOLD} GiB"; fi
 fi
 
-after="$(free_gib)"
+after="$(free_gib)" || die "cannot read free space on $VOLUME"
 log "done repos=$repos_seen swept=$repos_swept removed=$total_removed needs_review=$total_review failed=$repos_failed caches_cleared=$cleared free_before_gib=$before free_after_gib=$after"
 if [[ "$repos_failed" -gt 0 ]]; then
   log "WARNING: ${repos_failed} repo(s) could not be inspected or pruned. Read the log above."
