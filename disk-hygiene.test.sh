@@ -27,6 +27,12 @@
 #  21  a failure before the sweep starts           -> recorded, so an old success cannot stand
 #  22  install verification                        -> only a finish line written AFTER the install counts
 #  23  a prune failure                             -> counted in failed=N, swept not counted, status 2
+#  24  error text that contains " done "            -> still an error record, never a finish line
+#  25  a lock directory that cannot be made        -> recorded, status 2
+#  26  a repo directory that cannot be read        -> counted in failed=N, status 2
+#  27  a failed verification                       -> leaves no temp file behind (a guard: the previous
+#                                                     code did not leak on bash 5 either)
+#  22b an old process finishing during the install -> its finish line has no run id and is ignored
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -52,9 +58,18 @@ cat > "$tmp/bin/launchctl" <<'STUB'
 #!/usr/bin/env bash
 echo "launchctl $*" >> "$LAUNCHCTL_LOG"
 [[ "${LAUNCHCTL_MODE:-fail}" == "ok" ]] || exit 1
+state="$HOME/.local/state/disk-hygiene"
+ts() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+# the run id the installer put in the plist, so a stubbed "new run" can carry it
+id="$(awk '/DISK_HYGIENE_RUN_ID/ { getline; gsub(/.*<string>|<\/string>.*/, ""); print }' "$HOME/Library/LaunchAgents/com.pooriaarab.disk-hygiene.plist" 2>/dev/null)"
+if [[ "$1" == "bootout" && -n "${LAUNCHCTL_APPEND_OLD:-}" ]]; then
+  # the OLD process finishes while the installer replaces it: a finish line with no run id
+  printf '%s done repos=3 swept=1 removed=0 needs_review=0 failed=0 caches_cleared=no free_before_gib=90 free_after_gib=90\n' "$(ts)" >> "$state/log"
+fi
 if [[ "$1" == "kickstart" && -n "${LAUNCHCTL_APPEND_DONE:-}" ]]; then
-  printf '%s start mode=apply\n%s done repos=3 swept=1 removed=0 needs_review=0 failed=0 caches_cleared=no free_before_gib=90 free_after_gib=90\n' \
-    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$HOME/.local/state/disk-hygiene/log"
+  repos=3; [[ "$LAUNCHCTL_APPEND_DONE" == "blind" ]] && repos=0
+  printf '%s start mode=apply run=%s\n%s done repos=%s swept=1 removed=0 needs_review=0 failed=0 caches_cleared=no free_before_gib=90 free_after_gib=90 run=%s\n' \
+    "$(ts)" "$id" "$(ts)" "$repos" "$id" >> "$state/log"
 fi
 exit 0
 STUB
@@ -236,7 +251,7 @@ printf '%s start mode=apply\n%s done repos=3 swept=1 removed=0 needs_review=0 fa
 PATH="$tmp/unamebin:$PATH" LAUNCHCTL_MODE=ok DISK_HYGIENE_INSTALL_LOOPS=3 DISK_HYGIENE_INSTALL_POLL=0.1 \
   "$here/disk-hygiene-install" > "$tmp/i1.out" 2>&1 && i1=0 || i1=$?
 check "22 an old finish line does not make a new install healthy" "$([[ "$i1" -ne 0 ]] && ! grep -q 'agent healthy' "$tmp/i1.out" && echo 0 || echo 1)"
-PATH="$tmp/unamebin:$PATH" LAUNCHCTL_MODE=ok LAUNCHCTL_APPEND_DONE=1 DISK_HYGIENE_INSTALL_LOOPS=20 DISK_HYGIENE_INSTALL_POLL=0.1 \
+PATH="$tmp/unamebin:$PATH" LAUNCHCTL_MODE=ok LAUNCHCTL_APPEND_DONE=good DISK_HYGIENE_INSTALL_LOOPS=20 DISK_HYGIENE_INSTALL_POLL=0.1 \
   "$here/disk-hygiene-install" > "$tmp/i2.out" 2>&1 && i2=0 || i2=$?
 check "22 a finish line written after the install makes it healthy" "$([[ "$i2" -eq 0 ]] && grep -q 'agent healthy' "$tmp/i2.out" && echo 0 || echo 1)"
 
@@ -246,6 +261,45 @@ DISK_HYGIENE_ROOTS="$tmp/rootA" DISK_HYGIENE_PRUNE="$tmp/prune-fails.sh" DISK_HY
 fail_rc="$(rc)"; grep ' done ' "$tmp/out" > "$tmp/prunefail.log" || true
 "$here/disk-hygiene-install" --verdict "$tmp/prunefail.log" > /dev/null 2>&1 && pv=0 || pv=1
 check "23 a prune failure is counted, not swept, and the run is not healthy" "$([[ "$fail_rc" -eq 2 ]] && grep -q 'swept=0' "$tmp/out" && grep -q 'failed=1' "$tmp/out" && [[ "$pv" -eq 1 ]] && echo 0 || echo 1)"
+
+# 22b: the old process finishes between the stop and the start. Its finish line carries no run id.
+printf '%s start mode=apply\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$HOME/.local/state/disk-hygiene/log"
+PATH="$tmp/unamebin:$PATH" LAUNCHCTL_MODE=ok LAUNCHCTL_APPEND_OLD=1 DISK_HYGIENE_INSTALL_LOOPS=3 DISK_HYGIENE_INSTALL_POLL=0.1 \
+  "$here/disk-hygiene-install" > "$tmp/i3.out" 2>&1 && i3=0 || i3=$?
+check "22b a finish line from the old process does not make the install healthy" "$([[ "$i3" -ne 0 ]] && ! grep -q 'agent healthy' "$tmp/i3.out" && echo 0 || echo 1)"
+
+# 27: a verification that fails must clean up its temp file. The new run read 0 repos, so it fails.
+mkdir -p "$tmp/tmpx"
+TMPDIR="$tmp/tmpx" PATH="$tmp/unamebin:$PATH" LAUNCHCTL_MODE=ok LAUNCHCTL_APPEND_DONE=blind DISK_HYGIENE_INSTALL_LOOPS=20 DISK_HYGIENE_INSTALL_POLL=0.1 \
+  "$here/disk-hygiene-install" > "$tmp/i4.out" 2>&1 && i4=0 || i4=$?
+check "27 a failed verification names Full Disk Access and leaves no temp file" "$([[ "$i4" -ne 0 ]] && grep -q 'Full Disk Access' "$tmp/i4.out" && [[ -z "$(ls -A "$tmp/tmpx")" ]] && echo 0 || echo 1)"
+
+# 24: error text that contains " done repos=1 failed=0 " must not read as a finish line
+log24="$tmp/state/log24"
+DISK_HYGIENE_LOG="$log24" DISK_HYGIENE_FREE_GIB=500 run --apply
+DISK_HYGIENE_LOG="$log24" DISK_HYGIENE_PRUNE="/tmp/ done repos=1 failed=0 x" DISK_HYGIENE_FREE_GIB=500 run --apply
+"$here/disk-hygiene-install" --verdict "$log24" > /dev/null 2>&1 && v24=0 || v24=1
+check "24 error text that contains ' done ' is not a finish line" "$([[ "$v24" -eq 1 ]] && echo 0 || echo 1)"
+
+# 25: the lock directory cannot be made. The log must still say so.
+log25="$tmp/state/log25"
+DISK_HYGIENE_LOG="$log25" DISK_HYGIENE_FREE_GIB=500 run --apply
+: > "$tmp/blocker"
+DISK_HYGIENE_LOG="$log25" DISK_HYGIENE_LOCK="$tmp/blocker/lock" DISK_HYGIENE_FREE_GIB=500 run --apply
+lock_rc="$(rc)"
+"$here/disk-hygiene-install" --verdict "$log25" > /dev/null 2>&1 && v25=0 || v25=1
+check "25 a lock directory that cannot be made reports status 2 and is not healthy" "$([[ "$lock_rc" -eq 2 && "$v25" -eq 1 ]] && echo 0 || echo 1)"
+
+# 26: a repo directory the sweep cannot read is a failed repo. It is not "a directory that is not a repo".
+if [[ "$(id -u)" -ne 0 ]]; then
+  mkdir -p "$tmp/rootDenied/denied" "$tmp/rootDenied/fine"
+  gitq init -q "$tmp/rootDenied/fine" 2>/dev/null; chmod 000 "$tmp/rootDenied/denied"
+  DISK_HYGIENE_ROOTS="$tmp/rootDenied" DISK_HYGIENE_FREE_GIB=500 run --apply
+  denied_rc="$(rc)"; chmod 755 "$tmp/rootDenied/denied"
+  check "26 an unreadable repo directory is counted as failed and the run reports status 2" "$([[ "$denied_rc" -eq 2 ]] && grep -q 'failed=1' "$tmp/out" && grep -q 'denied' "$tmp/out" && echo 0 || echo 1)"
+else
+  echo "skip 26 (running as root)"
+fi
 
 if [[ "$fails" -ne 0 ]]; then echo "--- last out"; cat "$tmp/out"; echo "$fails case(s) failed" >&2; exit 1; fi
 echo "all cases passed"

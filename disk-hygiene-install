@@ -24,6 +24,9 @@ agent_dir="$HOME/Library/LaunchAgents"
 label="com.pooriaarab.disk-hygiene"
 interval="${DISK_HYGIENE_INTERVAL:-21600}"
 state="$HOME/.local/state/disk-hygiene"
+# Written into the plist. The sweep stamps every record with it, so verification can pick out the
+# records of the run this install started and ignore a finish line from an older process.
+run_id="$(date +%s)-$$-$RANDOM"
 
 plist() {
   cat <<PLIST
@@ -41,6 +44,11 @@ plist() {
 	</array>
 	<key>StartInterval</key>
 	<integer>$interval</integer>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>DISK_HYGIENE_RUN_ID</key>
+		<string>$run_id</string>
+	</dict>
 	<key>RunAtLoad</key>
 	<true/>
 	<key>StandardOutPath</key>
@@ -56,12 +64,15 @@ PLIST
 # ~/Documents without Full Disk Access, and the installer once called it healthy (2026-10-26).
 verdict() { # LOGFILE
   # Judge the LAST sweep. An old success must not hide a newer run that never finished.
-  local last repos failed
+  local last event repos failed
   last="$(grep -E '^[^ ]+ (start|done|error) ' "$1" 2>/dev/null | tail -n 1 || true)"
   [[ -n "$last" ]] || { echo "FAILED: no sweep in $1." >&2; return 1; }
-  case "$last" in
-    *' done '*) ;;
-    *' error '*) echo "FAILED: the last sweep failed: ${last#* error }" >&2; return 1 ;;
+  # The event is the second field. Matching " done " anywhere in the line would let error text that
+  # contains those words pass as a finish line.
+  event="$(awk '{ print $2 }' <<< "$last")"
+  case "$event" in
+    done) ;;
+    error) echo "FAILED: the last sweep failed: ${last#* error }" >&2; return 1 ;;
     *) echo "FAILED: the last sweep started but did not finish. Check the launchd logs next to $1." >&2; return 1 ;;
   esac
   repos="$(sed -n 's/.* done repos=\([0-9][0-9]*\) .*/\1/p' <<< "$last")"
@@ -98,9 +109,6 @@ for f in disk-hygiene prune-merged-worktrees.sh; do
   echo "installed $bin_dir/$f"
 done
 
-# Remember how long the log is now. Timestamps have one-second resolution and cannot tell an
-# older finish line from the one this install triggers, but lines after this count can.
-skip=0; [[ -f "$state/log" ]] && skip="$(wc -l < "$state/log" | tr -d ' ')"
 loops="${DISK_HYGIENE_INSTALL_LOOPS:-150}"; poll="${DISK_HYGIENE_INSTALL_POLL:-2}"
 plist > "$agent_dir/$label.plist"
 launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || true
@@ -112,11 +120,12 @@ echo "loaded $label (every ${interval}s)"
 rm -f "$state/launchd.err.log"
 launchctl kickstart -k "gui/$(id -u)/$label" 2>/dev/null || true
 for _ in $(seq 1 "$loops"); do
-  new="$(tail -n +"$((skip + 1))" "$state/log" 2>/dev/null || true)"
-  last="$(grep -E '^[^ ]+ (start|done|error) ' <<< "$new" | tail -n 1 || true)"
-  case "$last" in
-    *' done '*|*' error '*) slice="$(mktemp)"; printf '%s\n' "$new" > "$slice"
-                           verdict "$slice"; status=$?; rm -f "$slice"; exit "$status" ;;
+  # Only records stamped with this install's run id count. An older process cannot supply them.
+  mine="$(grep -F " run=$run_id" "$state/log" 2>/dev/null || true)"
+  event="$(grep -E '^[^ ]+ (start|done|error) ' <<< "$mine" | tail -n 1 | awk '{ print $2 }' || true)"
+  case "$event" in
+    done|error) slice="$(mktemp)"; printf '%s\n' "$mine" > "$slice"
+                status=0; verdict "$slice" || status=$?; rm -f "$slice"; exit "$status" ;;
   esac
   if grep -qiE 'operation not permitted|cannot list root' "$state/launchd.err.log" "$state/launchd.out.log" 2>/dev/null; then
     echo "FAILED: macOS blocked the sweep from reading ~/Documents." >&2
@@ -126,5 +135,5 @@ for _ in $(seq 1 "$loops"); do
   fi
   sleep "$poll"
 done
-echo "FAILED: no finish line in $state/log after 5 minutes. Check $state/launchd.err.log." >&2
+echo "FAILED: no finish line from this install after $loops polls. Check $state/launchd.err.log." >&2
 exit 1

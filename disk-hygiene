@@ -48,13 +48,18 @@ if [[ -n "${DISK_HYGIENE_VOLUME:-}" ]]; then VOLUME="$DISK_HYGIENE_VOLUME"
 elif [[ "$(uname -s)" == "Darwin" ]]; then VOLUME=/System/Volumes/Data
 else VOLUME=/; fi
 
-mkdir -p "$(dirname "$LOG")" "$(dirname "$LOCK")"
+# One id per install, set by the launchd plist. Every record carries it, so the installer can pick
+# out the records of the run it started and ignore a finish line from an older process.
+RUN_ID="${DISK_HYGIENE_RUN_ID:-}"
+mkdir -p "$(dirname "$LOG")" || { echo "error: cannot create the log directory for $LOG" >&2; exit 2; }
 
 # Every attempt leaves a record. `start` opens a sweep and `done` closes it. A failure before the
 # sweep starts leaves `error`. The installer judges the LAST record, so an old success can never
 # stand in for a newer attempt that failed (found by review, 2026-10-26).
-log() { printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" | tee -a "$LOG"; }
-die() { printf '%s error %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >> "$LOG"; echo "error: $*" >&2; exit 2; }
+log() { printf '%s %s%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" "${RUN_ID:+ run=$RUN_ID}" | tee -a "$LOG"; }
+die() { printf '%s error %s%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" "${RUN_ID:+ run=$RUN_ID}" >> "$LOG"; echo "error: $*" >&2; exit 2; }
+
+mkdir -p "$(dirname "$LOCK")" 2>/dev/null || die "cannot create the lock directory $(dirname "$LOCK")"
 
 [[ "$THRESHOLD" =~ ^[0-9]+$ ]] || die "DISK_HYGIENE_THRESHOLD_GIB must be a whole number, got: $THRESHOLD"
 [[ -x "$PRUNE" ]] || die "prune script not found or not executable: $PRUNE"
@@ -105,6 +110,13 @@ for root in "${root_list[@]}"; do
   [[ -d "$root" ]] || { log "root missing, skipped: $root"; continue; }
   for repo in "$root"/*/; do
     repo="${repo%/}"
+    [[ -d "$repo" ]] || continue  # an empty root leaves the glob unmatched: the literal pattern
+    # A directory this run cannot read is a failed repo, not "a directory that is not a repo".
+    if ! ls -A "$repo" >/dev/null 2>&1; then
+      log "cannot read directory, skipped: $repo"
+      repos_failed=$((repos_failed + 1))
+      continue
+    fi
     [[ -d "$repo/.git" ]] || continue  # main clones only; a linked worktree has a .git file
     # Count a repo as seen only after git can read it. A clone git cannot inspect is a sweep
     # error, not a repo with no worktrees: counting it would let a blind sweep report repos=1.
