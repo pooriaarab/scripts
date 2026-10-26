@@ -1,0 +1,126 @@
+#!/usr/bin/env bash
+# disk-hygiene — keep free disk space up by removing what regrows.
+# Usage: disk-hygiene [--apply]
+# Default is a dry run. Pass --apply to remove. The launchd agent passes --apply.
+#
+# WHY THIS EXISTS
+# On 2026-10-21 one Mac was down to 222 GiB free. About 400 stale worktrees held most of
+# the space, and nothing ever pruned them. Removing 112 merged worktrees freed ~78 GiB.
+# Deleting 426 idle node_modules directories freed ~3 GiB, because APFS shares blocks
+# between copies, so this tool does not touch node_modules.
+#
+# WHAT IT DOES
+# 1. For every repo directly under each root, runs prune-merged-worktrees.sh. That script
+#    removes a worktree only when it is clean, merged, and has no live process in it.
+# 2. When free space is under the threshold, clears caches that rebuild on demand: npm, bun,
+#    pnpm, Homebrew, Xcode DerivedData and iOS DeviceSupport, Playwright browsers.
+# 3. Logs free space before and after.
+#
+# Environment (all optional):
+#   DISK_HYGIENE_ROOTS          colon-separated roots; default $HOME/Documents/Personal
+#   DISK_HYGIENE_THRESHOLD_GIB  clear caches below this much free space; default 200
+#   DISK_HYGIENE_PRUNE          path to prune-merged-worktrees.sh; default: next to this file
+#   DISK_HYGIENE_LOG            log file; default ~/.local/state/disk-hygiene/log
+#   DISK_HYGIENE_LOCK           lock directory; default ~/.local/state/disk-hygiene/lock
+#   DISK_HYGIENE_VOLUME         volume to measure; default /System/Volumes/Data on macOS, else /
+#   DISK_HYGIENE_FREE_GIB       fixed free-space reading, for tests only
+#
+# Exit: 0 done, 2 bad setup, 3 still under the threshold after cleaning.
+set -euo pipefail
+
+APPLY=0
+for arg in "$@"; do
+  case "$arg" in
+    --apply) APPLY=1 ;;
+    -h|--help) sed -n '2,3p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) echo "usage: disk-hygiene [--apply]" >&2; exit 2 ;;
+  esac
+done
+
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOTS="${DISK_HYGIENE_ROOTS:-$HOME/Documents/Personal}"
+THRESHOLD="${DISK_HYGIENE_THRESHOLD_GIB:-200}"
+[[ "$THRESHOLD" =~ ^[0-9]+$ ]] || { echo "error: DISK_HYGIENE_THRESHOLD_GIB must be a whole number, got: $THRESHOLD" >&2; exit 2; }
+PRUNE="${DISK_HYGIENE_PRUNE:-$here/prune-merged-worktrees.sh}"
+STATE="$HOME/.local/state/disk-hygiene"
+LOG="${DISK_HYGIENE_LOG:-$STATE/log}"
+LOCK="${DISK_HYGIENE_LOCK:-$STATE/lock}"
+if [[ -n "${DISK_HYGIENE_VOLUME:-}" ]]; then VOLUME="$DISK_HYGIENE_VOLUME"
+elif [[ "$(uname -s)" == "Darwin" ]]; then VOLUME=/System/Volumes/Data
+else VOLUME=/; fi
+
+[[ -x "$PRUNE" ]] || { echo "error: prune script not found or not executable: $PRUNE" >&2; exit 2; }
+mkdir -p "$(dirname "$LOG")" "$(dirname "$LOCK")"
+
+# A run can outlast the launchd interval. Two runs would race on the same worktrees.
+# The lock holds its owner's pid. A run killed by SIGKILL or a reboot never runs its EXIT
+# trap, and a lock that nobody owns would skip every later run in silence, so reclaim a
+# lock whose pid is dead. A lock with no pid file is treated as held: its owner may still
+# be between mkdir and writing the pid.
+if ! mkdir "$LOCK" 2>/dev/null; then
+  holder="$(cat "$LOCK/pid" 2>/dev/null || true)"
+  if [[ -z "$holder" ]] || kill -0 "$holder" 2>/dev/null; then
+    echo "another disk-hygiene run holds $LOCK; skipping"; exit 0
+  fi
+  echo "reclaiming stale lock $LOCK (pid $holder is gone)"
+  rm -rf "$LOCK"
+  mkdir "$LOCK" 2>/dev/null || { echo "another disk-hygiene run took $LOCK; skipping"; exit 0; }
+fi
+echo "$$" > "$LOCK/pid"
+trap 'rm -rf "$LOCK"' EXIT
+
+free_gib() {
+  if [[ -n "${DISK_HYGIENE_FREE_GIB:-}" ]]; then echo "$DISK_HYGIENE_FREE_GIB"; return; fi
+  df -k "$VOLUME" | awk 'NR == 2 { printf "%d", $4 / 1048576 }'
+}
+log() { printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" | tee -a "$LOG"; }
+
+mode=dry-run; [[ "$APPLY" -eq 1 ]] && mode=apply
+before="$(free_gib)"
+log "start mode=$mode volume=$VOLUME free_before_gib=$before threshold_gib=$THRESHOLD"
+
+# --- 1. worktrees
+total_removed=0; total_review=0
+prune_args=(); [[ "$APPLY" -eq 1 ]] && prune_args+=(--apply)
+IFS=: read -r -a root_list <<< "$ROOTS"
+for root in "${root_list[@]}"; do
+  [[ -d "$root" ]] || { log "root missing, skipped: $root"; continue; }
+  for repo in "$root"/*/; do
+    repo="${repo%/}"
+    [[ -d "$repo/.git" ]] || continue  # main clones only; a linked worktree has a .git file
+    [[ "$(git -C "$repo" worktree list 2>/dev/null | wc -l)" -gt 1 ]] || continue
+    out="$("$PRUNE" "$repo" ${prune_args[@]+"${prune_args[@]}"} 2>&1)" \
+      || { log "prune failed in $repo"; echo "$out" >&2; continue; }
+    removed="$(sed -n 's/^removed: //p' <<< "$out")"
+    review="$(sed -n 's/^needs-review: //p' <<< "$out")"
+    total_removed=$((total_removed + ${removed:-0})); total_review=$((total_review + ${review:-0}))
+    log "repo=$repo removed=${removed:-0} needs_review=${review:-0}"
+    # Name each needs-review worktree: a human has to look at those.
+    sed -n '/^needs-review:/,$p' <<< "$out" | sed -n 's/^  - /  review: /p' | tee -a "$LOG"
+  done
+done
+
+# --- 2. caches, only when space is short
+clear_caches() {
+  command -v npm  >/dev/null && npm cache clean --force >/dev/null 2>&1 || true
+  command -v bun  >/dev/null && bun pm cache rm >/dev/null 2>&1 || true
+  command -v pnpm >/dev/null && pnpm store prune >/dev/null 2>&1 || true
+  command -v brew >/dev/null && brew cleanup --prune=all -s >/dev/null 2>&1 || true
+  # rebuilt by Xcode, by the next device connect, and by `playwright install`
+  rm -rf "$HOME/Library/Developer/Xcode/DerivedData/"* \
+         "$HOME/Library/Developer/Xcode/iOS DeviceSupport/"* \
+         "$HOME/Library/Caches/ms-playwright/"* 2>/dev/null || true
+}
+mid="$(free_gib)"
+cleared=no
+if [[ "$mid" -lt "$THRESHOLD" ]]; then
+  if [[ "$APPLY" -eq 1 ]]; then clear_caches; cleared=yes
+  else log "would clear caches: free ${mid} GiB is under ${THRESHOLD} GiB"; fi
+fi
+
+after="$(free_gib)"
+log "done removed=$total_removed needs_review=$total_review caches_cleared=$cleared free_before_gib=$before free_after_gib=$after"
+if [[ "$after" -lt "$THRESHOLD" ]]; then
+  log "WARNING: ${after} GiB free is still under ${THRESHOLD} GiB. Review needs-review items and large data by hand."
+  exit 3
+fi
