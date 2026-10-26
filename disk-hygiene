@@ -51,6 +51,8 @@ else VOLUME=/; fi
 # One id per install, set by the launchd plist. Every record carries it, so the installer can pick
 # out the records of the run it started and ignore a finish line from an older process.
 RUN_ID="${DISK_HYGIENE_RUN_ID:-}"
+# It lands in every record, so it must not be able to carry fields. Refuse one that is not a plain id.
+if [[ ! "$RUN_ID" =~ ^[A-Za-z0-9._-]*$ ]]; then RUN_ID=""; BAD_RUN_ID=yes; else BAD_RUN_ID=no; fi
 mkdir -p "$(dirname "$LOG")" || { echo "error: cannot create the log directory for $LOG" >&2; exit 2; }
 
 # Every attempt leaves a record. `start` opens a sweep and `done` closes it. A failure before the
@@ -99,13 +101,17 @@ fi
 echo "$$" > "$LOCK/pid"
 owns_lock=yes
 
+[[ "$BAD_RUN_ID" == no ]] || die "DISK_HYGIENE_RUN_ID must be letters, digits, dot, dash or underscore"
 [[ "$THRESHOLD" =~ ^[0-9]+$ ]] || die "DISK_HYGIENE_THRESHOLD_GIB must be a whole number, got: $THRESHOLD"
 [[ -x "$PRUNE" ]] || die "prune script not found or not executable: $PRUNE"
 
 free_gib() {
   if [[ -n "${DISK_HYGIENE_FREE_GIB:-}" ]]; then echo "$DISK_HYGIENE_FREE_GIB"; return; fi
-  local out
-  out="$(df -k "$VOLUME" 2>/dev/null | awk 'NR == 2 { printf "%d", $4 / 1048576 }')"
+  # Capture df's own status. In a pipeline its failure is hidden, and errexit is off inside a
+  # function called through || die, so a df that prints a table and then fails would count as a reading.
+  local raw out
+  raw="$(df -k "$VOLUME" 2>/dev/null)" || return 1
+  out="$(awk 'NR == 2 { printf "%d", $4 / 1048576 }' <<< "$raw")"
   [[ "$out" =~ ^[0-9]+$ ]] || return 1
   echo "$out"
 }

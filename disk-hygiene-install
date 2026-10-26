@@ -87,8 +87,10 @@ verdict() { # LOGFILE
     echo "FAILED: the last sweep is ${age_h} hours old (limit ${max_h}). The agent may have stopped, or the log may be unwritable." >&2
     return 1
   fi
-  repos="$(sed -n 's/.* done repos=\([0-9][0-9]*\) .*/\1/p' <<< "$last")"
-  failed="$(sed -n 's/.* failed=\([0-9][0-9]*\) .*/\1/p' <<< "$last")"
+  # The first repos= and failed= tokens decide. A greedy match would let a later token, such as one
+  # injected through an env value, override the real counts.
+  repos="$(awk '{ for (i = 3; i <= NF; i++) if ($i ~ /^repos=[0-9]+$/) { print substr($i, 7); exit } }' <<< "$last")"
+  failed="$(awk '{ for (i = 3; i <= NF; i++) if ($i ~ /^failed=[0-9]+$/) { print substr($i, 8); exit } }' <<< "$last")"
   if [[ -z "$repos" || "$repos" -eq 0 ]]; then
     echo "FAILED: the sweep finished but read 0 repos. macOS likely blocks launchd from reading ~/Documents." >&2
     echo "Grant /bin/bash Full Disk Access: System Settings > Privacy & Security > Full Disk Access," >&2

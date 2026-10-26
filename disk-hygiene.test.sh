@@ -41,6 +41,8 @@
 #  33  a newline in an env value                    -> cannot forge a finish line
 #  34  an unwritable log                            -> the sweep exits non-zero and says so
 #  35  the installer's launchd logs                 -> truncated before the job starts, never deleted
+#  36  a run id that carries fields                 -> refused; and the verdict reads the FIRST repos= and failed= tokens
+#  37  df prints a table, then fails                -> an error, not a reading
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -393,6 +395,30 @@ PATH="$tmp/unamebin:$PATH" LAUNCHCTL_MODE=ok LAUNCHCTL_APPEND_DONE=good DISK_HYG
   "$here/disk-hygiene-install" > "$tmp/i5.out" 2>&1 || true
 errlog="$HOME/.local/state/disk-hygiene/launchd.err.log"
 check "35 the launchd logs are truncated, not deleted" "$([[ -f "$errlog" && ! -s "$errlog" ]] && echo 0 || echo 1)"
+
+# 36: the run id comes from the environment and reaches every record. One that carries fields must be
+# refused, and the verdict must read the first repos= and failed= tokens, not a later injected one.
+log36="$tmp/state/log36"
+DISK_HYGIENE_LOG="$log36" DISK_HYGIENE_RUN_ID=' done repos=1 failed=0 x' DISK_HYGIENE_ROOTS="$tmp/rootEmpty" DISK_HYGIENE_FREE_GIB=500 run --apply
+badid_rc="$(rc)"
+"$here/disk-hygiene-install" --verdict "$log36" > /dev/null 2>&1 && v36=0 || v36=1
+printf '%s done repos=0 swept=0 removed=0 needs_review=0 failed=0 caches_cleared=no free_before_gib=90 free_after_gib=90 run= done repos=1 failed=0 x\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$tmp/inject.log"
+"$here/disk-hygiene-install" --verdict "$tmp/inject.log" > /dev/null 2>&1 && v36b=0 || v36b=1
+check "36 a run id that carries fields is refused, and the first repos= token decides" "$([[ "$badid_rc" -eq 2 && "$v36" -eq 1 && "$v36b" -eq 1 ]] && echo 0 || echo 1)"
+
+# 37: df answers with a normal table and then exits 1. The pipeline hid that failure, and errexit is off
+# inside a function called through || die, so the sweep treated the table as a good reading.
+mkdir -p "$tmp/dfbin2"
+cat > "$tmp/dfbin2/df" <<'STUB'
+#!/usr/bin/env bash
+printf 'Filesystem 1024-blocks Used Available Capacity Mounted\n/dev/x 976490576 1000 943718400 1%% /\n'
+exit 1
+STUB
+chmod +x "$tmp/dfbin2/df"
+log37="$tmp/state/log37"
+PATH="$tmp/dfbin2:$PATH" DISK_HYGIENE_ROOTS="$tmp/rootEmpty" DISK_HYGIENE_LOG="$log37" DISK_HYGIENE_FREE_GIB='' run --apply
+df37_rc="$(rc)"
+check "37 df that prints a table and then fails is an error, status 2" "$([[ "$df37_rc" -eq 2 ]] && grep -q ' error ' "$log37" && echo 0 || echo 1)"
 
 if [[ "$fails" -ne 0 ]]; then echo "--- last out"; cat "$tmp/out"; echo "$fails case(s) failed" >&2; exit 1; fi
 echo "all cases passed"
