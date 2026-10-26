@@ -24,6 +24,9 @@
 #  18  an old success, then a run that never ended  -> not healthy (judge the LAST run)
 #  19  a clone git cannot read                      -> not counted, failed=1, status 2, others still swept
 #  20  extra arguments after --verdict LOGFILE      -> status 2
+#  21  a failure before the sweep starts           -> recorded, so an old success cannot stand
+#  22  install verification                        -> only a finish line written AFTER the install counts
+#  23  a prune failure                             -> counted in failed=N, swept not counted, status 2
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -45,7 +48,17 @@ done
 printf '#!/usr/bin/env bash\nexit 1\n' > "$tmp/bin/gh"; chmod +x "$tmp/bin/gh"
 # launchctl stub: the installer must never reach the real launchd from a test. An unknown flag once
 # ran the whole install and replaced the live agent. Any call is logged, and case 17 asserts none.
-printf '#!/usr/bin/env bash\necho "launchctl $*" >> "$LAUNCHCTL_LOG"\nexit 1\n' > "$tmp/bin/launchctl"; chmod +x "$tmp/bin/launchctl"
+cat > "$tmp/bin/launchctl" <<'STUB'
+#!/usr/bin/env bash
+echo "launchctl $*" >> "$LAUNCHCTL_LOG"
+[[ "${LAUNCHCTL_MODE:-fail}" == "ok" ]] || exit 1
+if [[ "$1" == "kickstart" && -n "${LAUNCHCTL_APPEND_DONE:-}" ]]; then
+  printf '%s start mode=apply\n%s done repos=3 swept=1 removed=0 needs_review=0 failed=0 caches_cleared=no free_before_gib=90 free_after_gib=90\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$HOME/.local/state/disk-hygiene/log"
+fi
+exit 0
+STUB
+chmod +x "$tmp/bin/launchctl"
 export LAUNCHCTL_LOG="$tmp/launchctl.log"; : > "$LAUNCHCTL_LOG"
 # lsof stub: no live processes, so only the sweep logic is under test here
 printf '#!/usr/bin/env bash\nexit 0\n' > "$tmp/bin/lsof"; chmod +x "$tmp/bin/lsof"
@@ -200,6 +213,39 @@ check "19 a sweep with a failed clone is not healthy" "$([[ "$v6" -ne 0 ]] && ec
 # 20: extra arguments after the log file
 "$here/disk-hygiene-install" --verdict "$tmp/sighted.log" --bad > "$tmp/v7.out" 2>&1 && v7=0 || v7=$?
 check "20 extra arguments after --verdict LOGFILE report status 2" "$([[ "$v7" -eq 2 ]] && echo 0 || echo 1)"
+
+# 21: every attempt is recorded, so a failure before the sweep starts cannot leave an old success as
+# "the last sweep". One shared log: a good run, then a missing prune script, then a bad threshold.
+log21="$tmp/state/log21"
+DISK_HYGIENE_LOG="$log21" DISK_HYGIENE_FREE_GIB=500 run --apply
+"$here/disk-hygiene-install" --verdict "$log21" > /dev/null 2>&1 && good21=0 || good21=1
+DISK_HYGIENE_LOG="$log21" DISK_HYGIENE_PRUNE="$tmp/nope.sh" DISK_HYGIENE_FREE_GIB=500 run --apply
+"$here/disk-hygiene-install" --verdict "$log21" > /dev/null 2>&1 && after_missing=0 || after_missing=1
+DISK_HYGIENE_LOG="$log21" DISK_HYGIENE_FREE_GIB=500 run --apply
+DISK_HYGIENE_LOG="$log21" DISK_HYGIENE_THRESHOLD_GIB=lots DISK_HYGIENE_FREE_GIB=500 run --apply
+"$here/disk-hygiene-install" --verdict "$log21" > /dev/null 2>&1 && after_threshold=0 || after_threshold=1
+check "21 a good run is healthy, but not after a missing prune script or a bad threshold" "$([[ "$good21" -eq 0 && "$after_missing" -eq 1 && "$after_threshold" -eq 1 ]] && echo 0 || echo 1)"
+
+# 22: the installer must not accept a finish line that existed before it ran. Second-resolution
+# timestamps cannot tell old from new, so it counts log lines written after the install began.
+mkdir -p "$tmp/unamebin"; printf '#!/usr/bin/env bash\necho Darwin\n' > "$tmp/unamebin/uname"; chmod +x "$tmp/unamebin/uname"
+mkdir -p "$HOME/.local/state/disk-hygiene"
+printf '%s start mode=apply\n%s done repos=3 swept=1 removed=0 needs_review=0 failed=0 caches_cleared=no free_before_gib=90 free_after_gib=90\n' \
+  "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$HOME/.local/state/disk-hygiene/log"
+: > "$LAUNCHCTL_LOG"
+PATH="$tmp/unamebin:$PATH" LAUNCHCTL_MODE=ok DISK_HYGIENE_INSTALL_LOOPS=3 DISK_HYGIENE_INSTALL_POLL=0.1 \
+  "$here/disk-hygiene-install" > "$tmp/i1.out" 2>&1 && i1=0 || i1=$?
+check "22 an old finish line does not make a new install healthy" "$([[ "$i1" -ne 0 ]] && ! grep -q 'agent healthy' "$tmp/i1.out" && echo 0 || echo 1)"
+PATH="$tmp/unamebin:$PATH" LAUNCHCTL_MODE=ok LAUNCHCTL_APPEND_DONE=1 DISK_HYGIENE_INSTALL_LOOPS=20 DISK_HYGIENE_INSTALL_POLL=0.1 \
+  "$here/disk-hygiene-install" > "$tmp/i2.out" 2>&1 && i2=0 || i2=$?
+check "22 a finish line written after the install makes it healthy" "$([[ "$i2" -eq 0 ]] && grep -q 'agent healthy' "$tmp/i2.out" && echo 0 || echo 1)"
+
+# 23: a prune that fails is a failed repo. It must not count as swept, and the run must say so.
+printf '#!/usr/bin/env bash\nexit 1\n' > "$tmp/prune-fails.sh"; chmod +x "$tmp/prune-fails.sh"
+DISK_HYGIENE_ROOTS="$tmp/rootA" DISK_HYGIENE_PRUNE="$tmp/prune-fails.sh" DISK_HYGIENE_FREE_GIB=500 run --apply
+fail_rc="$(rc)"; grep ' done ' "$tmp/out" > "$tmp/prunefail.log" || true
+"$here/disk-hygiene-install" --verdict "$tmp/prunefail.log" > /dev/null 2>&1 && pv=0 || pv=1
+check "23 a prune failure is counted, not swept, and the run is not healthy" "$([[ "$fail_rc" -eq 2 ]] && grep -q 'swept=0' "$tmp/out" && grep -q 'failed=1' "$tmp/out" && [[ "$pv" -eq 1 ]] && echo 0 || echo 1)"
 
 if [[ "$fails" -ne 0 ]]; then echo "--- last out"; cat "$tmp/out"; echo "$fails case(s) failed" >&2; exit 1; fi
 echo "all cases passed"

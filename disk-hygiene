@@ -25,7 +25,7 @@
 #   DISK_HYGIENE_VOLUME         volume to measure; default /System/Volumes/Data on macOS, else /
 #   DISK_HYGIENE_FREE_GIB       fixed free-space reading, for tests only
 #
-# Exit: 0 done, 2 bad setup or a repo git could not read, 3 still under the threshold after cleaning.
+# Exit: 0 done, 2 bad setup or a repo that could not be read or pruned, 3 still under the threshold.
 set -euo pipefail
 
 APPLY=0
@@ -40,7 +40,6 @@ done
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOTS="${DISK_HYGIENE_ROOTS:-$HOME/Documents/Personal}"
 THRESHOLD="${DISK_HYGIENE_THRESHOLD_GIB:-200}"
-[[ "$THRESHOLD" =~ ^[0-9]+$ ]] || { echo "error: DISK_HYGIENE_THRESHOLD_GIB must be a whole number, got: $THRESHOLD" >&2; exit 2; }
 PRUNE="${DISK_HYGIENE_PRUNE:-$here/prune-merged-worktrees.sh}"
 STATE="$HOME/.local/state/disk-hygiene"
 LOG="${DISK_HYGIENE_LOG:-$STATE/log}"
@@ -49,8 +48,16 @@ if [[ -n "${DISK_HYGIENE_VOLUME:-}" ]]; then VOLUME="$DISK_HYGIENE_VOLUME"
 elif [[ "$(uname -s)" == "Darwin" ]]; then VOLUME=/System/Volumes/Data
 else VOLUME=/; fi
 
-[[ -x "$PRUNE" ]] || { echo "error: prune script not found or not executable: $PRUNE" >&2; exit 2; }
 mkdir -p "$(dirname "$LOG")" "$(dirname "$LOCK")"
+
+# Every attempt leaves a record. `start` opens a sweep and `done` closes it. A failure before the
+# sweep starts leaves `error`. The installer judges the LAST record, so an old success can never
+# stand in for a newer attempt that failed (found by review, 2026-10-26).
+log() { printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" | tee -a "$LOG"; }
+die() { printf '%s error %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >> "$LOG"; echo "error: $*" >&2; exit 2; }
+
+[[ "$THRESHOLD" =~ ^[0-9]+$ ]] || die "DISK_HYGIENE_THRESHOLD_GIB must be a whole number, got: $THRESHOLD"
+[[ -x "$PRUNE" ]] || die "prune script not found or not executable: $PRUNE"
 
 # A run can outlast the launchd interval. Two runs would race on the same worktrees.
 # The lock holds its owner's pid. A run killed by SIGKILL or a reboot never runs its EXIT
@@ -71,12 +78,14 @@ trap 'rm -rf "$LOCK"' EXIT
 
 free_gib() {
   if [[ -n "${DISK_HYGIENE_FREE_GIB:-}" ]]; then echo "$DISK_HYGIENE_FREE_GIB"; return; fi
-  df -k "$VOLUME" | awk 'NR == 2 { printf "%d", $4 / 1048576 }'
+  local out
+  out="$(df -k "$VOLUME" 2>/dev/null | awk 'NR == 2 { printf "%d", $4 / 1048576 }')"
+  [[ "$out" =~ ^[0-9]+$ ]] || return 1
+  echo "$out"
 }
-log() { printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" | tee -a "$LOG"; }
 
 mode=dry-run; [[ "$APPLY" -eq 1 ]] && mode=apply
-before="$(free_gib)"
+before="$(free_gib)" || die "cannot read free space on $VOLUME"
 log "start mode=$mode volume=$VOLUME free_before_gib=$before threshold_gib=$THRESHOLD"
 
 # --- 1. worktrees
@@ -87,10 +96,7 @@ log "start mode=$mode volume=$VOLUME free_before_gib=$before threshold_gib=$THRE
 IFS=: read -r -a root_list <<< "$ROOTS"
 for root in "${root_list[@]}"; do
   [[ -d "$root" ]] || continue  # a missing root is logged and skipped in the sweep below
-  if ! ls -A "$root" >/dev/null 2>&1; then
-    echo "error: cannot list root $root. Under launchd on macOS, grant /bin/bash Full Disk Access." >&2
-    exit 2
-  fi
+  ls -A "$root" >/dev/null 2>&1 || die "cannot list root $root. Under launchd on macOS, grant /bin/bash Full Disk Access."
 done
 
 total_removed=0; total_review=0; repos_seen=0; repos_swept=0; repos_failed=0
@@ -109,9 +115,9 @@ for root in "${root_list[@]}"; do
     fi
     repos_seen=$((repos_seen + 1))
     [[ "$(grep -c . <<< "$wt_list")" -gt 1 ]] || continue
-    repos_swept=$((repos_swept + 1))
     out="$("$PRUNE" "$repo" ${prune_args[@]+"${prune_args[@]}"} 2>&1)" \
-      || { log "prune failed in $repo"; echo "$out" >&2; continue; }
+      || { log "prune failed in $repo"; echo "$out" >&2; repos_failed=$((repos_failed + 1)); continue; }
+    repos_swept=$((repos_swept + 1))
     removed="$(sed -n 's/^removed: //p' <<< "$out")"
     review="$(sed -n 's/^needs-review: //p' <<< "$out")"
     total_removed=$((total_removed + ${removed:-0})); total_review=$((total_review + ${review:-0}))
@@ -142,7 +148,7 @@ fi
 after="$(free_gib)"
 log "done repos=$repos_seen swept=$repos_swept removed=$total_removed needs_review=$total_review failed=$repos_failed caches_cleared=$cleared free_before_gib=$before free_after_gib=$after"
 if [[ "$repos_failed" -gt 0 ]]; then
-  log "WARNING: ${repos_failed} repo(s) could not be inspected. Those were not swept."
+  log "WARNING: ${repos_failed} repo(s) could not be inspected or pruned. Read the log above."
   exit 2
 fi
 if [[ "$after" -lt "$THRESHOLD" ]]; then

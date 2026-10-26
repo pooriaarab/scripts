@@ -57,10 +57,11 @@ PLIST
 verdict() { # LOGFILE
   # Judge the LAST sweep. An old success must not hide a newer run that never finished.
   local last repos failed
-  last="$(grep -E '^[^ ]+ (start|done) ' "$1" 2>/dev/null | tail -n 1 || true)"
+  last="$(grep -E '^[^ ]+ (start|done|error) ' "$1" 2>/dev/null | tail -n 1 || true)"
   [[ -n "$last" ]] || { echo "FAILED: no sweep in $1." >&2; return 1; }
   case "$last" in
     *' done '*) ;;
+    *' error '*) echo "FAILED: the last sweep failed: ${last#* error }" >&2; return 1 ;;
     *) echo "FAILED: the last sweep started but did not finish. Check the launchd logs next to $1." >&2; return 1 ;;
   esac
   repos="$(sed -n 's/.* done repos=\([0-9][0-9]*\) .*/\1/p' <<< "$last")"
@@ -97,7 +98,10 @@ for f in disk-hygiene prune-merged-worktrees.sh; do
   echo "installed $bin_dir/$f"
 done
 
-since="$(date -u +%Y-%m-%dT%H:%M:%SZ)"  # a finish line from before this moment is an older run
+# Remember how long the log is now. Timestamps have one-second resolution and cannot tell an
+# older finish line from the one this install triggers, but lines after this count can.
+skip=0; [[ -f "$state/log" ]] && skip="$(wc -l < "$state/log" | tr -d ' ')"
+loops="${DISK_HYGIENE_INSTALL_LOOPS:-150}"; poll="${DISK_HYGIENE_INSTALL_POLL:-2}"
 plist > "$agent_dir/$label.plist"
 launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || true
 launchctl bootstrap "gui/$(id -u)" "$agent_dir/$label.plist"
@@ -107,10 +111,12 @@ echo "loaded $label (every ${interval}s)"
 # run now. Wait for it to log a finish line, or for macOS to refuse the read.
 rm -f "$state/launchd.err.log"
 launchctl kickstart -k "gui/$(id -u)/$label" 2>/dev/null || true
-for _ in $(seq 1 150); do
-  last="$(grep -E '^[^ ]+ (start|done) ' "$state/log" 2>/dev/null | tail -n 1 || true)"
+for _ in $(seq 1 "$loops"); do
+  new="$(tail -n +"$((skip + 1))" "$state/log" 2>/dev/null || true)"
+  last="$(grep -E '^[^ ]+ (start|done|error) ' <<< "$new" | tail -n 1 || true)"
   case "$last" in
-    *' done '*) if [[ "${last%% *}" > "$since" || "${last%% *}" == "$since" ]]; then verdict "$state/log"; exit $?; fi ;;
+    *' done '*|*' error '*) slice="$(mktemp)"; printf '%s\n' "$new" > "$slice"
+                           verdict "$slice"; status=$?; rm -f "$slice"; exit "$status" ;;
   esac
   if grep -qiE 'operation not permitted|cannot list root' "$state/launchd.err.log" "$state/launchd.out.log" 2>/dev/null; then
     echo "FAILED: macOS blocked the sweep from reading ~/Documents." >&2
@@ -118,7 +124,7 @@ for _ in $(seq 1 150); do
     echo "add /bin/bash, then run this installer again." >&2
     exit 1
   fi
-  sleep 2
+  sleep "$poll"
 done
 echo "FAILED: no finish line in $state/log after 5 minutes. Check $state/launchd.err.log." >&2
 exit 1
