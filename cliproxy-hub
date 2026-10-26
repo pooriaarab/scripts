@@ -41,7 +41,8 @@ need_url() { [ -n "${HUB_URL:-}" ] || die "set HUB_URL, for example https://<mac
 backup() { [ -e "$1" ] && cp -p "$1" "$1.bak-$(date +%Y%m%d-%H%M%S)" || true; }
 
 models_count() { # url key -> number of models, or empty on failure
-  curl -fsS -m 10 "$1/v1/models" -H "Authorization: Bearer $2" 2>/dev/null |
+  # Header on stdin keeps the key out of the process list.
+  printf 'Authorization: Bearer %s' "$2" | curl -fsS -m 10 "$1/v1/models" -H @- 2>/dev/null |
     python3 -c 'import sys,json;print(len(json.load(sys.stdin)["data"]))' 2>/dev/null || true
 }
 
@@ -78,7 +79,7 @@ cmd_check() {
 
   if "$TS" serve status 2>&1 | grep -q "$PORT"; then ok "tailscale serve exposes :$PORT"; else bad "tailscale serve has no :$PORT rule (run: cliproxy-hub serve)"; fi
 
-  if pmset -g assertions 2>/dev/null | grep -q 'PreventSystemSleep *1'; then ok "system sleep is blocked"
+  if [ "$(pmset -g 2>/dev/null | awk '$1=="sleep"{print $2}')" = 0 ] || pmset -g assertions 2>/dev/null | grep -q 'PreventSystemSleep *1'; then ok "system sleep is blocked"
   else bad "system sleep is not blocked; the hub sleeps and every client stops (see skills/cliproxy-hub)"; fi
 
   seats
@@ -123,10 +124,15 @@ PY
     [ "${1:-}" = "--codex-home" ] && dir="${2:?--codex-home needs a path}"
     mkdir -p "$dir"; f="$dir/config.toml"; backup "$f"
     HUB_KEY_V="$key" python3 - "$f" "$HUB_URL" <<'PY'
-import os, re, sys
+import json, os, re, sys
 f, url = sys.argv[1], sys.argv[2]
 s = open(f).read() if os.path.exists(f) else ""
-s = re.sub(r'(?m)^model_provider\s*=.*\n', '', s)
+# Only the top-level key: profile tables may carry their own model_provider.
+m = re.search(r'(?m)^\[', s)
+i = m.start() if m else len(s)
+head, rest = s[:i], s[i:]
+head = re.sub(r'(?m)^model_provider\s*=.*(\n|$)', '', head)
+s = head + rest
 s = re.sub(r'(?ms)^\[model_providers\.cliproxy\]\n.*?(?=^\[|\Z)', '', s).rstrip("\n")
 block = f'''model_provider = "cliproxy"
 
@@ -138,7 +144,7 @@ base_url = "{url}/v1"
 wire_api = "responses"
 requires_openai_auth = false
 supports_websockets = true
-experimental_bearer_token = "{os.environ["HUB_KEY_V"]}"
+experimental_bearer_token = {json.dumps(os.environ["HUB_KEY_V"])}
 '''
 open(f, "w").write(re.sub(r'\n{3,}', '\n\n', block))
 os.chmod(f, 0o600)
