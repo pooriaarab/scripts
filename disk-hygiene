@@ -25,7 +25,7 @@
 #   DISK_HYGIENE_VOLUME         volume to measure; default /System/Volumes/Data on macOS, else /
 #   DISK_HYGIENE_FREE_GIB       fixed free-space reading, for tests only
 #
-# Exit: 0 done, 2 bad setup, 3 still under the threshold after cleaning.
+# Exit: 0 done, 2 bad setup or a repo git could not read, 3 still under the threshold after cleaning.
 set -euo pipefail
 
 APPLY=0
@@ -93,15 +93,22 @@ for root in "${root_list[@]}"; do
   fi
 done
 
-total_removed=0; total_review=0; repos_seen=0; repos_swept=0
+total_removed=0; total_review=0; repos_seen=0; repos_swept=0; repos_failed=0
 prune_args=(); [[ "$APPLY" -eq 1 ]] && prune_args+=(--apply)
 for root in "${root_list[@]}"; do
   [[ -d "$root" ]] || { log "root missing, skipped: $root"; continue; }
   for repo in "$root"/*/; do
     repo="${repo%/}"
     [[ -d "$repo/.git" ]] || continue  # main clones only; a linked worktree has a .git file
+    # Count a repo as seen only after git can read it. A clone git cannot inspect is a sweep
+    # error, not a repo with no worktrees: counting it would let a blind sweep report repos=1.
+    if ! wt_list="$(git -C "$repo" worktree list 2>&1)"; then
+      log "cannot inspect repo, skipped: $repo ($(head -n 1 <<< "$wt_list"))"
+      repos_failed=$((repos_failed + 1))
+      continue
+    fi
     repos_seen=$((repos_seen + 1))
-    [[ "$(git -C "$repo" worktree list 2>/dev/null | wc -l)" -gt 1 ]] || continue
+    [[ "$(grep -c . <<< "$wt_list")" -gt 1 ]] || continue
     repos_swept=$((repos_swept + 1))
     out="$("$PRUNE" "$repo" ${prune_args[@]+"${prune_args[@]}"} 2>&1)" \
       || { log "prune failed in $repo"; echo "$out" >&2; continue; }
@@ -133,7 +140,11 @@ if [[ "$mid" -lt "$THRESHOLD" ]]; then
 fi
 
 after="$(free_gib)"
-log "done repos=$repos_seen swept=$repos_swept removed=$total_removed needs_review=$total_review caches_cleared=$cleared free_before_gib=$before free_after_gib=$after"
+log "done repos=$repos_seen swept=$repos_swept removed=$total_removed needs_review=$total_review failed=$repos_failed caches_cleared=$cleared free_before_gib=$before free_after_gib=$after"
+if [[ "$repos_failed" -gt 0 ]]; then
+  log "WARNING: ${repos_failed} repo(s) could not be inspected. Those were not swept."
+  exit 2
+fi
 if [[ "$after" -lt "$THRESHOLD" ]]; then
   log "WARNING: ${after} GiB free is still under ${THRESHOLD} GiB. Review needs-review items and large data by hand."
   exit 3

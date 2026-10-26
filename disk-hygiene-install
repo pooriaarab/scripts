@@ -55,24 +55,34 @@ PLIST
 # A sweep that finished having read 0 repos is not healthy. macOS gives launchd exactly that for
 # ~/Documents without Full Disk Access, and the installer once called it healthy (2026-10-26).
 verdict() { # LOGFILE
-  local line repos
-  line="$(grep ' done ' "$1" 2>/dev/null | tail -n 1 || true)"
-  [[ -n "$line" ]] || { echo "FAILED: no finish line in $1." >&2; return 1; }
-  repos="$(sed -n 's/.* done repos=\([0-9][0-9]*\) .*/\1/p' <<< "$line")"
+  # Judge the LAST sweep. An old success must not hide a newer run that never finished.
+  local last repos failed
+  last="$(grep -E '^[^ ]+ (start|done) ' "$1" 2>/dev/null | tail -n 1 || true)"
+  [[ -n "$last" ]] || { echo "FAILED: no sweep in $1." >&2; return 1; }
+  case "$last" in
+    *' done '*) ;;
+    *) echo "FAILED: the last sweep started but did not finish. Check the launchd logs next to $1." >&2; return 1 ;;
+  esac
+  repos="$(sed -n 's/.* done repos=\([0-9][0-9]*\) .*/\1/p' <<< "$last")"
+  failed="$(sed -n 's/.* failed=\([0-9][0-9]*\) .*/\1/p' <<< "$last")"
   if [[ -z "$repos" || "$repos" -eq 0 ]]; then
     echo "FAILED: the sweep finished but read 0 repos. macOS likely blocks launchd from reading ~/Documents." >&2
     echo "Grant /bin/bash Full Disk Access: System Settings > Privacy & Security > Full Disk Access," >&2
     echo "add /bin/bash, then run this installer again." >&2
     return 1
   fi
+  if [[ -z "$failed" || "$failed" -gt 0 ]]; then
+    echo "FAILED: the sweep could not inspect ${failed:-some} repo(s). Read the log." >&2
+    return 1
+  fi
   echo "disk-hygiene agent healthy: the last sweep read $repos repos."
-  echo "$line"
+  echo "$last"
 }
 
 case "${1:-}" in
   "") ;;
   --print) plist; exit 0 ;;
-  --verdict) [[ -n "${2:-}" ]] || { echo "usage: disk-hygiene-install --verdict LOGFILE" >&2; exit 2; }
+  --verdict) [[ $# -eq 2 && -n "$2" ]] || { echo "usage: disk-hygiene-install --verdict LOGFILE" >&2; exit 2; }
              verdict "$2"; exit $? ;;
   *) echo "usage: disk-hygiene-install [--print | --verdict LOGFILE]" >&2; exit 2 ;;
 esac
@@ -87,6 +97,7 @@ for f in disk-hygiene prune-merged-worktrees.sh; do
   echo "installed $bin_dir/$f"
 done
 
+since="$(date -u +%Y-%m-%dT%H:%M:%SZ)"  # a finish line from before this moment is an older run
 plist > "$agent_dir/$label.plist"
 launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || true
 launchctl bootstrap "gui/$(id -u)" "$agent_dir/$label.plist"
@@ -97,9 +108,10 @@ echo "loaded $label (every ${interval}s)"
 rm -f "$state/launchd.err.log"
 launchctl kickstart -k "gui/$(id -u)/$label" 2>/dev/null || true
 for _ in $(seq 1 150); do
-  if grep -q ' done ' "$state/log" 2>/dev/null && [[ -n "$(find "$state/log" -mmin -1 2>/dev/null)" ]]; then
-    verdict "$state/log"; exit $?
-  fi
+  last="$(grep -E '^[^ ]+ (start|done) ' "$state/log" 2>/dev/null | tail -n 1 || true)"
+  case "$last" in
+    *' done '*) if [[ "${last%% *}" > "$since" || "${last%% *}" == "$since" ]]; then verdict "$state/log"; exit $?; fi ;;
+  esac
   if grep -qiE 'operation not permitted|cannot list root' "$state/launchd.err.log" "$state/launchd.out.log" 2>/dev/null; then
     echo "FAILED: macOS blocked the sweep from reading ~/Documents." >&2
     echo "Grant /bin/bash Full Disk Access: System Settings > Privacy & Security > Full Disk Access," >&2

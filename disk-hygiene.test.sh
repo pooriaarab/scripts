@@ -21,6 +21,9 @@
 #  15  the done line counts repos seen              -> repos=N, so a run that read nothing shows repos=0
 #  16  the installer's verdict on a log             -> healthy only when repos is above 0
 #  17  an unknown installer flag                    -> status 2, and launchctl is never called
+#  18  an old success, then a run that never ended  -> not healthy (judge the LAST run)
+#  19  a clone git cannot read                      -> not counted, failed=1, status 2, others still swept
+#  20  extra arguments after --verdict LOGFILE      -> status 2
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -165,8 +168,8 @@ DISK_HYGIENE_FREE_GIB=500 run --apply
 check "15 the done line reports repos seen" "$(grep -q ' done repos=2 ' "$tmp/out" && echo 0 || echo 1)"
 
 # 16: the installer reads the same log and must not call a run that read nothing healthy
-printf '2026-10-26T16:01:38Z done repos=0 swept=0 removed=0 needs_review=0 caches_cleared=no free_before_gib=36 free_after_gib=36\n' > "$tmp/blind.log"
-printf '2026-10-26T16:29:47Z done repos=33 swept=33 removed=35 needs_review=110 caches_cleared=no free_before_gib=32 free_after_gib=37\n' > "$tmp/sighted.log"
+printf '2026-10-26T16:01:38Z done repos=0 swept=0 removed=0 needs_review=0 failed=0 caches_cleared=no free_before_gib=36 free_after_gib=36\n' > "$tmp/blind.log"
+printf '2026-10-26T16:29:47Z done repos=33 swept=33 removed=35 needs_review=110 failed=0 caches_cleared=no free_before_gib=32 free_after_gib=37\n' > "$tmp/sighted.log"
 printf '2026-10-26T16:29:47Z start mode=apply\n' > "$tmp/nodone.log"
 "$here/disk-hygiene-install" --verdict "$tmp/blind.log" > "$tmp/v1.out" 2>&1 && v1=0 || v1=$?
 "$here/disk-hygiene-install" --verdict "$tmp/sighted.log" > "$tmp/v2.out" 2>&1 && v2=0 || v2=$?
@@ -178,6 +181,25 @@ check "16 a log with no done line is not healthy" "$([[ "$v3" -ne 0 ]] && echo 0
 # 17: an unknown flag must be refused before any side effect
 "$here/disk-hygiene-install" --no-such-flag > "$tmp/v4.out" 2>&1 && v4=0 || v4=$?
 check "17 an unknown installer flag reports status 2 and never calls launchctl" "$([[ "$v4" -eq 2 && ! -s "$LAUNCHCTL_LOG" ]] && echo 0 || echo 1)"
+
+# 18: the verdict judges the last run. An old success must not hide a newer run that never finished.
+printf '2026-10-26T10:00:00Z start mode=apply\n2026-10-26T10:00:09Z done repos=2 swept=2 removed=0 needs_review=0 failed=0 caches_cleared=no free_before_gib=90 free_after_gib=90\n2026-10-26T10:05:00Z start mode=apply\n' > "$tmp/masked.log"
+"$here/disk-hygiene-install" --verdict "$tmp/masked.log" > "$tmp/v5.out" 2>&1 && v5=0 || v5=$?
+check "18 an old success does not hide a later run that never finished" "$([[ "$v5" -ne 0 ]] && echo 0 || echo 1)"
+
+# 19: a clone whose .git is unreadable must not count as seen. Git fails on it; the sweep says so and
+# still sweeps the other roots.
+mkdir -p "$tmp/rootBroken/broken/.git"
+DISK_HYGIENE_ROOTS="$tmp/rootBroken:$tmp/rootA" DISK_HYGIENE_FREE_GIB=500 run --apply
+broken_rc="$(rc)"
+check "19 an unreadable clone is not counted, is reported, and status is 2" "$([[ "$broken_rc" -eq 2 ]] && grep -q ' done repos=1 ' "$tmp/out" && grep -q 'failed=1' "$tmp/out" && grep -q 'broken' "$tmp/out" && echo 0 || echo 1)"
+grep ' done ' "$tmp/out" > "$tmp/broken.log" || true
+"$here/disk-hygiene-install" --verdict "$tmp/broken.log" > "$tmp/v6.out" 2>&1 && v6=0 || v6=$?
+check "19 a sweep with a failed clone is not healthy" "$([[ "$v6" -ne 0 ]] && echo 0 || echo 1)"
+
+# 20: extra arguments after the log file
+"$here/disk-hygiene-install" --verdict "$tmp/sighted.log" --bad > "$tmp/v7.out" 2>&1 && v7=0 || v7=$?
+check "20 extra arguments after --verdict LOGFILE report status 2" "$([[ "$v7" -eq 2 ]] && echo 0 || echo 1)"
 
 if [[ "$fails" -ne 0 ]]; then echo "--- last out"; cat "$tmp/out"; echo "$fails case(s) failed" >&2; exit 1; fi
 echo "all cases passed"
