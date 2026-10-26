@@ -1597,7 +1597,7 @@ const ASSISTED_BY_LINE_RE = /^\s*assisted-by:\s*(.*)$/i;
 // because "cursor" appears in the URL, even though Zephyr is not banned.
 const FOOTER_LINE_RE = new RegExp(`^\\s*(?:${EMOJI_RE.source})*\\s*generated (?:with|by)\\b(.*)$`, 'iu');
 
-export function validateCommits(commits, config, truncated = false) {
+export function validateCommits(commits, config, truncated = false, baseRef = '') {
   const failures = [];
   if (truncated) {
     failures.push(fail(
@@ -1607,6 +1607,13 @@ export function validateCommits(commits, config, truncated = false) {
       'GitHub caps the list at 250. A pull request that long cannot be reviewed. Split it.',
     ));
   }
+  // A promotion pull request (base `release`) carries the commits that were
+  // already judged when they landed on `main`. Re-judging them here fails the
+  // promotion on history nobody can change without rewriting the default
+  // branch, and it fails on a trailer a squash merge added rather than a
+  // person. The trailer rule therefore applies to pull requests into a working
+  // branch, which is where a commit is still editable.
+  if (baseRef === 'release') return { ok: failures.length === 0, failures };
   const banned = config.bannedCommitTrailers || [];
   // Word boundaries on both sides. Without them `pi` matches inside "Pia" and
   // `GPT` inside "Gupta", and a human co-author gets their PR failed for having
@@ -2328,16 +2335,19 @@ async function runPr(options) {
   ]);
   const commitsTruncated = typeof pull.commits === 'number' && commits.length < pull.commits;
   const commitResult = validateCommits(commits, config, commitsTruncated);
-  // A squash merge copies the pull request body into the commit. The body is
-  // required to carry Assisted-by, so the commit already on the default branch
-  // carries it too. Rewriting that branch is the only way to delete the line.
-  // A promotion warns for that one disclosure line. Co-authored-by and
-  // "Generated with" footers still fail.
+  // A promotion carries commits that are already on the default branch. A
+  // squash merge copies the pull request body into the commit, so the commit
+  // carries the Assisted-by line the body must have; some CLIs also add a
+  // Co-authored-by for the agent. Rewriting the default branch is the only way
+  // to remove either, and that is not a thing a pull request can do. A
+  // promotion warns for every AI-attribution trailer and fails on nothing
+  // here; the same commit fails the rule on the pull request that introduced
+  // it.
   const releasePromotion = isReleasePromotion(pull);
   let commitFailures = 0;
   for (const item of commitResult.failures) {
     const disclosure = item.got.trim();
-    if (releasePromotion && item.check.startsWith('AI attribution in ') && isValidAssistedByLine(disclosure)) {
+    if (releasePromotion && item.check.startsWith('AI attribution in ')) {
       warnings.push(fail(
         'release promotion: commit disclosure not applied',
         disclosure,

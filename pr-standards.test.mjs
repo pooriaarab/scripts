@@ -2834,13 +2834,17 @@ test('an ordinary pull request over the file cap still fails', async () => {
   assert.equal(result.warnings.some((w) => w.check === 'release promotion: file cap not applied'), false);
 });
 
-test('a release promotion still fails every rule but the size caps', async () => {
+test('a release promotion warns on attribution and still fails the other rules', async () => {
   const { exitCode, result } = await runPrWithRoutes(32, promotionRoutes(32, {
     commitMessage: 'Promote to release\n\nCo-authored-by: Claude <noreply@anthropic.com>',
   }));
 
-  assert.equal(exitCode, 1);
-  assert.equal(result.failures.some((f) => f.check === 'AI attribution in abc1234'), true);
+  // A promotion carries commits that are already on the default branch, so the
+  // trailer cannot be edited by this pull request. It warns here and fails on
+  // the pull request that introduced the commit.
+  assert.equal(exitCode, 0);
+  assert.equal(result.failures.some((f) => f.check === 'AI attribution in abc1234'), false);
+  assert.notEqual(result.warnings.find((w) => w.check === 'release promotion: commit disclosure not applied'), undefined);
   assert.equal(result.failures.some((f) => f.check === 'PR size'), false);
 });
 
@@ -2868,24 +2872,24 @@ test('an ordinary pull request still fails an Assisted-by commit trailer', async
   assert.equal(result.warnings.some((w) => w.check === 'release promotion: commit disclosure not applied'), false);
 });
 
-test('a promotion still fails a banned footer that follows Assisted-by', async () => {
+test('a promotion warns on a banned footer that follows Assisted-by', async () => {
   const { exitCode, result } = await runPrWithRoutes(38, promotionRoutes(38, {
     commitMessage: 'Stop the upload\n\nAssisted-by: grok:grok-4.7\nCo-authored-by: Claude <noreply@anthropic.com>',
   }));
 
-  assert.equal(exitCode, 1);
-  assert.equal(result.failures.some((f) => f.got.includes('Co-authored-by: Claude')), true);
+  assert.equal(exitCode, 0);
+  assert.equal(result.failures.some((f) => f.got.includes('Co-authored-by: Claude')), false);
   assert.notEqual(result.warnings.find((w) => w.check === 'release promotion: commit disclosure not applied'), undefined);
 });
 
-test('a promotion still fails a malformed Assisted-by line', async () => {
+test('a promotion warns on a malformed Assisted-by line', async () => {
   const { exitCode, result } = await runPrWithRoutes(39, promotionRoutes(39, {
     commitMessage: 'Stop the upload\n\nAssisted-by: agent:model,other:ai',
   }));
 
-  assert.equal(exitCode, 1);
-  assert.equal(result.failures.some((f) => f.got.includes('Assisted-by: agent:model,other:ai')), true);
-  assert.equal(result.warnings.some((w) => w.check === 'release promotion: commit disclosure not applied'), false);
+  assert.equal(exitCode, 0);
+  assert.equal(result.failures.some((f) => f.got.includes('Assisted-by: agent:model,other:ai')), false);
+  assert.notEqual(result.warnings.find((w) => w.check === 'release promotion: commit disclosure not applied'), undefined);
 });
 
 test('a submodule bump under an excluded path counts, vendored source does not', () => {
