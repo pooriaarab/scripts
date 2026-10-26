@@ -27,7 +27,7 @@
 #  21  a failure before the sweep starts           -> recorded, so an old success cannot stand
 #  22  install verification                        -> only a finish line written AFTER the install counts
 #  23  a prune failure                             -> counted in failed=N, swept not counted, status 2
-#  24  error text that contains " done "            -> still an error record, never a finish line
+#  24  text that contains " done " in a message     -> still an error record, never a finish line
 #  25  a lock directory that cannot be made        -> recorded, status 2
 #  26  a repo directory that cannot be read        -> counted in failed=N, status 2
 #  27  a failed verification                       -> leaves no temp file behind (a guard: the previous
@@ -289,7 +289,7 @@ log24="$tmp/state/log24"
 DISK_HYGIENE_LOG="$log24" DISK_HYGIENE_FREE_GIB=500 run --apply
 DISK_HYGIENE_LOG="$log24" DISK_HYGIENE_PRUNE="/tmp/ done repos=1 failed=0 x" DISK_HYGIENE_FREE_GIB=500 run --apply
 "$here/disk-hygiene-install" --verdict "$log24" > /dev/null 2>&1 && v24=0 || v24=1
-check "24 error text that contains ' done ' is not a finish line" "$([[ "$v24" -eq 1 ]] && echo 0 || echo 1)"
+check "24 text in a message that contains ' done ' is not a finish line" "$([[ "$v24" -eq 1 ]] && echo 0 || echo 1)"
 
 # 25: the lock directory cannot be made. The log must still say so.
 log25="$tmp/state/log25"
