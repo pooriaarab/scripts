@@ -81,7 +81,7 @@ def control_near(text, system_user=False):
     (or equal it, for a system user), so a label with no control cannot borrow a neighbour's.
     """
     pattern = label_pattern(text, system_user)
-    row_ok = ('n=>{const t=n.innerText.trim().split("\\n").join(" ");return '
+    row_ok = ('n=>{const lines=n.innerText.trim().split("\\n");const t=lines.join(" ");return lines.length<=3&&'
               + (pattern + '.test(t)' if system_user else 't.startsWith(' + json.dumps(text) + ')') + '}')
     return ('(()=>{const sel=' + json.dumps(CONTROL) + ';const own=n=>[...(n.matches(sel)?[n]:[]),...n.querySelectorAll(sel)];'
             'const rowOk=' + row_ok + ';const found=new Set();'
