@@ -1,0 +1,176 @@
+#!/usr/bin/env bash
+# One hub, many hosts: run CLIProxyAPI on the home Mac, point every other host at it.
+#
+#   cliproxy-hub check                      hub only: is the hub healthy?
+#   cliproxy-hub serve                      hub only: put the hub on the tailnet (HTTPS :8317)
+#   cliproxy-hub client claude [--config-dir D]   client: point Claude Code at the hub
+#   cliproxy-hub client codex  [--codex-home D]   client: point Codex at the hub
+#   cliproxy-hub verify                     client: can this host reach the hub?
+#
+# Hub commands read CLIPROXY_MANAGEMENT_KEY from the environment or from CLIPROXY_ENV_FILE.
+# Client commands read HUB_URL and HUB_KEY from the environment, or HUB_KEY_FILE.
+# Nothing here prints a key. Config files get a timestamped backup before any edit.
+#
+# Rules, from Theo's guide (gist 59a521d2ee8d70aaf90e280c175072af):
+#   - Claude subscriptions run in Claude Code only. Codex subscriptions run in Codex only.
+#   - Never serve other people's traffic with these seats.
+#   - The hub is a home machine. Never a VPS or datacenter host.
+set -euo pipefail
+
+PORT="${CLIPROXY_PORT:-8317}"
+CONF="${CLIPROXY_CONF:-$(brew --prefix 2>/dev/null || echo /opt/homebrew)/etc/cliproxyapi.conf}"
+TS="${TAILSCALE_BIN:-$(command -v tailscale || echo /Applications/Tailscale.app/Contents/MacOS/Tailscale)}"
+
+die() { echo "cliproxy-hub: $*" >&2; exit 1; }
+usage() { sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+ok() { printf '  ok    %s\n' "$*"; }
+bad() { printf '  FAIL  %s\n' "$*"; FAILED=1; }
+
+# First api-keys entry in the hub config. Used only inside this process.
+local_key() {
+  awk '/^api-keys:/{f=1;next} f&&/^[^ -]/{f=0} f&&/"/{split($0,a,"\"");print a[2];exit}' "$CONF"
+}
+
+client_key() {
+  if [ -n "${HUB_KEY:-}" ]; then printf '%s' "$HUB_KEY"
+  elif [ -n "${HUB_KEY_FILE:-}" ] && [ -r "$HUB_KEY_FILE" ]; then tr -d '\n' < "$HUB_KEY_FILE"
+  else die "set HUB_KEY or HUB_KEY_FILE"; fi
+}
+
+need_url() {
+  [ -n "${HUB_URL:-}" ] || die "set HUB_URL, for example https://<mac>.<tailnet>.ts.net:$PORT"
+  case "$HUB_URL" in
+    https://*|http://127.0.0.1*|http://localhost*) ;;
+    *) die "HUB_URL must be https (the key travels in a header)" ;;
+  esac
+}
+
+backup() { if [ -e "$1" ]; then cp -p "$1" "$1.bak-$(date +%Y%m%d-%H%M%S)" || die "backup of $1 failed; config left unchanged"; fi; }
+
+models_count() { # url key -> number of models, or empty on failure
+  # Header on stdin keeps the key out of the process list.
+  printf 'Authorization: Bearer %s' "$2" | curl -fsS -m 10 "$1/v1/models" -H @- 2>/dev/null |
+    python3 -c 'import sys,json;print(len(json.load(sys.stdin)["data"]))' 2>/dev/null || true
+}
+
+# Live seat status from the management API. A seat that cannot refresh still
+# lists its models, so /v1/models alone never shows a dead login.
+seats() {
+  mk="${CLIPROXY_MANAGEMENT_KEY:-}"
+  [ -n "$mk" ] || mk=$(sed -n 's/^CLIPROXY_MANAGEMENT_KEY=//p' "${CLIPROXY_ENV_FILE:-$HOME/.config/cliproxy-hub/env}" 2>/dev/null)
+  [ -n "$mk" ] || { bad "no management key: set CLIPROXY_MANAGEMENT_KEY"; return; }
+  out=$(printf 'Authorization: Bearer %s' "$mk" | curl -fsS -m 10 "http://127.0.0.1:$PORT/v0/management/auth-files" -H @- 2>/dev/null |
+    python3 -c '
+import sys, json
+for f in json.load(sys.stdin).get("files", []):
+    state = "ok" if f.get("status") == "active" and not f.get("unavailable") else "DEAD"
+    print(state, f.get("provider") or f.get("type"), f.get("email") or f.get("name"), f.get("status_message") or "")
+' 2>/dev/null) || { bad "management API unreachable"; return; }
+  echo "  seats:"
+  while read -r state prov who msg; do
+    if [ "$state" = ok ]; then ok "$prov  $who"
+    else bad "$prov  $who  ($msg) -> log in again: cliproxyapi -${prov}-login"; fi
+  done <<< "$out"
+}
+
+cmd_check() {
+  FAILED=0
+  echo "hub check ($CONF)"
+  [ -r "$CONF" ] || die "no hub config at $CONF"
+
+  lsof -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1 && ok "cliproxyapi listens on :$PORT" || bad "nothing listens on :$PORT"
+  grep -Eq '^host: "(127\.0\.0\.1|localhost)"' "$CONF" && ok "bound to localhost" || bad "host is not 127.0.0.1 (the tailnet is the front door)"
+
+  n=$(models_count "http://127.0.0.1:$PORT" "$(local_key)")
+  [ -n "$n" ] && [ "$n" -gt 0 ] && ok "local /v1/models returns $n models" || bad "local /v1/models returned nothing"
+
+  if "$TS" serve status 2>&1 | grep -q "$PORT"; then ok "tailscale serve exposes :$PORT"; else bad "tailscale serve has no :$PORT rule (run: cliproxy-hub serve)"; fi
+
+  if [ "$(pmset -g 2>/dev/null | awk '$1=="sleep"{print $2}')" = 0 ] || pmset -g assertions 2>/dev/null | grep -q 'PreventSystemSleep *1'; then ok "system sleep is blocked"
+  else bad "system sleep is not blocked; the hub sleeps and every client stops (see skills/cliproxy-hub)"; fi
+
+  seats
+  [ "$FAILED" = 0 ] && echo "hub: healthy" || { echo "hub: NOT healthy"; exit 1; }
+}
+
+cmd_serve() {
+  # The macOS app build of Tailscale refuses `serve` from a non-interactive
+  # shell ("GUI failed to start"). Run this from a real terminal.
+  "$TS" serve --bg --https="$PORT" "http://127.0.0.1:$PORT" ||
+    die "tailscale serve failed. Run it in a Terminal window, and enable HTTPS in the Tailscale admin console."
+  name=$("$TS" status --json | python3 -c 'import sys,json;print(json.load(sys.stdin)["Self"]["DNSName"].rstrip("."))')
+  echo "hub URL for clients: https://$name:$PORT"
+}
+
+cmd_verify() {
+  need_url
+  n=$(models_count "$HUB_URL" "$(client_key)")
+  [ -n "$n" ] && [ "$n" -gt 0 ] && echo "hub reachable: $n models" || die "hub unreachable or key rejected at $HUB_URL"
+}
+
+cmd_client() {
+  need_url
+  tool="${1:-}"; [ $# -gt 0 ] && shift
+  key="$(client_key)"
+  case "$tool" in
+  claude)
+    dir="$HOME/.claude-hub"
+    [ "${1:-}" = "--config-dir" ] && dir="${2:?--config-dir needs a path}"
+    mkdir -p "$dir"; f="$dir/settings.json"; backup "$f"
+    HUB_KEY_V="$key" python3 - "$f" "$HUB_URL" <<'PY'
+import json, os, sys
+f, url = sys.argv[1], sys.argv[2]
+d = json.load(open(f)) if os.path.exists(f) else {}
+d.setdefault("env", {}).update({"ANTHROPIC_BASE_URL": url, "ANTHROPIC_AUTH_TOKEN": os.environ["HUB_KEY_V"]})
+fd = os.open(f, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+os.write(fd, (json.dumps(d, indent=2) + "\n").encode())
+os.close(fd)
+os.chmod(f, 0o600)
+PY
+    echo "claude: wrote $f. Run: CLAUDE_CONFIG_DIR=$dir claude" ;;
+  codex)
+    dir="$HOME/.codex-hub"
+    [ "${1:-}" = "--codex-home" ] && dir="${2:?--codex-home needs a path}"
+    mkdir -p "$dir"; f="$dir/config.toml"; backup "$f"
+    HUB_KEY_V="$key" python3 - "$f" "$HUB_URL" <<'PY'
+import json, os, re, sys
+f, url = sys.argv[1], sys.argv[2]
+s = open(f).read() if os.path.exists(f) else ""
+# Only the top-level key: profile tables may carry their own model_provider.
+m = re.search(r'(?m)^\[', s)
+i = m.start() if m else len(s)
+head, rest = s[:i], s[i:]
+head = re.sub(r'(?m)^model_provider\s*=.*(\n|$)', '', head)
+s = head + rest
+s = re.sub(r'(?ms)^\[model_providers\.cliproxy\]\n.*?(?=^\[|\Z)', '', s).rstrip("\n")
+block = f'''model_provider = "cliproxy"
+
+{s}
+
+[model_providers.cliproxy]
+name = "CLIProxyAPI"
+base_url = "{url}/v1"
+wire_api = "responses"
+requires_openai_auth = false
+supports_websockets = true
+experimental_bearer_token = {json.dumps(os.environ["HUB_KEY_V"])}
+'''
+fd = os.open(f, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+os.write(fd, re.sub(r'\n{3,}', '\n\n', block).encode())
+os.close(fd)
+os.chmod(f, 0o600)
+PY
+    echo "codex: wrote $f. Run: CODEX_HOME=$dir codex" ;;
+  *) usage ;;
+  esac
+}
+
+[ "$#" -ge 1 ] || usage
+sub="$1"; shift
+case "$sub" in
+  check) cmd_check ;;
+  serve) cmd_serve ;;
+  verify) cmd_verify ;;
+  client) cmd_client "$@" ;;
+  *) usage ;;
+esac
