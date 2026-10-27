@@ -65,12 +65,28 @@ def by_text(text, selector=CLICKABLE, exact=True):
             f'&&e.innerText.trim(){test}{json.dumps(text)}{close})')
 
 
-def control_near(text):
-    """The checkbox or switch in the same row as a label."""
-    return ('(()=>{const t=[...document.querySelectorAll("[role=dialog] *")].filter(e=>e.getClientRects().length&&'
-            f'e.innerText&&e.innerText.trim().startsWith({json.dumps(text)})).pop();'
-            'let n=t;while(n&&!n.querySelector("input[type=checkbox],[role=switch],[role=checkbox]"))n=n.parentElement;'
-            'return n&&n.querySelector("input[type=checkbox],[role=switch],[role=checkbox]")})()')
+def label_pattern(text, system_user):
+    """The whole label. A system user must carry Meta's "(System user)" tag, so a person with the same name never matches."""
+    tag = r'\s*\(System user\)' if system_user else ''
+    return 'new RegExp(' + json.dumps('^' + re.escape(text) + tag + '$') + ')'
+
+
+CONTROL = 'input[type=checkbox],[role=switch],[role=checkbox]'
+
+
+def control_near(text, system_user=False):
+    """The one checkbox or switch for an exact label. Null when zero or several rows match."""
+    return ('(()=>{const sel=' + json.dumps(CONTROL) + ';const own=n=>[...(n.matches(sel)?[n]:[]),...n.querySelectorAll(sel)];'
+            'const found=new Set();for(const t of [...document.querySelectorAll("[role=dialog] *")].filter(e=>'
+            'e.getClientRects().length&&e.innerText&&' + label_pattern(text, system_user)
+            + '.test(e.innerText.trim().split("\\n").join(" ")))){let n=t;while(n&&own(n).length===0)n=n.parentElement;'
+            'if(n&&own(n).length===1)found.add(own(n)[0])}'
+            'return found.size===1?[...found][0]:null})()')
+
+
+def is_on(control_js):
+    return evaluate('JSON.stringify((()=>{const e=' + control_js + ';'
+                    'return Boolean(e&&(e.checked===true||e.getAttribute("aria-checked")==="true"))})())')
 
 
 def click(element_js, what):
@@ -100,8 +116,13 @@ def foreground():
     if evaluate('JSON.stringify(document.visibilityState)') == 'visible':
         return
     if sys.platform == 'darwin':
-        subprocess.run(['osascript', '-e', 'tell application "Google Chrome" to activate'],
-                       capture_output=True, timeout=15)
+        # Two Chrome instances can run. Raise the one that owns the debug port.
+        port = os.getenv('FB_PAGE_CDP_PORT', '9334')
+        pid = subprocess.run(['lsof', f'-iTCP:{port}', '-sTCP:LISTEN', '-t'],
+                             capture_output=True, text=True).stdout.split()
+        script = ('tell application "System Events" to set frontmost of (first process whose unix id is '
+                  f'{pid[0]}) to true' if pid else 'tell application "Google Chrome" to activate')
+        subprocess.run(['osascript', '-e', script], capture_output=True, timeout=15)
         pause(2)
     if evaluate('JSON.stringify(document.visibilityState)') != 'visible':
         fail('The Chrome tab is hidden. Bring Chrome to the front, then run again.')
@@ -154,7 +175,11 @@ def attach_page(name, portfolio, accept_terms):
     click(by_text('Add', 'button,[role=button]'), 'Add menu')
     click(item, 'Add an existing Page')
     type_into('document.querySelector(\'input[placeholder^="Facebook Page name"]\')', name, 'Page search')
-    click(by_text(name, '[role=option],[role=listitem]', exact=False), 'Page search result')
+    options = ('[...document.querySelectorAll("[role=option],[role=listitem]")].filter(e=>e.getClientRects().length'
+               '&&e.innerText.trim().split("\\n")[0].trim()===' + json.dumps(name) + ')')
+    if evaluate('JSON.stringify(' + options + '.length)') != 1:
+        fail('Page search must match exactly one Page by exact name.')
+    click(options + '[0]', 'Page search result')
     click(by_text('Next', 'button,[role=button]'), 'Next')
     click('document.querySelector(\'[role=dialog] input[type=checkbox]\')', 'Meta Commercial Terms box')
     click(by_text('Add Page', 'button,[role=button]'), 'Add Page')
@@ -163,8 +188,10 @@ def attach_page(name, portfolio, accept_terms):
 
 
 def read_page_id(name):
-    wait_for('/ID:\\s*\\d{10,}/.test(document.body.innerText)', 'Page ID in the details panel')
-    found = evaluate('JSON.stringify((document.body.innerText.match(/ID:\\s*(\\d{10,})/)||[])[1]||null)')
+    """Read the ID from the details panel of this Page, never from other text on the screen."""
+    panel = 'new RegExp(' + json.dumps('(?:^|\n)' + re.escape(name) + r'\nID:\s*(\d{10,})') + ')'
+    wait_for(panel + '.test(document.body.innerText)', 'Page ID in the details panel')
+    found = evaluate('JSON.stringify((document.body.innerText.match(' + panel + ')||[])[1]||null)')
     if not found:
         fail(f'Page ID not found for the Page "{name}".')
     return found
@@ -172,9 +199,13 @@ def read_page_id(name):
 
 def assign_user(user, toggles):
     click(by_text('Assign people', 'button,[role=button]'), 'Assign people')
-    click(control_near(user), 'system user')
-    for toggle in toggles:
-        click(control_near(toggle), f'permission {toggle}')
+    click(control_near(user, True), 'system user')
+    for toggle in dict.fromkeys(toggles):  # a repeated flag must not click twice
+        control = control_near(toggle)
+        if not is_on(control):
+            click(control, f'permission {toggle}')
+            if not is_on(control):
+                fail(f'Permission "{toggle}" did not turn on.')
     click(by_text('Assign', 'button,[role=button]'), 'Assign')
     wait_for('/People assigned/.test(document.body.innerText)', 'people assigned', 60)
     click(by_text('Done', 'button,[role=button]'), 'Done')
@@ -191,12 +222,15 @@ def record(registry, site, name, page_id):
 def run(args):
     name = args.name
     check_name(name)
-    if args.command == 'create':
-        if not args.category:
-            fail('--category is required for create.')
-        create_page(name, args.category, args.bio)
+    # Validate everything first: a failure after Page creation is retried into a duplicate Page.
+    if args.command == 'create' and not args.category:
+        fail('--category is required for create.')
     if not args.portfolio:
         fail('A portfolio ID is required. Pass --portfolio or set FB_PAGE_PORTFOLIO_ID.')
+    if not args.accept_terms:
+        fail('Meta Commercial Terms must be accepted for the portfolio. Pass --accept-terms.')
+    if args.command == 'create':
+        create_page(name, args.category, args.bio)
     attach_page(name, args.portfolio, args.accept_terms)
     click(by_text(name, '[role=row],[role=listitem],[role=gridcell]'), 'new Page in the list')
     page_id = read_page_id(name)
