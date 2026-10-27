@@ -1,0 +1,238 @@
+#!/usr/bin/env python3
+"""Create a brand Facebook Page, add it to a Meta business portfolio, and print its ID.
+
+Drives the personal Chrome session (browser-personal). Meta has no API to
+create a Page. Nothing in this file names an owner, a portfolio or a site.
+Every identifier comes from a flag or an env var.
+"""
+import argparse
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+import time
+
+CLICKABLE = 'button,[role=button],[role=option],[role=menuitem],a,label,[role=checkbox],input[type=checkbox]'
+
+
+def pause(seconds):
+    if not os.getenv('FB_PAGE_FAST'):
+        time.sleep(seconds)
+
+
+def fail(message):
+    raise RuntimeError(message)
+
+
+def browser(*args):
+    result = subprocess.run(['zsh', '-ic', 'browser-personal "$@"', 'fb-page', *map(str, args)],
+                            capture_output=True, text=True, timeout=90)
+    if result.returncode:
+        fail(f'browser {args[0]} failed (exit {result.returncode}); output withheld.')
+    return result.stdout
+
+
+def evaluate(js):
+    """Run JS that returns JSON.stringify(value); return the parsed value."""
+    lines = [l for l in browser('eval', js).splitlines() if l.strip() and not l.startswith('✓')]
+    if not lines:
+        return None
+    value = json.loads(lines[0])
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except ValueError:
+            return value
+    return value
+
+
+def wait_for(js, what, seconds=30):
+    deadline = time.monotonic() + float(os.getenv('FB_PAGE_WAIT_SECONDS', seconds))
+    while True:
+        if evaluate(f'JSON.stringify(Boolean({js}))'):
+            return
+        if time.monotonic() >= deadline:
+            fail(f'Timed out waiting for: {what}.')
+        pause(1)
+
+
+def by_text(text, selector=CLICKABLE, exact=True):
+    test = '===' if exact else '.startsWith('
+    close = '' if exact else ')'
+    return (f'[...document.querySelectorAll({json.dumps(selector)})].find(e=>e.getClientRects().length&&e.innerText'
+            f'&&e.innerText.trim(){test}{json.dumps(text)}{close})')
+
+
+def control_near(text):
+    """The checkbox or switch in the same row as a label."""
+    return ('(()=>{const t=[...document.querySelectorAll("[role=dialog] *")].filter(e=>e.getClientRects().length&&'
+            f'e.innerText&&e.innerText.trim().startsWith({json.dumps(text)})).pop();'
+            'let n=t;while(n&&!n.querySelector("input[type=checkbox],[role=switch],[role=checkbox]"))n=n.parentElement;'
+            'return n&&n.querySelector("input[type=checkbox],[role=switch],[role=checkbox]")})()')
+
+
+def click(element_js, what):
+    """Real mouse events: Meta's React UI ignores synthetic clicks."""
+    point = evaluate('(()=>{const e=' + element_js + ';if(!e)return JSON.stringify(null);'
+                     'e.scrollIntoView({block:"center"});const r=e.getBoundingClientRect();'
+                     'return JSON.stringify({x:r.x+r.width/2,y:r.y+r.height/2})})()')
+    if not point:
+        fail(f'Control not found: {what}.')
+    browser('mouse', 'move', round(point['x']), round(point['y']))
+    pause(0.8)  # Meta ignores a click that has no hover before it
+    browser('mouse', 'down')
+    pause(0.2)
+    browser('mouse', 'up')
+    pause(1.5)
+
+
+def type_into(element_js, text, what):
+    if not evaluate(f'JSON.stringify((()=>{{const e={element_js};if(!e)return false;e.focus();return true}})())'):
+        fail(f'Field not found: {what}.')
+    browser('keyboard', 'type', text)
+    pause(2)
+
+
+def foreground():
+    """Meta ignores clicks while the tab is hidden, so Chrome must be in front."""
+    if evaluate('JSON.stringify(document.visibilityState)') == 'visible':
+        return
+    if sys.platform == 'darwin':
+        subprocess.run(['osascript', '-e', 'tell application "Google Chrome" to activate'],
+                       capture_output=True, timeout=15)
+        pause(2)
+    if evaluate('JSON.stringify(document.visibilityState)') != 'visible':
+        fail('The Chrome tab is hidden. Bring Chrome to the front, then run again.')
+
+
+def open_page(url):
+    foreground()
+    browser('open', url)
+    pause(8)  # clicks sent before the page hydrates are dropped
+    if evaluate('JSON.stringify(/login|checkpoint/.test(location.pathname))'):
+        fail('Chrome is not logged in to Facebook. Log in, then run again.')
+
+
+def check_name(name):
+    deny = os.getenv('FB_PAGE_DENY')
+    if deny and re.search(deny, name, re.I):
+        fail('The Page name matches FB_PAGE_DENY. Choose a brand name.')
+
+
+def create_page(name, category, bio):
+    open_page('https://www.facebook.com/pages/create/')
+    wait_for('document.querySelector(\'[role=main] input[type=text]\')', 'create form')
+    type_into('document.querySelector(\'[role=main] input[type=text]\')', name, 'Page name')
+    type_into('document.querySelector(\'[role=main] input[role=combobox]\')', category, 'Category')
+    options = '[...document.querySelectorAll("[role=option]")].filter(e=>e.getClientRects().length)'
+    click(f'({options}.find(e=>e.innerText.trim()==={json.dumps(category)})||{options}[0])', 'category suggestion')
+    if bio:
+        type_into('document.querySelector(\'[role=main] textarea\')', bio, 'Bio')
+    click(by_text('Create Page', 'button,[role=button]'), 'Create Page')
+    wait_for('/Finish setting up your Page/.test(document.body.innerText)', 'Page created', 60)
+
+
+def settings_url(portfolio):
+    return f'https://business.facebook.com/latest/settings/pages?business_id={portfolio}'
+
+
+def page_listed(name):
+    return evaluate('JSON.stringify([...document.querySelectorAll("[role=row],[role=listitem],[role=gridcell]")]'
+                    f'.some(e=>e.innerText.trim()==={json.dumps(name)}))')
+
+
+def attach_page(name, portfolio, accept_terms):
+    if not accept_terms:
+        fail('Meta Commercial Terms must be accepted for the portfolio. Pass --accept-terms.')
+    open_page(settings_url(portfolio))
+    wait_for('/Pages/.test(document.body.innerText)', 'Pages settings')
+    if page_listed(name):
+        fail('A Page with this name is already in the portfolio.')
+    item = by_text('Add an existing Facebook Page', 'b,[role=menuitem],[role=button]', exact=False)
+    click(by_text('Add', 'button,[role=button]'), 'Add menu')
+    click(item, 'Add an existing Page')
+    type_into('document.querySelector(\'input[placeholder^="Facebook Page name"]\')', name, 'Page search')
+    click(by_text(name, '[role=option],[role=listitem]', exact=False), 'Page search result')
+    click(by_text('Next', 'button,[role=button]'), 'Next')
+    click('document.querySelector(\'[role=dialog] input[type=checkbox]\')', 'Meta Commercial Terms box')
+    click(by_text('Add Page', 'button,[role=button]'), 'Add Page')
+    wait_for('/Page added successfully/.test(document.body.innerText)', 'Page added', 60)
+    click(by_text('Maybe later', 'button,[role=button]'), 'Maybe later')
+
+
+def read_page_id(name):
+    wait_for('/ID:\\s*\\d{10,}/.test(document.body.innerText)', 'Page ID in the details panel')
+    found = evaluate('JSON.stringify((document.body.innerText.match(/ID:\\s*(\\d{10,})/)||[])[1]||null)')
+    if not found:
+        fail(f'Page ID not found for the Page "{name}".')
+    return found
+
+
+def assign_user(user, toggles):
+    click(by_text('Assign people', 'button,[role=button]'), 'Assign people')
+    click(control_near(user), 'system user')
+    for toggle in toggles:
+        click(control_near(toggle), f'permission {toggle}')
+    click(by_text('Assign', 'button,[role=button]'), 'Assign')
+    wait_for('/People assigned/.test(document.body.innerText)', 'people assigned', 60)
+    click(by_text('Done', 'button,[role=button]'), 'Done')
+
+
+def record(registry, site, name, page_id):
+    path = Path(registry)
+    data = json.loads(path.read_text()) if path.exists() else {'sites': {}}
+    data.setdefault('sites', {}).setdefault(site, {}).update({'brand': name, 'meta_page_id': page_id})
+    path.write_text(json.dumps(data, indent=2) + '\n')
+    path.chmod(0o600)
+
+
+def run(args):
+    name = args.name
+    check_name(name)
+    if args.command == 'create':
+        if not args.category:
+            fail('--category is required for create.')
+        create_page(name, args.category, args.bio)
+    if not args.portfolio:
+        fail('A portfolio ID is required. Pass --portfolio or set FB_PAGE_PORTFOLIO_ID.')
+    attach_page(name, args.portfolio, args.accept_terms)
+    click(by_text(name, '[role=row],[role=listitem],[role=gridcell]'), 'new Page in the list')
+    page_id = read_page_id(name)
+    if args.assign_user:
+        assign_user(args.assign_user, args.permission)
+    if args.registry and args.site:
+        record(args.registry, args.site, name, page_id)
+    print(json.dumps({'name': name, 'page_id': page_id, 'portfolio': args.portfolio,
+                      'assigned': args.assign_user or None}))
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('command', choices=['create', 'attach'],
+                        help='create: new Page then attach. attach: add an existing Page by name.')
+    parser.add_argument('--name', required=True)
+    parser.add_argument('--category', help='Facebook category text, for example "Medical & health"')
+    parser.add_argument('--bio')
+    parser.add_argument('--portfolio', default=os.getenv('FB_PAGE_PORTFOLIO_ID'))
+    parser.add_argument('--assign-user', default=os.getenv('FB_PAGE_SYSTEM_USER'),
+                        help='Display name of the system user to assign')
+    parser.add_argument('--permission', action='append', default=None,
+                        help='Permission toggle to enable. Default: Ads and Insights.')
+    parser.add_argument('--accept-terms', action='store_true',
+                        help='Tick the Meta Commercial Terms box for the portfolio')
+    parser.add_argument('--registry', help='JSON file to record the brand and Page ID in')
+    parser.add_argument('--site', help='Key to record under in the registry')
+    args = parser.parse_args(argv)
+    args.permission = args.permission or ['Ads', 'Insights']
+    try:
+        run(args)
+    except RuntimeError as error:
+        print(f'fb-page: {error}', file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())
