@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """CLI E2E: fake browser, real script, real registry file. No Facebook account is touched.
-Failure cases: permission toggle that stays off, ambiguous Page search, validation before Page creation, missing terms flag, denied name, missing portfolio, missing category,
+Failure cases: namesake Page already managed, permission toggle that stays off, ambiguous Page search, validation before Page creation, missing terms flag, denied name, missing portfolio, missing category,
 logged-out Chrome, hidden tab, wait timeout, Page already in the portfolio,
 Page ID not found, browser crash that prints a secret.
 Success case: JSON output, 0600 registry file, no secret in any output.
@@ -29,6 +29,8 @@ if args[0] == 'eval':
         out(mode == 'loggedout')
     elif js.startswith('JSON.stringify(Boolean('):
         out(mode != 'timeout')
+    elif '.some(l=>' in js:
+        out(mode == 'namesake')
     elif 'role=option' in js and '.length)' in js:
         out(2 if mode == 'ambiguous' else 1)
     elif '.some(' in js:
@@ -82,6 +84,7 @@ expect_fail(BASE, 'already in the portfolio', 'listed')
 expect_fail(BASE, 'Page ID not found', 'noid')
 expect_fail(BASE, 'browser eval failed', 'crash')
 expect_fail(BASE, 'exactly one Page', 'ambiguous')
+expect_fail(['create', '--name', 'Acme', '--category', 'Website', '--portfolio', '111', '--accept-terms'], 'already manage', 'namesake')
 expect_fail(BASE + ['--assign-user', 'Some System User'], 'did not turn on', 'stuckoff')
 # Validation runs before any browser call, so a bad create never makes a Page.
 expect_fail(['create', '--name', 'Acme', '--category', 'Website', '--accept-terms'], 'portfolio', 'crash')

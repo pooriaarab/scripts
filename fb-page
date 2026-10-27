@@ -75,12 +75,20 @@ CONTROL = 'input[type=checkbox],[role=switch],[role=checkbox]'
 
 
 def control_near(text, system_user=False):
-    """The one checkbox or switch for an exact label. Null when zero or several rows match."""
+    """The one checkbox or switch in the row of an exact label. Null when zero or several rows match.
+
+    The row is the nearest ancestor that holds a control. Its text must start with the label
+    (or equal it, for a system user), so a label with no control cannot borrow a neighbour's.
+    """
+    pattern = label_pattern(text, system_user)
+    row_ok = ('n=>{const t=n.innerText.trim().split("\\n").join(" ");return '
+              + (pattern + '.test(t)' if system_user else 't.startsWith(' + json.dumps(text) + ')') + '}')
     return ('(()=>{const sel=' + json.dumps(CONTROL) + ';const own=n=>[...(n.matches(sel)?[n]:[]),...n.querySelectorAll(sel)];'
-            'const found=new Set();for(const t of [...document.querySelectorAll("[role=dialog] *")].filter(e=>'
-            'e.getClientRects().length&&e.innerText&&' + label_pattern(text, system_user)
-            + '.test(e.innerText.trim().split("\\n").join(" ")))){let n=t;while(n&&own(n).length===0)n=n.parentElement;'
-            'if(n&&own(n).length===1)found.add(own(n)[0])}'
+            'const rowOk=' + row_ok + ';const found=new Set();'
+            'for(const t of [...document.querySelectorAll("[role=dialog] *")].filter(e=>e.getClientRects().length&&e.innerText&&'
+            + pattern.replace('new RegExp', 'new RegExp') + '.test(e.innerText.trim().split("\\n").join(" ")))){'
+            'let n=t;while(n&&own(n).length===0)n=n.parentElement;'
+            'if(n&&own(n).length===1&&rowOk(n))found.add(own(n)[0])}'
             'return found.size===1?[...found][0]:null})()')
 
 
@@ -142,7 +150,15 @@ def check_name(name):
         fail('The Page name matches FB_PAGE_DENY. Choose a brand name.')
 
 
+def assert_no_namesake(name):
+    open_page('https://www.facebook.com/pages/?category=your_pages')
+    wait_for('/Pages you manage/.test(document.body.innerText)', 'your Pages list')
+    if evaluate('JSON.stringify(document.body.innerText.split("\\n").some(l=>l.trim()===' + json.dumps(name) + '))'):
+        fail('You already manage a Page with this name. Pick another name or use attach.')
+
+
 def create_page(name, category, bio):
+    assert_no_namesake(name)
     open_page('https://www.facebook.com/pages/create/')
     wait_for('document.querySelector(\'[role=main] input[type=text]\')', 'create form')
     type_into('document.querySelector(\'[role=main] input[type=text]\')', name, 'Page name')
