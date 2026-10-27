@@ -37,9 +37,15 @@ client_key() {
   else die "set HUB_KEY or HUB_KEY_FILE"; fi
 }
 
-need_url() { [ -n "${HUB_URL:-}" ] || die "set HUB_URL, for example https://<mac>.<tailnet>.ts.net:$PORT"; }
+need_url() {
+  [ -n "${HUB_URL:-}" ] || die "set HUB_URL, for example https://<mac>.<tailnet>.ts.net:$PORT"
+  case "$HUB_URL" in
+    https://*|http://127.0.0.1*|http://localhost*) ;;
+    *) die "HUB_URL must be https (the key travels in a header)" ;;
+  esac
+}
 
-backup() { [ -e "$1" ] && cp -p "$1" "$1.bak-$(date +%Y%m%d-%H%M%S)" || true; }
+backup() { if [ -e "$1" ]; then cp -p "$1" "$1.bak-$(date +%Y%m%d-%H%M%S)" || die "backup of $1 failed; config left unchanged"; fi; }
 
 models_count() { # url key -> number of models, or empty on failure
   # Header on stdin keeps the key out of the process list.
@@ -53,7 +59,7 @@ seats() {
   mk="${CLIPROXY_MANAGEMENT_KEY:-}"
   [ -n "$mk" ] || mk=$(sed -n 's/^CLIPROXY_MANAGEMENT_KEY=//p' "${CLIPROXY_ENV_FILE:-$HOME/.config/cliproxy-hub/env}" 2>/dev/null)
   [ -n "$mk" ] || { bad "no management key: set CLIPROXY_MANAGEMENT_KEY"; return; }
-  out=$(curl -fsS -m 10 "http://127.0.0.1:$PORT/v0/management/auth-files" -H "Authorization: Bearer $mk" 2>/dev/null |
+  out=$(printf 'Authorization: Bearer %s' "$mk" | curl -fsS -m 10 "http://127.0.0.1:$PORT/v0/management/auth-files" -H @- 2>/dev/null |
     python3 -c '
 import sys, json
 for f in json.load(sys.stdin).get("files", []):
@@ -116,7 +122,9 @@ import json, os, sys
 f, url = sys.argv[1], sys.argv[2]
 d = json.load(open(f)) if os.path.exists(f) else {}
 d.setdefault("env", {}).update({"ANTHROPIC_BASE_URL": url, "ANTHROPIC_AUTH_TOKEN": os.environ["HUB_KEY_V"]})
-open(f, "w").write(json.dumps(d, indent=2) + "\n")
+fd = os.open(f, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+os.write(fd, (json.dumps(d, indent=2) + "\n").encode())
+os.close(fd)
 os.chmod(f, 0o600)
 PY
     echo "claude: wrote $f. Run: CLAUDE_CONFIG_DIR=$dir claude" ;;
@@ -147,7 +155,9 @@ requires_openai_auth = false
 supports_websockets = true
 experimental_bearer_token = {json.dumps(os.environ["HUB_KEY_V"])}
 '''
-open(f, "w").write(re.sub(r'\n{3,}', '\n\n', block))
+fd = os.open(f, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+os.write(fd, re.sub(r'\n{3,}', '\n\n', block).encode())
+os.close(fd)
 os.chmod(f, 0o600)
 PY
     echo "codex: wrote $f. Run: CODEX_HOME=$dir codex" ;;
