@@ -91,6 +91,7 @@ function checkRange(match, range) {
 // An API failure must stop the run too: a rate limit would read as "clean".
 function sweep(match, owner, { since, redact }) {
   const bad = [];
+  let removed = 0;
   const repos = split(gh(['repo', 'list', owner, '--visibility', 'public', '--limit', '1000', '--source', '--json', 'name', '-q', '.[].name']));
   const q = since ? `&since=${encodeURIComponent(since)}` : '';
   const patch = (path, fields) => gh(['api', '-X', 'PATCH', path, ...Object.entries(fields).flatMap(([k, v]) => ['-f', `${k}=${v}`])]);
@@ -98,19 +99,25 @@ function sweep(match, owner, { since, redact }) {
     const base = `repos/${owner}/${repo}`;
     const rn = showPath(match, repo);
     const api = (p) => gh(['api', '--paginate', `${base}/${p}`, '-q', '.[]|@json']).split('\n').filter(Boolean).map((x) => JSON.parse(x));
-    const drop = (path) => { if (redact) try { gh(['api', '-X', 'DELETE', path]); } catch { /* gone */ } };
+    // A removed match is resolved. Only a match still public makes the run fail.
+    const drop = (path) => { if (!redact) return false; try { gh(['api', '-X', 'DELETE', path]); return true; } catch { return false; } };
     for (const i of api(`issues?state=all&per_page=100${q}`)) {
       if (!match(`${i.title}\n${i.body || ''}`)) continue;
-      bad.push(`${rn}#${i.number} (${i.pull_request ? 'pull request' : 'issue'})`);
-      if (!redact) continue;
-      if (i.pull_request) patch(`${base}/pulls/${i.number}`, { title: match.redact(i.title), body: match.redact(i.body) });
-      else try { gh(['api', 'graphql', '-f', `query=mutation{deleteIssue(input:{issueId:"${i.node_id}"}){clientMutationId}}`]); } catch { /* needs admin */ }
+      let fixed = false;
+      if (redact) {
+        try {
+          if (i.pull_request) patch(`${base}/pulls/${i.number}`, { title: match.redact(i.title), body: match.redact(i.body) });
+          else gh(['api', 'graphql', '-f', `query=mutation{deleteIssue(input:{issueId:"${i.node_id}"}){clientMutationId}}`]);
+          fixed = true;
+        } catch { /* needs admin */ }
+      }
+      if (fixed) removed++; else bad.push(`${rn}#${i.number} (${i.pull_request ? 'pull request' : 'issue'})`);
     }
     for (const c of api(`issues/comments?per_page=100${q}`)) {
-      if (match(c.body || '')) { bad.push(`${rn} comment ${c.id}`); drop(`${base}/issues/comments/${c.id}`); }
+      if (match(c.body || '')) { if (drop(`${base}/issues/comments/${c.id}`)) removed++; else bad.push(`${rn} comment ${c.id}`); }
     }
     for (const c of api(`pulls/comments?per_page=100${q}`)) {
-      if (match(c.body || '')) { bad.push(`${rn} review comment ${c.id}`); drop(`${base}/pulls/comments/${c.id}`); }
+      if (match(c.body || '')) { if (drop(`${base}/pulls/comments/${c.id}`)) removed++; else bad.push(`${rn} review comment ${c.id}`); }
     }
     // A submitted review cannot be deleted. Report it so a person can act.
     for (const i of api(`issues?state=all&per_page=100${q}`).filter((x) => x.pull_request)) {
@@ -119,6 +126,7 @@ function sweep(match, owner, { since, redact }) {
       }
     }
   }
+  if (removed) console.log(`public-name-guard: removed ${removed} place(s) that named a private repository`);
   return bad;
 }
 
