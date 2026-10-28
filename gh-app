@@ -29,7 +29,12 @@ def command(args, data=None):
 
 
 def browser(*args):
-    return command(['zsh', '-ic', 'browser-personal "$@"', 'gh-app', *args])
+    out = command(['zsh', '-ic', 'browser-personal "$@"', 'gh-app', *args])
+    # browser-personal prints a status line before its --json payload.
+    brace = b'{' if isinstance(out, bytes) else '{'
+    if '--json' in args and brace in out:
+        return out[out.index(brace):]
+    return out
 
 
 def tabs():
