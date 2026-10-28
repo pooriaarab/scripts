@@ -60,6 +60,10 @@ Not part of the diagnosis order above.
 | `append-point-scan` | Flag shared append points from repo contents alone: freshness gates, enumerated scripts, ordinal registries, committed junk. Answers what WILL conflict once a repo gets busy. `./append-point-scan <dir-or-owner/repo>`. |
 | `merge-hotspots` | Rank files by share of recent commits and mark derived vs source. Churn is not contention: a busy file only serializes merges when several PRs touch it. `./merge-hotspots <dir-or-owner/repo>`. |
 
+## Guides
+
+- [Use Claude API credits safely](docs/claude-api-credits.md)
+
 ## Tests
 
 `.github/workflows/tests.yml` runs every test in this repo on each pull request:
