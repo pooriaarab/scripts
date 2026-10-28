@@ -5,6 +5,7 @@
 #   cliproxy-hub serve                      hub only: put the hub on the tailnet (HTTPS :8317)
 #   cliproxy-hub client claude [--config-dir D]   client: point Claude Code at the hub
 #   cliproxy-hub client codex  [--codex-home D]   client: point Codex at the hub
+#   cliproxy-hub client pi     [--pi-dir D]       client: add a "hub" provider to pi (Codex and Grok models)
 #   cliproxy-hub verify                     client: can this host reach the hub?
 #
 # Hub commands read CLIPROXY_MANAGEMENT_KEY from the environment or from CLIPROXY_ENV_FILE.
@@ -22,7 +23,7 @@ CONF="${CLIPROXY_CONF:-$(brew --prefix 2>/dev/null || echo /opt/homebrew)/etc/cl
 TS="${TAILSCALE_BIN:-$(command -v tailscale || echo /Applications/Tailscale.app/Contents/MacOS/Tailscale)}"
 
 die() { echo "cliproxy-hub: $*" >&2; exit 1; }
-usage() { sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 ok() { printf '  ok    %s\n' "$*"; }
 bad() { printf '  FAIL  %s\n' "$*"; FAILED=1; }
 
@@ -161,6 +162,36 @@ os.close(fd)
 os.chmod(f, 0o600)
 PY
     echo "codex: wrote $f. Run: CODEX_HOME=$dir codex" ;;
+  pi)
+    dir="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}"
+    [ "${1:-}" = "--pi-dir" ] && dir="${2:?--pi-dir needs a path}"
+    mkdir -p "$dir"; f="$dir/models.json"; backup "$f"
+    # pi runs the key command later from any folder, so store an absolute path.
+    [ -n "${HUB_KEY_FILE:-}" ] && HUB_KEY_FILE="$(cd "$(dirname "$HUB_KEY_FILE")" && pwd)/$(basename "$HUB_KEY_FILE")"
+    # Claude seats stay in Claude Code, so the pi provider lists no Claude model.
+    HUB_KEY_V="$key" HUB_KEY_FILE_V="$([ -z "${HUB_KEY:-}" ] && echo "${HUB_KEY_FILE:-}")" python3 - "$f" "$HUB_URL" <<'PY'
+import json, os, shlex, sys, tempfile
+f, url = sys.argv[1], sys.argv[2]
+d = json.load(open(f)) if os.path.exists(f) else {}
+kf = os.environ["HUB_KEY_FILE_V"]
+def m(i, n):
+    return {"id": i, "name": n, "contextWindow": 400000, "maxTokens": 32000, "reasoning": True, "input": ["text"]}
+d.setdefault("providers", {})["hub"] = {
+    "baseUrl": url + "/v1",
+    "api": "openai-completions",
+    # A key file keeps the key out of models.json; else the 0600 file holds it.
+    "apiKey": ("!cat " + shlex.quote(kf)) if kf else os.environ["HUB_KEY_V"],
+    "models": [m("gpt-5.6-sol", "Hub Codex gpt-5.6-sol"), m("gpt-6-sol", "Hub Codex gpt-6-sol"),
+               m("grok-4.6", "Hub Grok 4.6"), m("grok-4.7", "Hub Grok 4.7")],
+}
+# Write a 0600 temp file in the same folder, then replace the original in one step.
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(f) or ".")
+os.write(fd, (json.dumps(d, indent=1) + "\n").encode())
+os.close(fd)
+os.chmod(tmp, 0o600)
+os.replace(tmp, f)
+PY
+    echo "pi: wrote $f. Run: PI_CODING_AGENT_DIR=$(printf '%q' "$dir") pi --provider hub --model gpt-5.6-sol" ;;
   *) usage ;;
   esac
 }
