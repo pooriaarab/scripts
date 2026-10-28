@@ -31,8 +31,10 @@ if args[0] == 'eval':
         out(mode != 'timeout')
     elif '.some(l=>' in js:
         out(mode == 'namesake')
+    elif 'role=row' in js and '.length)' in js:
+        out({'listed': 1, 'listed2': 2}.get(mode, 0))
     elif 'role=option' in js and '.length)' in js:
-        out(2 if mode == 'ambiguous' else 1)
+        out(2 if mode == 'ambiguous' else 0 if mode == 'nocategory' else 1)
     elif '.some(' in js:
         out(mode == 'listed')
     elif 'ID:' in js and 'match' in js:
@@ -81,6 +83,8 @@ expect_fail(['create', '--name', 'Acme', '--portfolio', '111', '--accept-terms']
 expect_fail(BASE, 'not logged in', 'loggedout')
 expect_fail(BASE, 'hidden', 'hidden')
 expect_fail(BASE, 'Timed out', 'timeout')
+expect_fail(BASE, 'More than one Page', 'listed2')
+expect_fail(['create', '--name', 'Acme', '--category', 'Website', '--portfolio', '111', '--accept-terms'], 'category', 'nocategory')
 resumed, _, _ = run(BASE, 'listed')  # already in the portfolio: resume, do not fail
 assert resumed.returncode == 0 and '1467561843088600' in resumed.stdout, (resumed.stdout, resumed.stderr)
 expect_fail(BASE, 'Page ID not found', 'noid')

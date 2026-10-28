@@ -172,7 +172,10 @@ def create_page(name, category, bio):
     type_into('document.querySelector(\'[role=main] input[type=text]\')', name, 'Page name')
     type_into('document.querySelector(\'[role=main] input[role=combobox]\')', category, 'Category')
     options = '[...document.querySelectorAll("[role=option]")].filter(e=>e.getClientRects().length)'
-    click(f'({options}.find(e=>e.innerText.trim()==={json.dumps(category)})||{options}[0])', 'category suggestion')
+    exact = f'{options}.filter(e=>e.innerText.trim()==={json.dumps(category)})'
+    if evaluate('JSON.stringify(' + exact + '.length)') != 1:
+        fail(f'No single suggestion matches the category "{category}" exactly. Pass the exact category text.')
+    click(exact + '[0]', 'category suggestion')
     if bio:
         type_into('document.querySelector(\'[role=main] textarea\')', bio, 'Bio')
     click(by_text('Create Page', 'button,[role=button]'), 'Create Page')
@@ -183,9 +186,9 @@ def settings_url(portfolio):
     return f'https://business.facebook.com/latest/settings/pages?business_id={portfolio}'
 
 
-def page_listed(name):
+def pages_listed(name):
     return evaluate('JSON.stringify([...document.querySelectorAll("[role=row],[role=listitem],[role=gridcell]")]'
-                    f'.some(e=>e.innerText.trim()==={json.dumps(name)}))')
+                    f'.filter(e=>e.innerText.trim()==={json.dumps(name)}).length)')
 
 
 def attach_page(name, portfolio, accept_terms):
@@ -193,7 +196,10 @@ def attach_page(name, portfolio, accept_terms):
         fail('Meta Commercial Terms must be accepted for the portfolio. Pass --accept-terms.')
     open_page(settings_url(portfolio))
     wait_for('/Pages/.test(document.body.innerText)', 'Pages settings')
-    if page_listed(name):
+    listed = pages_listed(name)
+    if listed > 1:
+        fail('More than one Page in the portfolio has this name. Rename one first.')
+    if listed:
         return  # A retry after a failed assignment resumes here: the Page is already in the portfolio.
     item = by_text('Add an existing Facebook Page', 'b,[role=menuitem],[role=button]', exact=False)
     click(by_text('Add', 'button,[role=button]'), 'Add menu')
