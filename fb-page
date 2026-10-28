@@ -74,14 +74,20 @@ def label_pattern(text, system_user):
 CONTROL = 'input[type=checkbox],[role=switch],[role=checkbox]'
 
 
-def control_near(text, system_user=False):
+# Meta's partial-access rows. A row that holds two of them is a shared container, not one row.
+PERMISSIONS = ('Content', 'Community activity', 'Messages', 'Ads', 'Insights')
+
+
+def control_near(text, system_user=False, others=()):
     """The one checkbox or switch in the row of an exact label. Null when zero or several rows match.
 
     The row is the nearest ancestor that holds a control. Its text must start with the label
     (or equal it, for a system user), so a label with no control cannot borrow a neighbour's.
     """
     pattern = label_pattern(text, system_user)
-    row_ok = ('n=>{const lines=n.innerText.trim().split("\\n");const t=lines.join(" ");return lines.length<=3&&'
+    row_ok = ('n=>{const lines=n.innerText.trim().split("\\n");const t=lines.join(" ");'
+              'const rival=' + json.dumps(sorted(set(others) - {text})) + '.some(o=>lines.some(l=>l.trim()===o));'
+              'return lines.length<=3&&!rival&&'
               + (pattern + '.test(t)' if system_user else 't.startsWith(' + json.dumps(text) + ')') + '}')
     return ('(()=>{const sel=' + json.dumps(CONTROL) + ';const own=n=>[...(n.matches(sel)?[n]:[]),...n.querySelectorAll(sel)];'
             'const rowOk=' + row_ok + ';const found=new Set();'
@@ -219,7 +225,7 @@ def assign_user(user, toggles):
     click(by_text('Assign people', 'button,[role=button]'), 'Assign people')
     click(control_near(user, True), 'system user')
     for toggle in dict.fromkeys(toggles):  # a repeated flag must not click twice
-        control = control_near(toggle)
+        control = control_near(toggle, others=PERMISSIONS + tuple(toggles))
         if not is_on(control):
             click(control, f'permission {toggle}')
             if not is_on(control):
