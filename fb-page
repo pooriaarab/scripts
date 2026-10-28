@@ -233,7 +233,9 @@ def record(registry, site, name, page_id):
     path = Path(registry)
     data = json.loads(path.read_text()) if path.exists() else {'sites': {}}
     data.setdefault('sites', {}).setdefault(site, {}).update({'brand': name, 'meta_page_id': page_id})
-    path.write_text(json.dumps(data, indent=2) + '\n')
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, 'w') as handle:
+        handle.write(json.dumps(data, indent=2) + '\n')
     path.chmod(0o600)
 
 
@@ -245,6 +247,8 @@ def run(args):
         fail('--category is required for create.')
     if not args.portfolio:
         fail('A portfolio ID is required. Pass --portfolio or set FB_PAGE_PORTFOLIO_ID.')
+    if not re.fullmatch(r'\d+', args.portfolio):
+        fail('The portfolio ID must be digits only.')
     if not args.accept_terms:
         fail('Meta Commercial Terms must be accepted for the portfolio. Pass --accept-terms.')
     if args.command == 'create':

@@ -76,6 +76,7 @@ BASE = ['attach', '--name', 'Acme', '--portfolio', '111', '--accept-terms']
 expect_fail([a for a in BASE if a != '--accept-terms'], '--accept-terms')
 expect_fail(['attach', '--name', 'Blocked Co', '--portfolio', '111', '--accept-terms'], 'FB_PAGE_DENY')
 expect_fail(['attach', '--name', 'Acme', '--accept-terms'], 'portfolio')
+expect_fail(['attach', '--name', 'Acme', '--portfolio', '111&x=1', '--accept-terms'], 'digits')
 expect_fail(['create', '--name', 'Acme', '--portfolio', '111', '--accept-terms'], '--category')
 expect_fail(BASE, 'not logged in', 'loggedout')
 expect_fail(BASE, 'hidden', 'hidden')
