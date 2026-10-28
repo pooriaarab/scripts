@@ -191,7 +191,7 @@ os.close(fd)
 os.chmod(tmp, 0o600)
 os.replace(tmp, f)
 PY
-    echo "pi: wrote $f. Run: PI_CODING_AGENT_DIR=$dir pi --provider hub --model gpt-5.6-sol" ;;
+    echo "pi: wrote $f. Run: PI_CODING_AGENT_DIR=$(printf '%q' "$dir") pi --provider hub --model gpt-5.6-sol" ;;
   *) usage ;;
   esac
 }
