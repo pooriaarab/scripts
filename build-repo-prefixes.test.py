@@ -38,8 +38,8 @@ class DerivePrefixTest(unittest.TestCase):
 
     def test_known_names_keep_their_documented_prefixes(self):
         m = load()
-        self.assertEqual(m.derive_prefix("private-repo-c4e6"), "cr")
-        self.assertEqual(m.derive_prefix("private-repo-5073"), "pop")
+        self.assertEqual(m.derive_prefix("private-repo-c4e6"), "prc")
+        self.assertEqual(m.derive_prefix("private-repo-5073"), "pr")
 
 
 class RegistryTest(unittest.TestCase):

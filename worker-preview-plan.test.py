@@ -95,7 +95,7 @@ class WorkerPreviewPlanTest(unittest.TestCase):
         pin = {**self.pin, "branch": "blo-142-" + "a" * 48}
         result, manifest = self.run_plan(pin=pin)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(len(manifest["intended"]["preview"]["hostname"]), 84)
+        self.assertEqual(len(manifest["intended"]["preview"]["hostname"]), 94)
 
     def test_rejects_preview_hostname_beyond_dns_limit(self):
         pin = {**self.pin, "branch": "blo-142-" + "a" * 48}
@@ -130,7 +130,7 @@ class WorkerPreviewPlanTest(unittest.TestCase):
         self.assertEqual((first_result.returncode, other_result.returncode), (0, 0))
         self.assertNotEqual(first["intended"]["r2"][0]["name"],
                             other["intended"]["r2"][0]["name"])
-        self.assertIn("c2bc21d0e5d44e9d", first["intended"]["r2"][0]["name"])
+        self.assertIn("4160b66cee22f392", first["intended"]["r2"][0]["name"])
 
     def test_removes_output_when_directory_sync_fails(self):
         loader = importlib.machinery.SourceFileLoader("worker_preview_plan", str(COMMAND))

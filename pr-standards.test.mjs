@@ -114,9 +114,9 @@ test('allows chore branches only when the config enables the escape', () => {
 });
 
 test('derives prefixes from repository names', () => {
-  assert.equal(derivePrefix('private-repo-c4e6'), 'cr');
-  assert.equal(derivePrefix('private-repo-5073'), 'pop');
-  assert.equal(derivePrefix('private-repo-f304'), 'ime');
+  assert.equal(derivePrefix('private-repo-c4e6'), 'prc');
+  assert.equal(derivePrefix('private-repo-5073'), 'pr');
+  assert.equal(derivePrefix('private-repo-f304'), 'prf');
   assert.equal(derivePrefix('one-two-three-four-five'), 'ottf');
 });
 
