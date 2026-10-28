@@ -58,6 +58,7 @@ The script skips these on purpose:
 
 - macOS and Windows labels, `matrix` values, list values and existing expressions.
 - Lines inside `run: |` block scalars.
+- `-arm` labels such as `ubuntu-24.04-arm`.
 - JSON-style `"runs-on": "boat"` keys. Fix those by hand.
 
 A job that must stay hosted (a secret-heavy deploy, an alert, a `gitleaks-action` scan) needs

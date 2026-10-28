@@ -36,6 +36,10 @@ jobs:
           cat <<EOF
           runs-on: boat
           EOF
+      - run: |2-
+          runs-on: boat
+  j:
+    runs-on: ubuntu-24.04-arm
 """
 
 
@@ -78,6 +82,8 @@ class CiRunnerIndirect(unittest.TestCase):
         self.assertIn("runs-on: ${{ matrix.os }}", text)
         self.assertIn("    runs-on:\n      - boat\n", text)
         self.assertIn("          runs-on: boat\n", text)
+        self.assertEqual(text.count("          runs-on: boat\n"), 2)
+        self.assertIn("runs-on: ubuntu-24.04-arm", text)
 
     def test_second_run_is_a_no_op(self):
         run(self.repo, "--write")

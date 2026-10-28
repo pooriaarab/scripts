@@ -3,15 +3,15 @@
 
 boat / ubuntu-<version>|latest -> ${{ vars.CI_RUNNER || 'boat' }}
 boat-8                         -> ${{ vars.CI_RUNNER_LARGE || 'boat-8' }}
-macOS, nscloud, matrix, expression and list values are left alone.
+macOS, nscloud, -arm, matrix, expression and list values are left alone.
 Lines inside block scalars (run: |) are never touched.
 Usage: ci-runner-indirect [--write] <repo-dir>...
 """
 import re, sys, pathlib
 
 PAT = re.compile(r'^(?P<ind>\s*)runs-on:\s*(?P<q>["\']?)(?P<val>[A-Za-z0-9._-]+)(?P=q)(?P<tail>\s*#.*)?\s*$')
-BLOCK = re.compile(r':\s*[|>][+-]?[0-9]?\s*(#.*)?$')
-LITERAL_UBUNTU = re.compile(r'^(ubuntu-latest|ubuntu-[0-9]+\.[0-9]+(-arm)?)$')
+BLOCK = re.compile(r':\s*[|>](?:[0-9][+-]?|[+-][0-9]?)?\s*(#.*)?$')
+LITERAL_UBUNTU = re.compile(r'^(ubuntu-latest|ubuntu-[0-9]+\.[0-9]+)$')
 MAP = {
     'boat': "${{ vars.CI_RUNNER || 'boat' }}",
     'boat-8': "${{ vars.CI_RUNNER_LARGE || 'boat-8' }}",
