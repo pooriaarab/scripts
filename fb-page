@@ -123,17 +123,19 @@ def foreground():
     """Meta ignores clicks while the tab is hidden, so Chrome must be in front."""
     if evaluate('JSON.stringify(document.visibilityState)') == 'visible':
         return
-    if sys.platform == 'darwin':
-        # Two Chrome instances can run. Raise the one that owns the debug port.
-        port = os.getenv('FB_PAGE_CDP_PORT', '9334')
-        pid = subprocess.run(['lsof', f'-iTCP:{port}', '-sTCP:LISTEN', '-t'],
-                             capture_output=True, text=True).stdout.split()
-        script = ('tell application "System Events" to set frontmost of (first process whose unix id is '
-                  f'{pid[0]}) to true' if pid else 'tell application "Google Chrome" to activate')
-        subprocess.run(['osascript', '-e', script], capture_output=True, timeout=15)
-        pause(2)
-    if evaluate('JSON.stringify(document.visibilityState)') != 'visible':
-        fail('The Chrome tab is hidden. Bring Chrome to the front, then run again.')
+    for _ in range(4):
+        if sys.platform == 'darwin':
+            # Two Chrome instances can run. Raise the one that owns the debug port.
+            port = os.getenv('FB_PAGE_CDP_PORT', '9334')
+            pid = subprocess.run(['lsof', f'-iTCP:{port}', '-sTCP:LISTEN', '-t'],
+                                 capture_output=True, text=True).stdout.split()
+            script = ('tell application "System Events" to set frontmost of (first process whose unix id is '
+                      f'{pid[0]}) to true' if pid else 'tell application "Google Chrome" to activate')
+            subprocess.run(['osascript', '-e', script], capture_output=True, timeout=15)
+        pause(3)
+        if evaluate('JSON.stringify(document.visibilityState)') == 'visible':
+            return
+    fail('The Chrome tab is hidden. Bring Chrome to the front, then run again.')
 
 
 def open_page(url):
