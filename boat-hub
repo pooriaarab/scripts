@@ -20,7 +20,7 @@
 # Tailscale identity, so every box joins as its own device.
 set -euo pipefail
 
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+HERE="$(cd "$(dirname "$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "${BASH_SOURCE[0]}")")" && pwd)"   # follows a symlink on PATH
 CFG="$HOME/.config/cliproxy-hub"
 SECRETS="${BOAT_HUB_SECRETS:-$HOME/Documents/Personal/.secrets}"
 newest() { ls -t "$@" 2>/dev/null | head -1 || true; }
