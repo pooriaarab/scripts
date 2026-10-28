@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """CLI E2E: fake browser, real script, real registry file. No Facebook account is touched.
 Failure cases: namesake Page already managed, permission toggle that stays off, ambiguous Page search, validation before Page creation, missing terms flag, denied name, missing portfolio, missing category,
-logged-out Chrome, hidden tab, wait timeout, Page already in the portfolio,
+logged-out Chrome, hidden tab, wait timeout, retry with the Page already in the portfolio (resumes),
 Page ID not found, browser crash that prints a secret.
 Success case: JSON output, 0600 registry file, no secret in any output.
 """
@@ -81,7 +81,8 @@ expect_fail(['create', '--name', 'Acme', '--portfolio', '111', '--accept-terms']
 expect_fail(BASE, 'not logged in', 'loggedout')
 expect_fail(BASE, 'hidden', 'hidden')
 expect_fail(BASE, 'Timed out', 'timeout')
-expect_fail(BASE, 'already in the portfolio', 'listed')
+resumed, _, _ = run(BASE, 'listed')  # already in the portfolio: resume, do not fail
+assert resumed.returncode == 0 and '1467561843088600' in resumed.stdout, (resumed.stdout, resumed.stderr)
 expect_fail(BASE, 'Page ID not found', 'noid')
 expect_fail(BASE, 'browser eval failed', 'crash')
 expect_fail(BASE, 'exactly one Page', 'ambiguous')

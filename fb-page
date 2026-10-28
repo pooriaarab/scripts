@@ -194,7 +194,7 @@ def attach_page(name, portfolio, accept_terms):
     open_page(settings_url(portfolio))
     wait_for('/Pages/.test(document.body.innerText)', 'Pages settings')
     if page_listed(name):
-        fail('A Page with this name is already in the portfolio.')
+        return  # A retry after a failed assignment resumes here: the Page is already in the portfolio.
     item = by_text('Add an existing Facebook Page', 'b,[role=menuitem],[role=button]', exact=False)
     click(by_text('Add', 'button,[role=button]'), 'Add menu')
     click(item, 'Add an existing Page')
