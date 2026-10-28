@@ -121,7 +121,7 @@ def click(element_js, what):
 def type_into(element_js, text, what):
     if not evaluate(f'JSON.stringify((()=>{{const e={element_js};if(!e)return false;e.focus();return true}})())'):
         fail(f'Field not found: {what}.')
-    browser('keyboard', 'type', text)
+    browser('keyboard', 'inserttext', text)
     pause(2)
 
 
