@@ -163,9 +163,11 @@ os.chmod(f, 0o600)
 PY
     echo "codex: wrote $f. Run: CODEX_HOME=$dir codex" ;;
   pi)
-    dir="$HOME/.pi/agent"
+    dir="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}"
     [ "${1:-}" = "--pi-dir" ] && dir="${2:?--pi-dir needs a path}"
     mkdir -p "$dir"; f="$dir/models.json"; backup "$f"
+    # pi runs the key command later from any folder, so store an absolute path.
+    [ -n "${HUB_KEY_FILE:-}" ] && HUB_KEY_FILE="$(cd "$(dirname "$HUB_KEY_FILE")" && pwd)/$(basename "$HUB_KEY_FILE")"
     # Claude seats stay in Claude Code, so the pi provider lists no Claude model.
     HUB_KEY_V="$key" HUB_KEY_FILE_V="${HUB_KEY_FILE:-}" python3 - "$f" "$HUB_URL" <<'PY'
 import json, os, shlex, sys, tempfile
@@ -189,7 +191,7 @@ os.close(fd)
 os.chmod(tmp, 0o600)
 os.replace(tmp, f)
 PY
-    echo "pi: wrote $f. Run: pi --provider hub --model gpt-5.6-sol" ;;
+    echo "pi: wrote $f. Run: PI_CODING_AGENT_DIR=$dir pi --provider hub --model gpt-5.6-sol" ;;
   *) usage ;;
   esac
 }
