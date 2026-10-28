@@ -86,7 +86,7 @@ def control_near(text, system_user=False, others=()):
     """
     pattern = label_pattern(text, system_user)
     row_ok = ('n=>{const lines=n.innerText.trim().split("\\n");const t=lines.join(" ");'
-              'const rival=' + json.dumps(sorted(set(others) - {text})) + '.some(o=>lines.some(l=>l.trim()===o));'
+              'const rival=' + json.dumps(sorted(set(others) - {text})) + '.filter(o=>lines.map(x=>x.trim()).includes(o)).length>0;'
               'return lines.length<=3&&!rival&&'
               + (pattern + '.test(t)' if system_user else 't.startsWith(' + json.dumps(text) + ')') + '}')
     return ('(()=>{const sel=' + json.dumps(CONTROL) + ';const own=n=>[...(n.matches(sel)?[n]:[]),...n.querySelectorAll(sel)];'
