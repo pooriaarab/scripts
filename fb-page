@@ -179,7 +179,9 @@ def create_page(name, category, bio):
     if bio:
         type_into('document.querySelector(\'[role=main] textarea\')', bio, 'Bio')
     click(by_text('Create Page', 'button,[role=button]'), 'Create Page')
-    wait_for('/Finish setting up your Page/.test(document.body.innerText)', 'Page created', 60)
+    wait_for('/Finish setting up your Page|too many Pages/.test(document.body.innerText)', 'Page created', 60)
+    if evaluate('JSON.stringify(/too many Pages/.test(document.body.innerText))'):
+        fail('Meta says too many Pages were created recently. Wait, then run again. Nothing was created.')
 
 
 def settings_url(portfolio):

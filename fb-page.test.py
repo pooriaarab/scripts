@@ -31,6 +31,10 @@ if args[0] == 'eval':
         out(mode != 'timeout')
     elif '.some(l=>' in js:
         out(mode == 'namesake')
+    elif 'getBoundingClientRect' in js:
+        out({'x': 5, 'y': 6})
+    elif 'too many Pages' in js and 'JSON.stringify(/' in js:
+        out(mode == 'ratelimit')
     elif 'role=row' in js and '.length)' in js:
         out({'listed': 1, 'listed2': 2}.get(mode, 0))
     elif 'role=option' in js and '.length)' in js:
@@ -94,6 +98,7 @@ expect_fail(BASE, 'Page ID not found', 'noid')
 expect_fail(BASE, 'browser eval failed', 'crash')
 expect_fail(BASE, 'exactly one Page', 'ambiguous')
 expect_fail(['create', '--name', 'Acme', '--category', 'Website', '--portfolio', '111', '--accept-terms'], 'already manage', 'namesake')
+expect_fail(['create', '--name', 'Acme', '--category', 'Website', '--portfolio', '111', '--accept-terms'], 'too many Pages', 'ratelimit')
 expect_fail(BASE + ['--assign-user', 'Some System User'], 'did not turn on', 'stuckoff')
 # Validation runs before any browser call, so a bad create never makes a Page.
 expect_fail(['create', '--name', 'Acme', '--category', 'Website', '--accept-terms'], 'portfolio', 'crash')
