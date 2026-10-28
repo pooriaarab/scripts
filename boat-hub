@@ -1,0 +1,152 @@
+#!/usr/bin/env bash
+# Boat boxes that already reach the CLIProxyAPI hub.
+#
+#   boat-hub base              build the 'hub-ready' snapshot (Tailscale installed, not joined)
+#   boat-hub warm REPO...      save 'REPO-ready': that repo's environment on top of hub-ready
+#   boat-hub new REPO [-- boat new args]   new box from REPO-ready; joins the tailnet, wires the hub
+#
+# Needs: boat CLI, a named environment per repo, and these files (never printed, never committed):
+#   HUB_KEY_FILE         hub key           (default $HOME/.config/cliproxy-hub/key)
+#   TS_KEY_FILE          Tailscale auth key (default $HOME/.config/cliproxy-hub/tailscale-key)
+#   HUB_URL              tailnet URL of the hub (https)
+#   CLIPROXY_HUB_SCRIPT  path to cliproxy-hub (default: next to this script)
+# Keys go into a new box with `boat new --file`. The Tailscale key is shredded once the box has
+# joined. The hub key stays in the box's client config. A snapshot holds neither key and no
+# Tailscale identity, so every box joins as its own device.
+set -euo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CFG="$HOME/.config/cliproxy-hub"
+HUB_KEY_FILE="${HUB_KEY_FILE:-$CFG/key}"
+TS_KEY_FILE="${TS_KEY_FILE:-$CFG/tailscale-key}"
+HUB_SCRIPT="${CLIPROXY_HUB_SCRIPT:-$HERE/cliproxy-hub}"
+BASE="${BOAT_HUB_BASE:-hub-ready}"
+TYPE="${BOAT_HUB_TYPE:-small}"
+
+snap() { printf '%s-ready' "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"; }
+die() { echo "boat-hub: $*" >&2; exit 1; }
+usage() { sed -n '2,6p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+need() { [ -r "$1" ] || die "missing file: $1"; }
+box_id() { python3 -c 'import sys,json
+for l in sys.stdin:
+    if l.startswith("{") and json.loads(l).get("event")=="ready": print(json.loads(l)["id"]); break'; }
+
+work="$(mktemp -d)"; trap 'rm -rf "$work"' EXIT
+
+write_boot() {
+  cat > "$work/boot.sh" <<'B'
+#!/usr/bin/env bash
+# First boot: join the tailnet, wire Claude Code, Codex and pi to the hub.
+set -euo pipefail
+H="$HOME/hub"
+command -v tailscale >/dev/null || curl -fsSL https://tailscale.com/install.sh | sudo sh >/dev/null 2>&1
+sudo systemctl enable --now tailscaled >/dev/null 2>&1 || true
+# A snapshot may carry tailscaled state (a machine key). Reset it on the first boot so every box is its own device.
+if [ ! -e "$H/.joined" ]; then
+  sudo systemctl stop tailscaled; sudo rm -f /var/lib/tailscale/tailscaled.state; sudo systemctl start tailscaled
+  sleep 2
+fi
+tailscale status >/dev/null 2>&1 || sudo tailscale up --auth-key="file:$H/tailscale-key" --hostname="boat-$(hostname | cut -c1-20)"
+touch "$H/.joined"
+shred -u "$H/tailscale-key" 2>/dev/null || rm -f "$H/tailscale-key"   # the node is enrolled; the key is no longer needed
+export HUB_KEY_FILE="$H/hub-key"
+for t in claude codex pi; do bash "$H/cliproxy-hub" client "$t"; done
+bash "$H/cliproxy-hub" verify
+B
+  cat > "$work/first.sh" <<'B'
+#!/usr/bin/env bash
+set -euo pipefail
+mkdir -p "$HOME/hub" && cp /tmp/hub/* "$HOME/hub/"
+chmod 600 "$HOME/hub/hub-key" "$HOME/hub/tailscale-key"
+shred -u /tmp/hub/hub-key /tmp/hub/tailscale-key 2>/dev/null || rm -f /tmp/hub/hub-key /tmp/hub/tailscale-key
+gh auth setup-git >/dev/null 2>&1 || true
+# Latest main of this repo (the snapshot is a frozen copy), then the latest agent rules.
+R="$HOME/__REPO__"
+# Restoring a snapshot can leave .git without history. Fetch a fresh .git; keep the files the
+# environment wrote (untracked secrets stay, tracked files are restored from the new HEAD).
+if [ -d "$R" ] && ! git -C "$R" rev-parse --verify HEAD >/dev/null 2>&1; then
+  rm -rf /tmp/rc && { gh repo clone "pooriaarab/__REPO__" /tmp/rc -- -q 2>&1 | tail -1 || true; test -d /tmp/rc/.git || echo "WARN: could not repair __REPO__ .git" >&2; }
+  if [ -d /tmp/rc/.git ]; then rm -rf "$R/.git" && mv /tmp/rc/.git "$R/.git" && git -C "$R" reset -q && git -C "$R" checkout -q -- . ; fi
+  rm -rf /tmp/rc
+fi
+if [ -d "$R/.git" ]; then git -C "$R" pull --ff-only -q || echo "WARN: __REPO__ is not at the latest main" >&2; else echo "WARN: no __REPO__ checkout" >&2; fi
+AP="$HOME/private-repo-b1e6"
+if [ -d "$AP/.git" ]; then git -C "$AP" pull --ff-only -q || echo "WARN: private-repo-b1e6 not updated" >&2
+else gh repo clone pooriaarab/private-repo-b1e6 "$AP" -- -q --depth 1 || echo "WARN: private-repo-b1e6 clone failed" >&2; fi
+if [ -f "$AP/rules/common.md" ]; then
+  mkdir -p "$HOME/.claude-hub" "$HOME/.codex-hub"
+  cat "$AP/rules/common.md" "$AP/rules/claude.md" > "$HOME/.claude-hub/CLAUDE.md"
+  cat "$AP/rules/common.md" "$AP/rules/codex.md" > "$HOME/.codex-hub/AGENTS.md"
+else echo "WARN: no agent rules installed" >&2; fi
+grep -q claude-hub "$HOME/.bashrc" 2>/dev/null || cat >> "$HOME/.bashrc" <<'R'
+alias claude-hub='CLAUDE_CONFIG_DIR=$HOME/.claude-hub claude'
+alias codex-hub='CODEX_HOME=$HOME/.codex-hub codex'
+R
+HUB_URL="__HUB_URL__" exec bash "$HOME/hub/boot.sh"
+B
+  sed -i.bak -e "s|__HUB_URL__|$HUB_URL|" -e "s|__REPO__|$1|g" "$work/first.sh" && rm -f "$work/first.sh.bak"
+}
+
+cmd_base() {
+  id=$(boat new --type "$TYPE" --name "$BASE-build" --ttl 1800 --no-env --json | box_id)   # no account secrets in the base
+  [ -n "$id" ] || die "box did not start"
+  trap 'boat delete "$id" --yes >/dev/null 2>&1 || true; rm -rf "$work"' EXIT
+  boat exec "$id" --timeout 180 -- "bash -c 'curl -fsSL https://tailscale.com/install.sh | sudo sh >/dev/null 2>&1 && sudo systemctl enable tailscaled && sudo systemctl stop tailscaled && sudo rm -f /var/lib/tailscale/tailscaled.state'" >/dev/null
+  boat snapshot "$id" "$BASE" | tail -1
+}
+
+cmd_warm() {
+  [ $# -gt 0 ] || usage
+  bad=0
+  for repo in "$@"; do
+    printf '%s' "$repo" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]*$' || { bad=1; echo "FAIL $repo (bad name)"; continue; }
+    id=$(boat new --type "$TYPE" --name "warm-$repo" --ttl 1800 --from "$BASE" --environment "$repo" --json | box_id) || { bad=1; echo "FAIL $repo (create)"; continue; }
+    [ -n "$id" ] || { bad=1; echo "FAIL $repo (no box)"; continue; }
+    # An environment that lists no repo clones nothing, so clone it here (gh uses the box's token).
+    if boat env info "$repo" --json | python3 -c 'import sys,json; d=json.load(sys.stdin); sys.exit(0 if (d.get("environment") or d).get("selectedRepositories") else 1)'; then :; else
+      boat exec "$id" --timeout 600 -- "gh repo clone pooriaarab/$repo /home/user/$repo -- -q" >/dev/null 2>&1 || true
+    fi
+    # The environment clones the repo after the box is ready; wait, or the snapshot holds an empty folder.
+    cloned=0
+    for _ in $(seq 1 30); do
+      if boat exec "$id" --timeout 30 -- "git -C /home/user/$repo rev-parse --verify HEAD && git -C /home/user/$repo status --porcelain >/dev/null && ! test -e /home/user/$repo/.git/index.lock" 2>/dev/null | grep -q '"exitCode":0'; then cloned=1; break; fi
+      sleep 10
+    done
+    [ "$cloned" = 1 ] || { bad=1; echo "FAIL $repo (clone did not finish)"; boat delete "$id" --yes >/dev/null 2>&1 || true; continue; }
+    # Wait for Boat to finish hydrating the box (secret files, dependencies), not just the clone.
+    hyd=0
+    for _ in $(seq 1 30); do
+      boat info "$id" --json | python3 -c 'import sys,json; d=json.load(sys.stdin); d=d.get("sandbox",d); sys.exit(0 if d.get("hydrated") and d.get("setupStatus") not in ("running","pending","failed") else 1)' && { hyd=1; break; }
+      sleep 10
+    done
+    [ "$hyd" = 1 ] || { bad=1; echo "FAIL $repo (hydration did not finish)"; boat delete "$id" --yes >/dev/null 2>&1 || true; continue; }
+    sleep 5
+    if boat snapshot "$id" "$(snap "$repo")" >/dev/null; then echo "ok   $(snap "$repo")"; else bad=1; echo "FAIL $repo (snapshot)"; fi
+    boat delete "$id" --yes >/dev/null 2>&1 || echo "WARN  box $id not deleted"
+  done
+  return "$bad"
+}
+
+cmd_new() {
+  repo="${1:-}"; [ -n "$repo" ] || usage; shift
+  [ "${1:-}" = "--" ] && shift
+  printf '%s' "$repo" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]*$' || die "bad repo name: $repo"
+  [ -n "${HUB_URL:-}" ] || die "set HUB_URL (https tailnet URL of the hub)"
+  printf '%s' "$HUB_URL" | grep -Eq '^https://[A-Za-z0-9.-]+(:[0-9]+)?$' || die "HUB_URL must look like https://host[:port]"
+  need "$HUB_KEY_FILE"; need "$TS_KEY_FILE"; need "$HUB_SCRIPT"
+  for a in "$@"; do case "$a" in --from|--from=*|--environment|--environment=*|--setup-file|--setup-file=*|--file|--file=*) die "boat-hub sets $a itself" ;; esac; done
+  write_boot "$repo"
+  boat new --type "$TYPE" --from "$(snap "$repo")" --environment "$repo" \
+    --file "/tmp/hub/hub-key=$HUB_KEY_FILE" --file "/tmp/hub/tailscale-key=$TS_KEY_FILE" \
+    --file "/tmp/hub/boot.sh=$work/boot.sh" --file "/tmp/hub/cliproxy-hub=$HUB_SCRIPT" \
+    --setup-file "$work/first.sh" "$@"
+}
+
+[ "$#" -ge 1 ] || usage
+sub="$1"; shift
+case "$sub" in
+  base) cmd_base ;;
+  warm) cmd_warm "$@" ;;
+  new) cmd_new "$@" ;;
+  *) usage ;;
+esac
