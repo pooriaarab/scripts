@@ -169,7 +169,7 @@ PY
     # pi runs the key command later from any folder, so store an absolute path.
     [ -n "${HUB_KEY_FILE:-}" ] && HUB_KEY_FILE="$(cd "$(dirname "$HUB_KEY_FILE")" && pwd)/$(basename "$HUB_KEY_FILE")"
     # Claude seats stay in Claude Code, so the pi provider lists no Claude model.
-    HUB_KEY_V="$key" HUB_KEY_FILE_V="${HUB_KEY_FILE:-}" python3 - "$f" "$HUB_URL" <<'PY'
+    HUB_KEY_V="$key" HUB_KEY_FILE_V="$([ -z "${HUB_KEY:-}" ] && echo "${HUB_KEY_FILE:-}")" python3 - "$f" "$HUB_URL" <<'PY'
 import json, os, shlex, sys, tempfile
 f, url = sys.argv[1], sys.argv[2]
 d = json.load(open(f)) if os.path.exists(f) else {}
