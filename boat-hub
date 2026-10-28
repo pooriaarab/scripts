@@ -23,7 +23,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CFG="$HOME/.config/cliproxy-hub"
 SECRETS="${BOAT_HUB_SECRETS:-$HOME/Documents/Personal/.secrets}"
-newest() { ls -t "$@" 2>/dev/null | head -1; }
+newest() { ls -t "$@" 2>/dev/null | head -1 || true; }
 HUB_KEY_FILE="${HUB_KEY_FILE:-$([ -r "$CFG/key" ] && echo "$CFG/key" || echo "$SECRETS/cliproxy-hub-key")}"
 TS_KEY_FILE="${TS_KEY_FILE:-$([ -r "$CFG/tailscale-key" ] && echo "$CFG/tailscale-key" || newest "$SECRETS"/tailscale-authkey-boat-hub-*)}"
 if [ -z "${HUB_URL:-}" ] && [ -r "$SECRETS/cliproxy-hub.env" ]; then
@@ -149,22 +149,23 @@ cmd_new() {
   [ -n "${HUB_URL:-}" ] || die "set HUB_URL (https tailnet URL of the hub)"
   printf '%s' "$HUB_URL" | grep -Eq '^https://[A-Za-z0-9.-]+(:[0-9]+)?$' || die "HUB_URL must look like https://host[:port]"
   need "$HUB_KEY_FILE"; need "$TS_KEY_FILE"; need "$HUB_SCRIPT"
-  for a in "$@"; do case "$a" in --from|--from=*|--environment|--environment=*|--setup-file|--setup-file=*|--file|--file=*) die "boat-hub sets $a itself" ;; esac; done
+  for a in "$@"; do case "$a" in --from|--from=*|--environment|--environment=*|--setup-file|--setup-file=*|--file|--file=*|--json) die "boat-hub sets $a itself" ;; esac; done
   write_boot "$repo"
   extra=("$@")
   # A repo with no environment of its own uses one that passes the GitHub login, so first boot can clone.
   envargs=()
   if boat env info "$repo" --json >/dev/null 2>&1; then envargs=(--environment "$repo")
-  elif boat env info "$FALLBACK_ENV" --json >/dev/null 2>&1; then envargs=(--environment "$FALLBACK_ENV"); fi
+  elif boat env info "$FALLBACK_ENV" --json >/dev/null 2>&1; then envargs=(--environment "$FALLBACK_ENV")
+  else envargs=(--no-env); fi   # never fall through to Boat's default environment
   newbox() {   # newbox SNAPSHOT
-    boat new --type "$TYPE" --from "$1" ${envargs[@]+"${envargs[@]}"} \
+    boat new --json --type "$TYPE" --from "$1" ${envargs[@]+"${envargs[@]}"} \
       --file "/tmp/hub/hub-key=$HUB_KEY_FILE" --file "/tmp/hub/tailscale-key=$TS_KEY_FILE" \
       --file "/tmp/hub/boot.sh=$work/boot.sh" --file "/tmp/hub/cliproxy-hub=$HUB_SCRIPT" \
       --setup-file "$work/first.sh" ${extra[@]+"${extra[@]}"}
   }
   out="$work/new.out"
-  if newbox "$(snap "$repo")" 2>"$work/new.err" | tee "$out" >/dev/null; [ "${PIPESTATUS[0]}" = 0 ]; then cat "$out"; return 0; fi
-  if grep -q '"event":"created"' "$out"; then cat "$out"; cat "$work/new.err" >&2; return 1; fi
+  if newbox "$(snap "$repo")" >"$out" 2>&1; then cat "$out"; return 0; fi
+  grep -q '"code":"snapshot_not_found"' "$out" || { cat "$out" >&2; return 1; }   # retry only for a missing snapshot
   echo "boat-hub: no $(snap "$repo") snapshot; starting from $BASE and cloning $repo on first boot" >&2
   newbox "$BASE"
 }
