@@ -263,6 +263,8 @@ def run(args):
         fail('The portfolio ID must be digits only.')
     if not args.accept_terms:
         fail('Meta Commercial Terms must be accepted for the portfolio. Pass --accept-terms.')
+    if bool(args.registry) != bool(args.site):
+        fail('--registry and --site go together. Pass both or neither.')
     if args.command == 'create':
         create_page(name, args.category, args.bio)
     attach_page(name, args.portfolio, args.accept_terms)

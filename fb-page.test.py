@@ -85,6 +85,9 @@ expect_fail(BASE, 'hidden', 'hidden')
 expect_fail(BASE, 'Timed out', 'timeout')
 expect_fail(BASE, 'More than one Page', 'listed2')
 expect_fail(['create', '--name', 'Acme', '--category', 'Website', '--portfolio', '111', '--accept-terms'], 'category', 'nocategory')
+half = subprocess.run([str(SCRIPT), *BASE, '--registry', '/nonexistent/registry.json'], capture_output=True, text=True,
+                      env=dict(os.environ, FB_PAGE_DENY='blocked'))
+assert half.returncode == 1 and 'go together' in half.stderr, (half.stdout, half.stderr)
 resumed, _, _ = run(BASE, 'listed')  # already in the portfolio: resume, do not fail
 assert resumed.returncode == 0 and '1467561843088600' in resumed.stdout, (resumed.stdout, resumed.stderr)
 expect_fail(BASE, 'Page ID not found', 'noid')
