@@ -27,7 +27,7 @@ newest() { ls -t "$@" 2>/dev/null | head -1 || true; }
 HUB_KEY_FILE="${HUB_KEY_FILE:-$([ -r "$CFG/key" ] && echo "$CFG/key" || echo "$SECRETS/cliproxy-hub-key")}"
 TS_KEY_FILE="${TS_KEY_FILE:-$([ -r "$CFG/tailscale-key" ] && echo "$CFG/tailscale-key" || newest "$SECRETS"/tailscale-authkey-boat-hub-*)}"
 if [ -z "${HUB_URL:-}" ] && [ -r "$SECRETS/cliproxy-hub.env" ]; then
-  HUB_URL="$(sed -n 's/^HUB_URL=//p' "$SECRETS/cliproxy-hub.env" | head -1)"
+  HUB_URL="$(awk '/^HUB_URL=/{print substr($0,9); exit}' "$SECRETS/cliproxy-hub.env")"
 fi
 HUB_SCRIPT="${CLIPROXY_HUB_SCRIPT:-$HERE/cliproxy-hub}"
 BASE="${BOAT_HUB_BASE:-hub-ready}"
@@ -81,7 +81,7 @@ if [ -d "$R" ] && ! git -C "$R" rev-parse --verify HEAD >/dev/null 2>&1; then
   rm -rf /tmp/rc
 fi
 if [ ! -d "$R" ]; then
-  for _ in $(seq 1 12); do [ -d "$R/.git" ] && break; sleep 5; done   # an environment clones it late
+  for _ in $(seq 1 12); do git -C "$R" rev-parse --verify HEAD >/dev/null 2>&1 && ! test -e "$R/.git/index.lock" && break; sleep 5; done   # an environment clones it late
   [ -d "$R/.git" ] || gh repo clone "pooriaarab/__REPO__" "$R" -- -q 2>&1 | tail -1 || true
 fi
 if [ -d "$R/.git" ]; then git -C "$R" pull --ff-only -q || echo "WARN: __REPO__ is not at the latest main" >&2; else echo "WARN: no __REPO__ checkout" >&2; fi
@@ -156,7 +156,10 @@ cmd_new() {
   envargs=()
   if boat env info "$repo" --json >/dev/null 2>&1; then envargs=(--environment "$repo")
   elif boat env info "$FALLBACK_ENV" --json >/dev/null 2>&1; then envargs=(--environment "$FALLBACK_ENV")
-  else envargs=(--no-env); fi   # never fall through to Boat's default environment
+  else
+    envargs=(--no-env)   # never fall through to Boat's default environment
+    echo "boat-hub: no environment for $repo and no $FALLBACK_ENV environment; the box gets no GitHub login, so it will not clone $repo or agents-private" >&2
+  fi
   newbox() {   # newbox SNAPSHOT
     boat new --json --type "$TYPE" --from "$1" ${envargs[@]+"${envargs[@]}"} \
       --file "/tmp/hub/hub-key=$HUB_KEY_FILE" --file "/tmp/hub/tailscale-key=$TS_KEY_FILE" \
