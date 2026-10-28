@@ -168,7 +168,7 @@ PY
     mkdir -p "$dir"; f="$dir/models.json"; backup "$f"
     # Claude seats stay in Claude Code, so the pi provider lists no Claude model.
     HUB_KEY_V="$key" HUB_KEY_FILE_V="${HUB_KEY_FILE:-}" python3 - "$f" "$HUB_URL" <<'PY'
-import json, os, sys
+import json, os, shlex, sys, tempfile
 f, url = sys.argv[1], sys.argv[2]
 d = json.load(open(f)) if os.path.exists(f) else {}
 kf = os.environ["HUB_KEY_FILE_V"]
@@ -178,14 +178,16 @@ d.setdefault("providers", {})["hub"] = {
     "baseUrl": url + "/v1",
     "api": "openai-completions",
     # A key file keeps the key out of models.json; else the 0600 file holds it.
-    "apiKey": ("!cat " + kf) if kf else os.environ["HUB_KEY_V"],
+    "apiKey": ("!cat " + shlex.quote(kf)) if kf else os.environ["HUB_KEY_V"],
     "models": [m("gpt-5.6-sol", "Hub Codex gpt-5.6-sol"), m("gpt-6-sol", "Hub Codex gpt-6-sol"),
                m("grok-4.6", "Hub Grok 4.6"), m("grok-4.7", "Hub Grok 4.7")],
 }
-fd = os.open(f, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+# Write a 0600 temp file in the same folder, then replace the original in one step.
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(f) or ".")
 os.write(fd, (json.dumps(d, indent=1) + "\n").encode())
 os.close(fd)
-os.chmod(f, 0o600)
+os.chmod(tmp, 0o600)
+os.replace(tmp, f)
 PY
     echo "pi: wrote $f. Run: pi --provider hub --model gpt-5.6-sol" ;;
   *) usage ;;
