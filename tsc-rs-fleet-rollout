@@ -151,6 +151,10 @@ Goal: adopt tsc-rs $VERSION. Branch: $branch."
   git checkout -b "$branch"
   bun add --dev --exact "tsc-rs@$VERSION"
   bun install --frozen-lockfile
+  # Directory and similar repos run require-site.ts before typecheck/lint.
+  if [[ -f scripts/require-site.ts ]] && grep -q '"site:use"' package.json; then
+    bun run site:use _starter
+  fi
   bun run typecheck 2>&1 | tee "$ROOT/$name-typecheck.log"
   bun run ci:local 2>&1 | tee "$ROOT/$name-ci.log"
   git add -- package.json
