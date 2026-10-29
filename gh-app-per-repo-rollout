@@ -10,39 +10,62 @@ STANDARD_PERMS=(
   actions=read checks=read statuses=read
 )
 
+SHORT_RE='^[a-z0-9]+(-[a-z0-9]+)*$'
+
 usage() {
-  echo 'Usage: gh-app-per-repo-rollout plan <short> | verify <short> [--online]' >&2
-  echo 'Use a lowercase short name with letters, digits, and single hyphens (1-60 characters).' >&2
+  cat >&2 <<'EOF'
+Usage:
+  gh-app-per-repo-rollout plan <short>
+  gh-app-per-repo-rollout verify <short> [--online]
+  gh-app-per-repo-rollout batch-status <manifest.tsv>
+  gh-app-per-repo-rollout batch-plan <manifest.tsv> [--limit N]
+  gh-app-per-repo-rollout batch-verify <manifest.tsv> [--online] [--limit N]
+
+Short names use lowercase letters, digits, and single hyphens (1-60 characters).
+Manifest TSV columns: canonical_repo<TAB>short (header row optional).
+Keep manifest files in agents-private; do not commit them to public repos.
+EOF
   exit 2
 }
-[[ $# -ge 2 && $# -le 3 ]] || usage
-action=$1
-short=$2
-[[ ${#short} -le 60 && $short =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]] || usage
-app="pooriaarab-${short}-fleet"
-folder="${app}-app"
-script_dir=$(cd "$(dirname "$0")" && pwd)
 
-# Print literal shell expressions and token capture commands in plan mode.
-# shellcheck disable=SC2016
-case "$action" in
-  plan)
-    [[ $# == 2 ]] || usage
-    printf '# Run from the scripts checkout. These commands are printed only.\n'
-    printf '# In GitHub, select ONLY the target private repository.\n'
-    printf '# Stop if GitHub assigns another slug; use its saved APP_SLUG for install.\n'
-    printf 'secrets_root="$HOME/Documents/Personal/.secrets"\n'
-    printf 'test ! -e "$secrets_root/%s" && \\\n' "$folder"
-    printf './gh-app create --name %s' "$app"
-    printf ' --perm %s' "${STANDARD_PERMS[@]}"
-    printf ' && \\\n'
-    printf 'mv -n "$secrets_root/%s" "$secrets_root/%s"\n' "$app" "$folder"
-    printf './gh-app install %s --owner pooriaarab\n' "$app"
-    printf 'GH_TOKEN="$(./gh-app token %s)" gh api rate_limit --jq '\''.resources.core | {limit, remaining, reset}'\''\n' "$folder"
-    ;;
-  verify)
-    [[ $# == 2 || ${3:-} == --online ]] || usage
-    python3 - "$HOME/Documents/Personal/.secrets/$folder" "$script_dir/gh-app" "${3:-}" <<'PY'
+validate_short() {
+  local short=$1
+  [[ ${#short} -le 60 && $short =~ $SHORT_RE ]]
+}
+
+folder_for_short() {
+  printf 'pooriaarab-%s-fleet-app' "$1"
+}
+
+app_for_short() {
+  printf 'pooriaarab-%s-fleet' "$1"
+}
+
+print_plan() {
+  local short=$1 folder app
+  folder=$(folder_for_short "$short")
+  app=$(app_for_short "$short")
+  printf '# short=%s\n' "$short"
+  printf '# Run from the scripts checkout. These commands are printed only.\n'
+  printf '# In GitHub, select ONLY the target private repository.\n'
+  printf '# Stop if GitHub assigns another slug; use its saved APP_SLUG for install.\n'
+  printf 'secrets_root="$HOME/Documents/Personal/.secrets"\n'
+  printf 'test ! -e "$secrets_root/%s" && \\\n' "$folder"
+  printf './gh-app create --name %s' "$app"
+  printf ' --perm %s' "${STANDARD_PERMS[@]}"
+  printf ' && \\\n'
+  printf 'mv -n "$secrets_root/%s" "$secrets_root/%s"\n' "$app" "$folder"
+  printf './gh-app install %s --owner pooriaarab\n' "$app"
+  printf 'GH_TOKEN="$(./gh-app token %s)" gh api rate_limit --jq '\''.resources.core | {limit, remaining, reset}'\''\n' "$folder"
+  printf './gh-app-per-repo-rollout verify %s\n' "$short"
+}
+
+run_verify() {
+  local short=$1 online=${2:-}
+  local folder script_dir
+  folder=$(folder_for_short "$short")
+  script_dir=$(cd "$(dirname "$0")" && pwd)
+  python3 - "$HOME/Documents/Personal/.secrets/$folder" "$script_dir/gh-app" "$online" <<'PY'
 import json
 import os
 from pathlib import Path
@@ -101,6 +124,141 @@ except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
     fail('Online verification fails. Check App access and gh availability. Output withheld.')
 print(json.dumps(result, sort_keys=True))
 PY
+}
+
+read_manifest_shorts() {
+  local manifest=$1
+  [[ -f $manifest && -r $manifest ]] || {
+    echo "Manifest not readable: $manifest" >&2
+    exit 2
+  }
+  python3 - "$manifest" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+short_re = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
+for number, raw in enumerate(path.read_text().splitlines(), start=1):
+    line = raw.strip()
+    if not line or line.startswith("#"):
+        continue
+    parts = line.split("\t")
+    if len(parts) < 2:
+        raise SystemExit(f"line {number}: need canonical_repo and short columns")
+    repo, short = parts[0].strip(), parts[1].strip()
+    if repo.lower() in ("canonical_repo", "repo") and short.lower() == "short":
+        continue
+    if not short_re.fullmatch(short) or len(short) > 60:
+        raise SystemExit(f"line {number}: invalid short {short!r}")
+    print(short)
+PY
+}
+
+batch_status() {
+  local manifest=$1 secrets_root=$HOME/Documents/Personal/.secrets
+  local total=0 ready=0 missing=0
+  while IFS= read -r short; do
+    total=$((total + 1))
+    local folder
+    folder=$(folder_for_short "$short")
+    if [[ -f $secrets_root/$folder/app.env && -f $secrets_root/$folder/app.pem ]]; then
+      ready=$((ready + 1))
+      printf 'ready\t%s\n' "$short"
+    else
+      missing=$((missing + 1))
+      printf 'missing\t%s\n' "$short"
+    fi
+  done < <(read_manifest_shorts "$manifest")
+  printf 'summary\ttotal=%s\tready=%s\tmissing=%s\n' "$total" "$ready" "$missing"
+}
+
+batch_plan() {
+  local manifest=$1 limit=${2:-0} count=0
+  while IFS= read -r short; do
+    local folder=$HOME/Documents/Personal/.secrets/$(folder_for_short "$short")
+    if [[ -f $folder/app.env && -f $folder/app.pem ]]; then
+      continue
+    fi
+    print_plan "$short"
+    printf '\n'
+    count=$((count + 1))
+    if [[ $limit -gt 0 && $count -ge $limit ]]; then
+      break
+    fi
+  done < <(read_manifest_shorts "$manifest")
+}
+
+batch_verify() {
+  local manifest=$1 online=${2:-} limit=${3:-0} count=0 failed=0
+  while IFS= read -r short; do
+    local folder=$HOME/Documents/Personal/.secrets/$(folder_for_short "$short")
+    if [[ ! -f $folder/app.env || ! -f $folder/app.pem ]]; then
+      continue
+    fi
+    printf '=== verify %s ===\n' "$short"
+    if [[ -n $online ]]; then
+      run_verify "$short" --online || failed=1
+    else
+      run_verify "$short" || failed=1
+    fi
+    count=$((count + 1))
+    if [[ $limit -gt 0 && $count -ge $limit ]]; then
+      break
+    fi
+  done < <(read_manifest_shorts "$manifest")
+  return "$failed"
+}
+
+[[ $# -ge 1 ]] || usage
+action=$1
+shift
+
+case "$action" in
+  plan)
+    [[ $# == 1 ]] || usage
+    validate_short "$1" || usage
+    print_plan "$1"
+    ;;
+  verify)
+    [[ $# == 1 || ($# == 2 && ${2:-} == --online) ]] || usage
+    validate_short "$1" || usage
+    run_verify "$1" "${2:-}"
+    ;;
+  batch-status)
+    [[ $# == 1 ]] || usage
+    batch_status "$1"
+    ;;
+  batch-plan)
+    [[ $# -ge 1 ]] || usage
+    manifest=$1
+    shift
+    limit=0
+    while [[ $# -gt 0 ]]; do
+      [[ $1 == --limit && $# -ge 2 ]] || usage
+      limit=$2
+      shift 2
+    done
+    batch_plan "$manifest" "$limit"
+    ;;
+  batch-verify)
+    [[ $# -ge 1 ]] || usage
+    manifest=$1
+    shift
+    online=
+    limit=0
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --online) online=--online; shift ;;
+        --limit)
+          [[ $# -ge 2 ]] || usage
+          limit=$2
+          shift 2
+          ;;
+        *) usage ;;
+      esac
+    done
+    batch_verify "$manifest" "$online" "$limit"
     ;;
   *) usage ;;
 esac

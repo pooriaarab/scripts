@@ -121,5 +121,20 @@ The script copies each `pooriaarab-*-fleet-app/` directory with `tar` over `box 
 It sets mode `700` on folders and `600` on key files. It never prints secrets.
 Re-run after adding a new wave-1 row or registering a new per-repo App.
 
-Dev snapshots (`boat-hub warm`) do not embed these keys; run a sync after provisioning
-or bake a warm snapshot only after boxes already received keys.
+## Wave 2 batch rollout
+
+Keep the repository-to-short manifest in `pooriaarab/agents-private` only.
+Do not commit that list to public repositories.
+
+From this checkout, after wave 2 lands on `main`:
+
+```sh
+manifest=~/Documents/Personal/agents-private/memory/global/reference-github-app-per-repo-wave2-manifest.tsv
+./gh-app-per-repo-rollout batch-status "$manifest"
+./gh-app-per-repo-rollout batch-plan "$manifest" --limit 1
+./gh-app-per-repo-rollout batch-verify "$manifest"
+```
+
+Register one App at a time in Chrome (`gh-app create` / `install`).
+Update the private registry row to **live** with IDs from `app.env`.
+Then sync keys to Boat boxes (see above).
