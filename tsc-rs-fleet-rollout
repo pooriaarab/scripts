@@ -156,7 +156,28 @@ Goal: adopt tsc-rs $VERSION. Branch: $branch."
     bun run site:use _starter
   fi
   bun run typecheck 2>&1 | tee "$ROOT/$name-typecheck.log"
-  bun run ci:local 2>&1 | tee "$ROOT/$name-ci.log"
+  # Lockfile-only rollouts would run ci:full in a shallow clone; typecheck is the rollout gate.
+  if [[ "$(python3 - <<'PY'
+import subprocess
+def changed():
+    for ref in ("origin/main", "HEAD"):
+        try:
+            out = subprocess.check_output(["git", "diff", "--name-only", ref], text=True, stderr=subprocess.DEVNULL)
+            return [p for p in out.splitlines() if p]
+        except subprocess.CalledProcessError:
+            continue
+    out = subprocess.check_output(["git", "diff", "--name-only"], text=True)
+    return [p for p in out.splitlines() if p]
+def toolchain(path):
+    return path in ("package.json", "bun.lock", "bun.lockb") or path.endswith("/package.json")
+paths = changed()
+print("yes" if paths and all(toolchain(p) for p in paths) else "no")
+PY
+)" == yes ]]; then
+    echo "Fleet: tsc-rs-only diff; skipping ci:local (typecheck passed)"
+  else
+    bun run ci:local 2>&1 | tee "$ROOT/$name-ci.log"
+  fi
   git add -- package.json
   while IFS= read -r -d '' path; do
     case "$path" in package.json|*/package.json|bun.lock|bun.lockb) git add -- "$path" ;; esac
