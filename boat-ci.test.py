@@ -91,9 +91,18 @@ else: sys.exit(2)
         for path in templates:
             self.assertIn(f'runs-on: {selector}', path.read_text(), path)
         for path in ROOT.glob('.github/workflows/*.yml'):
-            for line in path.read_text().splitlines():
+            text = path.read_text()
+            expected = 'runs-on: ubuntu-latest'
+            if path.name in frozenset({'tsc-rs-fleet-rollout.yml', 'deps-fleet-rollout.yml'}):
+                # Manual fleet rollouts run on boat, not GitHub-hosted ubuntu.
+                self.assertIn('  workflow_dispatch:', text)
+                self.assertNotIn('  pull_request:', text)
+                self.assertNotIn('  push:', text)
+                self.assertIn("if: github.ref == 'refs/heads/main' && github.repository_owner == 'pooriaarab'", text)
+                expected = 'runs-on: self-hosted'
+            for line in text.splitlines():
                 if line.strip().startswith('runs-on:'):
-                    self.assertEqual(line.strip(), 'runs-on: ubuntu-latest', path)
+                    self.assertEqual(line.strip(), expected, path)
 
     def test_fanout_uses_visibility_in_both_shapes(self):
         subprocess.run(['git', 'init', '-q', str(self.base)], check=True)
