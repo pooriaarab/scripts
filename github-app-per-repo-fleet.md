@@ -105,3 +105,21 @@ Record the measured limit in the private inventory; do not assume 12,500.
 Run `./gh-app-per-repo-rollout.test.sh` for the smoke test.
 Its fake commands check planning, invalid configuration, online success, and secret filtering.
 The final `PASS` line provides a repeatable result without contacting GitHub.
+
+## Boat boxes
+
+Runner and agent boxes use `~/Documents/Personal/.secrets/` for GitHub App keys.
+After you create or rotate a per-repo fleet App on the Mac, sync its folders to the
+fleet pool:
+
+```sh
+./boat-fleet-app-secrets-sync --check   # list folders and target boxes
+./boat-fleet-app-secrets-sync           # push to every box in ~/.sec-fleet/boxes.txt
+```
+
+The script copies each `pooriaarab-*-fleet-app/` directory with `tar` over `box ssh`.
+It sets mode `700` on folders and `600` on key files. It never prints secrets.
+Re-run after adding a new wave-1 row or registering a new per-repo App.
+
+Dev snapshots (`boat-hub warm`) do not embed these keys; run a sync after provisioning
+or bake a warm snapshot only after boxes already received keys.
