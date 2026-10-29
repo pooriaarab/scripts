@@ -66,6 +66,9 @@ process_repo() (
   echo "Inspecting $repo"
   gh repo clone "$repo" "$dir" -- --depth 1 --quiet
   cd "$dir"
+  if git grep -l 'supportsheep/packages/support' -- 'package.json' '**/package.json' >/dev/null 2>&1; then
+    [[ -d "$ROOT/supportsheep" ]] || gh repo clone "$OWNER/supportsheep" "$ROOT/supportsheep" -- --depth 1 --quiet
+  fi
   [[ -f package.json && ( -f bun.lock || -f bun.lockb ) ]] || { echo 'Skip: no Bun root package.'; exit 0; }
   [[ -f .github/pr-standards.json ]] || { echo 'Skip: no PR prefix configuration.'; exit 0; }
   prefix="$(python3 -c 'import json; print(json.load(open(".github/pr-standards.json"))["prefix"])')"
