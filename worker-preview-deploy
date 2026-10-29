@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Deploy accepted inert bytes with a trusted Wrangler 4.135.0 installation.
 
-Arguments name private inputs outside Git. Deployment uses existing data and
-Access acquisitions. A pending upload requires manual reconciliation; never retry.
+Arguments name private inputs outside Git. Use existing data and Access acquisitions.
+Existing Previews and pending uploads require separate ownership reconciliation.
 The trusted config artifact_manifest_sha256 must come from the manifest inside
 the original archive after its digest matches the intake pin. Do not derive this
 trust value from the mutable extracted directory.
@@ -85,7 +85,7 @@ def leases(paths):
         yield
 
 
-def deploy(args):
+def deploy(args, progress):
     intake = private(args.intake, True)
     state = private(args.state, True)
     output = private(args.output, True)
@@ -169,103 +169,107 @@ def deploy(args):
                 require(current['head']['ref'] == owner['branch'] and all(current[key]['repo']['full_name'] == owner['repository'] for key in ('head', 'base')))
             current_head()
             require(child([str(executable), '--version'], clean, neutral).strip() == '4.135.0')
-            lock_path = state / ('.deploy-' + stem + '.lock')
-            lock = os.open(lock_path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+            pending, receipt_path = state / ('.deploy-' + stem + '.pending'), state / ('.deploy-' + stem + '-' + owner['head_sha'] + '-' + cfg['artifact_manifest_sha256'] + '.receipt.json')
+            require(not os.path.lexists(pending) and not os.path.lexists(receipt_path))
+            secret = load(args.secrets)
+            require(set(secret) == set(cfg['secret_names']))
+            require(all(isinstance(value, str) and value for value in secret.values()))
+            credentials = load(args.credentials)
+            require(set(credentials) == {'account_id', 'api_token'} and credentials['account_id'] == account)
+            token = credentials['api_token']
+            require(isinstance(token, str) and token and '\n' not in token)
+            class ReadOnly(P['Cloudflare']):
+                def request(self, method, path, body=None):
+                    require(method == 'GET' and body is None)
+                    return api(account, token, path, envelope=True)
+            resources = ReadOnly(account, token)
+            for kind in P['KINDS']:
+                for item in plan['intended'][kind]:
+                    require(P['exact'](resources, kind, item['name']) == data['acquired'][kind][item['binding']]['name' if kind == 'r2' else 'id'])
+            ids = access['access']
+            desired['service_policy']['include'][0]['service_token']['token_id'] = ids['service_token_id']
+            for route, kinds in [('/access/apps', ['application']),
+                ('/access/apps/' + ids['application_id'] + '/policies', ['human_policy', 'service_policy']),
+                ('/access/service_tokens', ['service_token'])]:
+                listed = A['Cloudflare'].list(resources, route.lstrip('/'))
+                matches = [item for item in listed if isinstance(item, dict) and any(item.get('id') == ids[kind + '_id'] for kind in kinds)]
+                require(len(matches) == len(kinds))
+                if 'human_policy' in kinds:
+                    require(len(listed) == 2)
+                for kind in kinds:
+                    require(any(item.get('id') == ids[kind + '_id'] and A['matches'](item, desired[kind]) for item in matches))
+                if kinds == ['application']:
+                    require(len([item for item in listed if item.get('domain') == plan['intended']['preview']['hostname']]) == 1)
+            worker = plan['intended']['target_worker']['name']
+            base = '/workers/workers/' + worker
+            api(account, token, base)  # Refuse implicit creation of the parent Worker.
+            subdomain = api(account, token, '/workers/scripts/' + worker + '/subdomain')
+            require(subdomain.get('enabled') is False and subdomain.get('previews_enabled') is False)
             try:
-                private(lock_path)
-                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                pending, receipt_path = state / ('.deploy-' + stem + '.pending'), state / ('.deploy-' + stem + '-' + owner['head_sha'] + '-' + cfg['artifact_manifest_sha256'] + '.receipt.json')
-                require(not os.path.lexists(pending) and not os.path.lexists(receipt_path))
-                secret = load(args.secrets)
-                require(set(secret) == set(cfg['secret_names']))
-                require(all(isinstance(value, str) and value for value in secret.values()))
-                credentials = load(args.credentials)
-                require(set(credentials) == {'account_id', 'api_token'} and credentials['account_id'] == account)
-                token = credentials['api_token']
-                require(isinstance(token, str) and token and '\n' not in token)
-                class ReadOnly(P['Cloudflare']):
-                    def request(self, method, path, body=None):
-                        require(method == 'GET' and body is None)
-                        return api(account, token, path, envelope=True)
-                resources = ReadOnly(account, token)
-                for kind in P['KINDS']:
-                    for item in plan['intended'][kind]:
-                        require(P['exact'](resources, kind, item['name']) == data['acquired'][kind][item['binding']]['name' if kind == 'r2' else 'id'])
-                ids = access['access']
-                desired['service_policy']['include'][0]['service_token']['token_id'] = ids['service_token_id']
-                for route, kinds in [('/access/apps', ['application']),
-                    ('/access/apps/' + ids['application_id'] + '/policies', ['human_policy', 'service_policy']),
-                    ('/access/service_tokens', ['service_token'])]:
-                    listed = A['Cloudflare'].list(resources, route.lstrip('/'))
-                    matches = [item for item in listed if isinstance(item, dict) and any(item.get('id') == ids[kind + '_id'] for kind in kinds)]
-                    require(len(matches) == len(kinds))
-                    if 'human_policy' in kinds:
-                        require(len(listed) == 2)
-                    for kind in kinds:
-                        require(any(item.get('id') == ids[kind + '_id'] and A['matches'](item, desired[kind]) for item in matches))
-                    if kinds == ['application']:
-                        require(len([item for item in listed if item.get('domain') == plan['intended']['preview']['hostname']]) == 1)
-                worker = plan['intended']['target_worker']['name']
-                base = '/workers/workers/' + worker
-                api(account, token, base)  # Refuse implicit creation of the parent Worker.
-                configuration = dict(name=worker, account_id=account, main=str(neutral / 'worker/worker.js'),
-                    compatibility_date=cfg['compatibility_date'], no_bundle=True, find_additional_modules=True,
-                    workers_dev=False, preview_urls=False, compatibility_flags=cfg['compatibility_flags'], previews={'vars': cfg['vars']})
-                for kind, key, field in [('d1', 'd1_databases', 'database_id'), ('kv', 'kv_namespaces', 'id'), ('r2', 'r2_buckets', 'bucket_name')]:
-                    configuration['previews'][key] = [dict(binding=item['binding'], **{field: data['acquired'][kind][item['binding']]['name' if kind == 'r2' else 'id']}) for item in plan['intended'][kind]]
-                configuration['rules'] = [dict(type=kind, globs=patterns, fallthrough=True) for kind, patterns in
-                    [('ESModule', ['**/*.js', '**/*.mjs']), ('CompiledWasm', ['**/*.wasm']), ('Text', ['**/*.txt']), ('Data', ['**/*.bin'])]]
-                for name, content in payload.items():
-                    if name.startswith('migrations/'):
-                        continue
-                    target = neutral / name
-                    target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-                    target.write_bytes(content)
-                    target.chmod(0o600)
-                if (neutral / 'assets').exists():
-                    configuration['assets'] = {'directory': str(neutral / 'assets'), 'binding': cfg['asset_binding']}
-                config_path, secret_path = neutral / 'wrangler.json', neutral / 'secrets.json'
-                P['atomic_write'](config_path, configuration, True)
-                P['atomic_write'](secret_path, secret, True)
-                clean.update(CLOUDFLARE_ACCOUNT_ID=account, CLOUDFLARE_API_TOKEN=token, GITHUB_SHA=owner['head_sha'])
-                intent = dict(schema=1, owner=owner, artifact_manifest_sha256=cfg['artifact_manifest_sha256'], resource_digest=digest(json.dumps([data, access], sort_keys=True).encode()))
-                current_head()
-                P['atomic_write'](pending, intent, True)
-                result = json.loads(child([str(executable), 'preview', '--config', str(config_path),
-                    '--name', owner['branch'], '--worker-name', worker, '--ignore-base-config',
-                    '--secrets-file', str(secret_path), '--json'], clean, neutral))
-                preview, deployment = result['preview'], result['deployment']
-                require(preview['name'] == owner['branch'] and preview['worker_name'] == worker)
-                for identifier in (preview['id'], deployment['id']):
-                    require(isinstance(identifier, str) and A['OPAQUE'].fullmatch(identifier))
-                remote_preview = api(account, token, base + '/previews/' + preview['id'])
-                for value in (preview, remote_preview):
-                    require(value['id'] == preview['id'] and value['name'] == owner['branch'] and value['worker_name'] == worker)
-                    require(value['urls'] == ['https://' + plan['intended']['preview']['hostname']])
-                verified = api(account, token, base + '/previews/' + preview['id'] + '/deployments/' + deployment['id'])
-                for value in (deployment, verified):
-                    require(value['id'] == deployment['id'] and value['preview_id'] == preview['id'] and value['preview_name'] == owner['branch'])
-                    require(value['annotations']['workers/commit_sha'] == owner['head_sha'])
-                    require(isinstance(value.get('urls', []), list) and all(isinstance(url, str) for url in value.get('urls', [])))
-                current_head()
-                receipt = dict(intent, deployment_id=verified['id'], preview_id=preview['id'],
-                    hostname=plan['intended']['preview']['hostname'], status='native-deployment-verified')
-                P['atomic_write'](receipt_path, receipt, True)
-                pending.unlink()
-                P['sync_directory'](state)
-                return receipt
-            finally:
-                os.close(lock)
+                api(account, token, base + '/previews/' + owner['branch'])
+            except A['urllib'].error.HTTPError as error:
+                require(error.code == 404)
+            else:
+                raise ValueError('existing Preview requires ownership reconciliation')
+            configuration = dict(name=worker, account_id=account, main=str(neutral / 'worker/worker.js'),
+                compatibility_date=cfg['compatibility_date'], no_bundle=True, find_additional_modules=True,
+                workers_dev=False, preview_urls=False, compatibility_flags=cfg['compatibility_flags'], previews={'vars': cfg['vars']})
+            for kind, key, field in [('d1', 'd1_databases', 'database_id'), ('kv', 'kv_namespaces', 'id'), ('r2', 'r2_buckets', 'bucket_name')]:
+                configuration['previews'][key] = [dict(binding=item['binding'], **{field: data['acquired'][kind][item['binding']]['name' if kind == 'r2' else 'id']}) for item in plan['intended'][kind]]
+            configuration['rules'] = [dict(type=kind, globs=patterns, fallthrough=True) for kind, patterns in
+                [('ESModule', ['**/*.js', '**/*.mjs']), ('CompiledWasm', ['**/*.wasm']), ('Text', ['**/*.txt']), ('Data', ['**/*.bin'])]]
+            for name, content in payload.items():
+                if name.startswith('migrations/'):
+                    continue
+                target = neutral / name
+                target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+                target.write_bytes(content)
+                target.chmod(0o600)
+            if (neutral / 'assets').exists():
+                configuration['assets'] = {'directory': str(neutral / 'assets'), 'binding': cfg['asset_binding']}
+            config_path, secret_path = neutral / 'wrangler.json', neutral / 'secrets.json'
+            P['atomic_write'](config_path, configuration, True)
+            P['atomic_write'](secret_path, secret, True)
+            clean.update(CLOUDFLARE_ACCOUNT_ID=account, CLOUDFLARE_API_TOKEN=token, GITHUB_SHA=owner['head_sha'])
+            intent = dict(schema=1, owner=owner, artifact_manifest_sha256=cfg['artifact_manifest_sha256'], resource_digest=digest(json.dumps([data, access], sort_keys=True).encode()))
+            current_head()
+            P['atomic_write'](pending, intent, True)
+            progress['upload_started'] = True
+            result = json.loads(child([str(executable), 'preview', '--config', str(config_path),
+                '--name', owner['branch'], '--worker-name', worker, '--ignore-base-config',
+                '--secrets-file', str(secret_path), '--json'], clean, neutral))
+            preview, deployment = result['preview'], result['deployment']
+            require(preview['name'] == owner['branch'] and preview['worker_name'] == worker)
+            for identifier in (preview['id'], deployment['id']):
+                require(isinstance(identifier, str) and A['OPAQUE'].fullmatch(identifier))
+            remote_preview = api(account, token, base + '/previews/' + preview['id'])
+            for value in (preview, remote_preview):
+                require(value['id'] == preview['id'] and value['name'] == owner['branch'] and value['worker_name'] == worker)
+                require(value['urls'] == ['https://' + plan['intended']['preview']['hostname']])
+            verified = api(account, token, base + '/previews/' + preview['id'] + '/deployments/' + deployment['id'])
+            for value in (deployment, verified):
+                require(value['id'] == deployment['id'] and value['preview_id'] == preview['id'] and value['preview_name'] == owner['branch'])
+                require(value['annotations']['workers/commit_sha'] == owner['head_sha'])
+                require(isinstance(value.get('urls', []), list) and all(isinstance(url, str) for url in value.get('urls', [])))
+            current_head()
+            receipt = dict(intent, deployment_id=verified['id'], preview_id=preview['id'],
+                hostname=plan['intended']['preview']['hostname'], status='native-deployment-verified')
+            P['atomic_write'](receipt_path, receipt, True)
+            pending.unlink()
+            P['sync_directory'](state)
+            return receipt
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ('intake', 'plan', 'config', 'access_config', 'state', 'output', 'credentials', 'secrets'):
         parser.add_argument(name, type=Path)
+    progress = {}
     try:
-        receipt = deploy(parser.parse_args())
+        receipt = deploy(parser.parse_args(), progress)
     except Exception:
-        print('error: trusted deployment rejected or incomplete; preserve pending state', file=sys.stderr)
+        code = 'upload-incomplete-reconcile-pending' if progress.get('upload_started') else 'preflight-rejected-no-upload'
+        print('error: ' + code, file=sys.stderr)
         return 1
     print(json.dumps(receipt, sort_keys=True))
     return 0

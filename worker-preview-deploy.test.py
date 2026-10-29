@@ -104,7 +104,7 @@ print(json.dumps(dict(version=1, preview=f['preview'], deployment=f['deployment'
             change(context)
         write(root / 'fixture', fixture)
         shim = root / 'shim.py'
-        shim.write_text('''import io,json,pathlib,runpy,sys,urllib.request
+        shim.write_text('''import io,json,pathlib,runpy,sys,urllib.request,urllib.error
 r=pathlib.Path(__file__).parent
 f=json.loads((r/'fixture').read_text())
 original=pathlib.Path.read_bytes
@@ -116,9 +116,11 @@ pathlib.Path.read_bytes=read
 def api(request, timeout=30):
     p=request.full_url
     assert p.startswith('https://api.cloudflare.com/client/v4/') and request.method=='GET'
+    if p.endswith('/previews/scr-7-example') and not f.get('existing_preview'): raise urllib.error.HTTPError(p,404,'missing',{},None)
     if f.get('readback_failure') and '/deployments/' in p: raise OSError('fake-secret-must-never-appear')
     if '/deployments/' in p: value=f.get('readback',f['deployment'])
     elif '/previews/' in p: value=f['preview']
+    elif '/subdomain' in p: value=dict(enabled=f.get('public_worker',False),previews_enabled=False)
     elif '/d1/database' in p: value=[dict(uuid=f['data']['acquired']['d1']['DB']['id'],name=f['data']['intended']['d1'][0]['name'])]
     elif '/storage/kv/' in p: value=[dict(id=f['data']['acquired']['kv']['CACHE']['id'],title=f['data']['intended']['kv'][0]['name'])]
     elif '/r2/buckets' in p: value=dict(buckets=[dict(name=f['data']['acquired']['r2']['FILES']['name'])])
@@ -146,6 +148,8 @@ runpy.run_path(sys.argv[0],run_name='__main__')
         assert ('credentials' in events) == credentials, (label, events)
         assert bool(list(state.glob('.deploy-*.pending'))) == pending, (label, list(output.iterdir()))
         assert SECRET not in run.stdout + run.stderr
+        if not success:
+            assert ('upload-incomplete-reconcile-pending' if pending else 'preflight-rejected-no-upload') in run.stderr
         receipts = [p for p in state.glob('.deploy-*.receipt.json') if '-old-head.' not in p.name]
         assert bool(receipts) == success
         if success:
@@ -172,6 +176,8 @@ def assets(c):
     c['cfg'].update(asset_binding='ASSETS', artifact_manifest_sha256=hashlib.sha256((c['intake'] / 'bundle/artifact-manifest.json').read_bytes()).hexdigest())
     write(c['root'] / 'config', c['cfg']); c['fixture']['assets']=True
 
+case('existing-preview-rejected', lambda c: c['fixture'].update(existing_preview=True))
+case('public-worker-rejected', lambda c: c['fixture'].update(public_worker=True))
 case('positive', success=True)
 case('modules-and-assets', assets, success=True)
 case('paginated-access', lambda c: c['fixture'].update(paginated=True), success=True)
