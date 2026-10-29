@@ -1,0 +1,202 @@
+#!/usr/bin/env bash
+# Roll out tsc-rs 0.8. Requires authenticated gh, git, bun, and python3.
+# Merge mode also requires the fleet premerge command on PATH.
+set -euo pipefail
+OWNER=pooriaarab
+VERSION=0.8.0
+DRY_RUN=0
+MERGE=0
+REPOS=()
+ROOT="$(mktemp -d "${TMPDIR:-/tmp}/tsc-rs-rollout.XXXXXX")"
+trap 'rm -rf "$ROOT"' EXIT
+usage() {
+  cat <<'HELP'
+Usage: tsc-rs-fleet-rollout [--owner NAME] [--repo NAME] [--dry-run] [--merge-when-green]
+
+--repo is repeatable. Without it, inspect all active, owned repositories.
+Eligible repositories need Bun, a configured PR prefix, typecheck, and ci:local.
+Dry runs clone and inspect repositories without remote changes.
+Merge mode checks each PR once through premerge. Pending PRs remain open.
+Run again to check existing rollout PRs. No review credit is invented.
+HELP
+}
+while (( $# )); do
+  case "$1" in
+    --owner|--repo)
+      [[ $# -ge 2 && "$2" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]*$ ]] || { usage >&2; exit 2; }
+      if [[ "$1" == --owner ]]; then OWNER="$2"; else REPOS+=("$2"); fi
+      shift 2 ;;
+    --dry-run) DRY_RUN=1; shift ;;
+    --merge-when-green) MERGE=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) usage >&2; exit 2 ;;
+  esac
+done
+for tool in gh git bun python3; do
+  command -v "$tool" >/dev/null || { echo "Missing command: $tool" >&2; exit 2; }
+done
+if (( MERGE && ! DRY_RUN )); then
+  command -v premerge >/dev/null || { echo 'Merge mode requires premerge on PATH.' >&2; exit 2; }
+fi
+gh auth status >/dev/null 2>&1 || { echo 'Authenticate gh before rollout.' >&2; exit 2; }
+if (( ${#REPOS[@]} == 0 )); then
+  gh repo list "$OWNER" --limit 1000 --json name,isArchived,isFork \
+    --jq '.[] | select(.isArchived == false and .isFork == false) | .name' > "$ROOT/repos"
+else
+  printf '%s\n' "${REPOS[@]}" > "$ROOT/repos"
+fi
+
+# shellcheck disable=SC2329 # Invoked through an exported worker function.
+merge_pr() {
+  local repo="$1" number="$2" sha gate
+  sha="$(gh pr view "$number" -R "$repo" --json headRefOid --jq .headRefOid)"
+  if premerge "$number" "$repo"; then
+    gh pr merge "$number" -R "$repo" --squash --delete-branch --match-head-commit "$sha"
+  else
+    gate=$?
+    [[ "$gate" == 1 ]] || return "$gate"
+    echo "Pending merge gates: $repo PR #$number"
+  fi
+}
+
+# shellcheck disable=SC2329 # Invoked in a separate Bash process below.
+process_repo() (
+  set -euo pipefail
+  local name="$1" repo="$OWNER/$1" dir="$ROOT/$1" prefix branch issue existing body claim sha result claim_body
+  echo "Inspecting $repo"
+  gh repo clone "$repo" "$dir" -- --depth 1 --quiet
+  cd "$dir"
+  [[ -f package.json && ( -f bun.lock || -f bun.lockb ) ]] || { echo 'Skip: no Bun root package.'; exit 0; }
+  [[ -f .github/pr-standards.json ]] || { echo 'Skip: no PR prefix configuration.'; exit 0; }
+  prefix="$(python3 -c 'import json; print(json.load(open(".github/pr-standards.json"))["prefix"])')"
+  [[ "$prefix" =~ ^[a-z]{2,4}$ ]] || { echo 'Invalid PR prefix.' >&2; exit 1; }
+  existing="$(gh pr list -R "$repo" --state open --json number,headRefName \
+    --jq '.[] | select(.headRefName | endswith("-tsc-rs-0-8")) | .number')"
+  if [[ -n "$existing" ]]; then
+    [[ "$existing" =~ ^[0-9]+$ ]] || { echo 'Multiple rollout PRs need review.' >&2; exit 1; }
+    echo "Existing PR: https://github.com/$repo/pull/$existing"
+    if (( MERGE && ! DRY_RUN )); then merge_pr "$repo" "$existing"; fi
+    exit 0
+  fi
+  # Modify only tracked package scripts. Preserve build and emit commands.
+  if python3 - "$VERSION" <<'PY'
+import json, pathlib, re, subprocess, sys
+root = json.loads(pathlib.Path('package.json').read_text())
+if not all(root.get('scripts', {}).get(k) for k in ('typecheck', 'ci:local')):
+    print('Skip: typecheck and ci:local are required.')
+    sys.exit(10)
+paths = subprocess.check_output(['git', 'ls-files', '-z', '--', 'package.json', '**/package.json']).decode().split('\0')
+changes, supported = [], False
+for name in filter(None, paths):
+    path = pathlib.Path(name)
+    data = json.loads(path.read_text())
+    changed = False
+    for key, value in data.get('scripts', {}).items():
+        supported |= bool(re.search(r'(?<![\w/-])(?:tsc|tsc-rs)\s+--noEmit\b', value))
+        new = re.sub(r'(?<![\w/-])(?:bunx\s+)?tsc(?=\s+--noEmit\b)', 'tsc-rs', value)
+        if new != value:
+            data['scripts'][key] = new
+            changed = True
+    if changed:
+        changes.append((path, data))
+if not supported:
+    print('Skip: no supported tsc --noEmit commands.')
+    sys.exit(10)
+if not changes and root.get('devDependencies', {}).get('tsc-rs') == sys.argv[1] and 'tsc-rs' in root.get('trustedDependencies', []):
+    print('Skip: already configured.')
+    sys.exit(10)
+for path, data in changes:
+    path.write_text(json.dumps(data, indent=2) + '\n')
+root = json.loads(pathlib.Path('package.json').read_text())
+trusted = root.setdefault('trustedDependencies', [])
+if 'tsc-rs' not in trusted:
+    trusted.append('tsc-rs')
+pathlib.Path('package.json').write_text(json.dumps(root, indent=2) + '\n')
+PY
+  then
+    :
+  else
+    result=$?
+    [[ "$result" == 10 ]] && exit 0
+    exit "$result"
+  fi
+  if (( DRY_RUN )); then echo "Dry run: adopt tsc-rs@$VERSION in $repo"; exit 0; fi
+  issue="$(gh issue list -R "$repo" --state open --search 'in:title "Adopt tsc-rs 0.8 for typecheck"' \
+    --json number,title --jq '.[] | select(.title == "Adopt tsc-rs 0.8 for typecheck") | .number')"
+  if [[ -z "$issue" ]]; then
+    issue="$(gh issue create -R "$repo" --title 'Adopt tsc-rs 0.8 for typecheck' \
+      --body 'Use tsc-rs 0.8 for no-emit type checks. Verify local CI before push.')"
+    issue="${issue##*/}"
+  fi
+  [[ "$issue" =~ ^[0-9]+$ ]] || { echo 'Cannot select one rollout issue.' >&2; exit 1; }
+  branch="$prefix-$issue-tsc-rs-0-8"
+  claim="$(gh api --paginate "repos/$repo/issues/$issue/comments" \
+    --jq '.[] | select(.body | contains("<!-- fleet-claim:tsc-rs-rollout -->")) | .id')"
+  claim_body="<!-- fleet-claim:tsc-rs-rollout -->
+Harness: fleet rollout. Model: none (deterministic script).
+Host: $(hostname). Start: $(date -u +%FT%TZ). State: active.
+Goal: adopt tsc-rs $VERSION. Branch: $branch."
+  if [[ -n "$claim" ]]; then
+    [[ "$claim" =~ ^[0-9]+$ ]] || { echo 'Multiple fleet claims need review.' >&2; exit 1; }
+    gh api -X PATCH "repos/$repo/issues/comments/$claim" -f body="$claim_body" >/dev/null
+  else
+    claim="$(gh api "repos/$repo/issues/$issue/comments" -f body="$claim_body" --jq .id)"
+  fi
+  trap 'gh api -X PATCH "repos/$repo/issues/comments/$claim" -f body="<!-- fleet-claim:tsc-rs-rollout --> Harness: fleet rollout. Model: none. State: released. Branch: $branch." >/dev/null || true' EXIT
+  git checkout -b "$branch"
+  bun add --dev --exact "tsc-rs@$VERSION"
+  bun install --frozen-lockfile
+  bun run typecheck 2>&1 | tee "$ROOT/$name-typecheck.log"
+  bun run ci:local 2>&1 | tee "$ROOT/$name-ci.log"
+  git add -- package.json
+  while IFS= read -r -d '' path; do
+    case "$path" in package.json|*/package.json|bun.lock|bun.lockb) git add -- "$path" ;; esac
+  done < <(git diff --name-only -z)
+  [[ -z "$(git diff --name-only)" ]] || { echo 'CI changed other tracked files; inspect manually.' >&2; exit 1; }
+  git diff --cached --quiet && { echo 'No changes.'; exit 0; }
+  git commit -m "Adopt tsc-rs $VERSION for typecheck"
+  git push -u origin "$branch"
+  sha="$(git rev-parse HEAD)"
+  body="$ROOT/$name-pr.md"
+  cat > "$body" <<EOF
+Closes #$issue
+
+## What
+Pin tsc-rs $VERSION and use it for no-emit type checks.
+Trust its install script through Bun.
+
+## Why
+Evaluate the Rust checker through the existing typecheck and CI gates.
+
+## How I verified
+\`bun install --frozen-lockfile\` -> exit 0
+\`bun run typecheck\` -> exit 0 at $sha
+\`bun run ci:local\` -> exit 0 at $sha
+Operator: not applicable - compiler change with no web deployment.
+
+Assisted-by: tsc-rs-fleet-rollout:none
+
+The rollout uses a deterministic script with no model session.
+Independent review is required before merge.
+EOF
+  existing="$(gh pr create -R "$repo" --head "$branch" \
+    --title "[$(printf '%s' "$prefix" | tr '[:lower:]' '[:upper:]')-$issue] Adopt tsc-rs for typecheck" --body-file "$body")"
+  echo "PR: $existing"
+  if (( MERGE )); then merge_pr "$repo" "${existing##*/}"; fi
+)
+
+failed=0
+while IFS= read -r repo; do
+  [[ -n "$repo" ]] || continue
+  [[ "$repo" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]*$ ]] || { failed=1; continue; }
+  # Separate Bash preserves errexit inside the function despite the conditional.
+  export OWNER VERSION ROOT DRY_RUN MERGE
+  export -f process_repo merge_pr
+  if bash -euo pipefail -c 'process_repo "$1"' bash "$repo"; then
+    echo "Complete: $OWNER/$repo"
+  else
+    echo "Failed: $OWNER/$repo" >&2
+    failed=1
+  fi
+done < "$ROOT/repos"
+exit "$failed"
