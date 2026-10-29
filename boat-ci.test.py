@@ -93,8 +93,8 @@ else: sys.exit(2)
         for path in ROOT.glob('.github/workflows/*.yml'):
             text = path.read_text()
             expected = 'runs-on: ubuntu-latest'
-            if path.name == 'tsc-rs-fleet-rollout.yml':
-                # The operator explicitly requests this manual fleet exception.
+            if path.name in frozenset({'tsc-rs-fleet-rollout.yml', 'deps-fleet-rollout.yml'}):
+                # Manual fleet rollouts run on boat, not GitHub-hosted ubuntu.
                 self.assertIn('  workflow_dispatch:', text)
                 self.assertNotIn('  pull_request:', text)
                 self.assertNotIn('  push:', text)
