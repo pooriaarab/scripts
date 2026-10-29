@@ -1,0 +1,113 @@
+#!/usr/bin/env bash
+# Register one wave-2 per-repo fleet App: create, manifest clicks, install with repo picker clicks.
+set -euo pipefail
+SHORT=${1:?usage: gh-app-fleet-wave2-one <short>}
+REPO=${2:-$SHORT}
+HERE=$(cd "$(dirname "$0")" && pwd)
+SECRETS=$HOME/Documents/Personal/.secrets
+APP="pooriaarab-${SHORT}-fleet"
+FOLDER="${APP}-app"
+PERMS=(contents=write pull_requests=write issues=write workflows=write actions=read checks=read statuses=read)
+
+die() { echo "gh-app-fleet-wave2-one: $*" >&2; exit 1; }
+
+browser_eval() {
+  local js=$1
+  zsh -ic "browser-personal eval $(printf '%s' "$js" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')" 2>&1 | tail -1
+}
+
+if [[ -f $SECRETS/$FOLDER/app.pem && -f $SECRETS/$FOLDER/app.env ]]; then
+  echo "skip create: $FOLDER already exists"
+else
+  rm -rf "$SECRETS/$APP" "$SECRETS/$FOLDER"
+  cd "$HERE"
+  create_args=(--name "$APP")
+  for p in "${PERMS[@]}"; do create_args+=(--perm "$p"); done
+  ./gh-app create "${create_args[@]}" &
+  create_pid=$!
+  sleep 8
+  browser_eval '(function(){var b=document.querySelector("button"); if(b){b.click(); return "create-html"} return "no"})()'
+  sleep 6
+  browser_eval '(function(){var f=document.querySelector("form"); if(f){f.submit(); return "manifest-submit"} return "no-form"})()'
+  python3 - "$SECRETS/$APP" "$HERE/gh-app" <<'PY'
+import importlib.machinery, importlib.util, json, re, sys, time
+from pathlib import Path
+from urllib.parse import parse_qs, urlparse
+
+folder = Path(sys.argv[1])
+loader = importlib.machinery.SourceFileLoader('ghapp', str(Path(sys.argv[2]).resolve()))
+spec = importlib.util.spec_from_loader('ghapp', loader)
+gh = importlib.util.module_from_spec(spec)
+loader.exec_module(gh)
+state = re.search(r'state=([a-f0-9]+)', (folder / 'create.html').read_text()).group(1)
+
+def redirect(url):
+    q = parse_qs(url.query)
+    if url.scheme == 'https' and url.netloc == 'github.com' and url.path == '/':
+        if q.get('state') == [state]:
+            code = q.get('code', [''])[0]
+            return code if re.fullmatch(r'[A-Za-z0-9_-]+', code) else None
+
+deadline = time.monotonic() + 240
+code = None
+while time.monotonic() < deadline:
+    for tab in gh.tabs():
+        code = redirect(urlparse(tab['url']))
+        if code:
+            break
+    if code:
+        break
+    time.sleep(2)
+if not code:
+    sys.exit('timed out waiting for manifest redirect')
+
+result = gh.api(f'/app-manifests/{code}/conversions')
+gh.write(folder / 'conversion.json', json.dumps(result))
+gh.write(folder / 'app.pem', result['pem'])
+key = gh.command(['openssl', 'pkcs8', '-topk8', '-nocrypt', '-in', str(folder / 'app.pem')])
+gh.write(folder / 'app-pkcs8.pem', key.decode())
+gh.save_env(folder, dict(APP_ID=result['id'], APP_SLUG=result['slug'], APP_CLIENT_ID=result['client_id']))
+print(result['id'], result['slug'])
+PY
+  wait "$create_pid" || true
+  mv -n "$SECRETS/$APP" "$SECRETS/$FOLDER"
+fi
+
+cd "$HERE"
+./gh-app install "$APP" --owner pooriaarab &
+inst_pid=$!
+sleep 10
+browser_eval '(function(){
+  var sel=document.querySelector("#installations_repository_selection_selected")||document.querySelector("input[type=radio][value=selected]");
+  if(sel){sel.click(); sel.dispatchEvent(new Event("change",{bubbles:true}));}
+  return sel?"radio":"no-radio";
+})()'
+sleep 2
+browser_eval '(function(){
+  var btn=[...document.querySelectorAll("button")].find(b=>(b.innerText||"").trim()==="Select repositories");
+  if(btn){btn.click(); return "open"}
+  return "no-btn";
+})()'
+sleep 2
+browser_eval "(function(){
+  var inp=document.querySelector('input[type=search]')||document.querySelector('input[placeholder*=\"Search\"]');
+  if(!inp) return 'no-search';
+  inp.focus(); inp.value='${REPO}'; inp.dispatchEvent(new Event('input',{bubbles:true}));
+  return 'typed';
+})()"
+sleep 2
+browser_eval "(function(){
+  var els=[...document.querySelectorAll('label,div,span')];
+  for(var el of els){var t=(el.innerText||'').trim(); if(t==='${REPO}'||t==='pooriaarab/${REPO}'){el.click(); return t;}}
+  return 'pick-fail';
+})()"
+sleep 1
+browser_eval '(function(){
+  var s=[...document.querySelectorAll("button")].find(b=>(b.innerText||"").trim()==="Install"|| (b.innerText||"").trim()==="Save");
+  if(s && !s.disabled){s.click(); return (s.innerText||"").trim()}
+  return s?"disabled":"no-install-btn";
+})()'
+wait "$inst_pid"
+
+"$HERE/gh-app-per-repo-rollout" verify "$SHORT"
+echo "done $SHORT -> $FOLDER"
