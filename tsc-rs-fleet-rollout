@@ -83,9 +83,33 @@ process_repo() (
     if (( MERGE && ! DRY_RUN )); then merge_pr "$repo" "$existing"; fi
     exit 0
   fi
-  # Modify only tracked package scripts. Preserve build and emit commands.
+  # Replace the TypeScript CLI with tsc-rs in tracked package.json (scripts, wireit, etc.).
   if python3 - "$VERSION" <<'PY'
 import json, pathlib, re, subprocess, sys
+TSC = re.compile(r'(?<![\w/.-])(?:bunx\s+)?tsc(?!-rs\b|-alias\b)')
+def uses_compiler(text):
+    return bool(TSC.search(text) or re.search(r'(?<![\w/.-])tsc-rs\b', text))
+def swap_compiler(text):
+    return TSC.sub('tsc-rs', text)
+def rewrite_package(data):
+    changed = False
+    def walk(node):
+        nonlocal changed
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if isinstance(value, str):
+                    if TSC.search(value):
+                        new = swap_compiler(value)
+                        if new != value:
+                            node[key] = new
+                            changed = True
+                else:
+                    walk(value)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item)
+    walk(data)
+    return changed
 root = json.loads(pathlib.Path('package.json').read_text())
 if not all(root.get('scripts', {}).get(k) for k in ('typecheck', 'ci:local')):
     print('Skip: typecheck and ci:local are required.')
@@ -95,21 +119,22 @@ changes, supported = [], False
 for name in filter(None, paths):
     path = pathlib.Path(name)
     data = json.loads(path.read_text())
-    changed = False
-    for key, value in data.get('scripts', {}).items():
-        supported |= bool(re.search(r'(?<![\w/-])(?:tsc|tsc-rs)\s+--noEmit\b', value))
-        new = re.sub(r'(?<![\w/-])(?:bunx\s+)?tsc(?=\s+--noEmit\b)', 'tsc-rs', value)
-        if new != value:
-            data['scripts'][key] = new
-            changed = True
-    if changed:
+    if uses_compiler(json.dumps(data)):
+        supported = True
+    if rewrite_package(data):
         changes.append((path, data))
 if not supported:
-    print('Skip: no supported tsc --noEmit commands.')
+    print('Skip: no supported tsc commands.')
     sys.exit(10)
 if not changes and root.get('devDependencies', {}).get('tsc-rs') == sys.argv[1] and 'tsc-rs' in root.get('trustedDependencies', []):
-    print('Skip: already configured.')
-    sys.exit(10)
+    leftover = False
+    for name in filter(None, paths):
+        if TSC.search(pathlib.Path(name).read_text()):
+            leftover = True
+            break
+    if not leftover:
+        print('Skip: already configured.')
+        sys.exit(10)
 for path, data in changes:
     path.write_text(json.dumps(data, indent=2) + '\n')
 root = json.loads(pathlib.Path('package.json').read_text())
@@ -192,7 +217,7 @@ PY
 Closes #$issue
 
 ## What
-Pin tsc-rs $VERSION and use it for no-emit type checks.
+Pin tsc-rs $VERSION for typecheck, emit, and project builds (scripts and wireit).
 Trust its install script through Bun.
 
 ## Why

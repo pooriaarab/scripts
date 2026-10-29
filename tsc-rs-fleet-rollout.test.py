@@ -90,7 +90,7 @@ if sys.argv[1:]==['run','ci:local'] and os.environ.get('FAIL_CI')=='1': sys.exit
     manifest = json.loads(run(['git', '--git-dir', str(remote), 'show',
                                'fx-7-tsc-rs-0-8:package.json']).stdout)
     assert manifest['scripts']['typecheck'] == 'tsc-rs --noEmit'
-    assert manifest['scripts']['build'] == 'tsc -b'
+    assert manifest['scripts']['build'] == 'tsc-rs -b'
     assert manifest['devDependencies']['tsc-rs'] == '0.8.0'
     assert 'tsc-rs' in manifest['trustedDependencies']
     body = (root / 'body').read_text()
