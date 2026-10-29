@@ -53,13 +53,14 @@ check "ack wrote nothing" "$(grep -c -E 'issue create|replies' "$FAKE_LOG")" 0
 # An unlabeled comment fails closed. A reply by the comment author does not answer it.
 cat > "$FAKE_COMMENTS" <<'JSON'
 [{"id":4,"in_reply_to_id":null,"path":"c.ts","line":1,"user":{"login":"bot"},"body":"This looks wrong."},
+ {"id":7,"in_reply_to_id":null,"path":"e.ts","line":4,"user":{"login":"bot"},"body":"Security: this is not a minor issue, it leaks the token."},
  {"id":5,"in_reply_to_id":null,"path":"d.ts","line":2,"user":{"login":"bot"},"body":"Minor: tidy."},
  {"id":6,"in_reply_to_id":5,"path":"d.ts","line":2,"user":{"login":"bot"},"body":"follow-up from same author"}]
 JSON
 : > "$FAKE_LOG"
 "$here/stack-merge" ack o/r 5 >/dev/null 2>&1; check "ack stops on unlabeled, exit" "$?" 2
 check "ack unlabeled wrote nothing" "$(grep -c -E 'issue create|replies' "$FAKE_LOG")" 0
-jq 'map(select(.id != 4))' "$FAKE_COMMENTS" > "$tmp/c2.json"
+jq 'map(select(.id != 4 and .id != 7))' "$FAKE_COMMENTS" > "$tmp/c2.json"
 out=$(FAKE_COMMENTS="$tmp/c2.json" "$here/stack-merge" ack o/r 5 --dry-run 2>&1); check "self-reply is not an answer" "$(grep -c 'd.ts' <<<"$out")" 1
 
 # Minor only: files one issue and replies once.

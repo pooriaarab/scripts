@@ -17,9 +17,9 @@ Commands:
         the full head SHA. The script does not merge.
   ack  <owner/repo> <pr> [issue] [--dry-run]
         File one tracking issue for unanswered inline comments labeled Minor,
-        Nit or Trivial. Reply to each. Exit 2 and change nothing if any
-        unanswered comment is unlabeled or says Major, Critical, Blocker, P0
-        or P1. A reply from the comment author does not count as an answer.
+        Nit or Trivial at the start of the comment. Reply to each. Exit 2 and change nothing if any
+        unanswered comment is unlabeled or has a word like Major, Critical,
+        Blocker, P0, P1, High or Security. A reply from the comment author does not count as an answer.
         With [issue], the body of that issue is replaced.
 
 Environment:
@@ -54,6 +54,7 @@ cmd_prep() {
     need_num "$merged"
     info=$($RGH pr view "$merged" -R "$repo" --json state,headRefName,isCrossRepository)
     [ "$(jq -r .state <<<"$info")" = MERGED ] || die "#$merged is not MERGED. Not deleting its branch." 2
+    [ "$(jq -r .headRefName <<<"$info")" != "$default" ] || die "#$merged head is the default branch. Not deleting it." 2
     [ "$(jq -r .isCrossRepository <<<"$info")" = false ] || die "#$merged came from a fork. Not deleting a branch." 2
     branch=$(jq -r .headRefName <<<"$info")
     base=$($RGH pr view "$pr" -R "$repo" --json baseRefName --jq .baseRefName)
@@ -98,8 +99,8 @@ cmd_ack() {
   n=$(jq length <<<"$unanswered")
   [ "$n" -gt 0 ] || { echo "#$pr: nothing unanswered"; return 0; }
   # Fail closed: only a clear Minor label may be acknowledged.
-  notminor=$(jq -r '.[] | select((.body | test("(?i)\\b(minor|nit|nitpick|trivial)\\b") | not)
-      or (.body | test("(?i)\\b(major|critical|blocker|p0|p1)\\b")))
+  notminor=$(jq -r '.[] | select((.body | test("(?i)^[\\s*_#>\\[(]*(minor|nit|nitpick|trivial)\\b") | not)
+      or (.body | test("(?i)\\b(major|critical|blocker|p0|p1|high|severe|security|vulnerab)")))
     | "\(.id) \(.path):\(.line // .original_line)"' <<<"$unanswered")
   if [ -n "$notminor" ]; then
     echo "#$pr: STOP. These unanswered inline comments are not clearly Minor. Fix or answer them by hand:" >&2
