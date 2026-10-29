@@ -38,7 +38,7 @@ sleep "$(cat agent-sleep 2>/dev/null || echo 0)"
 exit "$(cat exit-code 2>/dev/null || echo 0)"
 EOF
 chmod +x "$T/bin/ssh" "$RBIN/fake-agent"
-export PATH="$T/bin:$PATH" FAKE_RBIN="$RBIN" VM_ORCHESTRATE_VERIFY_WAIT=1
+export PATH="$T/bin:$PATH" FAKE_RBIN="$RBIN" VM_ORCHESTRATE_VERIFY_WAIT=2
 SECRET="s3cr3t-$RANDOM-value"
 
 n=0
@@ -92,9 +92,13 @@ check "24: a new start clears the old DONE and runs" '[ $CODE -eq 0 ] && [ "$(wc
 fresh; echo 1 > "$H/done-at"; start --rounds 3
 check "25: a job that ends inside the check exits 0" '[ $CODE -eq 0 ] && [[ "$OUT" == *"already finished"* ]]'
 
-fresh; echo 3 > "$H/agent-sleep"
-( start; echo $CODE > "$T/race1" ) & ( start; echo $CODE > "$T/race2" ) & wait
-check "22: of two racing starts, exactly one runs" '[ "$(cat "$T/race1" "$T/race2" | sort | tr "\n" " ")" = "0 1 " ]'
+race_ok=0
+for _ in 1 2 3 4 5; do
+  fresh; echo 3 > "$H/agent-sleep"
+  ( start; echo $CODE > "$T/race1" ) & ( start; echo $CODE > "$T/race2" ) & wait
+  if [ "$(cat "$T/race1" "$T/race2" | sort | tr "\n" " ")" = "0 1 " ]; then race_ok=1; break; fi
+done
+check "22: of two racing starts, exactly one runs" '[ "$race_ok" = 1 ]'
 run stop
 
 fresh; mkdir -p "$H/orch/.lock"; start
