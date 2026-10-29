@@ -1,0 +1,106 @@
+#!/usr/bin/env bash
+# Print setup commands or check one saved App. Never create or install an App.
+set +x
+set -euo pipefail
+
+# Match pooriaarab-sec-fleet repository permissions. Metadata read is implicit.
+# Keep administration and organization permissions out of this template.
+STANDARD_PERMS=(
+  contents=write pull_requests=write issues=write workflows=write
+  actions=read checks=read statuses=read
+)
+
+usage() {
+  echo 'Usage: gh-app-per-repo-rollout plan <short> | verify <short> [--online]' >&2
+  echo 'Use a lowercase short name with letters, digits, and single hyphens (1-60 characters).' >&2
+  exit 2
+}
+[[ $# -ge 2 && $# -le 3 ]] || usage
+action=$1
+short=$2
+[[ ${#short} -le 60 && $short =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]] || usage
+app="pooriaarab-${short}-fleet"
+folder="${app}-app"
+script_dir=$(cd "$(dirname "$0")" && pwd)
+
+# Print literal shell expressions and token capture commands in plan mode.
+# shellcheck disable=SC2016
+case "$action" in
+  plan)
+    [[ $# == 2 ]] || usage
+    printf '# Run from the scripts checkout. These commands are printed only.\n'
+    printf '# In GitHub, select ONLY the target private repository.\n'
+    printf '# Stop if GitHub assigns another slug; use its saved APP_SLUG for install.\n'
+    printf 'secrets_root="$HOME/Documents/Personal/.secrets"\n'
+    printf 'test ! -e "$secrets_root/%s" && \\\n' "$folder"
+    printf './gh-app create --name %s' "$app"
+    printf ' --perm %s' "${STANDARD_PERMS[@]}"
+    printf ' && \\\n'
+    printf 'mv -n "$secrets_root/%s" "$secrets_root/%s"\n' "$app" "$folder"
+    printf './gh-app install %s --owner pooriaarab\n' "$app"
+    printf 'GH_TOKEN="$(./gh-app token %s)" gh api rate_limit --jq '\''.resources.core | {limit, remaining, reset}'\''\n' "$folder"
+    ;;
+  verify)
+    [[ $# == 2 || ${3:-} == --online ]] || usage
+    python3 - "$HOME/Documents/Personal/.secrets/$folder" "$script_dir/gh-app" "${3:-}" <<'PY'
+import json
+import os
+from pathlib import Path
+import re
+import shlex
+import subprocess
+import sys
+
+folder, helper, online = Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+
+def fail(message):
+    print(message, file=sys.stderr)
+    sys.exit(1)
+
+try:
+    values = {}
+    for line in (folder / 'app.env').read_text().splitlines():
+        parts = shlex.split(line, comments=True)
+        if not parts:
+            continue
+        if parts[0] == 'export':
+            parts = parts[1:]
+        if len(parts) != 1 or '=' not in parts[0]:
+            raise ValueError()
+        key, value = parts[0].split('=', 1)
+        if key in values:
+            raise ValueError()
+        values[key] = value
+    for key in ('APP_ID', 'APP_INSTALLATION_ID'):
+        if not re.fullmatch(r'[1-9][0-9]*', values.get(key, '')):
+            raise ValueError()
+    if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,99}', values.get('APP_SLUG', '')):
+        raise ValueError()
+    if not (folder / 'app.pem').is_file():
+        raise ValueError()
+except (OSError, ValueError):
+    fail('Saved App configuration is missing or invalid. Check app.env IDs, slug, and app.pem.')
+print('PASS: saved App configuration (values withheld).')
+if not online:
+    sys.exit(0)
+try:
+    token = subprocess.run([helper, 'token', folder.name], capture_output=True,
+                           text=True, check=True, timeout=90).stdout.strip()
+    if not re.fullmatch(r'[A-Za-z0-9_]+', token):
+        raise ValueError()
+    env = dict(os.environ, GH_TOKEN=token, GH_HOST='github.com')
+    for key in ('GH_DEBUG', 'GITHUB_TOKEN', 'GH_ENTERPRISE_TOKEN', 'GITHUB_ENTERPRISE_TOKEN'):
+        env.pop(key, None)
+    response = subprocess.run(['gh', 'api', 'rate_limit'], env=env, capture_output=True,
+                              text=True, check=True, timeout=60)
+    core = json.loads(response.stdout)['resources']['core']
+    result = {key: core[key] for key in ('limit', 'remaining', 'reset')}
+    if any(type(value) is not int or value < 0 for value in result.values()):
+        raise ValueError()
+except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+    fail('Online verification fails. Check App access and gh availability. Output withheld.')
+print(json.dumps(result, sort_keys=True))
+PY
+    ;;
+  *) usage ;;
+esac

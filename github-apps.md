@@ -5,6 +5,12 @@ Use a personal token for short tasks that must act as your user.
 The existing Boat installation returned `x-ratelimit-limit: 12500` on 2026-10-11.
 That measured limit belongs to this installation. Other installations can have different limits.
 
+## Per-repo fleet
+
+Use a separate App installation when one private repository exhausts a shared budget.
+See [Per-repository GitHub App fleet](github-app-per-repo-fleet.md) for names, permissions, and rollout commands.
+Measure the new installation limit before assigning work.
+
 ## Create and install
 
 Install Python 3.9 or later, OpenSSL, curl, zsh, and `browser-personal` first.
