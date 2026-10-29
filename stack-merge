@@ -1,0 +1,122 @@
+#!/usr/bin/env bash
+# Helpers for merging a stack of PRs safely. The merge is never done here.
+# The script prints the exact `gh pr merge` command. You run it yourself.
+set -euo pipefail
+
+usage() {
+  cat <<'USAGE'
+Usage: stack-merge <command> [arguments]
+
+Commands:
+  prep <owner/repo> <merged-pr|-> <pr>
+        Point <pr> at main. Then delete the branch of <merged-pr>.
+        Use "-" when no PR merged before this one. Refuses to delete the
+        branch of a PR that is not merged.
+  gate <owner/repo> <pr>
+        Run the gate command. On exit 0, print the exact merge command with
+        the full head SHA. The script does not merge.
+  ack  <owner/repo> <pr> [issue] [--dry-run]
+        File one tracking issue for unanswered Minor inline comments. Reply to
+        each comment. Exit 2 and change nothing if any unanswered comment says
+        Major or Critical. Fix those first.
+
+Environment:
+  STACK_GATE_CMD    Command for "gate". It gets STACK_REPO, STACK_PR and
+                    STACK_SHA in its environment. Required for "gate".
+  STACK_READ_GH     Program for reads. Default: gh-app-read if on PATH, else gh.
+  STACK_WRITE_GH    Program for writes. Default: gh.
+  STACK_MERGE_FLAG  Merge style flag in the printed command. Default: --merge.
+                    Merge commits keep the reviewed SHA of upper PRs.
+
+Order for a stack: prep, gate, run the printed merge command, repeat for the
+next PR. Needs jq.
+USAGE
+}
+
+die() { echo "stack-merge: $*" >&2; exit "${2:-1}"; }
+command -v jq >/dev/null || die "jq is required"
+
+if [ -n "${STACK_READ_GH:-}" ]; then RGH="$STACK_READ_GH"
+elif command -v gh-app-read >/dev/null; then RGH=gh-app-read
+else RGH=gh; fi
+WGH="${STACK_WRITE_GH:-gh}"
+
+need_repo() { [[ "${1:-}" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] || die "first argument must be <owner/repo>" 2; }
+need_num() { [[ "${1:-}" =~ ^[0-9]+$ ]] || die "not a PR number: ${1:-}" 2; }
+
+cmd_prep() {
+  local repo=${1:-} merged=${2:-} pr=${3:-} branch state base
+  need_repo "$repo"; need_num "$pr"
+  if [ "$merged" != "-" ]; then
+    need_num "$merged"
+    state=$($RGH pr view "$merged" -R "$repo" --json state --jq .state)
+    [ "$state" = MERGED ] || die "#$merged is $state, not MERGED. Not deleting its branch." 2
+    branch=$($RGH pr view "$merged" -R "$repo" --json headRefName --jq .headRefName)
+  fi
+  $WGH pr edit "$pr" -R "$repo" --base main >/dev/null
+  base=$($RGH pr view "$pr" -R "$repo" --json baseRefName --jq .baseRefName)
+  [ "$base" = main ] || die "#$pr base is $base after retarget. Not deleting anything."
+  echo "#$pr -> main"
+  if [ "$merged" != "-" ]; then
+    $WGH api -X DELETE "repos/$repo/git/refs/heads/$branch" >/dev/null
+    echo "deleted $branch"
+  fi
+}
+
+cmd_gate() {
+  local repo=${1:-} pr=${2:-} sha rc=0
+  need_repo "$repo"; need_num "$pr"
+  [ -n "${STACK_GATE_CMD:-}" ] || die "STACK_GATE_CMD is empty. Run with --help." 2
+  sha=$($RGH pr view "$pr" -R "$repo" --json headRefOid --jq .headRefOid)
+  [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || die "could not read a full head SHA for #$pr"
+  STACK_REPO=$repo STACK_PR=$pr STACK_SHA=$sha bash -c "$STACK_GATE_CMD" || rc=$?
+  if [ "$rc" -ne 0 ]; then echo "GATE #$pr: HOLD (gate exit $rc) head=$sha"; return 2; fi
+  echo "GATE #$pr: PASS head=$sha"
+  echo "Run this yourself:"
+  echo "  gh pr merge $pr -R $repo ${STACK_MERGE_FLAG:---merge} --match-head-commit $sha"
+}
+
+cmd_ack() {
+  local repo=${1:-} pr=${2:-} issue="" dry=0 a json unanswered sev list n i
+  need_repo "$repo"; need_num "$pr"; shift 2
+  for a in "$@"; do
+    case "$a" in --dry-run) dry=1 ;; *) need_num "$a"; issue=$a ;; esac
+  done
+  json=$($RGH api --paginate "repos/$repo/pulls/$pr/comments?per_page=100" | jq -s 'add // []')
+  unanswered=$(jq '[.[] | select(.in_reply_to_id != null) | .in_reply_to_id] as $r
+    | [.[] | select(.in_reply_to_id == null and ((.id as $i | $r | index($i)) | not))]' <<<"$json")
+  n=$(jq length <<<"$unanswered")
+  [ "$n" -gt 0 ] || { echo "#$pr: nothing unanswered"; return 0; }
+  sev=$(jq -r '.[] | select(.body | test("(?i)\\b(major|critical)\\b")) | "\(.id) \(.path):\(.line // .original_line)"' <<<"$unanswered")
+  if [ -n "$sev" ]; then
+    echo "#$pr: STOP, unanswered Major/Critical inline comment(s). Fix the code first:" >&2
+    sed 's/^/  /' <<<"$sev" >&2
+    return 2
+  fi
+  list=$(jq -r '.[] | "- `\(.path):\(.line // .original_line)` (\(.user.login)): " +
+    (.body | gsub("<[^>]+>"; "") | gsub("\\*\\*"; "") | gsub("\n"; " ") | .[0:160])' <<<"$unanswered")
+  if [ "$dry" -eq 1 ]; then
+    echo "#$pr: DRY RUN. Would track $n comment(s):"; echo "$list"; return 0
+  fi
+  local body="Inline review comments on #$pr, tracked so they are fixed after the stack merges:
+
+$list"
+  if [ -n "$issue" ]; then
+    $WGH issue edit "$issue" -R "$repo" --body "$body" >/dev/null
+  else
+    issue=$($WGH issue create -R "$repo" --title "Follow-ups from inline review on #$pr" --body "$body" | grep -o '[0-9]*$')
+  fi
+  for i in $(jq -r '.[].id' <<<"$unanswered"); do
+    $WGH api -X POST "repos/$repo/pulls/$pr/comments/$i/replies" \
+      -f body="Tracked in #$issue. Not blocking: the independent review rated this item Minor." >/dev/null
+  done
+  echo "#$pr: replied to $n comment(s), tracking issue #$issue"
+}
+
+case "${1:-}" in
+  prep) shift; cmd_prep "$@" ;;
+  gate) shift; cmd_gate "$@" ;;
+  ack)  shift; cmd_ack "$@" ;;
+  -h|--help|help) usage ;;
+  *) usage >&2; exit 2 ;;
+esac
