@@ -9,16 +9,18 @@ Usage: stack-merge <command> [arguments]
 
 Commands:
   prep <owner/repo> <merged-pr|-> <pr>
-        Point <pr> at main. Then delete the branch of <merged-pr>.
-        Use "-" when no PR merged before this one. Refuses to delete the
-        branch of a PR that is not merged.
+        Point <pr> at the default branch. Then delete the branch of <merged-pr>.
+        Use "-" when no PR merged before this one. Refuses a PR that is
+        not merged, came from a fork, or is not stacked on that branch.
   gate <owner/repo> <pr>
         Run the gate command. On exit 0, print the exact merge command with
         the full head SHA. The script does not merge.
   ack  <owner/repo> <pr> [issue] [--dry-run]
-        File one tracking issue for unanswered Minor inline comments. Reply to
-        each comment. Exit 2 and change nothing if any unanswered comment says
-        Major or Critical. Fix those first.
+        File one tracking issue for unanswered inline comments labeled Minor,
+        Nit or Trivial. Reply to each. Exit 2 and change nothing if any
+        unanswered comment is unlabeled or says Major, Critical, Blocker, P0
+        or P1. A reply from the comment author does not count as an answer.
+        With [issue], the body of that issue is replaced.
 
 Environment:
   STACK_GATE_CMD    Command for "gate". It gets STACK_REPO, STACK_PR and
@@ -33,7 +35,7 @@ next PR. Needs jq.
 USAGE
 }
 
-die() { echo "stack-merge: $*" >&2; exit "${2:-1}"; }
+die() { echo "stack-merge: $1" >&2; exit "${2:-1}"; }
 command -v jq >/dev/null || die "jq is required"
 
 if [ -n "${STACK_READ_GH:-}" ]; then RGH="$STACK_READ_GH"
@@ -45,20 +47,24 @@ need_repo() { [[ "${1:-}" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] || die "first 
 need_num() { [[ "${1:-}" =~ ^[0-9]+$ ]] || die "not a PR number: ${1:-}" 2; }
 
 cmd_prep() {
-  local repo=${1:-} merged=${2:-} pr=${3:-} branch state base
+  local repo=${1:-} merged=${2:-} pr=${3:-} info branch default base
   need_repo "$repo"; need_num "$pr"
+  default=$($RGH repo view "$repo" --json defaultBranchRef --jq .defaultBranchRef.name)
   if [ "$merged" != "-" ]; then
     need_num "$merged"
-    state=$($RGH pr view "$merged" -R "$repo" --json state --jq .state)
-    [ "$state" = MERGED ] || die "#$merged is $state, not MERGED. Not deleting its branch." 2
-    branch=$($RGH pr view "$merged" -R "$repo" --json headRefName --jq .headRefName)
+    info=$($RGH pr view "$merged" -R "$repo" --json state,headRefName,isCrossRepository)
+    [ "$(jq -r .state <<<"$info")" = MERGED ] || die "#$merged is not MERGED. Not deleting its branch." 2
+    [ "$(jq -r .isCrossRepository <<<"$info")" = false ] || die "#$merged came from a fork. Not deleting a branch." 2
+    branch=$(jq -r .headRefName <<<"$info")
+    base=$($RGH pr view "$pr" -R "$repo" --json baseRefName --jq .baseRefName)
+    [ "$base" = "$branch" ] || die "#$pr targets $base, not the branch of #$merged ($branch). Not a stack pair." 2
   fi
-  $WGH pr edit "$pr" -R "$repo" --base main >/dev/null
+  $WGH pr edit "$pr" -R "$repo" --base "$default" >/dev/null
   base=$($RGH pr view "$pr" -R "$repo" --json baseRefName --jq .baseRefName)
-  [ "$base" = main ] || die "#$pr base is $base after retarget. Not deleting anything."
-  echo "#$pr -> main"
+  [ "$base" = "$default" ] || die "#$pr base is $base after retarget. Not deleting anything."
+  echo "#$pr -> $default"
   if [ "$merged" != "-" ]; then
-    $WGH api -X DELETE "repos/$repo/git/refs/heads/$branch" >/dev/null
+    $WGH api -X DELETE "repos/$repo/git/refs/heads/$(jq -rn --arg b "$branch" '$b | @uri')" >/dev/null
     echo "deleted $branch"
   fi
 }
@@ -77,28 +83,35 @@ cmd_gate() {
 }
 
 cmd_ack() {
-  local repo=${1:-} pr=${2:-} issue="" dry=0 a json unanswered sev list n i
+  local repo=${1:-} pr=${2:-} issue="" dry=0 a json unanswered notminor list n i body
   need_repo "$repo"; need_num "$pr"; shift 2
   for a in "$@"; do
     case "$a" in --dry-run) dry=1 ;; *) need_num "$a"; issue=$a ;; esac
   done
   json=$($RGH api --paginate "repos/$repo/pulls/$pr/comments?per_page=100" | jq -s 'add // []')
-  unanswered=$(jq '[.[] | select(.in_reply_to_id != null) | .in_reply_to_id] as $r
+  # A comment is answered only by a reply from someone other than its author.
+  unanswered=$(jq '(INDEX(.[]; .id | tostring)) as $by
+    | [.[] | select(.in_reply_to_id != null)
+        | select(.user.login != $by[(.in_reply_to_id | tostring)].user.login)
+        | .in_reply_to_id] as $r
     | [.[] | select(.in_reply_to_id == null and ((.id as $i | $r | index($i)) | not))]' <<<"$json")
   n=$(jq length <<<"$unanswered")
   [ "$n" -gt 0 ] || { echo "#$pr: nothing unanswered"; return 0; }
-  sev=$(jq -r '.[] | select(.body | test("(?i)\\b(major|critical)\\b")) | "\(.id) \(.path):\(.line // .original_line)"' <<<"$unanswered")
-  if [ -n "$sev" ]; then
-    echo "#$pr: STOP, unanswered Major/Critical inline comment(s). Fix the code first:" >&2
-    sed 's/^/  /' <<<"$sev" >&2
+  # Fail closed: only a clear Minor label may be acknowledged.
+  notminor=$(jq -r '.[] | select((.body | test("(?i)\\b(minor|nit|nitpick|trivial)\\b") | not)
+      or (.body | test("(?i)\\b(major|critical|blocker|p0|p1)\\b")))
+    | "\(.id) \(.path):\(.line // .original_line)"' <<<"$unanswered")
+  if [ -n "$notminor" ]; then
+    echo "#$pr: STOP. These unanswered inline comments are not clearly Minor. Fix or answer them by hand:" >&2
+    sed 's/^/  /' <<<"$notminor" >&2
     return 2
   fi
   list=$(jq -r '.[] | "- `\(.path):\(.line // .original_line)` (\(.user.login)): " +
-    (.body | gsub("<[^>]+>"; "") | gsub("\\*\\*"; "") | gsub("\n"; " ") | .[0:160])' <<<"$unanswered")
+    (.body | gsub("<[^>]+>"; "") | gsub("\\*\\*"; "") | gsub("@"; "") | gsub("\n"; " ") | .[0:160])' <<<"$unanswered")
   if [ "$dry" -eq 1 ]; then
     echo "#$pr: DRY RUN. Would track $n comment(s):"; echo "$list"; return 0
   fi
-  local body="Inline review comments on #$pr, tracked so they are fixed after the stack merges:
+  body="Inline review comments on #$pr, tracked so they are fixed after the stack merges:
 
 $list"
   if [ -n "$issue" ]; then

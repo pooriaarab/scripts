@@ -21,7 +21,9 @@ Environment:
   GH_BIN              The gh program to run. Default: gh.
 
 Allowed:
-  api <path>          GET only. Flags that send data or set another method fail.
+  api <path>          GET only. Only these flags pass: --paginate, --slurp, --jq/-q,
+                      --template/-t, -H, --hostname, --cache, --include/-i,
+                      --verbose, --silent, --method GET. Any other flag exits 2.
   pr|issue            view, list, diff, checks, status
   run|release|repo    view, list
   search, status
@@ -35,7 +37,7 @@ USAGE
 
 case "${1:-}" in -h|--help|help|"") usage; [ -n "${1:-}" ] && exit 0 || exit 2 ;; esac
 
-die() { echo "gh-app-read: $*" >&2; exit "${2:-1}"; }
+die() { echo "gh-app-read: $1" >&2; exit "${2:-1}"; }
 
 [ -n "${GH_READ_APPS:-}" ] || die "GH_READ_APPS is empty. Run with --help." 2
 [ -n "${GH_APP_TOKEN_CMD:-}" ] || die "GH_APP_TOKEN_CMD is empty. Run with --help." 2
@@ -47,11 +49,14 @@ allowed() {
     pr|issue) case "${a[1]:-}" in view|list|diff|checks|status) return 0 ;; esac ;;
     run|release|repo) case "${a[1]:-}" in view|list) return 0 ;; esac ;;
     api)
+      # Allowlist of flags. A write needs -X, -f, -F or --input, so none pass.
       for ((i = 1; i < ${#a[@]}; i++)); do
         case "${a[i]}" in
-          -X|--method) [ "$(printf '%s' "${a[i+1]:-}" | tr a-z A-Z)" = GET ] || return 1 ;;
-          -X*|--method=*) return 1 ;;
-          -f|-F|--field|--raw-field|--input|-f?*|-F?*|--field=*|--raw-field=*|--input=*) return 1 ;;
+          --paginate|--slurp|--verbose|--include|-i|--silent) ;;
+          --jq|-q|--template|-t|-H|--header|--hostname|--cache) i=$((i + 1)) ;;
+          --jq=*|--template=*|--header=*|--hostname=*|--cache=*) ;;
+          --method) [ "$(printf '%s' "${a[i+1]:-}" | tr a-z A-Z)" = GET ] || return 1; i=$((i + 1)) ;;
+          -*) return 1 ;;
         esac
       done
       return 0 ;;
@@ -71,11 +76,14 @@ ttl="${GH_READ_TTL_MIN:-50}"
 
 if [ ! -s "$cache" ] || [ -n "$(find "$cache" -mmin "+$ttl" 2>/dev/null)" ]; then
   umask 077
+  mkdir -p -m 700 "$dir" 2>/dev/null || true
+  [ -d "$dir" ] || die "cache folder is not usable: $dir"
   cmd="${GH_APP_TOKEN_CMD//\{app\}/$app}"
-  bash -c "$cmd" > "$cache.tmp" || { rm -f "$cache.tmp"; die "token command failed for $app"; }
-  [ -s "$cache.tmp" ] || { rm -f "$cache.tmp"; die "token command printed nothing for $app"; }
+  out=$(bash -c "$cmd" 2>/dev/null) || die "token command failed for $app"
+  printf '%s\n' "${out%%$'\n'*}" > "$cache.tmp"
+  [ -s "$cache.tmp" ] && [ -n "${out%%$'\n'*}" ] || { rm -f "$cache.tmp"; die "token command printed nothing for $app"; }
   chmod 600 "$cache.tmp"
   mv "$cache.tmp" "$cache"
 fi
 
-GH_TOKEN="$(tr -d '\n' < "$cache")" exec "${GH_BIN:-gh}" "$@"
+GH_TOKEN="$(head -n 1 "$cache")" exec "${GH_BIN:-gh}" "$@"
