@@ -63,6 +63,17 @@ check "ack unlabeled wrote nothing" "$(grep -c -E 'issue create|replies' "$FAKE_
 jq 'map(select(.id != 4 and .id != 7))' "$FAKE_COMMENTS" > "$tmp/c2.json"
 out=$(FAKE_COMMENTS="$tmp/c2.json" "$here/stack-merge" ack o/r 5 --dry-run 2>&1); check "self-reply is not an answer" "$(grep -c 'd.ts' <<<"$out")" 1
 
+# Label bypass attempts all fail closed. Real Minor labels pass.
+for body in "Trivial to exploit: SQL injection" "nit: this allows remote code execution" \
+            "Minor: but this crashes in production" "Nit-picking aside, this deadlocks" "Minority report"; do
+  jq -n --arg b "$body" '[{id:1,in_reply_to_id:null,path:"x",line:1,user:{login:"bot"},body:$b}]' > "$tmp/c4.json"
+  FAKE_COMMENTS="$tmp/c4.json" "$here/stack-merge" ack o/r 5 --dry-run >/dev/null 2>&1; check "bypass refused: $body" "$?" 2
+done
+for body in "Minor: rename this." "**Minor**: rename" "> Nitpick - tidy the name" "[Minor] rename"; do
+  jq -n --arg b "$body" '[{id:1,in_reply_to_id:null,path:"x",line:1,user:{login:"bot"},body:$b}]' > "$tmp/c4.json"
+  FAKE_COMMENTS="$tmp/c4.json" "$here/stack-merge" ack o/r 5 --dry-run >/dev/null 2>&1; check "real Minor passes: $body" "$?" 0
+done
+
 # Minor only: files one issue and replies once.
 cat > "$FAKE_COMMENTS" <<'JSON'
 [{"id":2,"in_reply_to_id":null,"path":"b.ts","line":9,"user":{"login":"bot"},"body":"Minor: rename this."}]

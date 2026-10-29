@@ -17,7 +17,9 @@ Commands:
         the full head SHA. The script does not merge.
   ack  <owner/repo> <pr> [issue] [--dry-run]
         File one tracking issue for unanswered inline comments labeled Minor,
-        Nit or Trivial at the start of the comment. Reply to each. Exit 2 and change nothing if any
+        Nit or Trivial at the start of the comment, followed by a colon or dash.
+        Reply to each. A word list cannot judge severity, so run --dry-run
+        and read the list before you run it for real. Exit 2 and change nothing if any
         unanswered comment is unlabeled or has a word like Major, Critical,
         Blocker, P0, P1, High or Security. A reply from the comment author does not count as an answer.
         With [issue], the body of that issue is replaced.
@@ -99,8 +101,8 @@ cmd_ack() {
   n=$(jq length <<<"$unanswered")
   [ "$n" -gt 0 ] || { echo "#$pr: nothing unanswered"; return 0; }
   # Fail closed: only a clear Minor label may be acknowledged.
-  notminor=$(jq -r '.[] | select((.body | test("(?i)^[\\s*_#>\\[(]*(minor|nit|nitpick|trivial)\\b") | not)
-      or (.body | test("(?i)\\b(major|critical|blocker|p0|p1|high|severe|security|vulnerab)")))
+  notminor=$(jq -r '.[] | select((.body | test("(?i)^[\\s*_#>\\[(]*(minor|nit|nitpick|trivial)[*_\\])]*\\s*[:\\-–—\\]]") | not)
+      or (.body | test("(?i)\\b(major|critical|blocker|p0|p1|severe|security|exploit|inject|rce|remote code|bypass|leak|crash|data loss|deadlock|race|vulnerab)|\\bhigh\\b")))
     | "\(.id) \(.path):\(.line // .original_line)"' <<<"$unanswered")
   if [ -n "$notminor" ]; then
     echo "#$pr: STOP. These unanswered inline comments are not clearly Minor. Fix or answer them by hand:" >&2
