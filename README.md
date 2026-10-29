@@ -187,6 +187,37 @@ must be unique across the account.
 The rollout creates or reuses a GitHub issue per repo, then a branch and a PR.
 Repos that are already configured are skipped.
 
+## gh-app-read
+
+Run read-only `gh` commands on a GitHub App installation token. Each App has its
+own hourly budget, often 12,500 requests, so agent reads do not drain the owner
+token. The wrapper rotates across the Apps you list and caches each token for 50
+minutes in a file with mode 600. It refuses any command that may write.
+
+```bash
+export GH_READ_APPS="app-a app-b"
+export GH_APP_TOKEN_CMD='<your-token-tool> token {app}'   # prints one token
+gh-app-read api rate_limit --jq .rate
+gh-app-read pr view 12 -R <owner>/<repo> --json state,headRefOid
+```
+
+Run `gh-app-read --help` for every variable. Writes and merges use plain `gh`.
+Skill: `agent-factory-throughput` in the skills library.
+
+## stack-merge
+
+Helpers for merging a PR stack bottom-up. The script never merges. It prints the
+exact `gh pr merge --match-head-commit <full-sha>` command and you run it.
+
+| Command | What |
+|---|---|
+| `stack-merge prep <owner/repo> <merged-pr\|-> <pr>` | Point the next PR at `main`, then delete the merged branch. Refuses an unmerged PR |
+| `stack-merge gate <owner/repo> <pr>` | Run `STACK_GATE_CMD`. On exit 0, print the merge command with the full head SHA |
+| `stack-merge ack <owner/repo> <pr> [issue] [--dry-run]` | File one issue for unanswered Minor inline comments and reply to each. Exit 2 on any Major or Critical |
+
+Run `stack-merge --help` for the variables. Check both tools with
+`./stack-merge.test.sh`. It uses a fake `gh` and needs no network.
+
 ## Notes
 
 | Doc | What |
