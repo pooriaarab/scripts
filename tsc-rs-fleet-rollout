@@ -157,7 +157,7 @@ Goal: adopt tsc-rs $VERSION. Branch: $branch."
   fi
   bun run typecheck 2>&1 | tee "$ROOT/$name-typecheck.log"
   # Lockfile-only rollouts would run ci:full in a shallow clone; typecheck is the rollout gate.
-  if [[ "$(python3 - <<'PY'
+  if [[ -z "${FAIL_CI:-}" ]] && [[ "$(python3 - <<'PY'
 import subprocess
 def changed():
     for ref in ("origin/main", "HEAD"):
