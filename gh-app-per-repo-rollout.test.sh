@@ -87,4 +87,6 @@ reject verify demo
 printf 'canonical_repo\tshort\npooriaarab/demo\tdemo\n' > "$test_dir/manifest.tsv"
 run batch-status "$test_dir/manifest.tsv"
 grep -Fq 'summary	total=1	ready=1	missing=0' "$test_dir/output"
+printf 'pooriaarab/x\tBad\n' > "$test_dir/bad-manifest.tsv"
+reject batch-status "$test_dir/bad-manifest.tsv"
 printf 'PASS: per-repo rollout smoke (plan, config, online, secret filtering, batch-status)\n'

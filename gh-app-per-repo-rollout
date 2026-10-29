@@ -157,7 +157,10 @@ PY
 
 batch_status() {
   local manifest=$1 secrets_root=$HOME/Documents/Personal/.secrets
-  local total=0 ready=0 missing=0
+  local total=0 ready=0 missing=0 tmp
+  tmp=$(mktemp)
+  trap 'rm -f "$tmp"' RETURN
+  read_manifest_shorts "$manifest" >"$tmp"
   while IFS= read -r short; do
     total=$((total + 1))
     local folder
@@ -169,12 +172,15 @@ batch_status() {
       missing=$((missing + 1))
       printf 'missing\t%s\n' "$short"
     fi
-  done < <(read_manifest_shorts "$manifest")
+  done <"$tmp"
   printf 'summary\ttotal=%s\tready=%s\tmissing=%s\n' "$total" "$ready" "$missing"
 }
 
 batch_plan() {
-  local manifest=$1 limit=${2:-0} count=0
+  local manifest=$1 limit=${2:-0} count=0 tmp
+  tmp=$(mktemp)
+  trap 'rm -f "$tmp"' RETURN
+  read_manifest_shorts "$manifest" >"$tmp"
   while IFS= read -r short; do
     local folder=$HOME/Documents/Personal/.secrets/$(folder_for_short "$short")
     if [[ -f $folder/app.env && -f $folder/app.pem ]]; then
@@ -186,11 +192,14 @@ batch_plan() {
     if [[ $limit -gt 0 && $count -ge $limit ]]; then
       break
     fi
-  done < <(read_manifest_shorts "$manifest")
+  done <"$tmp"
 }
 
 batch_verify() {
-  local manifest=$1 online=${2:-} limit=${3:-0} count=0 failed=0
+  local manifest=$1 online=${2:-} limit=${3:-0} count=0 failed=0 tmp
+  tmp=$(mktemp)
+  trap 'rm -f "$tmp"' RETURN
+  read_manifest_shorts "$manifest" >"$tmp"
   while IFS= read -r short; do
     local folder=$HOME/Documents/Personal/.secrets/$(folder_for_short "$short")
     if [[ ! -f $folder/app.env || ! -f $folder/app.pem ]]; then
@@ -206,7 +215,7 @@ batch_verify() {
     if [[ $limit -gt 0 && $count -ge $limit ]]; then
       break
     fi
-  done < <(read_manifest_shorts "$manifest")
+  done <"$tmp"
   return "$failed"
 }
 
