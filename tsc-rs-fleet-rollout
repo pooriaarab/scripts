@@ -68,6 +68,8 @@ process_repo() (
   cd "$dir"
   if git grep -l 'supportsheep/packages/support' -- 'package.json' '**/package.json' >/dev/null 2>&1; then
     [[ -d "$ROOT/supportsheep" ]] || gh repo clone "$OWNER/supportsheep" "$ROOT/supportsheep" -- --depth 1 --quiet
+    # Bun file: links are relative to each repo root, not the rollout temp dir.
+    [[ -e "$dir/supportsheep" ]] || ln -s "$ROOT/supportsheep" "$dir/supportsheep"
   fi
   [[ -f package.json && ( -f bun.lock || -f bun.lockb ) ]] || { echo 'Skip: no Bun root package.'; exit 0; }
   [[ -f .github/pr-standards.json ]] || { echo 'Skip: no PR prefix configuration.'; exit 0; }
