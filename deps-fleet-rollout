@@ -1,0 +1,159 @@
+#!/usr/bin/env bash
+# Bump Bun dependencies to latest across eligible org repos (self-hosted / Box).
+# Requires gh, git, bun, python3; merge mode requires premerge on PATH.
+set -euo pipefail
+
+OWNER=pooriaarab
+DRY_RUN=0
+MERGE=0
+REPOS=()
+ROOT="$(mktemp -d "${TMPDIR:-/tmp}/deps-fleet-rollout.XXXXXX")"
+trap 'rm -rf "$ROOT"' EXIT
+
+usage() {
+  cat <<'HELP'
+Usage: deps-fleet-rollout [--owner NAME] [--repo NAME] [--dry-run] [--merge-when-green]
+
+--repo is repeatable. Without it, all non-archived non-fork repos for NAME.
+Requires root package.json, bun.lock/bun.lockb, .github/pr-standards.json,
+and package.json scripts typecheck + ci:local.
+HELP
+}
+
+while (( $# )); do
+  case "$1" in
+    --owner|--repo)
+      [[ $# -ge 2 && "$2" =~ ^[A-Za-z0-9_.-]+$ && "$2" != .* ]] || { usage >&2; exit 2; }
+      if [[ "$1" == --owner ]]; then OWNER="$2"; else REPOS+=("$2"); fi
+      shift 2 ;;
+    --dry-run) DRY_RUN=1; shift ;;
+    --merge-when-green) MERGE=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) usage >&2; exit 2 ;;
+  esac
+done
+
+for tool in gh git bun python3; do
+  command -v "$tool" >/dev/null || { echo "Missing command: $tool" >&2; exit 2; }
+done
+if (( MERGE && ! DRY_RUN )); then
+  command -v premerge >/dev/null || { echo 'Merge mode requires premerge on PATH.' >&2; exit 2; }
+fi
+gh auth status >/dev/null 2>&1 || { echo 'Authenticate gh before rollout.' >&2; exit 2; }
+
+if (( ${#REPOS[@]} == 0 )); then
+  gh repo list "$OWNER" --limit 1000 --json name,isArchived,isFork \
+    --jq '.[] | select(.isArchived == false and .isFork == false) | .name' > "$ROOT/repos"
+else
+  printf '%s\n' "${REPOS[@]}" > "$ROOT/repos"
+fi
+
+merge_pr() {
+  local repo="$1" number="$2" sha gate
+  sha="$(gh pr view "$number" -R "$repo" --json headRefOid --jq .headRefOid)"
+  if premerge "$number" "$repo"; then
+    gh pr merge "$number" -R "$repo" --squash --delete-branch --match-head-commit "$sha"
+  else
+    gate=$?
+    [[ "$gate" == 1 ]] || return "$gate"
+    echo "Pending merge gates: $repo PR #$number"
+  fi
+}
+
+process_repo() (
+  set -euo pipefail
+  local name="$1" repo="$OWNER/$1" dir="$ROOT/$1" prefix branch issue existing body claim sha
+  echo "Inspecting $repo"
+  gh repo clone "$repo" "$dir" -- --depth 1 --quiet
+  cd "$dir"
+  [[ -f package.json && ( -f bun.lock || -f bun.lockb ) ]] || { echo 'Skip: no Bun root package.'; exit 0; }
+  [[ -f .github/pr-standards.json ]] || { echo 'Skip: no PR prefix configuration.'; exit 0; }
+  prefix="$(python3 -c 'import json; print(json.load(open(".github/pr-standards.json"))["prefix"])')"
+  [[ "$prefix" =~ ^[a-z]{2,4}$ ]] || { echo 'Invalid PR prefix.' >&2; exit 1; }
+  python3 - <<'PY' || exit 0
+import json, pathlib, sys
+root = json.loads(pathlib.Path('package.json').read_text())
+need = ('typecheck', 'ci:local')
+if not all(root.get('scripts', {}).get(k) for k in need):
+    print('Skip: typecheck and ci:local are required.')
+    sys.exit(10)
+PY
+
+  existing="$(gh pr list -R "$repo" --state open --json number,headRefName \
+    --jq '.[] | select(.headRefName | endswith("-deps-latest")) | .number' | head -1)"
+  if [[ -n "$existing" ]]; then
+    [[ "$existing" =~ ^[0-9]+$ ]] || { echo 'Multiple deps PRs need operator review.' >&2; exit 1; }
+    echo "Existing PR: https://github.com/$repo/pull/$existing"
+    if (( MERGE && ! DRY_RUN )); then merge_pr "$repo" "$existing"; fi
+    exit 0
+  fi
+
+  if (( DRY_RUN )); then echo "Dry run: bun update --latest in $repo"; exit 0; fi
+
+  issue="$(gh issue list -R "$repo" --state open --search 'in:title "Bump dependencies to latest"' \
+    --json number,title --jq '.[] | select(.title == "Bump dependencies to latest") | .number' | head -1)"
+  if [[ -z "$issue" ]]; then
+    issue="$(gh issue create -R "$repo" --title 'Bump dependencies to latest' \
+      --body 'Refresh lockfile and package ranges to current latest versions. Verify typecheck and ci:local before merge.')"
+    issue="${issue##*/}"
+  fi
+  [[ "$issue" =~ ^[0-9]+$ ]] || { echo 'Cannot select one rollout issue.' >&2; exit 1; }
+  branch="$prefix-$issue-deps-latest"
+  claim="$(gh api "repos/$repo/issues/$issue/comments" -f body="Harness: deps fleet rollout. Model: none (deterministic script).
+Host: $(hostname). Start: $(date -u +%FT%TZ). State: active.
+Goal: bun update --latest. Branch: $branch." --jq .id)"
+  trap 'gh api -X PATCH "repos/$repo/issues/comments/$claim" -f body="Harness: deps fleet rollout. Model: none. State: released. Branch: $branch." >/dev/null || true' EXIT
+
+  git checkout -b "$branch"
+  bun update --latest
+  bun install --frozen-lockfile
+  bun run typecheck 2>&1 | tee "$ROOT/$name-typecheck.log"
+  bun run ci:local 2>&1 | tee "$ROOT/$name-ci.log"
+  git add -- package.json bun.lock bun.lockb
+  while IFS= read -r -d '' path; do
+    case "$path" in package.json|*/package.json|bun.lock|bun.lockb) git add -- "$path" ;; esac
+  done < <(git diff --name-only -z)
+  [[ -z "$(git diff --name-only)" ]] || { echo 'Update changed other tracked files; inspect manually.' >&2; exit 1; }
+  git diff --cached --quiet && { echo 'No dependency changes.'; exit 0; }
+  git commit -m "Bump dependencies to latest"
+  git push -u origin "$branch"
+  sha="$(git rev-parse HEAD)"
+  body="$ROOT/$name-pr.md"
+  cat > "$body" <<EOF
+Closes #$issue
+
+## What
+Run \`bun update --latest\` and refresh the lockfile for this repository only.
+
+## Why
+Stay on current dependency releases without manual per-package edits.
+
+## How I verified
+\`bun install --frozen-lockfile\` -> exit 0
+\`bun run typecheck\` -> exit 0 at $sha
+\`bun run ci:local\` -> exit 0 at $sha
+Operator: not applicable - dependency refresh with existing CI gates.
+
+Automated-by: deps-fleet-rollout (deterministic script; no model contributor).
+Independent review is required before merge.
+EOF
+  existing="$(gh pr create -R "$repo" --head "$branch" \
+    --title "[$(printf '%s' "$prefix" | tr '[:lower:]' '[:upper:]')-$issue] Bump dependencies to latest" --body-file "$body")"
+  echo "PR: $existing"
+  if (( MERGE )); then merge_pr "$repo" "${existing##*/}"; fi
+)
+
+failed=0
+while IFS= read -r repo; do
+  [[ -n "$repo" ]] || continue
+  [[ "$repo" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]*$ ]] || { failed=1; continue; }
+  export OWNER ROOT DRY_RUN MERGE
+  export -f process_repo merge_pr
+  if bash -euo pipefail -c 'process_repo "$1"' bash "$repo"; then
+    echo "Complete: $OWNER/$repo"
+  else
+    echo "Failed: $OWNER/$repo" >&2
+    failed=1
+  fi
+done < "$ROOT/repos"
+exit "$failed"

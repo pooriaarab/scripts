@@ -1,0 +1,48 @@
+name: deps fleet rollout
+
+on:
+  workflow_dispatch:
+    inputs:
+      owner:
+        description: GitHub org or user
+        required: true
+        default: pooriaarab
+      merge_when_green:
+        description: Squash-merge PRs when premerge passes
+        type: boolean
+        default: false
+      single_repo:
+        description: Optional single repo name (empty = all eligible)
+        required: false
+        default: ""
+
+concurrency:
+  group: deps-fleet-rollout
+  cancel-in-progress: false
+
+jobs:
+  rollout:
+    name: Bump dependencies to latest
+    runs-on: ${{ vars.CI_RUNNER_DEFAULT || 'self-hosted' }}
+    timeout-minutes: 720
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: true
+      - uses: oven-sh/setup-bun@v2
+      - name: Run deps fleet rollout
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PATH: /home/user/bin:${{ env.PATH }}
+        run: |
+          set -euo pipefail
+          chmod +x ./deps-fleet-rollout
+          args=(--owner "${{ inputs.owner }}")
+          [[ "${{ inputs.merge_when_green }}" == "true" ]] && args+=(--merge-when-green)
+          [[ -n "${{ inputs.single_repo }}" ]] && args+=(--repo "${{ inputs.single_repo }}")
+          ./deps-fleet-rollout "${args[@]}" | tee deps-rollout-log.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: deps-rollout-log
+          path: deps-rollout-log.txt
