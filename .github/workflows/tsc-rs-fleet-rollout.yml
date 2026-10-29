@@ -1,0 +1,48 @@
+name: tsc-rs fleet rollout
+
+on:
+  workflow_dispatch:
+    inputs:
+      owner:
+        description: GitHub org or user
+        required: true
+        default: pooriaarab
+      merge_when_green:
+        description: Squash-merge PRs when checks are green
+        type: boolean
+        default: true
+      single_repo:
+        description: Optional single repo name (empty = all)
+        required: false
+        default: ""
+
+concurrency:
+  group: tsc-rs-fleet-rollout
+  cancel-in-progress: false
+
+jobs:
+  rollout:
+    name: Roll out tsc-rs typecheck
+    runs-on: ${{ vars.CI_RUNNER_DEFAULT || 'self-hosted' }}
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: true
+      - uses: oven-sh/setup-bun@v2
+      - name: Run fleet rollout
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_DELAY: "3"
+        run: |
+          set -euo pipefail
+          chmod +x ./tsc-rs-fleet-rollout
+          args=(--owner "${{ inputs.owner }}")
+          [[ "${{ inputs.merge_when_green }}" == "true" ]] && args+=(--merge-when-green)
+          [[ -n "${{ inputs.single_repo }}" ]] && args+=(--repo "${{ inputs.single_repo }}")
+          ./tsc-rs-fleet-rollout "${args[@]}" | tee rollout-log.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: tsc-rs-rollout-log
+          path: rollout-log.txt
