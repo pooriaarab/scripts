@@ -86,7 +86,7 @@ process_repo() (
   # Replace the TypeScript CLI with tsc-rs in tracked package.json (scripts, wireit, etc.).
   if python3 - "$VERSION" <<'PY'
 import json, pathlib, re, subprocess, sys
-TSC = re.compile(r'(?<![\w/.-])(?:bunx\s+)?tsc(?=\s)')
+TSC = re.compile(r'(?<![\w/.-])(?:bunx\s+)?tsc(?!onfig\b)(?=\s|$|[;&|])')
 def uses_compiler(text):
     return bool(TSC.search(text) or re.search(r'(?<![\w/.-])tsc-rs\b', text))
 def swap_compiler(text):
