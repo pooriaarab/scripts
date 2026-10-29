@@ -50,6 +50,7 @@ jobs:
         continue-on-error: true
         run: |
           set -euo pipefail
+          python3 tsc-rs-fleet-rollout.test.py
           python3 gh-app.test.py
           ./gh-app-per-repo-rollout.test.sh
           python3 fb-page.test.py

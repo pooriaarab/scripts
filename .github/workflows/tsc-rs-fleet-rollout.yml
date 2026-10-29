@@ -4,17 +4,21 @@ on:
   workflow_dispatch:
     inputs:
       owner:
-        description: GitHub org or user
+        description: GitHub owner
         required: true
         default: pooriaarab
+        type: string
       merge_when_green:
-        description: Squash-merge PRs when checks are green
+        description: Merge only after premerge approves all gates
         type: boolean
         default: true
       single_repo:
-        description: Optional single repo name (empty = all)
-        required: false
-        default: ""
+        description: Optional repository name
+        type: string
+        default: ''
+
+permissions:
+  contents: read
 
 concurrency:
   group: tsc-rs-fleet-rollout
@@ -22,25 +26,30 @@ concurrency:
 
 jobs:
   rollout:
-    name: Roll out tsc-rs typecheck
-    runs-on: ${{ vars.CI_RUNNER_DEFAULT || 'self-hosted' }}
+    # Manual runs use trusted main code and the runner's fleet gh credentials.
+    if: github.ref == 'refs/heads/main' && github.repository_owner == 'pooriaarab'
+    runs-on: self-hosted
     timeout-minutes: 360
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          persist-credentials: true
+          persist-credentials: false
       - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
       - name: Run fleet rollout
+        shell: bash
         env:
-          GH_TOKEN: ${{ github.token }}
-          GH_DELAY: "3"
+          ROLLOUT_OWNER: ${{ inputs.owner }}
+          MERGE_WHEN_GREEN: ${{ inputs.merge_when_green }}
+          SINGLE_REPO: ${{ inputs.single_repo }}
         run: |
           set -euo pipefail
-          chmod +x ./tsc-rs-fleet-rollout
-          args=(--owner "${{ inputs.owner }}")
-          [[ "${{ inputs.merge_when_green }}" == "true" ]] && args+=(--merge-when-green)
-          [[ -n "${{ inputs.single_repo }}" ]] && args+=(--repo "${{ inputs.single_repo }}")
-          ./tsc-rs-fleet-rollout "${args[@]}" | tee rollout-log.txt
+          # gh needs a fleet login. github.token covers only this repository.
+          args=(--owner "$ROLLOUT_OWNER")
+          if [[ "$MERGE_WHEN_GREEN" == true ]]; then args+=(--merge-when-green); fi
+          if [[ -n "$SINGLE_REPO" ]]; then args+=(--repo "$SINGLE_REPO"); fi
+          ./tsc-rs-fleet-rollout "${args[@]}" 2>&1 | tee rollout-log.txt
       - uses: actions/upload-artifact@v4
         if: always()
         with:
