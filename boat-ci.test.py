@@ -90,10 +90,16 @@ else: sys.exit(2)
         selector = "${{ github.event.repository.private == true && 'boat' || 'ubuntu-latest' }}"
         for path in templates:
             self.assertIn(f'runs-on: {selector}', path.read_text(), path)
+        # workflow_dispatch fleet rollouts run on boat/self-hosted, not ubuntu-latest.
+        fleet_rollout_runs_on = "runs-on: ${{ vars.CI_RUNNER_DEFAULT || 'self-hosted' }}"
+        fleet_rollout_workflows = frozenset({'tsc-rs-fleet-rollout.yml'})
         for path in ROOT.glob('.github/workflows/*.yml'):
             for line in path.read_text().splitlines():
                 if line.strip().startswith('runs-on:'):
-                    self.assertEqual(line.strip(), 'runs-on: ubuntu-latest', path)
+                    if path.name in fleet_rollout_workflows:
+                        self.assertEqual(line.strip(), fleet_rollout_runs_on, path)
+                    else:
+                        self.assertEqual(line.strip(), 'runs-on: ubuntu-latest', path)
 
     def test_fanout_uses_visibility_in_both_shapes(self):
         subprocess.run(['git', 'init', '-q', str(self.base)], check=True)
