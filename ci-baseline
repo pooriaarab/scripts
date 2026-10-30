@@ -1,0 +1,123 @@
+#!/usr/bin/env python3
+"""ci-baseline: measure a repository's CI from the GitHub API alone.
+
+  ci-baseline OWNER/REPO [--since YYYY-MM-DD] [--until YYYY-MM-DD] [--max-runs N] [--json]
+
+Prints, per workflow and event: runs, jobs, median queue wait, median run time,
+total job-seconds, and the share of all jobs. Run it before a CI change and
+again after, over equal windows, and compare the two totals.
+
+Why these columns: on a busy runner pool the wait is often longer than the run,
+and a job's cost is mostly the box start, so the job COUNT is the lever. A table
+that sorts by job count shows where the jobs come from.
+
+Needs `gh` logged in with read access to the repository's Actions. It makes one
+API call per run, so --max-runs (default 300) bounds the cost. The sample is the
+newest runs in the window; read the printed window before you extrapolate.
+"""
+import argparse
+import json
+import statistics
+import subprocess
+import sys
+import time
+from collections import defaultdict
+from datetime import datetime
+
+
+def gh(path):
+    for attempt in range(4):
+        out = subprocess.run(["gh", "api", path], capture_output=True, text=True)
+        if out.returncode == 0:
+            return json.loads(out.stdout)
+        time.sleep(2 * (attempt + 1))  # a 5xx from the API is usually brief
+    sys.exit(f"ci-baseline: gh api {path} failed: {out.stderr.strip()}")
+
+
+def ts(value):
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+def median(values):
+    return statistics.median(values) if values else 0
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("repo")
+    ap.add_argument("--since", help="first day, YYYY-MM-DD")
+    ap.add_argument("--until", help="last day, YYYY-MM-DD")
+    ap.add_argument("--max-runs", type=int, default=300)
+    ap.add_argument("--json", action="store_true")
+    args = ap.parse_args()
+
+    created = ""
+    if args.since and args.until:
+        created = f"&created={args.since}..{args.until}"
+    elif args.since:
+        created = f"&created=>={args.since}"
+    elif args.until:
+        created = f"&created=<={args.until}"
+
+    runs = []
+    page = 1
+    while len(runs) < args.max_runs:
+        batch = gh(f"repos/{args.repo}/actions/runs?per_page=100&page={page}{created}")["workflow_runs"]
+        if not batch:
+            break
+        runs += batch
+        page += 1
+    runs = runs[: args.max_runs]
+    if not runs:
+        sys.exit("ci-baseline: no runs in that window")
+
+    rows = defaultdict(lambda: {"runs": 0, "jobs": 0, "waits": [], "runs_s": [], "job_s": 0.0})
+    for run in runs:
+        row = rows[(run["name"], run["event"])]
+        row["runs"] += 1
+        jobs = gh(f"repos/{args.repo}/actions/runs/{run['id']}/jobs?per_page=100&filter=latest")["jobs"]
+        for job in jobs:
+            if not job.get("started_at") or not job.get("completed_at"):
+                continue  # skipped or cancelled before a box started: it costs nothing
+            row["jobs"] += 1
+            row["waits"].append((ts(job["started_at"]) - ts(job["created_at"])).total_seconds())
+            seconds = (ts(job["completed_at"]) - ts(job["started_at"])).total_seconds()
+            row["runs_s"].append(seconds)
+            row["job_s"] += seconds
+
+    total_jobs = sum(r["jobs"] for r in rows.values()) or 1
+    result = {
+        "repo": args.repo,
+        "window": {"newest": max(r["created_at"] for r in runs), "oldest": min(r["created_at"] for r in runs)},
+        "runs": len(runs),
+        "jobs": sum(r["jobs"] for r in rows.values()),
+        "job_seconds": round(sum(r["job_s"] for r in rows.values())),
+        "median_wait_s": median([w for r in rows.values() for w in r["waits"]]),
+        "median_run_s": median([s for r in rows.values() for s in r["runs_s"]]),
+        "by_workflow": [
+            {
+                "workflow": name,
+                "event": event,
+                "runs": r["runs"],
+                "jobs": r["jobs"],
+                "share": round(100 * r["jobs"] / total_jobs, 1),
+                "median_wait_s": median(r["waits"]),
+                "median_run_s": median(r["runs_s"]),
+                "job_seconds": round(r["job_s"]),
+            }
+            for (name, event), r in sorted(rows.items(), key=lambda kv: -kv[1]["jobs"])
+        ],
+    }
+    if args.json:
+        print(json.dumps(result, indent=2))
+        return
+    print(f"{result['repo']}: {result['runs']} runs, {result['jobs']} billed jobs, {result['job_seconds']} job-seconds")
+    print(f"window: {result['window']['oldest']} .. {result['window']['newest']}")
+    print(f"median wait {result['median_wait_s']:.0f}s, median run {result['median_run_s']:.0f}s\n")
+    print(f"{'jobs':>6} {'share':>6} {'runs':>5} {'wait':>6} {'run':>6}  workflow / event")
+    for r in result["by_workflow"]:
+        print(f"{r['jobs']:>6} {r['share']:>5.1f}% {r['runs']:>5} {r['median_wait_s']:>5.0f}s {r['median_run_s']:>5.0f}s  {r['workflow']} / {r['event']}")
+
+
+if __name__ == "__main__":
+    main()
