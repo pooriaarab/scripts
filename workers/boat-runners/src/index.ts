@@ -85,6 +85,15 @@ export class BrokerDO {
     if (!r.ok) throw new Error(`GitHub ${r.status}`);
     return r.json() as Promise<any>;
   }
+  async runEnded(repo: string, id: number): Promise<boolean> {
+    if (!Number.isSafeInteger(id) || id <= 0) throw new Error('Invalid workflow run');
+    const response = await this.gh(`/repos/${repo}/actions/runs/${id}`);
+    if (response.status === 404) return true;
+    if (!response.ok) throw new Error(`Workflow run lookup ${response.status}`);
+    const run = await response.json() as { status?: unknown };
+    if (typeof run.status !== 'string' || !['queued', 'in_progress', 'waiting', 'pending', 'requested', 'completed'].includes(run.status)) throw new Error('Invalid workflow run status');
+    return run.status === 'completed';
+  }
   async list(path: string, key: string) {
     const all: Row[] = [];
     for (let page = 1; ; page++) {
@@ -147,6 +156,14 @@ export class BrokerDO {
         await this.end(l.job, job.status !== 'in_progress');
         this.rows('UPDATE leases SET closing=1 WHERE id=?', l.id);
         await this.cleanup(l);
+        return null;
+      }
+      // GitHub can leave a child queued after its workflow run completes.
+      if (await this.runEnded(l.repo, job.run_id)) {
+        await this.end(l.job, false);
+        // This lease has not issued a runner. Older leases remain independent.
+        this.rows('DELETE FROM leases WHERE id=?', l.id);
+        console.info(JSON.stringify({ event: 'boat.queue.retired', job: l.job, run: job.run_id, reason: 'run-ended' }));
         return null;
       }
       const r = await this.gh(`/repos/${l.repo}/actions/runners/generate-jitconfig`, 'POST', { name: l.name, runner_group_id: 1, labels: [label], work_folder: '_work' });
@@ -243,8 +260,14 @@ export class BrokerDO {
           }
         }
         for (const job of this.rows('SELECT id FROM jobs WHERE repo=?', repo)) {
-          const current = await this.data(`/repos/${repo}/actions/jobs/${job.id}`);
-          if (current.status !== 'queued') await this.end(job.id, current.status === 'completed');
+          const response = await this.gh(`/repos/${repo}/actions/jobs/${job.id}`);
+          if (!response.ok && response.status !== 404) throw new Error('Job lookup failed');
+          const current: Row = response.status === 404 ? { status: 'gone' } : await response.json();
+          const ended = current.status === 'queued' && await this.runEnded(repo, current.run_id);
+          if (current.status !== 'queued' || ended) {
+            await this.end(job.id, current.status === 'completed');
+            if (ended) console.info(JSON.stringify({ event: 'boat.queue.retired', job: job.id, run: current.run_id, reason: 'run-ended' }));
+          }
         }
       } catch { errors++; }
     }
