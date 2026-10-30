@@ -23,7 +23,7 @@ Usage:
 
 Short names use lowercase letters, digits, and single hyphens (1-60 characters).
 Manifest TSV columns: canonical_repo<TAB>short (header row optional).
-Keep manifest files in agents-private; do not commit them to public repos.
+Keep manifest files in a private repository; do not commit them to public repos.
 EOF
   exit 2
 }

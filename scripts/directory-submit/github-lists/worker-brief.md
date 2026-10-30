@@ -9,7 +9,7 @@ Public repos clone with no login: `git clone --depth 1 https://github.com/<owner
 `SHARD` (a JSON file path given in your prompt) lists targets: public GitHub repos or issue forms that
 accept new entries for free. For each target, prepare the change for each fleet site that fits.
 The sites are 17 niche directories. Their public facts are in `/home/user/facts.json` (name, domain, url, tagline, short and long description, tags, MCP endpoint, API, llms.txt).
-Read that file. The `pooriaarab/directory` repo is private: do not try to clone it. Each site's own pages at its domain are public if you need more.
+Read that file. The fleet template repository is private: do not try to clone it. Each site's own pages at its domain are public if you need more.
 
 ## Rules
 1. Read the target's `CONTRIBUTING`, README and the last 10 merged PRs (use the public GitHub web pages via curl, or

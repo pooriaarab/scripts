@@ -20,7 +20,7 @@ copy-paste packet. This folder drives the browser and writes the ledger.
 
 ## Set up
 
-1. Check out `pooriaarab/directory` and set `DIRSUB_REPO` to its path. The
+1. Check out the fleet template repository and set `DIRSUB_REPO` to its path. The
    default is the current directory.
 2. Sign in once, by hand, to each board in the `browser-personal` Chrome
    profile. The drivers never type a password. Read the `agent-browser-profiles`

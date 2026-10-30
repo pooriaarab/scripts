@@ -123,13 +123,13 @@ Re-run after adding a new wave-1 row or registering a new per-repo App.
 
 ## Wave 2 batch rollout
 
-Keep the repository-to-short manifest in `pooriaarab/agents-private` only.
+Keep the repository-to-short manifest in a private repository only.
 Do not commit that list to public repositories.
 
 From this checkout, after wave 2 lands on `main`:
 
 ```sh
-manifest=~/Documents/Personal/agents-private/memory/global/reference-github-app-per-repo-wave2-manifest.tsv
+manifest=~/private-notes/github-app-per-repo-wave2-manifest.tsv
 ./gh-app-per-repo-rollout batch-status "$manifest"
 ./gh-app-per-repo-rollout batch-plan "$manifest" --limit 1
 ./gh-app-per-repo-rollout batch-verify "$manifest"
