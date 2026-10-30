@@ -3,6 +3,10 @@
 Use this runbook with the existing CI inspection tools before changing release scheduling or test selection.
 It defines evidence requirements; it does not automate a critical-path calculation.
 
+For scheduler placement, repeated builds, safe pool drains, and PR proof, use
+[the CI cost controls](ci-cost-controls.md). Keep this procedure for measuring
+the complete release interval.
+
 ## Record the baseline
 
 Keep raw evidence in private storage. Job names, logs, and URLs can identify private projects.

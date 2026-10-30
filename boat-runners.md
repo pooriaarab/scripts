@@ -1,5 +1,9 @@
 # Boat runner pool
 
+For cost audits, safe drains, and development versus production scheduling,
+read [Reduce CI cost without blocking delivery](ci-cost-controls.md).
+GitHub Actions can schedule this pool without the native Boat CI integration.
+
 Run `boat-pool` on the owner's Mac with `gh` authenticated and the Box CLI at
 `~/.ascii/bin/box`. Install the broker from #508 first. Set `BROKER_URL`,
 `POOL_TOKEN` and (for hooks) `WEBHOOK_SECRET` in the operator shell; never commit

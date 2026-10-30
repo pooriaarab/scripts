@@ -15,6 +15,11 @@ The [`agents`](https://github.com/pooriaarab/agents) repo is the hub — a porta
 | [scripts](https://github.com/pooriaarab/scripts) | Automation scripts |
 | [prompts](https://github.com/pooriaarab/prompts) | Refined prompts |
 
+## CI cost controls
+
+[Reduce CI cost without blocking delivery](ci-cost-controls.md) covers local
+proof, production checks, runner placement, safe pool drains, and billing evidence.
+
 ## fleet-ci-census
 
 Fleet CI wall-time census. `./fleet-ci-census --help`.
