@@ -35,40 +35,46 @@ function fixture(parent = 'completed', lookupStatus = 200, jobLookupStatus = 200
     },
   };
   let mints = 0;
+  const mintedLabels = [];
+  const knownJobs = new Map();
   const env = { WEBHOOK_SECRET: secret, POOL_TOKEN: secret };
   const broker = new BrokerDO({ storage }, env);
   env.BROKER = { idFromName: () => 'broker', get: () => ({ fetch: (req, init) => broker.fetch(req instanceof Request ? req : new Request(req, init)) }) };
   // Only GitHub transport is replaced. Router, signatures, SQL, claims, cleanup,
   // and reconciliation execute the real broker code.
-  broker.gh = async (path, method = 'GET') => {
+  broker.gh = async (path, method = 'GET', body) => {
     clock += 30_000; // Advance long-poll time without sleeping in the scenarios.
     if (method === 'DELETE') return new Response(null, { status: 204 });
     if (path.endsWith('/generate-jitconfig')) {
       mints++;
+      mintedLabels.push(body.labels);
       return Response.json({ runner: { id: 7 }, encoded_jit_config: 'dummy-jit-secret' });
     }
     if (path === '/repos/pooriaarab/fixture') return Response.json({ private: true });
-    if (path.includes('/actions/jobs/')) return jobLookupStatus === 200 ? Response.json({ id: 101, run_id: 100, status: 'queued', labels: ['boat'] }) : Response.json({}, { status: jobLookupStatus });
+    if (path.includes('/actions/jobs/')) return jobLookupStatus === 200 ? Response.json(knownJobs.get(Number(path.split('/').at(-1))) ?? { id: 101, run_id: 100, status: 'queued', labels: ['boat'] }) : Response.json({}, { status: jobLookupStatus });
     if (path === '/repos/pooriaarab/fixture/actions/runs/100') {
       return lookupStatus === 200 ? Response.json({ id: 100, status: parentState }) : Response.json({ error: 'lookup refused' }, { status: lookupStatus });
     }
     if (path.includes('/actions/runs?')) {
       return Response.json({ workflow_runs: parentState !== 'completed' && path.includes(`status=${parentState}`) ? [{ id: 100 }] : [] });
     }
-    if (path.includes('/actions/runs/100/jobs')) return Response.json({ jobs: [{ id: 101, run_id: 100, status: 'queued', labels: ['boat'] }] });
+    if (path.includes('/actions/runs/100/jobs')) return Response.json({ jobs: [...knownJobs.values()] });
     if (path.includes('/actions/runners')) return Response.json({ runners: [] });
     throw new Error('Unexpected fake GitHub route');
   };
   const request = (path, init = {}) => worker.fetch(new Request(`https://fixture.invalid${path}`, {
     ...init, headers: { authorization: `Bearer ${secret}`, ...init.headers },
   }), env);
-  async function seed() {
-    const body = JSON.stringify({ action: 'queued', repository: { private: true, full_name: 'pooriaarab/fixture' }, workflow_job: { id: 101, run_id: 100, labels: ['boat'] } });
+  async function seed(extra = {}, retained = true) {
+    const job = { id: 101, run_id: 100, status: 'queued', labels: ['boat'], ...extra };
+    knownJobs.set(job.id, job);
+    const body = JSON.stringify({ action: 'queued', repository: { private: true, full_name: 'pooriaarab/fixture' }, workflow_job: job });
     const signature = 'sha256=' + createHmac('sha256', secret).update(body).digest('hex');
     const response = await request('/webhook', { method: 'POST', body, headers: { 'x-github-event': 'workflow_job', 'x-hub-signature-256': signature } });
     assert.equal(response.status, 200);
+    assert.equal(broker.rows('SELECT id FROM jobs WHERE id=?', job.id).length, retained ? 1 : 0);
   }
-  return { db, broker, env, request, seed, setParent: value => { parentState = value; }, mints: () => mints, jobs: () => broker.rows('SELECT * FROM jobs') };
+  return { db, broker, env, request, seed, setParent: value => { parentState = value; }, mints: () => mints, mintedLabels, jobs: () => broker.rows('SELECT * FROM jobs') };
 }
 
 const results = [];
@@ -78,6 +84,102 @@ async function scenario(name, check) {
   catch (error) { results.push({ name, passed: false, durationMs: Math.round(performance.now() - started), error: error.message }); }
 }
 try {
+  async function claim(f, label = 'boat-8') {
+    const response = await f.request(`/lease?label=${label}&box=fixture`);
+    assert.equal(response.status, 200);
+    return (await response.json()).job_id;
+  }
+  await scenario('large deployment passes older ordinary jobs', async () => {
+    const f = fixture('in_progress');
+    try {
+      await f.seed({ id: 101, name: 'E2E smoke shard 1', labels: ['boat-8'] });
+      await f.seed({ id: 102, name: 'Deploy canary / Deploy site (production)', labels: ['boat-deploy'] });
+      const first = await claim(f);
+      assert.equal(first, 102);
+      assert.deepEqual(f.mintedLabels, [['boat-deploy']]);
+      return { firstClaim: first };
+    } finally { f.db.close(); }
+  });
+  await scenario('two prioritized claims preserve ordinary FIFO progress', async () => {
+    const f = fixture('in_progress');
+    try {
+      for (const id of [101, 102]) await f.seed({ id, name: 'E2E smoke', labels: ['boat-8'] });
+      for (const id of [201, 202, 203, 204]) await f.seed({ id, name: 'Deploy site', labels: ['boat-deploy'] });
+      const order = [];
+      for (let i = 0; i < 6; i++) order.push(await claim(f));
+      assert.deepEqual(order, [201, 202, 101, 203, 204, 102]);
+      assert.equal(f.mints(), 6);
+      return { order, runnerMints: f.mints() };
+    } finally { f.db.close(); }
+  });
+  await scenario('standard label keeps FIFO order', async () => {
+    const f = fixture('in_progress');
+    try {
+      await f.seed({ id: 101, name: 'Ordinary check' });
+      await f.seed({ id: 102, name: 'Deploy metadata' });
+      assert.deepEqual([await claim(f, 'boat'), await claim(f, 'boat')], [101, 102]);
+      return { order: [101, 102] };
+    } finally { f.db.close(); }
+  });
+  await scenario('reconciliation preserves deployment labels, queue age, and leases', async () => {
+    const f = fixture('in_progress');
+    try {
+      await f.seed({ id: 101, name: 'E2E smoke', labels: ['boat-8'] });
+      await f.seed({ id: 102, name: 'Deploy site', labels: ['boat-deploy'] });
+      const before = f.jobs().find(j => j.id === 102);
+      // Simulate an existing record without changing its original queue age.
+      await worker.scheduled({}, f.env);
+      const after = f.jobs().find(j => j.id === 102);
+      assert.equal(after.queued, before.queued);
+      assert.equal(await claim(f), 102);
+      const lease = f.jobs().find(j => j.id === 102).lease;
+      await f.seed({ id: 102, name: 'Deploy site', labels: ['boat-deploy'] });
+      assert.equal(f.jobs().find(j => j.id === 102).lease, lease);
+      assert.equal(await claim(f), 101);
+      return { queueTimestampPreserved: true, leasePreserved: true };
+    } finally { f.db.close(); }
+  });
+  await scenario('deployment label cannot request pool capacity directly', async () => {
+    const f = fixture('in_progress');
+    try {
+      await f.seed({ id: 101, name: 'E2E smoke', labels: ['boat-8'] });
+      await f.seed({ id: 102, name: 'Deploy site', labels: ['boat-deploy'] });
+      const response = await f.request('/lease?label=boat-deploy&box=fixture');
+      assert.equal(response.status, 400);
+      assert.equal(f.mints(), 0);
+      return { status: response.status, runnerMints: f.mints() };
+    } finally { f.db.close(); }
+  });
+  await scenario('mixed deployment labels never enter the queue', async () => {
+    const f = fixture('in_progress');
+    try {
+      for (const labels of [['boat-deploy', 'boat-8'], ['boat-8', 'boat-deploy'], ['boat-deploy', 'self-hosted']]) {
+        await f.seed({ id: 102, name: 'Deploy site', labels }, false);
+        assert.equal(f.jobs().length, 0);
+      }
+      return { jobsRemaining: f.jobs().length, runnerMints: f.mints() };
+    } finally { f.db.close(); }
+  });
+  await scenario('job names cannot grant deployment isolation', async () => {
+    const f = fixture('in_progress');
+    try {
+      await f.seed({ id: 101, name: 'E2E smoke', labels: ['boat-8'] });
+      await f.seed({ id: 102, name: 'Deploy site', labels: ['boat-8'] });
+      assert.equal(await claim(f), 101);
+      assert.deepEqual(f.mintedLabels, [['boat-8']]);
+      return { firstClaim: 101, runnerLabels: f.mintedLabels };
+    } finally { f.db.close(); }
+  });
+  await scenario('deployment backoff is respected', async () => {
+    const f = fixture('in_progress');
+    try {
+      await f.seed({ id: 101, name: 'E2E smoke', labels: ['boat-8'] });
+      await f.seed({ id: 102, name: 'Deploy site', labels: ['boat-deploy'] });
+      f.broker.rows('UPDATE jobs SET next=? WHERE id=102', Date.now() + 600_000);
+      assert.equal(await claim(f), 101);
+      return { firstClaim: 101 };
+    } finally { f.db.close(); }
+  });
   for (const [name, status] of [['completed parent', 200], ['deleted parent', 404]]) {
     await scenario(`${name} refuses queued child before runner creation`, async () => {
       const f = fixture('completed', status);
