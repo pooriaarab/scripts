@@ -45,6 +45,8 @@ skill.
 
 For releases, use [Measure release CI changes](ci-release-evidence.md) to compare full delivery intervals, shared runner demand, and failure costs.
 
+For web changes, use [Measure web performance changes](web-performance-evidence.md) to check fonts, caching, payloads, and server work.
+
 ## Other scripts
 
 Not part of the diagnosis order above.
