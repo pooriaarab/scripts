@@ -1,7 +1,7 @@
 """Ledger writer for directory-submit.
 
 Writes rows in the fleet ledger shape (submissions/ledger.csv of
-pooriaarab/directory): target, site, status, date, proof, retry_after, reason.
+the fleet template repository): target, site, status, date, proof, retry_after, reason.
 One row per (target, site). A new result replaces the old row.
 """
 import csv

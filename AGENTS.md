@@ -111,3 +111,10 @@ Cloud agents need push access via Git integration and a successful environment B
 Setup guide: https://github.com/pooriaarab/scripts/blob/main/cursor-cloud-rollout.md
 
 <!-- cursor-cloud:end -->
+
+## Public naming boundary
+
+This repo is public. Do not name a private repository in any file, issue, PR
+or comment. Use a generic phrase such as "the fleet template repository", or an
+example name such as `example-repo`. Keep private names and inventories in a
+private repository.
