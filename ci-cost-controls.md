@@ -52,6 +52,34 @@ Payments buy credit; they do not establish consumed usage. Count included
 compute once. Report a short observed rate separately from a monthly invoice.
 Do not promise a universal savings percentage.
 
+### Qualify native CI before moving the pool
+
+Run one isolated repository on the smallest suitable native machine. Confirm
+the runner label, machine identifier, source revision, result, and cleanup.
+Exclude that label from the warm broker so the result proves native execution.
+
+Record queue time, execution time, compute, and start charges separately.
+Include every account consumer when checking the remaining start allowance.
+Hourly or minute limits can block a job even when daily allowance remains.
+
+For example, a small-machine pilot on 2026-10-30 runs for 58 seconds after
+10 seconds of queueing. Reported compute is $0.000333435. The account reports
+$0.07 for its next start, because its included daily starts are exhausted.
+At that marginal price, one start costs about 210 times the job's compute.
+This is a dated account observation, not a universal Boat price.
+
+Compare the proposed bill with the capacity that can actually stop:
+
+```text
+native cost = compute + start charges + other billable usage
+pool saving = cost of machines that can safely stop or run fewer hours
+```
+
+Moving jobs while keeping every pool machine online adds cost. Preserve enough
+warm capacity until larger builds, peak queues, cancellation, and recovery pass.
+An allocation refusal followed by success after a limit change proves restored
+capacity. It does not prove a code fix or a cheaper service.
+
 ## Choose where proof runs
 
 Use this flow only after qualifying the local gate and deployment checks.
