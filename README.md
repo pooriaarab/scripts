@@ -35,6 +35,7 @@ stops you from optimising a job that does not matter.
 | 2 | `ci-job-timings` | Which jobs take longest? Trace dependencies and waits separately to find the complete critical path. |
 | 3 | `ci-cache-health` | Do the caches actually hit? A cache that restores nothing still prints a green success line, and a disabled remote cache prints one grey line. |
 | 4 | `ci-runner-audit` | Is each job on a tier that can run it? Flags `services:` and `actions/cache` misuse on self-hosted runners. |
+| 0 | `ci-baseline` | Where do the jobs come from? Counts billed jobs, median wait and median run per workflow and event from the API. Run it before and after a CI change over equal windows. |
 
 Only optimise after step 4. The reasoning behind the order, and the checklist of defects
 that hide behind a green check, are in the

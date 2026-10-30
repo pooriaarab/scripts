@@ -34,6 +34,17 @@ def gh(path):
     sys.exit(f"ci-baseline: gh api {path} failed: {out.stderr.strip()}")
 
 
+def run_jobs(repo, run_id):
+    """Every job of one run: the API returns at most 100 per page."""
+    jobs, page = [], 1
+    while True:
+        batch = gh(f"repos/{repo}/actions/runs/{run_id}/jobs?per_page=100&filter=latest&page={page}")["jobs"]
+        jobs += batch
+        if len(batch) < 100:
+            return jobs
+        page += 1
+
+
 def ts(value):
     return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
@@ -75,9 +86,8 @@ def main():
     for run in runs:
         row = rows[(run["name"], run["event"])]
         row["runs"] += 1
-        jobs = gh(f"repos/{args.repo}/actions/runs/{run['id']}/jobs?per_page=100&filter=latest")["jobs"]
-        for job in jobs:
-            if not job.get("started_at") or not job.get("completed_at"):
+        for job in run_jobs(args.repo, run["id"]):
+            if job.get("conclusion") == "skipped" or not job.get("started_at") or not job.get("completed_at"):
                 continue  # skipped or cancelled before a box started: it costs nothing
             row["jobs"] += 1
             row["waits"].append((ts(job["started_at"]) - ts(job["created_at"])).total_seconds())
