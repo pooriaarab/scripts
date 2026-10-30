@@ -1,5 +1,6 @@
 interface Env { APP_ID: string; APP_INSTALLATION_ID: string; APP_PRIVATE_KEY: string; WEBHOOK_SECRET: string; POOL_TOKEN: string; BROKER: DurableObjectNamespace }
-const labels = ['boat', 'boat-8'];
+const poolLabels = ['boat', 'boat-8'];
+const labels = [...poolLabels, 'boat-deploy'];
 const json = (body: unknown, status = 200) => Response.json(body, { status });
 const b64url = (bytes: ArrayBuffer | Uint8Array) => btoa(String.fromCharCode(...new Uint8Array(bytes))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 const pause = (ms: number) => new Promise(r => setTimeout(r, ms));
@@ -103,6 +104,9 @@ export class BrokerDO {
     }
   }
   add(repo: string, job: Row) {
+    // A deployment JIT runner has one exclusive label. A conjunction with
+    // another label cannot match it and must not consume pool capacity.
+    if (job.labels?.includes('boat-deploy') && job.labels.length !== 1) return;
     const label = job.labels?.find((l: string) => labels.includes(l));
     if (!label || this.rows('SELECT id FROM ended WHERE id=?', job.id).length) return;
     this.rows('INSERT OR IGNORE INTO jobs(id,repo,label,run_id,queued,lease) VALUES(?,?,?,?,?,NULL)', job.id, repo, label, job.run_id, Date.now());
@@ -135,10 +139,17 @@ export class BrokerDO {
   async mint(label: string, box: string): Promise<Response | null> {
     let lease: Row | undefined;
     this.ctx.storage.transactionSync(() => {
-      const job = this.rows('SELECT * FROM jobs WHERE label=? AND lease IS NULL AND next<=? ORDER BY queued,id LIMIT 1', label, Date.now())[0];
+      const ordinary = this.rows('SELECT * FROM jobs WHERE label=? AND lease IS NULL AND next<=? ORDER BY queued,id LIMIT 1', label, Date.now())[0];
+      const urgent = label === 'boat-8' ? this.rows('SELECT * FROM jobs WHERE label=? AND lease IS NULL AND next<=? ORDER BY queued,id LIMIT 1', 'boat-deploy', Date.now())[0] : undefined;
+      const key = `priority-streak:${label}`;
+      const streak = this.rows('SELECT v FROM meta WHERE k=?', key)[0]?.v ?? 0;
+      // Give deploys the next free large slot, but let an ordinary claim
+      // progress after two prioritized claims. Never preempt a live lease.
+      const job = urgent && (!ordinary || streak < 2) ? urgent : ordinary;
       if (!job) return;
+      this.rows('INSERT OR REPLACE INTO meta(k,v) VALUES(?,?)', key, job.label === 'boat-deploy' ? Math.min(2, streak + 1) : 0);
       const id = crypto.randomUUID();
-      lease = { id, job: job.id, repo: job.repo, name: `boat-${box.slice(0, 16)}-${id}`, created: Date.now(), pending: 1 };
+      lease = { id, job: job.id, repo: job.repo, label: job.label, name: `boat-${box.slice(0, 16)}-${id}`, created: Date.now(), pending: 1 };
       this.rows('INSERT INTO leases(id,job,repo,name,created) VALUES(?,?,?,?,?)', id, job.id, job.repo, lease.name, lease.created);
       this.rows('UPDATE jobs SET lease=? WHERE id=?', id, job.id);
     });
@@ -166,7 +177,7 @@ export class BrokerDO {
         console.info(JSON.stringify({ event: 'boat.queue.retired', job: l.job, run: job.run_id, reason: 'run-ended' }));
         return null;
       }
-      const r = await this.gh(`/repos/${l.repo}/actions/runners/generate-jitconfig`, 'POST', { name: l.name, runner_group_id: 1, labels: [label], work_folder: '_work' });
+      const r = await this.gh(`/repos/${l.repo}/actions/runners/generate-jitconfig`, 'POST', { name: l.name, runner_group_id: 1, labels: [l.label], work_folder: '_work' });
       if (!r.ok) { this.rows('UPDATE leases SET pending=0 WHERE id=?', l.id); l.pending = 0; throw new Error(`Mint ${r.status}`); }
       const cfg: any = await r.json();
       l.runner = cfg.runner.id; l.pending = 0;
@@ -175,7 +186,7 @@ export class BrokerDO {
         await this.cleanup(l);
         return null;
       }
-      return json({ lease_id: l.id, job_id: l.job, repo: l.repo, label, runner_id: l.runner, encoded_jit_config: cfg.encoded_jit_config });
+      return json({ lease_id: l.id, job_id: l.job, repo: l.repo, label: l.label, runner_id: l.runner, encoded_jit_config: cfg.encoded_jit_config });
     } catch {
       this.ctx.storage.transactionSync(() => {
         this.rows('UPDATE leases SET closing=1 WHERE id=?', l.id);
@@ -196,7 +207,7 @@ export class BrokerDO {
     }
     if (path === '/lease' && req.method === 'GET') {
       const label = url.searchParams.get('label') ?? '', box = url.searchParams.get('box') ?? '';
-      if (!labels.includes(label) || !/^[\w.-]{1,80}$/.test(box)) return json({ error: 'Invalid label or box' }, 400);
+      if (!poolLabels.includes(label) || !/^[\w.-]{1,80}$/.test(box)) return json({ error: 'Invalid label or box' }, 400);
       this.rows('INSERT OR REPLACE INTO boxes VALUES(?,?,?)', box, label, Date.now());
       const deadline = Date.now() + 25_000;
       do {
